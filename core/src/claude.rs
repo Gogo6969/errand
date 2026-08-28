@@ -215,6 +215,11 @@ impl Claude {
         // Whatever it complains about, kept. Most of the time it complains
         // about nothing; the one failure that matters says everything here and
         // nothing on stdout, so this is the only place it can be found.
+        // Still wanted, until somebody says otherwise. Read by the stdout
+        // watcher to tell a process that refused to start from one that was
+        // asked to leave, which are indistinguishable from the pipe's end.
+        let still_wanted = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
         let complaints: Arc<Mutex<String>> = Arc::default();
         let heard = complaints.clone();
         let also_heard = complaints.clone();
@@ -229,6 +234,7 @@ impl Claude {
 
         let ended = tx.clone();
         let asked = waiting.clone();
+        let watching_for_the_end = still_wanted.clone();
         handle.spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             let mut said_anything = false;
@@ -261,7 +267,13 @@ impl Claude {
             // process refused to start, and the reason is on the other pipe.
             // Left alone, this is a thread that sits there looking like it is
             // thinking, for ever.
-            if !said_anything {
+            //
+            // Unless it was stopped on purpose, which looks identical from
+            // here and is not a failure at all. Switching a thread to another
+            // engine used to leave a red line in it saying the agent had
+            // stopped without saying why, which was true and completely
+            // misleading.
+            if !said_anything && watching_for_the_end.load(std::sync::atomic::Ordering::SeqCst) {
                 let _ = ended.send(Event::Failed {
                     why: in_words(&also_heard.lock().unwrap()),
                 });
@@ -280,6 +292,7 @@ impl Claude {
                     Turn::Stop => break,
                 }
             }
+            still_wanted.store(false, std::sync::atomic::Ordering::SeqCst);
             let _ = child.kill().await;
         });
 
@@ -403,6 +416,11 @@ pub fn read(line: &str) -> Vec<Event> {
                         .get("permission_suggestions")
                         .and_then(|s| s.as_array())
                         .is_some_and(|s| !s.is_empty()),
+                    step: request
+                        .get("tool_use_id")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     tool,
                     call,
                 })]

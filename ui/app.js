@@ -214,7 +214,7 @@ function fromStore(line) {
         kind: "asking",
         text: line.text,
         tool: line.tool,
-        call: line.call,
+        step: line.call,
         answered: line.outcome || "That question expired when the thread closed.",
       };
     case "doing":
@@ -354,7 +354,7 @@ function asks(m) {
   if (m.answered) {
     const settled = document.createElement("p");
     settled.className = "settled";
-    settled.textContent = m.answered;
+    settled.textContent = m.outcome ? `${m.answered} · ${m.outcome}` : m.answered;
     body.append(settled);
   } else {
     const choices = document.createElement("div");
@@ -387,7 +387,7 @@ async function answer(m, said, label) {
   drawMessages();
   drawThreads();
   try {
-    await invoke("answer", { id: t.id, call: m.call, said });
+    await invoke("answer", { id: t.id, call: m.call, step: m.step, said });
   } catch (why) {
     m.answered = String(why);
     drawMessages();
@@ -429,25 +429,36 @@ listen("happened", ({ payload }) => {
     // step: two calls to the same tool are otherwise indistinguishable, and
     // several can be in flight at once.
     case "did": {
-      const step = t.messages.find((m) => m.kind === "doing" && m.call === payload.call);
+      const step = t.messages.find(
+        (m) => (m.kind === "doing" && m.call === payload.call) || m.step === payload.call,
+      );
       if (step) step.outcome = payload.outcome;
       break;
     }
 
     // Stopped, and waiting. Not working any more: a spinner beside a question
     // says the machine is busy when the truth is that it is waiting for you.
-    case "needs_you":
+    case "needs_you": {
       t.working = false;
-      t.messages.push({
+      const asking = {
         kind: "asking",
         text: payload.asking,
         detail: payload.detail,
         tool: payload.tool,
+        // Two ids: one to answer the engine with, one that names the step and
+        // is what the outcome will arrive against.
         call: payload.call,
+        step: payload.step,
         can_remember: payload.can_remember,
         answered: null,
-      });
+      };
+      // The step it halted is already on screen. Turn that line into the
+      // question rather than adding a second one saying the same sentence.
+      const already = t.messages.findIndex((m) => m.kind === "doing" && m.call === payload.step);
+      if (already >= 0) t.messages[already] = asking;
+      else t.messages.push(asking);
       break;
+    }
 
     case "done":
       t.working = false;

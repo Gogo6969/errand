@@ -258,7 +258,11 @@ async fn errand(
                     asking: tools::in_plain_words(&name, &args),
                     detail: tools::the_thing_itself(&name, &args),
                     tool: name.clone(),
+                    // Both ids, and here they happen to be the same one: this
+                    // engine's questions are about the tool call directly,
+                    // with no request of their own in between.
                     call: call.id.clone(),
+                    step: call.id.clone(),
                     // Remembering is per tool, for this conversation only.
                     can_remember: true,
                 }));

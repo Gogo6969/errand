@@ -242,6 +242,7 @@ async fn answer(
     held: State<'_, Held>,
     id: String,
     call: String,
+    step: String,
     said: String,
 ) -> Result<(), String> {
     let said = match said.as_str() {
@@ -251,7 +252,7 @@ async fn answer(
         other => return Err(format!("no idea what \"{other}\" means")),
     };
     held.store
-        .answered(&id, &call, in_a_word(said))
+        .answered(&id, &step, in_a_word(said))
         .map_err(|e| e.to_string())?;
 
     let mut live = held.live.lock().unwrap();

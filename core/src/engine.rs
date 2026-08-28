@@ -61,6 +61,14 @@ pub struct NeedsYou {
     /// What to answer with. Its own id, not the tool call's: one step can be
     /// asked about more than once.
     pub call: String,
+    /// The step this is a question about.
+    ///
+    /// Two ids rather than one because they are two different things and one
+    /// engine proves it: Claude Code's question carries its own request id and
+    /// the tool call's id separately. This is the one that joins the question
+    /// to the step in the timeline, so a question and the step it halted are
+    /// one line rather than the same sentence written twice.
+    pub step: String,
     /// Whether yes can be remembered, so the same question is not asked again.
     /// Only offered when the engine says there is a rule that would cover it.
     pub can_remember: bool,

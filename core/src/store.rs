@@ -270,24 +270,41 @@ impl Store {
             Event::Did { call, outcome } => {
                 let conn = self.conn.lock().unwrap();
                 conn.execute(
-                    "UPDATE lines SET outcome = ? WHERE thread = ? AND call = ? AND kind = 'doing'",
+                    "UPDATE lines SET outcome = ? WHERE thread = ? AND call = ?
+                       AND kind IN ('doing', 'asking')",
                     params![outcome, thread, call],
                 )?;
                 Ok(None)
             }
-            // Kept with the id it was asked under, so the answer can be put
-            // back onto the question when it comes, and so a thread reopened
-            // later reads as "it asked, you said yes" rather than as a
-            // question nobody ever dealt with.
-            Event::NeedsYou(ask) => self
-                .append(
-                    thread,
-                    "asking",
-                    &ask.asking,
-                    Some(&ask.call),
-                    Some(&ask.tool),
-                )
-                .map(Some),
+            // A question is not a new thing that happened. It is the step
+            // that was already announced, stopping. So it turns that line into
+            // a question rather than adding one underneath it, or the thread
+            // reads as the same sentence written twice -- once as something
+            // being done and once as something being asked about.
+            //
+            // Joined by the step's own id, which the question carries for
+            // exactly this. If there is no step to find, the question stands
+            // on its own rather than being lost.
+            Event::NeedsYou(ask) => {
+                let conn = self.conn.lock().unwrap();
+                let turned = conn.execute(
+                    "UPDATE lines SET kind = 'asking' WHERE thread = ? AND call = ? AND kind = 'doing'",
+                    params![thread, &ask.step],
+                )?;
+                drop(conn);
+                match turned {
+                    0 => self
+                        .append(
+                            thread,
+                            "asking",
+                            &ask.asking,
+                            Some(&ask.step),
+                            Some(&ask.tool),
+                        )
+                        .map(Some),
+                    _ => Ok(None),
+                }
+            }
             Event::Done { .. } => Ok(None),
             Event::Failed { why } => self.append(thread, "ended", why, None, None).map(Some),
         }
@@ -376,11 +393,11 @@ impl Store {
     /// onto its step: a question and its answer are one thing that happened,
     /// and splitting them across two lines makes a reopened thread read as
     /// though it were asked twice.
-    pub fn answered(&self, thread: &str, call: &str, said: &str) -> Result<()> {
+    pub fn answered(&self, thread: &str, step: &str, said: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE lines SET outcome = ? WHERE thread = ? AND call = ? AND kind = 'asking'",
-            params![said, thread, call],
+            params![said, thread, step],
         )?;
         Ok(())
     }
