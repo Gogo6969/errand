@@ -357,3 +357,31 @@ main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
 }
 
 #threads .last.waiting { color: var(--accent); }
+
+/* ------------------------------------------------------------ engine -- */
+
+/*
+  What is answering, and a way to change it. A control rather than a label,
+  because which engine a thread is on is a real choice with real consequences
+  and hiding it in a settings screen makes it look like a preference.
+*/
+#engine {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 22px 3px 7px;
+  border-radius: 7px;
+  cursor: pointer;
+  max-width: 260px;
+  /* The chevron, drawn rather than fetched. */
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink-soft) 50%),
+                    linear-gradient(135deg, var(--ink-soft) 50%, transparent 50%);
+  background-position: calc(100% - 12px) center, calc(100% - 8px) center;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+}
+#engine:hover { background-color: var(--card); border-color: var(--rule); color: var(--ink); }
+#engine:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

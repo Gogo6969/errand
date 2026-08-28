@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use errand_core::local::{find, LlmSettings, Local};
 use errand_core::{claude::Claude, Answer, Engine, Event, Line, Store, Thread};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -28,7 +29,11 @@ mod onscreen;
 /// Everything the window is holding: the conversations that are live, and the
 /// book they are all written into.
 struct Held {
-    live: Mutex<HashMap<String, Claude>>,
+    /// Whatever is answering each open thread. Boxed rather than one concrete
+    /// type because there are two engines now and the window is not told which
+    /// it is talking to -- that is the whole point of the protocol, and it
+    /// stops being true the moment this map knows.
+    live: Mutex<HashMap<String, Box<dyn Engine + Send>>>,
     store: Arc<Store>,
 }
 
@@ -147,6 +152,10 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
     // hard error, and resuming from the wrong directory quietly starts an empty
     // conversation wearing the same name.
     let known = held.store.thread(&id).map_err(|e| e.to_string())?;
+    let on_engine = known
+        .as_ref()
+        .map_or_else(|| "claude".to_string(), |t| t.engine.clone());
+    let settings = known.as_ref().and_then(|t| t.engine_settings.clone());
     let (home, again) = match &known {
         Some(t) => (std::path::PathBuf::from(&t.cwd), t.opened),
         None => {
@@ -166,8 +175,23 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         }
     };
 
-    let (claude, events) = Claude::open(&id, &home, again).map_err(|e| e.to_string())?;
-    held.live.lock().unwrap().insert(id.clone(), claude);
+    let (engine, events): (Box<dyn Engine + Send>, _) = match on_engine.as_str() {
+        "local" => {
+            // Everything about a local model has to be told to it. Nothing is
+            // remembered by anything outside this app, which is the difference
+            // between the two: Claude Code holds its own session, and this
+            // holds none.
+            let settings: LlmSettings = serde_json::from_str(&settings.unwrap_or_default())
+                .map_err(|_| "this thread has no model chosen".to_string())?;
+            let (it, events) = Local::open(settings, home).map_err(|e| e.to_string())?;
+            (Box::new(it), events)
+        }
+        _ => {
+            let (it, events) = Claude::open(&id, &home, again).map_err(|e| e.to_string())?;
+            (Box::new(it), events)
+        }
+    };
+    held.live.lock().unwrap().insert(id.clone(), engine);
 
     // Everything it says: written down, then forwarded. In that order, so that
     // a window which reloads a moment later reads the same conversation it was
@@ -246,6 +270,70 @@ fn in_a_word(said: Answer) -> &'static str {
     }
 }
 
+/// One thing that could answer a thread.
+#[derive(Clone, Serialize)]
+struct Choice {
+    /// `claude`, or `local`.
+    engine: String,
+    /// What it is called on screen.
+    name: String,
+    /// Everything a local model needs to be reached, as JSON. Nothing for
+    /// Claude.
+    settings: Option<String>,
+}
+
+/// Everything that could answer a thread on this machine.
+///
+/// Claude is always there; the rest is whatever is actually running and
+/// answering right now, found by asking the usual ports rather than by keeping
+/// a list somebody has to maintain. A model that was there yesterday and is not
+/// there today should not be offered, because choosing it would fail later and
+/// somewhere less obvious.
+#[tauri::command]
+async fn engines() -> Result<Vec<Choice>, String> {
+    let mut all = vec![Choice {
+        engine: "claude".into(),
+        name: "Claude".into(),
+        settings: None,
+    }];
+    for found in find::detect_all().await {
+        for model in found.models {
+            let settings = LlmSettings {
+                provider: found.provider.clone(),
+                base_url: found.base_url.clone(),
+                model: model.clone(),
+                ..Default::default()
+            };
+            all.push(Choice {
+                engine: "local".into(),
+                name: format!("{model} · {}", found.label),
+                settings: serde_json::to_string(&settings).ok(),
+            });
+        }
+    }
+    Ok(all)
+}
+
+/// Put a thread on a different engine.
+///
+/// Whatever was answering it is stopped first. Two engines in one thread would
+/// both be writing into it, and the second would be talking about a
+/// conversation it never had.
+#[tauri::command]
+async fn use_engine(
+    held: State<'_, Held>,
+    id: String,
+    engine: String,
+    settings: Option<String>,
+) -> Result<(), String> {
+    if let Some(mut was) = held.live.lock().unwrap().remove(&id) {
+        let _ = was.stop();
+    }
+    held.store
+        .use_engine(&id, &engine, settings.as_deref())
+        .map_err(|e| e.to_string())
+}
+
 /// Give a thread the name it will be remembered by.
 #[tauri::command]
 async fn call_it(held: State<'_, Held>, id: String, name: String) -> Result<(), String> {
@@ -289,6 +377,8 @@ pub fn run() {
             open_thread,
             say,
             answer,
+            engines,
+            use_engine,
             call_it,
             stop,
             forget

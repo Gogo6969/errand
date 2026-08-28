@@ -47,6 +47,11 @@ pub struct Thread {
     pub opened: bool,
     pub started_at: i64,
     pub spoke_at: i64,
+    /// `claude`, or `local`.
+    pub engine: String,
+    /// Where a local model lives and which one, as JSON. Nothing for Claude,
+    /// which needs no telling.
+    pub engine_settings: Option<String>,
 }
 
 /// One line of a conversation, as it will be shown again tomorrow.
@@ -104,6 +109,16 @@ const CHANGES: &[&str] = &[
         PRIMARY KEY (thread, seq)
      );
      CREATE INDEX lines_by_call ON lines(thread, call);",
+    // 2. Which engine this thread belongs to.
+    //
+    // A thread's memory lives inside its engine -- Claude Code keeps a session
+    // transcript of its own, and a local model's history is a list we hold --
+    // so this is not a preference, it is part of what the thread is. Two
+    // columns rather than one because "which kind" and "which model, where"
+    // answer different questions, and a model id on its own does not say which
+    // machine it is on.
+    "ALTER TABLE threads ADD COLUMN engine TEXT NOT NULL DEFAULT 'claude';
+     ALTER TABLE threads ADD COLUMN engine_settings TEXT;",
 ];
 
 impl Store {
@@ -165,7 +180,8 @@ impl Store {
     pub fn threads(&self) -> Result<Vec<Thread>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
-            "SELECT id, name, cwd, model, opened, started_at, spoke_at
+            "SELECT id, name, cwd, model, opened, started_at, spoke_at,
+                    engine, engine_settings
                FROM threads ORDER BY spoke_at DESC",
         )?;
         let rows = q.query_map([], |r| {
@@ -177,6 +193,8 @@ impl Store {
                 opened: r.get::<_, i64>(4)? != 0,
                 started_at: r.get(5)?,
                 spoke_at: r.get(6)?,
+                engine: r.get(7)?,
+                engine_settings: r.get(8)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -336,6 +354,22 @@ impl Store {
 
 /// Where the store lives for a real installation.
 impl Store {
+    /// Put this thread on a different engine.
+    ///
+    /// `opened` goes back to false with it. It records whether *this* engine
+    /// has run here before, and the answer for one that has never run is no --
+    /// leaving it true would have Claude Code resume a session it never
+    /// started, which fails with nothing on stdout to say why.
+    pub fn use_engine(&self, id: &str, engine: &str, settings: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE threads SET engine = ?, engine_settings = ?, opened = 0, model = NULL
+               WHERE id = ?",
+            params![engine, settings, id],
+        )?;
+        Ok(())
+    }
+
     /// Write down what somebody said to a question.
     ///
     /// Onto the question rather than under it, the same way an outcome goes

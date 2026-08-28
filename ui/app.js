@@ -67,6 +67,68 @@ function kindFor(t) {
   return t.kind;
 }
 
+/**
+ * Everything on this machine that could answer a thread.
+ *
+ * Asked for once and kept, because the answer is a handful of network probes
+ * and the list does not change while somebody is picking from it. Claude is
+ * always in it; the rest is whatever is actually running right now, which is
+ * the point -- offering a model that was there yesterday means choosing it and
+ * finding out later, somewhere less obvious.
+ */
+let couldAnswer = null;
+async function whatCouldAnswer() {
+  if (!couldAnswer) couldAnswer = await invoke("engines");
+  return couldAnswer;
+}
+
+/** How one choice is recognised again, since a model id alone does not say where it lives. */
+function keyOf(engine, settings) {
+  if (engine !== "local" || !settings) return "claude";
+  try {
+    const s = JSON.parse(settings);
+    return `local|${s.base_url}|${s.model}`;
+  } catch {
+    return "claude";
+  }
+}
+
+/** Fill the picker, and mark what this thread is on. */
+async function drawEngines(t) {
+  const mine = keyOf(t.on, t.onSettings);
+  const choices = await whatCouldAnswer();
+  // The thread may have moved on while the probes were out.
+  if (showing !== t.id) return;
+
+  el.engine.replaceChildren(
+    ...choices.map((c) => {
+      const option = document.createElement("option");
+      option.value = keyOf(c.engine, c.settings);
+      option.textContent = c.name;
+      option.selected = option.value === mine;
+      return option;
+    }),
+  );
+
+  // A thread on a model that has since gone quiet still has to say what it is
+  // on, or the picker silently claims it is something else.
+  if (!choices.some((c) => keyOf(c.engine, c.settings) === mine)) {
+    const gone = document.createElement("option");
+    gone.value = mine;
+    gone.textContent = `${JSON.parse(t.onSettings || "{}").model || "?"} · not running`;
+    gone.selected = true;
+    el.engine.prepend(gone);
+  }
+}
+
+/**
+ * Move a thread onto a different engine.
+ *
+ * Said out loud in the thread, because it is not a settings change: an engine
+ * holds the memory of the conversation it had, and the new one has not had it.
+ * A person who switches and then says "carry on with that" deserves to know
+ * that nobody knows what "that" is.
+ */
 /** The open thread's own mark, which is the same mark as its row in the list. */
 function drawMark(t) {
   el.mark.replaceChildren(tile(kindFor(t), t.working));
@@ -80,7 +142,16 @@ function uuid() {
 
 async function start() {
   const id = uuid();
-  threads.set(id, { id, name: "New errand", messages: [], working: false, engine: "", loaded: true });
+  threads.set(id, {
+    id,
+    name: "New errand",
+    messages: [],
+    working: false,
+    engine: "",
+    on: "claude",
+    onSettings: null,
+    loaded: true,
+  });
   await invoke("open_thread", { id });
   show(id);
   drawThreads();
@@ -104,6 +175,8 @@ async function catchUp() {
       messages: [],
       working: false,
       engine: t.model || "",
+      on: t.engine || "claude",
+      onSettings: t.engine_settings || null,
       loaded: false,
     });
   }
@@ -162,7 +235,7 @@ function show(id) {
   const t = threads.get(id);
   drawMark(t);
   el.name.textContent = t.name;
-  el.engine.textContent = t.engine;
+  drawEngines(t);
   drawThreads();
   drawMessages();
 }
@@ -392,7 +465,6 @@ listen("happened", ({ payload }) => {
 
   if (payload.thread === showing) {
     drawMark(t);
-    el.engine.textContent = t.engine;
     el.name.textContent = t.name;
     drawMessages();
   }
@@ -445,6 +517,35 @@ el.what.addEventListener("keydown", (e) => {
 el.what.addEventListener("input", () => {
   el.what.style.height = "auto";
   el.what.style.height = Math.min(el.what.scrollHeight, window.innerHeight * 0.4) + "px";
+});
+
+el.engine.addEventListener("change", async () => {
+  const t = threads.get(showing);
+  if (!t) return;
+  const choice = (await whatCouldAnswer()).find(
+    (c) => keyOf(c.engine, c.settings) === el.engine.value,
+  );
+  if (!choice) return;
+
+  t.on = choice.engine;
+  t.onSettings = choice.settings;
+  t.working = false;
+  try {
+    await invoke("use_engine", { id: t.id, engine: choice.engine, settings: choice.settings });
+    await invoke("open_thread", { id: t.id });
+    // Said in the thread rather than in a toast that disappears. Somebody
+    // scrolling back next week needs to see where the conversation changed
+    // hands, or the gap in what it remembers looks like a fault.
+    t.messages.push({
+      kind: "ended",
+      failed: false,
+      text: `Now on ${choice.name}. It has not seen anything said before this line.`,
+    });
+  } catch (why) {
+    t.messages.push({ kind: "ended", failed: true, text: String(why) });
+  }
+  drawMessages();
+  drawThreads();
 });
 
 el.new.addEventListener("click", start);
