@@ -27,6 +27,15 @@ pub struct Step {
     /// The tool underneath, kept for the timeline and for when something goes
     /// wrong and somebody needs the real name of the thing that failed.
     pub tool: String,
+    /// The call's own id, which the outcome will carry back when it arrives.
+    ///
+    /// A step and the answer to it are two events with time in between, and
+    /// without something they share there is no way to put the second onto the
+    /// first. The first version of this carried the tool's name here and the
+    /// call id there, which looks like a pair and is not one: two steps using
+    /// the same tool were indistinguishable, and a reloaded thread showed every
+    /// step as though it had never answered.
+    pub call: String,
 }
 
 /// What the agent needs from a person before it can go on.
@@ -57,7 +66,9 @@ pub enum Event {
     /// A step being taken.
     Doing(Step),
     /// The step finished, with what it produced where that is worth showing.
-    Did { tool: String, outcome: String },
+    ///
+    /// `call` is the id of the step this belongs to, not the tool's name.
+    Did { call: String, outcome: String },
     /// Stopped, and it is a person's turn.
     NeedsYou(NeedsYou),
     /// The turn is over and this is what came of it.

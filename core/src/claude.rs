@@ -32,6 +32,7 @@
 
 use std::process::Stdio;
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -39,6 +40,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use crate::engine::{Engine, Event, Step};
 
 /// A thread's conversation with Claude Code.
+///
+/// Wants a runtime with more than one thread, or a caller that never blocks the
+/// one it has. Reading the process and answering it are tasks, and a caller
+/// that blocks a current-thread runtime waiting for an event stops the very
+/// task that would produce it. The symptom is silence, which reads exactly like
+/// an agent with nothing to say.
 ///
 /// Nothing here holds the pipe. One task owns the process and its stdin, and
 /// everything else posts to it, which is what makes `say` safe to call from a
@@ -57,9 +64,30 @@ enum Turn {
 impl Claude {
     /// Start a conversation, or pick up the one this thread already had.
     ///
-    /// `session` is the thread's own id. Reusing it is what makes a thread
-    /// closed on Tuesday and opened on Wednesday the same conversation.
-    pub fn open(session: &str, cwd: &std::path::Path) -> Result<(Self, Receiver<Event>)> {
+    /// `again` is the whole of the difference and it is not a detail. A session
+    /// is started with `--session-id` exactly once; every reopening after that
+    /// is `--resume`, and the two are not interchangeable:
+    ///
+    /// - `--session-id` on an id that already has a transcript fails outright,
+    ///   and fails in the worst possible shape: exit 1, one line on stderr, and
+    ///   *nothing at all on stdout*. A reader waiting for the usual opening
+    ///   event waits for ever. That is why stderr and the exit code are watched
+    ///   here rather than trusted to be quiet.
+    /// - `--resume` on an id with no transcript fails politely, saying so on
+    ///   stdout as well, so that one is visible without watching anything.
+    /// - Both together is refused at launch unless the intent is to fork.
+    ///
+    /// All of it is scoped to the working directory. The same id resumed from
+    /// somewhere else finds no conversation; started from somewhere else with
+    /// `--session-id`, it quietly begins an empty one under the same name,
+    /// which is a lie nobody would catch. So the directory is the thread's, is
+    /// stored with it, and is passed back in unchanged.
+    pub fn open(
+        session: &str,
+        cwd: &std::path::Path,
+        again: bool,
+    ) -> Result<(Self, Receiver<Event>)> {
+        let pick_up = if again { "--resume" } else { "--session-id" };
         let mut child = tokio::process::Command::new("claude")
             .args([
                 "--print",
@@ -69,7 +97,7 @@ impl Claude {
                 "stream-json",
                 "--include-partial-messages",
                 "--verbose",
-                "--session-id",
+                pick_up,
                 session,
             ])
             .current_dir(cwd)
@@ -82,17 +110,58 @@ impl Claude {
 
         let mut stdin = child.stdin.take().context("claude stdin")?;
         let stdout = child.stdout.take().context("claude stdout")?;
+        let stderr = child.stderr.take().context("claude stderr")?;
         let (tx, rx) = channel();
 
         let handle = tokio::runtime::Handle::current();
+
+        // Whatever it complains about, kept. Most of the time it complains
+        // about nothing; the one failure that matters says everything here and
+        // nothing on stdout, so this is the only place it can be found.
+        let complaints: Arc<Mutex<String>> = Arc::default();
+        let heard = complaints.clone();
+        let also_heard = complaints.clone();
+        handle.spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let mut said = heard.lock().unwrap();
+                said.push_str(line.trim());
+                said.push(' ');
+            }
+        });
+
+        let ended = tx.clone();
         handle.spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
+            let mut said_anything = false;
             while let Ok(Some(line)) = lines.next_line().await {
                 for event in read(&line) {
-                    if tx.send(event).is_err() {
+                    said_anything = true;
+                    // A failure that says nothing is worse than no failure at
+                    // all: the thread stops, and the person is told that it
+                    // stopped, and nothing else. It happens for real -- asking
+                    // to reopen a conversation that is not there ends the turn
+                    // with an error carrying no words, and the reason is on the
+                    // other pipe.
+                    let event = match event {
+                        Event::Failed { why } if why.trim().is_empty() => Event::Failed {
+                            why: in_words(&complaints.lock().unwrap()),
+                        },
+                        other => other,
+                    };
+                    if ended.send(event).is_err() {
                         return; // Nobody is listening any more.
                     }
                 }
+            }
+            // Stdout has closed. If it closed without a single word, the
+            // process refused to start, and the reason is on the other pipe.
+            // Left alone, this is a thread that sits there looking like it is
+            // thinking, for ever.
+            if !said_anything {
+                let _ = ended.send(Event::Failed {
+                    why: in_words(&also_heard.lock().unwrap()),
+                });
             }
         });
 
@@ -171,7 +240,7 @@ pub fn read(line: &str) -> Vec<Event> {
                     .iter()
                     .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
                     .map(|b| Event::Did {
-                        tool: b
+                        call: b
                             .get("tool_use_id")
                             .and_then(|t| t.as_str())
                             .unwrap_or("")
@@ -200,6 +269,31 @@ pub fn read(line: &str) -> Vec<Event> {
     }
 }
 
+/// What the agent complained about, said the way a person would say it.
+///
+/// The two failures worth knowing by name are the ones that follow from getting
+/// the reopening flags wrong, and both are said here in words rather than
+/// passed through as they arrive. Everything else is passed through: it is
+/// still better than silence, and inventing a sentence for a failure nobody has
+/// seen yet is how a program ends up explaining the wrong thing confidently.
+fn in_words(complained: &str) -> String {
+    let said = complained.trim();
+    if said.contains("No conversation found") {
+        return "This conversation could not be found where it was left. Its history is gone, \
+                though anything it did is not."
+            .to_string();
+    }
+    if said.contains("is already in use") {
+        return "This conversation was opened as though it were new when it already existed. \
+                That is a fault in Errand rather than anything you did."
+            .to_string();
+    }
+    if said.is_empty() {
+        return "The agent stopped without saying why.".to_string();
+    }
+    said.to_string()
+}
+
 /// One content block, if it is something a person should see.
 fn block(b: &serde_json::Value) -> Option<Event> {
     match b.get("type").and_then(|t| t.as_str())? {
@@ -215,6 +309,9 @@ fn block(b: &serde_json::Value) -> Option<Event> {
             Some(Event::Doing(Step {
                 what: in_plain_words(&tool, b.get("input")),
                 tool,
+                // Every tool_use block carries one, and the tool_result that
+                // answers it carries the same string back as `tool_use_id`.
+                call: b.get("id")?.as_str()?.to_string(),
             }))
         }
         _ => None,
@@ -298,7 +395,7 @@ mod tests {
     /// the only reason to trust any of this.
     const INIT: &str = r#"{"type":"system","subtype":"init","session_id":"7ee4de55-1111","model":"claude-opus-5"}"#;
     const TEXT: &str = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"I'll run that command."}]}}"#;
-    const TOOL: &str = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"echo hello","description":"Echo a greeting"}}]}}"#;
+    const TOOL: &str = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"echo hello","description":"Echo a greeting"}}]}}"#;
     const RESULT: &str = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"hello-from-a-tool"}]}}"#;
     const DONE: &str = r#"{"type":"result","is_error":false,"result":"Output: hello","total_cost_usd":0.18,"num_turns":2}"#;
     const HOOK: &str = r#"{"type":"system","subtype":"hook_started","session_id":"7ee4de55-1111"}"#;
@@ -329,14 +426,15 @@ mod tests {
             read(TOOL),
             vec![Event::Doing(Step {
                 what: "Echo a greeting".into(),
-                tool: "Bash".into()
+                tool: "Bash".into(),
+                call: "toolu_01".into(),
             })]
         );
     }
 
     #[test]
     fn a_tool_with_nothing_to_say_for_itself_is_still_said_in_plain_words() {
-        let bare = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la /tmp"}}]}}"#;
+        let bare = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_02","name":"Bash","input":{"command":"ls -la /tmp"}}]}}"#;
         let Event::Doing(step) = &read(bare)[0] else {
             panic!("a tool call is a step");
         };
@@ -344,7 +442,7 @@ mod tests {
         assert_eq!(step.tool, "Bash", "the real name is kept for the timeline");
 
         // And one nobody has taught it about is named rather than hidden.
-        let odd = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"NotebookEdit","input":{}}]}}"#;
+        let odd = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_03","name":"NotebookEdit","input":{}}]}}"#;
         let Event::Doing(step) = &read(odd)[0] else {
             panic!("still a step");
         };
@@ -356,7 +454,7 @@ mod tests {
         assert_eq!(
             read(RESULT),
             vec![Event::Did {
-                tool: "t1".into(),
+                call: "t1".into(),
                 outcome: "hello-from-a-tool".into()
             }]
         );

@@ -53,11 +53,63 @@ function uuid() {
 
 async function start() {
   const id = uuid();
-  threads.set(id, { id, name: "New errand", messages: [], working: false, engine: "" });
+  threads.set(id, { id, name: "New errand", messages: [], working: false, engine: "", loaded: true });
   await invoke("open_thread", { id });
   show(id);
   drawThreads();
   el.what.focus();
+}
+
+/**
+ * What was here before.
+ *
+ * The window used to be the only place a conversation existed, so closing it
+ * was the same as ending everything in it. Now the threads are read back at the
+ * start and their messages when one is opened -- lazily, because a person with
+ * forty threads should not wait for thirty-nine of them.
+ */
+async function catchUp() {
+  const known = await invoke("threads");
+  for (const t of known) {
+    threads.set(t.id, {
+      id: t.id,
+      name: t.name,
+      messages: [],
+      working: false,
+      engine: t.model || "",
+      loaded: false,
+    });
+  }
+  drawThreads();
+  if (known.length) await open(known[0].id);
+  else await start();
+}
+
+/** Show a thread, fetching what was said in it the first time. */
+async function open(id) {
+  const t = threads.get(id);
+  if (!t.loaded) {
+    t.messages = (await invoke("lines", { id })).map(fromStore);
+    t.loaded = true;
+  }
+  // Reopening is what makes it a conversation rather than a transcript: the
+  // agent is handed back its own memory of this thread, not just our copy of it.
+  await invoke("open_thread", { id });
+  show(id);
+  el.what.focus();
+}
+
+/** One stored line, as the page holds it. */
+function fromStore(line) {
+  switch (line.kind) {
+    case "mine":
+    case "said":
+      return { kind: line.kind, text: line.text };
+    case "doing":
+      return { kind: "doing", text: line.text, call: line.call, outcome: line.outcome || "" };
+    default:
+      return { kind: "ended", failed: line.kind === "ended", text: line.text };
+  }
 }
 
 function show(id) {
@@ -74,7 +126,7 @@ function drawThreads() {
     ...[...threads.values()].map((t) => {
       const li = document.createElement("li");
       li.setAttribute("aria-current", String(t.id === showing));
-      li.onclick = () => show(t.id);
+      li.onclick = () => open(t.id);
 
       const name = document.createElement("span");
       name.className = "name";
@@ -155,20 +207,26 @@ listen("happened", ({ payload }) => {
       break;
 
     case "doing":
-      t.messages.push({ kind: "doing", text: payload.what, tool: payload.tool, id: payload.tool });
+      t.messages.push({ kind: "doing", text: payload.what, tool: payload.tool, call: payload.call });
       break;
 
     // A step that has answered stops looking like a step that has hung, so the
     // outcome lands on the step rather than on a line of its own.
+    // Joined by the id both sides carry, not by guessing at the most recent
+    // step: two calls to the same tool are otherwise indistinguishable, and
+    // several can be in flight at once.
     case "did": {
-      const step = [...t.messages].reverse().find((m) => m.kind === "doing" && !m.outcome);
+      const step = t.messages.find((m) => m.kind === "doing" && m.call === payload.call);
       if (step) step.outcome = payload.outcome;
       break;
     }
 
     case "done":
       t.working = false;
-      if (t.name === "New errand") t.name = titleFrom(t);
+      if (t.name === "New errand") {
+        t.name = titleFrom(t);
+        invoke("call_it", { id: t.id, name: t.name });
+      }
       break;
 
     case "failed":
@@ -235,6 +293,5 @@ el.what.addEventListener("input", () => {
 
 el.new.addEventListener("click", start);
 
-// Something to type into the moment the window opens. A person with an errand
-// in mind should not have to press New first.
-start();
+// What was here before, and something to type into if there was nothing.
+catchUp();

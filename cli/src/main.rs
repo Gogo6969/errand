@@ -19,7 +19,9 @@ async fn main() -> anyhow::Result<()> {
     let here = std::env::current_dir()?;
     println!("errand · thread {thread}\ntype to talk to it; it can be talked to while it works. ctrl-d to leave.\n");
 
-    let (mut claude, events) = Claude::open(&thread, &here)?;
+    // Always a fresh session here: the harness makes a new uuid every time it
+    // is run, so there is never anything to resume.
+    let (mut claude, events) = Claude::open(&thread, &here, false)?;
 
     // Everything it says, as it says it, on its own thread so that typing is
     // never blocked by whatever it happens to be doing.
