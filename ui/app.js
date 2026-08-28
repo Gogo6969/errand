@@ -132,6 +132,18 @@ function fromStore(line) {
     case "mine":
     case "said":
       return { kind: line.kind, text: line.text };
+    case "asking":
+      // A question that was answered is settled history; one that was not is
+      // a question nobody will ever answer now, because the process that asked
+      // it is gone. Both are drawn as answered, and only a live one gets
+      // buttons.
+      return {
+        kind: "asking",
+        text: line.text,
+        tool: line.tool,
+        call: line.call,
+        answered: line.outcome || "That question expired when the thread closed.",
+      };
     case "doing":
       return {
         kind: "doing",
@@ -172,7 +184,15 @@ function drawThreads() {
       const last = document.createElement("span");
       last.className = "last";
       const said = [...t.messages].reverse().find((m) => m.kind === "said" || m.kind === "mine");
-      last.textContent = t.working ? "Working…" : said ? said.text : "Nothing said yet";
+      const waiting = t.messages.some((m) => m.kind === "asking" && !m.answered);
+      last.textContent = waiting
+        ? "Waiting on you"
+        : t.working
+          ? "Working…"
+          : said
+            ? said.text
+            : "Nothing said yet";
+      if (waiting) last.classList.add("waiting");
 
       words.append(name, last);
       li.append(words);
@@ -217,12 +237,87 @@ function draw(m) {
       }
       return node;
     }
+    case "asking":
+      return asks(m);
     case "ended":
       node.className = m.failed ? "ended failed" : "ended";
       node.textContent = m.text;
       return node;
     default:
       return null;
+  }
+}
+
+/**
+ * A step that has stopped, and the three things you can say to it.
+ *
+ * The command is shown whole and unabbreviated, because a question about
+ * something you cannot see is not a question anybody can answer honestly, and
+ * the part of a long command worth worrying about is usually at the end of it.
+ *
+ * Once answered the card becomes a line of history rather than disappearing.
+ * What you allowed is worth being able to look back at.
+ */
+function asks(m) {
+  const li = document.createElement("li");
+  li.className = "asking";
+  li.append(tile(forTool(m.tool), false));
+
+  const body = document.createElement("div");
+  body.className = "question";
+
+  const what = document.createElement("p");
+  what.className = "wants";
+  what.textContent = m.text;
+  body.append(what);
+
+  if (m.detail) {
+    const detail = document.createElement("pre");
+    detail.className = "detail";
+    detail.textContent = m.detail;
+    body.append(detail);
+  }
+
+  if (m.answered) {
+    const settled = document.createElement("p");
+    settled.className = "settled";
+    settled.textContent = m.answered;
+    body.append(settled);
+  } else {
+    const choices = document.createElement("div");
+    choices.className = "choices";
+    const say = (label, said, kind) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = kind;
+      b.textContent = label;
+      b.onclick = () => answer(m, said, label);
+      return b;
+    };
+    choices.append(say("Yes", "yes", "yes"));
+    if (m.can_remember) choices.append(say("Always", "always", "always"));
+    choices.append(say("No", "no", "no"));
+    body.append(choices);
+  }
+
+  li.append(body);
+  return li;
+}
+
+/** Say yes or no, and let the halted work go on or not. */
+async function answer(m, said, label) {
+  const t = threads.get(showing);
+  // Settled here as well as in the store, so the buttons stop being buttons
+  // the moment they are pressed rather than when the answer comes back.
+  m.answered = label === "Always" ? "You said yes, and to stop asking" : `You said ${label.toLowerCase()}`;
+  t.working = said !== "no";
+  drawMessages();
+  drawThreads();
+  try {
+    await invoke("answer", { id: t.id, call: m.call, said });
+  } catch (why) {
+    m.answered = String(why);
+    drawMessages();
   }
 }
 
@@ -265,6 +360,21 @@ listen("happened", ({ payload }) => {
       if (step) step.outcome = payload.outcome;
       break;
     }
+
+    // Stopped, and waiting. Not working any more: a spinner beside a question
+    // says the machine is busy when the truth is that it is waiting for you.
+    case "needs_you":
+      t.working = false;
+      t.messages.push({
+        kind: "asking",
+        text: payload.asking,
+        detail: payload.detail,
+        tool: payload.tool,
+        call: payload.call,
+        can_remember: payload.can_remember,
+        answered: null,
+      });
+      break;
 
     case "done":
       t.working = false;

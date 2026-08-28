@@ -38,6 +38,14 @@
 //!   not used at all, since this list adds permissions rather than being the
 //!   whole of them.
 //! - `--append-system-prompt` carries ERRAND MODE, below.
+//! - `--permission-prompt-tool stdio` is the one that makes a person part of
+//!   this. It is not in the help text and the literal `stdio` is the whole
+//!   trick: with it, and with the handshake below, a step that needs
+//!   permission is asked about on the same pipe as everything else instead of
+//!   being refused before anybody hears about it. Found by watching what the
+//!   official SDK puts on its own command line, and then confirmed by running
+//!   it: the same request that was silently denied ran, and came back with the
+//!   page it fetched.
 //!
 //! What comes back is a stream of JSON objects, captured from a real run rather
 //! than from the documentation: `system` with subtypes (`init` carries the
@@ -47,6 +55,7 @@
 //! is deliberately dropped rather than shown, because a person watching their
 //! own errand does not need to watch the machinery underneath it.
 
+use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
@@ -54,7 +63,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::engine::{Engine, Event, Step};
+use crate::engine::{Answer, Engine, Event, NeedsYou, Step};
 
 /// What turns a helpful assistant into somebody running an errand.
 ///
@@ -71,6 +80,15 @@ use crate::engine::{Engine, Event, Step};
 /// end, keep the safeguards while doing it, and come back with the result or
 /// with one answerable question, never with a menu.
 const ERRAND_MODE: &str = include_str!("errand.md");
+
+/// The first thing said on the pipe, before anything is asked of it.
+///
+/// Without this the agent treats the other end as a script rather than as
+/// somebody who can answer, and the permission flag above does nothing. It
+/// carries no settings of its own; it exists to say that there is a window
+/// here and a person in front of it.
+const HELLO: &str =
+    r#"{"type":"control_request","request_id":"errand-hello","request":{"subtype":"initialize"}}"#;
 
 /// The tools an errand may reach for without anybody being asked first.
 ///
@@ -107,10 +125,24 @@ const GRANTED: &[&str] = &[
 /// to a program that is busy thinking.
 pub struct Claude {
     turns: tokio::sync::mpsc::UnboundedSender<Turn>,
+    /// Questions asked and not yet answered, by the id they came with.
+    ///
+    /// Kept because answering needs more than the answer: the agent wants its
+    /// own input handed back, and a remembered yes needs the rule it suggested.
+    /// Both arrive with the question and neither is worth making the window
+    /// carry back and forth.
+    waiting: Waiting,
 }
+
+/// The questions in flight, shared between the task reading them and the
+/// caller answering them.
+type Waiting = Arc<Mutex<HashMap<String, serde_json::Value>>>;
 
 /// Something to do to the conversation.
 enum Turn {
+    /// A line to write, whether that is something said or something answered.
+    /// They are the same to the pipe and the order between them matters, which
+    /// is the reason they are not two channels.
     Say(String),
     Stop,
 }
@@ -156,7 +188,14 @@ impl Claude {
                 "--allowedTools",
             ])
             .args(GRANTED)
-            .args(["--append-system-prompt", ERRAND_MODE, pick_up, session])
+            .args([
+                "--permission-prompt-tool",
+                "stdio",
+                "--append-system-prompt",
+                ERRAND_MODE,
+                pick_up,
+                session,
+            ])
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -164,6 +203,7 @@ impl Claude {
             .kill_on_drop(true)
             .spawn()
             .context("starting claude; is Claude Code installed and on the PATH?")?;
+        let waiting: Waiting = Arc::default();
 
         let mut stdin = child.stdin.take().context("claude stdin")?;
         let stdout = child.stdout.take().context("claude stdout")?;
@@ -188,10 +228,16 @@ impl Claude {
         });
 
         let ended = tx.clone();
+        let asked = waiting.clone();
         handle.spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             let mut said_anything = false;
             while let Ok(Some(line)) = lines.next_line().await {
+                // A question is the one thing that has to be kept rather than
+                // only passed on: answering it needs what it arrived with.
+                if let Some((id, request)) = a_question(&line) {
+                    asked.lock().unwrap().insert(id, request);
+                }
                 for event in read(&line) {
                     said_anything = true;
                     // A failure that says nothing is worse than no failure at
@@ -237,7 +283,9 @@ impl Claude {
             let _ = child.kill().await;
         });
 
-        Ok((Self { turns }, rx))
+        // Said before anything else, so the agent knows there is somebody here.
+        let _ = turns.send(Turn::Say(format!("{HELLO}\n")));
+        Ok((Self { turns, waiting }, rx))
     }
 }
 
@@ -255,11 +303,71 @@ impl Engine for Claude {
             .map_err(|_| anyhow::anyhow!("this conversation has ended"))
     }
 
+    /// Answer a question, and let the halted step go ahead or not.
+    ///
+    /// The agent is given back its own input rather than anything of ours: it
+    /// asked about a specific command and it must run that command, not one
+    /// this end reconstructed. A remembered yes carries the rule the agent
+    /// itself suggested, for the same reason.
+    fn answer(&mut self, call: &str, said: Answer) -> Result<()> {
+        let asked = self.waiting.lock().unwrap().remove(call);
+        let asked = asked.unwrap_or_default();
+        let reply = match said {
+            Answer::No => serde_json::json!({
+                "behavior": "deny",
+                // Said to the agent, not to the person. It reads this and
+                // decides what to do next, so it is worth saying that the
+                // route is closed rather than that something went wrong.
+                "message": "Not this one. Find another way or say what you need.",
+            }),
+            Answer::Yes => serde_json::json!({
+                "behavior": "allow",
+                "updatedInput": asked.get("input").cloned().unwrap_or_default(),
+            }),
+            Answer::Always => serde_json::json!({
+                "behavior": "allow",
+                "updatedInput": asked.get("input").cloned().unwrap_or_default(),
+                "updatedPermissions": asked
+                    .get("permission_suggestions")
+                    .cloned()
+                    .unwrap_or(serde_json::json!([])),
+            }),
+        };
+        let line = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "control_response",
+                "response": { "subtype": "success", "request_id": call, "response": reply },
+            })
+        );
+        self.turns
+            .send(Turn::Say(line))
+            .map_err(|_| anyhow::anyhow!("this conversation has ended"))
+    }
+
     fn stop(&mut self) -> Result<()> {
         // It may already be gone, which is not a failure to stop it.
         let _ = self.turns.send(Turn::Stop);
         Ok(())
     }
+}
+
+/// A question, if this line is one, as its id and everything it came with.
+///
+/// Separate from `read` because the two want different things from the same
+/// line: the window wants a question it can show, and answering wants the
+/// request exactly as it arrived. Parsing it twice is cheaper than threading
+/// the raw line through everything that handles events.
+fn a_question(line: &str) -> Option<(String, serde_json::Value)> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("type")?.as_str()? != "control_request" {
+        return None;
+    }
+    let request = v.get("request")?;
+    if request.get("subtype")?.as_str()? != "can_use_tool" {
+        return None;
+    }
+    Some((v.get("request_id")?.as_str()?.to_string(), request.clone()))
 }
 
 /// Turn one line of Claude Code's output into what the window understands.
@@ -275,6 +383,33 @@ pub fn read(line: &str) -> Vec<Event> {
     let at = |k: &str| v.get(k).and_then(|s| s.as_str()).unwrap_or("").to_string();
 
     match at("type").as_str() {
+        // A step that has stopped and is waiting to be allowed.
+        "control_request" => match a_question(line) {
+            Some((call, request)) => {
+                let tool = request
+                    .get("tool_name")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let input = request.get("input");
+                vec![Event::NeedsYou(NeedsYou {
+                    asking: in_plain_words(&tool, input),
+                    detail: the_thing_itself(&tool, input),
+                    // Offered only when the agent named a rule that would
+                    // cover it. Without one there is nothing to remember, and
+                    // a button that quietly does nothing is worse than no
+                    // button.
+                    can_remember: request
+                        .get("permission_suggestions")
+                        .and_then(|s| s.as_array())
+                        .is_some_and(|s| !s.is_empty()),
+                    tool,
+                    call,
+                })]
+            }
+            None => vec![],
+        },
+
         "system" if at("subtype") == "init" => vec![Event::Started {
             session: at("session_id"),
             model: at("model"),
@@ -416,6 +551,38 @@ fn in_plain_words(tool: &str, input: Option<&serde_json::Value>) -> String {
     }
 }
 
+/// The thing itself, whole, for a question that has to be judged.
+///
+/// The opposite of `in_plain_words`, and both are needed for the same call.
+/// "Fetch the page and show the first lines" is what somebody wants to read
+/// about a step that is happening; it is not enough to decide whether it
+/// should. So the question shows the plain sentence and the actual command
+/// underneath, uncut, because the dangerous part of a long command is usually
+/// at the end of it.
+fn the_thing_itself(tool: &str, input: Option<&serde_json::Value>) -> String {
+    let field = |k: &str| {
+        input
+            .and_then(|i| i.get(k))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    match tool {
+        "Bash" => field("command"),
+        "Read" | "Write" | "Edit" | "NotebookEdit" => field("file_path"),
+        "WebFetch" => field("url"),
+        "WebSearch" => field("query"),
+        _ => None,
+    }
+    .unwrap_or_else(|| {
+        // Anything unrecognised is shown as it arrived rather than summarised,
+        // since the whole point here is that nothing is hidden.
+        input
+            .map(|i| i.to_string())
+            .filter(|s| s != "null")
+            .unwrap_or_default()
+    })
+}
+
 /// Content that may be a string or a list of blocks, as one string.
 fn said(v: &serde_json::Value) -> String {
     match v {
@@ -533,6 +700,51 @@ mod tests {
             }]
         );
         assert!(read(DONE)[0].ends_the_turn());
+    }
+
+    /// Captured from a real run of the flags in the module docs. None of this
+    /// shape is documented anywhere, so the line itself is the specification.
+    const ASKED: &str = r#"{"type":"control_request","request_id":"f719d6a2","request":{"subtype":"can_use_tool","tool_name":"Bash","display_name":"Bash","input":{"command":"curl -s https://example.com | head -c 40","description":"Fetch example.com"},"permission_suggestions":[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"curl -s https://example.com"}],"behavior":"allow","destination":"localSettings"}],"tool_use_id":"toolu_015"}}"#;
+
+    #[test]
+    fn a_step_that_needs_permission_becomes_a_question_with_the_command_in_it() {
+        let Event::NeedsYou(ask) = &read(ASKED)[0] else {
+            panic!("a halted step is a question");
+        };
+        assert_eq!(ask.asking, "Fetch example.com", "its own words, where it has them");
+        assert_eq!(
+            ask.detail, "curl -s https://example.com | head -c 40",
+            "whole and uncut: the end of a command is the part worth reading"
+        );
+        assert_eq!(ask.tool, "Bash");
+        assert_eq!(
+            ask.call, "f719d6a2",
+            "the request's own id, which is what an answer is addressed to"
+        );
+        assert!(ask.can_remember, "it suggested a rule, so yes can be remembered");
+    }
+
+    #[test]
+    fn a_question_with_no_rule_behind_it_does_not_offer_to_remember_the_answer() {
+        // A button that quietly does nothing is worse than no button.
+        let bare = r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"WebFetch","input":{"url":"https://example.com"}}}"#;
+        let Event::NeedsYou(ask) = &read(bare)[0] else {
+            panic!("still a question");
+        };
+        assert!(!ask.can_remember);
+        assert_eq!(ask.detail, "https://example.com");
+    }
+
+    #[test]
+    fn a_control_message_that_is_not_a_question_is_not_shown_as_one() {
+        // The agent answers our opening hello on the same channel, and an
+        // acknowledgement is not something to interrupt anybody with.
+        for line in [
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"errand-hello"}}"#,
+            r#"{"type":"control_request","request_id":"x","request":{"subtype":"interrupt"}}"#,
+        ] {
+            assert!(read(line).is_empty(), "showed control traffic: {line}");
+        }
     }
 
     #[test]

@@ -284,3 +284,76 @@ main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
   cursor: pointer;
 }
 #send:disabled { opacity: 0.35; cursor: default; }
+
+/* ------------------------------------------------------------ asking -- */
+
+/*
+  A question, with the work stopped behind it. It is the only thing in the
+  timeline that is louder than what the agent says, because it is the only
+  thing that will sit there for ever if nobody deals with it.
+*/
+
+.asking {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  max-width: 74ch;
+  padding: 12px 13px;
+  border-radius: 14px;
+  background: var(--card);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--rule));
+}
+
+.asking .tile { margin-top: 1px; }
+.question { min-width: 0; flex: 1; }
+
+.wants { margin: 0; font-weight: 500; }
+
+/* Whole, wrapped and never cut. The end of a long command is the part worth
+   reading, and a question that hides it is not a question. */
+.detail {
+  margin: 7px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--side);
+  border: 1px solid var(--rule);
+  color: var(--ink-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.choices { display: flex; gap: 7px; margin-top: 11px; }
+
+.choices button {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.choices button:hover { border-color: #4a5464; }
+.choices button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.choices .yes {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #16181d;
+  font-weight: 500;
+}
+.choices .yes:hover { background: #f0b45e; border-color: #f0b45e; }
+.choices .no { color: var(--ink-soft); }
+
+/* Answered, and kept. What you allowed is worth being able to look back at. */
+.settled {
+  margin: 10px 0 0;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+}
+
+#threads .last.waiting { color: var(--accent); }

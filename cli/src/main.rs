@@ -11,7 +11,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use errand_core::{claude::Claude, Engine, Event};
+use errand_core::{claude::Claude, Answer, Engine, Event};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,6 +25,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Everything it says, as it says it, on its own thread so that typing is
     // never blocked by whatever it happens to be doing.
+    // A question halts everything until it is answered, so the harness has to
+    // be able to answer one. Typing y, a or n at the prompt does it; anything
+    // else is treated as a new thing to say.
+    let asked: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
+    let pending = asked.clone();
+
     let working = Arc::new(AtomicBool::new(false));
     let watching = working.clone();
     std::thread::spawn(move || loop {
@@ -32,6 +38,9 @@ async fn main() -> anyhow::Result<()> {
             Ok(event) => {
                 if event.ends_the_turn() {
                     watching.store(false, Ordering::SeqCst);
+                }
+                if let Event::NeedsYou(ask) = &event {
+                    *pending.lock().unwrap() = Some(ask.call.clone());
                 }
                 show(&event);
             }
@@ -49,9 +58,25 @@ async fn main() -> anyhow::Result<()> {
             break;
         }
         let said = line.trim();
-        if !said.is_empty() {
-            working.store(true, Ordering::SeqCst);
-            claude.say(said)?;
+        if said.is_empty() {
+            continue;
+        }
+        let question = asked.lock().unwrap().take();
+        match (question, said) {
+            (Some(call), "y") => claude.answer(&call, Answer::Yes)?,
+            (Some(call), "a") => claude.answer(&call, Answer::Always)?,
+            (Some(call), "n") => claude.answer(&call, Answer::No)?,
+            (Some(call), _) => {
+                // Not an answer, so it is still waiting. Put it back rather
+                // than losing it, or the thread hangs with nothing to say why.
+                *asked.lock().unwrap() = Some(call);
+                working.store(true, Ordering::SeqCst);
+                claude.say(said)?;
+            }
+            (None, _) => {
+                working.store(true, Ordering::SeqCst);
+                claude.say(said)?;
+            }
         }
     }
 
@@ -76,7 +101,16 @@ fn show(event: &Event) {
         Event::Doing(step) => println!("  · {}", step.what),
         Event::Did { outcome, .. } if !outcome.is_empty() => println!("    {outcome}"),
         Event::Did { .. } => {}
-        Event::NeedsYou(ask) => println!("\n? {}", ask.asking),
+        Event::NeedsYou(ask) => {
+            println!("\n? {}", ask.asking);
+            if !ask.detail.is_empty() {
+                println!("  {}", ask.detail);
+            }
+            print!(
+                "  y = yes, {}n = no › ",
+                if ask.can_remember { "a = always, " } else { "" }
+            );
+        }
         Event::Done { .. } => print!("\n› "),
         Event::Failed { why } => println!("\nit could not: {why}"),
     }

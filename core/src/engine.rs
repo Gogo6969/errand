@@ -11,6 +11,9 @@
 //! step being taken, a question that stops the work, an ending, or a failure.
 //! Anything an engine wants to say that does not fit is a thing the window
 //! would not know how to show.
+//!
+//! Only one of the five goes the other way. A question is the one event with a
+//! reply, and it is the reason the trait has more than `say` on it.
 
 use serde::{Deserialize, Serialize};
 
@@ -38,17 +41,41 @@ pub struct Step {
     pub call: String,
 }
 
-/// What the agent needs from a person before it can go on.
+/// What the agent wants to do, and cannot do until somebody says so.
+///
+/// This is a question with the work already halted behind it. The agent has
+/// decided on a step, the step needs permission, and nothing happens until
+/// this is answered. So it carries everything needed to answer well: what it
+/// wants to do in a sentence, the actual thing it would run, and the id to
+/// answer with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NeedsYou {
-    /// The question, in one sentence.
+    /// What it wants to do, in a sentence.
     pub asking: String,
-    /// Where it got stuck, when there is something to look at.
-    pub screenshot: Option<String>,
-    /// Whether the person can take the controls and hand them back. A locked
-    /// door somebody can walk through themselves is not the same kind of stop
-    /// as a question only they can answer.
-    pub can_take_over: bool,
+    /// The thing itself: the command, the address, whatever is concrete enough
+    /// to judge. A question about a shell command that does not show you the
+    /// command is a question nobody can answer honestly.
+    pub detail: String,
+    /// The tool underneath, for the mark beside the question.
+    pub tool: String,
+    /// What to answer with. Its own id, not the tool call's: one step can be
+    /// asked about more than once.
+    pub call: String,
+    /// Whether yes can be remembered, so the same question is not asked again.
+    /// Only offered when the engine says there is a rule that would cover it.
+    pub can_remember: bool,
+}
+
+/// What a person says back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Answer {
+    /// Go ahead, this once.
+    Yes,
+    /// Go ahead, and stop asking me about this.
+    Always,
+    /// No. The step does not happen and the agent is told why.
+    No,
 }
 
 /// Everything an engine is allowed to say.
@@ -69,7 +96,7 @@ pub enum Event {
     ///
     /// `call` is the id of the step this belongs to, not the tool's name.
     Did { call: String, outcome: String },
-    /// Stopped, and it is a person's turn.
+    /// Stopped, and it is a person's turn. The work is halted until answered.
     NeedsYou(NeedsYou),
     /// The turn is over and this is what came of it.
     Done { said: String },
@@ -93,6 +120,12 @@ impl Event {
 pub trait Engine {
     /// Send a turn. Safe to call while the engine is working.
     fn say(&mut self, text: &str) -> anyhow::Result<()>;
+    /// Answer a question it stopped to ask. `call` is the one it came with.
+    ///
+    /// Nothing happens on the other side until this arrives, which is the
+    /// whole point and also the thing to be careful about: a question nobody
+    /// answers is a thread that waits for ever.
+    fn answer(&mut self, call: &str, said: Answer) -> anyhow::Result<()>;
     /// Stop it, whatever it is doing.
     fn stop(&mut self) -> anyhow::Result<()>;
 }

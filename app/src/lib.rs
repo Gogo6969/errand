@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use errand_core::{claude::Claude, Engine, Event, Line, Store, Thread};
+use errand_core::{claude::Claude, Answer, Engine, Event, Line, Store, Thread};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -207,6 +207,45 @@ async fn say(held: State<'_, Held>, id: String, text: String) -> Result<(), Stri
     thread.say(&text).map_err(|e| e.to_string())
 }
 
+/// Answer a question the thread stopped to ask.
+///
+/// Written down first, then sent, for the same reason as saying anything else:
+/// what somebody decided is worth keeping even if the agent has gone. And the
+/// order matters more here than there, because the moment the answer lands the
+/// agent starts working again and its next line may arrive before ours.
+#[tauri::command]
+async fn answer(
+    held: State<'_, Held>,
+    id: String,
+    call: String,
+    said: String,
+) -> Result<(), String> {
+    let said = match said.as_str() {
+        "yes" => Answer::Yes,
+        "always" => Answer::Always,
+        "no" => Answer::No,
+        other => return Err(format!("no idea what \"{other}\" means")),
+    };
+    held.store
+        .answered(&id, &call, in_a_word(said))
+        .map_err(|e| e.to_string())?;
+
+    let mut live = held.live.lock().unwrap();
+    let thread = live
+        .get_mut(&id)
+        .ok_or_else(|| "that conversation is not open".to_string())?;
+    thread.answer(&call, said).map_err(|e| e.to_string())
+}
+
+/// What an answer is called when it is read back later.
+fn in_a_word(said: Answer) -> &'static str {
+    match said {
+        Answer::Yes => "You said yes",
+        Answer::Always => "You said yes, and to stop asking",
+        Answer::No => "You said no",
+    }
+}
+
 /// Give a thread the name it will be remembered by.
 #[tauri::command]
 async fn call_it(held: State<'_, Held>, id: String, name: String) -> Result<(), String> {
@@ -249,6 +288,7 @@ pub fn run() {
             lines,
             open_thread,
             say,
+            answer,
             call_it,
             stop,
             forget

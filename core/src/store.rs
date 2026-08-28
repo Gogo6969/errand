@@ -54,7 +54,8 @@ pub struct Thread {
 pub struct Line {
     pub seq: i64,
     pub at: i64,
-    /// `mine`, `said`, `doing` or `ended`. A string rather than an enum because
+    /// `mine`, `said`, `doing`, `asking` or `ended`. A string rather than an
+    /// enum because
     /// this is what the window switches on, and one vocabulary shared between
     /// the store, the wire and the page is one thing to keep right.
     pub kind: String,
@@ -256,8 +257,18 @@ impl Store {
                 )?;
                 Ok(None)
             }
+            // Kept with the id it was asked under, so the answer can be put
+            // back onto the question when it comes, and so a thread reopened
+            // later reads as "it asked, you said yes" rather than as a
+            // question nobody ever dealt with.
             Event::NeedsYou(ask) => self
-                .append(thread, "asking", &ask.asking, None, None)
+                .append(
+                    thread,
+                    "asking",
+                    &ask.asking,
+                    Some(&ask.call),
+                    Some(&ask.tool),
+                )
                 .map(Some),
             Event::Done { .. } => Ok(None),
             Event::Failed { why } => self.append(thread, "ended", why, None, None).map(Some),
@@ -324,6 +335,23 @@ impl Store {
 }
 
 /// Where the store lives for a real installation.
+impl Store {
+    /// Write down what somebody said to a question.
+    ///
+    /// Onto the question rather than under it, the same way an outcome goes
+    /// onto its step: a question and its answer are one thing that happened,
+    /// and splitting them across two lines makes a reopened thread read as
+    /// though it were asked twice.
+    pub fn answered(&self, thread: &str, call: &str, said: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE lines SET outcome = ? WHERE thread = ? AND call = ? AND kind = 'asking'",
+            params![said, thread, call],
+        )?;
+        Ok(())
+    }
+}
+
 pub fn beside(data_dir: &Path) -> PathBuf {
     data_dir.join("errand.db")
 }
