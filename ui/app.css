@@ -481,3 +481,65 @@ main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
 
 /* The bubble no longer wraps its own text, since the elements inside do it. */
 .said { white-space: normal; }
+
+/* --------------------------------------------------------- searching -- */
+
+#side header { gap: 8px; justify-content: space-between; align-items: center; }
+
+#find {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  padding: 5px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+}
+#find::placeholder { color: var(--faint, var(--ink-soft)); opacity: .7; }
+#find:focus { outline: none; border-color: #38404d; }
+#find::-webkit-search-cancel-button { filter: grayscale(1) opacity(.5); }
+
+/* Said rather than shown as an empty list, which reads as a broken sidebar. */
+#threads .nothing {
+  padding: 14px 10px;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  cursor: default;
+  display: block;
+}
+#threads .nothing:hover { background: none; }
+
+/* -------------------------------------------------- what to do with -- */
+
+.did-with {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+/* Kept reachable by keyboard even while invisible to the eye. */
+.said:hover .did-with,
+.did-with:focus-within { opacity: 1; }
+
+.did-with button {
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.did-with button:hover { color: var(--ink); border-color: #4a5464; }
+.did-with button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+@media (prefers-reduced-motion: reduce) { .did-with { transition: none; } }
+
+/* A file on its way in, so the window says it is ready to take it. */
+body.catching #composer { border-top-color: var(--accent); }
+body.catching #what { border-color: var(--accent); }

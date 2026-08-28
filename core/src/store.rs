@@ -371,6 +371,53 @@ impl Store {
 
 /// Where the store lives for a real installation.
 impl Store {
+    /// Threads with something in them matching `looking_for`.
+    ///
+    /// Across everything rather than within the open thread, because the
+    /// question a person actually has is "which errand was that" and they do
+    /// not remember which one it was -- that is the whole reason they are
+    /// looking.
+    ///
+    /// A plain LIKE rather than a full-text index. At a few thousand lines it
+    /// is instant and it is one fewer thing that can be out of step with the
+    /// table it describes; the day a thread has a novel in it, FTS5 is the
+    /// upgrade and this is the thing to replace.
+    pub fn matching(&self, looking_for: &str) -> Result<Vec<Thread>> {
+        let looking_for = looking_for.trim();
+        if looking_for.is_empty() {
+            return self.threads();
+        }
+        let like = format!(
+            "%{}%",
+            looking_for
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT id, name, cwd, model, opened, started_at, spoke_at, engine, engine_settings
+               FROM threads
+              WHERE name LIKE ?1 ESCAPE '\\'
+                 OR id IN (SELECT thread FROM lines WHERE text LIKE ?1 ESCAPE '\\')
+              ORDER BY spoke_at DESC",
+        )?;
+        let rows = q.query_map([&like], |r| {
+            Ok(Thread {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                cwd: r.get(2)?,
+                model: r.get(3)?,
+                opened: r.get::<_, i64>(4)? != 0,
+                started_at: r.get(5)?,
+                spoke_at: r.get(6)?,
+                engine: r.get(7)?,
+                engine_settings: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Put this thread on a different engine.
     ///
     /// `opened` goes back to false with it. It records whether *this* engine

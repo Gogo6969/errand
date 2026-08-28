@@ -47,6 +47,7 @@ const el = {
   form: document.getElementById("composer"),
   new: document.getElementById("new"),
   mark: document.getElementById("mark"),
+  find: document.getElementById("find"),
 };
 
 /**
@@ -242,8 +243,18 @@ function show(id) {
 }
 
 function drawThreads() {
+  // Not `showing`, which is the thread that is open. Shadowing that here would
+  // quietly stop every row knowing whether it is the current one.
+  const listed = [...threads.values()].filter((t) => !narrowedTo || narrowedTo.has(t.id));
+  if (!listed.length) {
+    const none = document.createElement("li");
+    none.className = "nothing";
+    none.textContent = "Nothing matches that.";
+    el.threads.replaceChildren(none);
+    return;
+  }
   el.threads.replaceChildren(
-    ...[...threads.values()].map((t) => {
+    ...listed.map((t) => {
       const li = document.createElement("li");
       li.setAttribute("aria-current", String(t.id === showing));
       li.onclick = () => open(t.id);
@@ -290,7 +301,7 @@ function draw(m) {
   switch (m.kind) {
     case "said":
       node.className = "said";
-      node.append(render(m.text));
+      node.append(render(m.text), doneWith(m));
       return node;
     // Your own words are shown exactly as you typed them. Reading somebody's
     // asterisks as emphasis is a small thing to get wrong and an odd one to
@@ -489,6 +500,46 @@ listen("happened", ({ payload }) => {
   drawThreads();
 });
 
+/**
+ * The two things worth doing with an answer.
+ *
+ * Copy, because an answer is often the point of the errand and it has to be
+ * able to leave. And ask again, which re-sends the last thing you asked rather
+ * than re-running the reply: an engine cannot un-say something, so the honest
+ * version of "regenerate" is asking the same question a second time.
+ *
+ * On hover rather than always, since a column of buttons down the side of a
+ * conversation competes with the conversation.
+ */
+function doneWith(m) {
+  const row = document.createElement("span");
+  row.className = "did-with";
+
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.textContent = "Copy";
+  copy.onclick = async () => {
+    await navigator.clipboard.writeText(m.text);
+    copy.textContent = "Copied";
+    setTimeout(() => (copy.textContent = "Copy"), 1400);
+  };
+  row.append(copy);
+
+  // Offered on the last answer only. Asking again from halfway up the thread
+  // would put the reply at the bottom, under everything that came after it.
+  const t = threads.get(showing);
+  const asked = t && [...t.messages].reverse().find((x) => x.kind === "mine");
+  const isLast = t && [...t.messages].reverse().find((x) => x.kind === "said") === m;
+  if (asked && isLast) {
+    const again = document.createElement("button");
+    again.type = "button";
+    again.textContent = "Ask again";
+    again.onclick = () => sayIt(asked.text);
+    row.append(again);
+  }
+  return row;
+}
+
 /** A thread is named after what was asked of it, since that is how it is remembered. */
 function titleFrom(t) {
   const first = t.messages.find((m) => m.kind === "mine");
@@ -499,38 +550,77 @@ function titleFrom(t) {
 
 // -------------------------------------------------------------- saying --
 
-el.form.addEventListener("submit", async (e) => {
+el.form.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = el.what.value.trim();
-  if (!text || !showing) return;
+  if (!text) return;
+  el.what.value = "";
+  el.what.style.height = "auto";
+  sayIt(text);
+});
 
+/** Say something to the thread that is open, from wherever it was typed. */
+async function sayIt(text) {
+  if (!showing) return;
   const t = threads.get(showing);
   t.messages.push({ kind: "mine", text });
   // Working from the moment it is sent, not from the moment something comes
   // back: the gap between the two is exactly when a person wonders whether the
   // thing they typed went anywhere.
   t.working = true;
-  el.what.value = "";
-  el.what.style.height = "auto";
   drawMessages();
   drawThreads();
 
   try {
-    await invoke("say", { id: showing, text });
+    await invoke("say", { id: t.id, text });
   } catch (why) {
     t.working = false;
     t.messages.push({ kind: "ended", failed: true, text: String(why) });
     drawMessages();
   }
-});
+}
 
 // Enter sends; shift-enter is a new line. And the box grows with what is in it,
 // because an errand worth describing is sometimes worth two sentences.
+// Up and down walk back through what you have already asked this thread, the
+// way a terminal does, because the second thing you ask is usually the first
+// thing again with one word changed. Only from an empty box, or while already
+// walking, so it never steals the arrow keys from somebody editing a sentence.
+let walkedBack = null;
+
 el.what.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
+    walkedBack = null;
     el.form.requestSubmit();
+    return;
   }
+
+  if (e.key !== "ArrowUp" && e.key !== "ArrowDown") {
+    walkedBack = null;
+    return;
+  }
+  const t = threads.get(showing);
+  if (!t) return;
+  const asked = t.messages.filter((m) => m.kind === "mine").map((m) => m.text);
+  if (!asked.length) return;
+  if (walkedBack === null && el.what.value.trim()) return;
+
+  e.preventDefault();
+  if (walkedBack === null) walkedBack = asked.length;
+  walkedBack += e.key === "ArrowUp" ? -1 : 1;
+
+  if (walkedBack >= asked.length) {
+    // Past the newest is where you started: an empty box, ready for a new one.
+    walkedBack = null;
+    el.what.value = "";
+  } else {
+    walkedBack = Math.max(0, walkedBack);
+    el.what.value = asked[walkedBack];
+  }
+  el.what.style.height = "auto";
+  el.what.style.height = Math.min(el.what.scrollHeight, window.innerHeight * 0.4) + "px";
+  el.what.setSelectionRange(el.what.value.length, el.what.value.length);
 });
 el.what.addEventListener("input", () => {
   el.what.style.height = "auto";
@@ -575,6 +665,92 @@ el.messages.addEventListener("click", (e) => {
   e.preventDefault();
   invoke("show_in_browser", { url: link.href }).catch((why) => complain(String(why)));
 });
+
+/**
+ * Which threads the list is showing.
+ *
+ * Null while nothing is being looked for, which is not the same as an empty
+ * search returning everything: the difference is that an unsuccessful search
+ * shows nothing and says so, rather than quietly showing the whole list as
+ * though it had matched.
+ */
+let narrowedTo = null;
+
+let searchingAfter = null;
+el.find.addEventListener("input", () => {
+  // Waited on briefly, because searching on every keystroke asks the store a
+  // question about a word somebody is still in the middle of typing.
+  clearTimeout(searchingAfter);
+  searchingAfter = setTimeout(look, 140);
+});
+
+async function look() {
+  const lookingFor = el.find.value.trim();
+  if (!lookingFor) {
+    narrowedTo = null;
+    drawThreads();
+    return;
+  }
+  // camelCase on the way over: the command takes `looking_for` and the bridge
+  // renames it. Every other command here has single-word arguments, so this is
+  // the first place it could show up, and it showed up as a red line in a
+  // thread rather than as anything a stub would have caught.
+  const found = await invoke("matching", { lookingFor });
+  narrowedTo = new Set(found.map((t) => t.id));
+  // A thread that has never been opened is not in the page's list yet, and a
+  // search that finds one has to be able to show it.
+  for (const t of found) {
+    if (!threads.has(t.id)) {
+      threads.set(t.id, {
+        id: t.id,
+        name: t.name,
+        messages: [],
+        working: false,
+        engine: t.model || "",
+        on: t.engine || "claude",
+        onSettings: t.engine_settings || null,
+        loaded: false,
+      });
+    }
+  }
+  drawThreads();
+}
+
+/**
+ * A file dropped on the window.
+ *
+ * Its path goes into the box rather than its contents. Both engines can open a
+ * file they are told about -- Claude Code natively, the local one through
+ * `read_file` -- so handing over the path is the whole job, and it keeps a
+ * hundred-megabyte CSV out of a context window that could never hold it.
+ *
+ * Through the window's own drag events rather than the page's, because the two
+ * are not equivalent here: the page is given a file with no path, for the same
+ * reason a web page is, and a name with no directory is not something either
+ * engine can open. The window is given the real path.
+ *
+ * A picture is the case this does not cover, and it is uncovered on purpose
+ * rather than half-done: showing one to a model means base64 in the message and
+ * an endpoint that can see, and guessing at either would produce something that
+ * silently sends nothing.
+ */
+function catchFiles() {
+  const webview = window.__TAURI__?.webview?.getCurrentWebview?.();
+  if (!webview) return; // Not inside the window, which is only true in a browser.
+  webview.onDragDropEvent(({ payload }) => {
+    if (payload.type === "over" || payload.type === "enter") {
+      document.body.classList.add("catching");
+      return;
+    }
+    document.body.classList.remove("catching");
+    if (payload.type !== "drop" || !payload.paths?.length) return;
+    const already = el.what.value.trim();
+    el.what.value = already ? `${already}\n${payload.paths.join("\n")}` : payload.paths.join("\n");
+    el.what.focus();
+    el.what.dispatchEvent(new Event("input"));
+  });
+}
+catchFiles();
 
 el.new.addEventListener("click", start);
 

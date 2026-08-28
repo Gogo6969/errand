@@ -133,6 +133,12 @@ async fn threads(held: State<'_, Held>) -> Result<Vec<Thread>, String> {
     held.store.threads().map_err(|e| e.to_string())
 }
 
+/// The threads with something matching in them.
+#[tauri::command]
+async fn matching(held: State<'_, Held>, looking_for: String) -> Result<Vec<Thread>, String> {
+    held.store.matching(&looking_for).map_err(|e| e.to_string())
+}
+
 /// Everything said in one thread, in the order it was said.
 #[tauri::command]
 async fn lines(held: State<'_, Held>, id: String) -> Result<Vec<Line>, String> {
@@ -409,6 +415,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             threads,
+            matching,
             lines,
             open_thread,
             say,
