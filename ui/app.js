@@ -48,6 +48,8 @@ const el = {
   new: document.getElementById("new"),
   mark: document.getElementById("mark"),
   find: document.getElementById("find"),
+  reach: document.getElementById("reach"),
+  reachable: document.getElementById("reachable"),
 };
 
 /**
@@ -751,6 +753,76 @@ function catchFiles() {
   });
 }
 catchFiles();
+
+/**
+ * What this thread can reach, beyond what the engine brought with it.
+ *
+ * The same list for either engine, and read from the same file Claude Code
+ * reads, which is the point: Claude Code connects to these servers itself and
+ * the local engine connects through ours, so a tool that works under one works
+ * under the other and is called the same thing.
+ *
+ * A server that did not start says why. Before this existed, a tool that was
+ * quietly absent was indistinguishable from a tool the agent chose not to use,
+ * and there was nowhere to look.
+ */
+el.reach.addEventListener("click", async () => {
+  if (!el.reachable.hidden) {
+    el.reachable.hidden = true;
+    return;
+  }
+  if (!showing) return;
+  el.reachable.hidden = false;
+  el.reachable.replaceChildren(saying("Asking them…"));
+
+  let servers;
+  try {
+    servers = await invoke("outside", { id: showing });
+  } catch (why) {
+    el.reachable.replaceChildren(saying(String(why)));
+    return;
+  }
+
+  if (!servers.length) {
+    el.reachable.replaceChildren(
+      saying("Nothing configured. Servers are read from ~/.claude.json, the same ones Claude Code uses."),
+    );
+    return;
+  }
+
+  el.reachable.replaceChildren(
+    ...servers.map((s) => {
+      const box = document.createElement("div");
+      box.className = s.trouble ? "server broken" : "server";
+
+      const name = document.createElement("span");
+      name.className = "server-name";
+      name.textContent = s.name;
+      const where = document.createElement("span");
+      where.className = "server-from";
+      where.textContent = s.from;
+      box.append(name, where);
+
+      const what = document.createElement("p");
+      what.className = "server-what";
+      what.textContent = s.trouble
+        ? s.trouble
+        : s.tools.length
+          ? s.tools.join(", ")
+          : "started, but offers nothing";
+      box.append(what);
+      return box;
+    }),
+  );
+});
+
+/** One line in the panel, for when there is nothing to list. */
+function saying(text) {
+  const p = document.createElement("p");
+  p.className = "server-what";
+  p.textContent = text;
+  return p;
+}
 
 el.new.addEventListener("click", start);
 

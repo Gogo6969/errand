@@ -25,6 +25,7 @@ use super::talk::LlmClient;
 use super::tools;
 use super::{ChatMessage, LlmSettings, ToolCall, ToolDef};
 use crate::engine::{Answer, Engine, Event, NeedsYou, Step};
+use crate::mcp;
 
 /// How many times round the loop before something is wrong.
 ///
@@ -98,6 +99,17 @@ async fn conversation(
     mut asked: UnboundedReceiver<Turn>,
     out: std::sync::mpsc::Sender<Event>,
 ) {
+    // Started once for the conversation rather than once per turn. Several of
+    // these are `npx` and take seconds to come up; paying that on every message
+    // would make the thread feel broken.
+    //
+    // A server that did not start is not announced here. It was, briefly, and
+    // it was wrong twice over: the same sentence went into the transcript again
+    // every time the thread was reopened, and it is not something the agent
+    // said. It belongs where somebody goes to look, which is the panel that
+    // lists what this thread can reach, and `trouble` is what that panel reads.
+    let outside = mcp::Servers::open(&home).await;
+
     let mut history = vec![ChatMessage::System {
         content: opening_instructions(&home),
     }];
@@ -121,7 +133,16 @@ async fn conversation(
             image_data_urls: vec![],
         });
 
-        let ran = errand(&client, &home, &mut history, &mut allowed, &mut asked, &out).await;
+        let ran = errand(
+            &client,
+            &home,
+            &outside,
+            &mut history,
+            &mut allowed,
+            &mut asked,
+            &out,
+        )
+        .await;
         match ran {
             Ok(Done::Finished(said)) => {
                 let _ = out.send(Event::Done { said });
@@ -144,16 +165,31 @@ enum Done {
 }
 
 /// One errand: round the loop until the model stops asking for tools.
+#[allow(clippy::too_many_arguments)]
 async fn errand(
     client: &LlmClient,
     home: &std::path::Path,
+    outside: &mcp::Servers,
     history: &mut Vec<ChatMessage>,
     allowed: &mut HashSet<String>,
     asked: &mut UnboundedReceiver<Turn>,
     out: &std::sync::mpsc::Sender<Event>,
 ) -> Result<Done> {
-    let known: Vec<tools::Tool> = tools::all();
-    let defs: Vec<ToolDef> = known.iter().map(|t| t.def.clone()).collect();
+    // Ours and theirs, in one list, because the model should not be able to
+    // tell which is which and neither should anything below.
+    let mut defs: Vec<ToolDef> = tools::all().into_iter().map(|t| t.def).collect();
+    defs.extend(outside.tools().iter().map(|t| ToolDef {
+        name: t.called.clone(),
+        description: t.description.clone(),
+        schema: serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": t.called,
+                "description": t.description,
+                "parameters": t.takes,
+            },
+        }),
+    }));
 
     for round in 0..ENOUGH {
         let cancel = CancellationToken::new();
@@ -246,7 +282,7 @@ async fn errand(
                 serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::json!({}));
 
             let _ = out.send(Event::Doing(Step {
-                what: tools::in_plain_words(&name, &args),
+                what: say_plainly(outside, &name, &args),
                 tool: name.clone(),
                 call: call.id.clone(),
             }));
@@ -255,7 +291,7 @@ async fn errand(
             // local model running a shell command is no safer for being local.
             if tools::asks_first(&name) && !allowed.contains(&name) {
                 let _ = out.send(Event::NeedsYou(NeedsYou {
-                    asking: tools::in_plain_words(&name, &args),
+                    asking: say_plainly(outside, &name, &args),
                     detail: tools::the_thing_itself(&name, &args),
                     tool: name.clone(),
                     // Both ids, and here they happen to be the same one: this
@@ -301,7 +337,10 @@ async fn errand(
                 }
             }
 
-            let outcome = match tools::run(&name, &args, home).await {
+            let outcome = match match outside.knows(&name) {
+                Some(_) => outside.call(&name, &args).await,
+                None => tools::run(&name, &args, home).await,
+            } {
                 Ok(said) => said,
                 // Told to the model as a result, not raised as an error: a
                 // failed step is something to try differently, and an error is
@@ -355,6 +394,22 @@ async fn wait_for_an_answer(
             // behind it. Nothing to do with it but let it go.
             Some(Turn::Answer { .. }) => {}
         }
+    }
+}
+
+/// What a step is doing, in words, wherever the tool came from.
+///
+/// A tool from outside has no entry in our list and never will: the whole point
+/// is that anybody can add one. So its own description is used, which is what
+/// the server wrote for the model to read, and it is the best sentence anybody
+/// has about it.
+fn say_plainly(outside: &mcp::Servers, name: &str, args: &serde_json::Value) -> String {
+    match outside.knows(name) {
+        None => tools::in_plain_words(name, args),
+        Some(tool) => match tool.description.lines().next().map(str::trim) {
+            Some(said) if !said.is_empty() => said.to_string(),
+            _ => format!("Using {} from {}", tool.own_name, tool.server),
+        },
     }
 }
 

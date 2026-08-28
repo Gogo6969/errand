@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use errand_core::local::{find, LlmSettings, Local};
+use errand_core::mcp;
 use errand_core::{claude::Claude, Answer, Engine, Event, Line, Store, Thread};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -376,6 +377,62 @@ fn worth_opening(url: &str) -> bool {
         .any(|s| url.starts_with(s))
 }
 
+/// One server of tools, as the window shows it.
+#[derive(Clone, Serialize)]
+struct Outside {
+    name: String,
+    /// Where it was configured, so a tool that appears in one folder and not
+    /// another has a visible reason rather than looking like a fault.
+    from: String,
+    /// What it offers, or nothing when it did not start.
+    tools: Vec<String>,
+    /// Why not, in words, when it did not.
+    trouble: Option<String>,
+}
+
+/// The tools this thread can reach, whichever engine is answering it.
+///
+/// Read from the same file Claude Code reads, so this is the truth for both:
+/// Claude Code connects to these servers itself, and the local engine connects
+/// through ours. One list, one place it comes from, no drift between them.
+///
+/// This starts the servers to ask what they offer, which is the only way to
+/// know. It is why the panel is opened rather than always on screen.
+#[tauri::command]
+async fn outside(held: State<'_, Held>, id: String) -> Result<Vec<Outside>, String> {
+    let home = held
+        .store
+        .thread(&id)
+        .map_err(|e| e.to_string())?
+        .map(|t| std::path::PathBuf::from(t.cwd))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let configured = mcp::configured(&home);
+    let running = mcp::Servers::open(&home).await;
+
+    Ok(configured
+        .into_iter()
+        .map(|server| {
+            let trouble = running
+                .trouble
+                .iter()
+                .find(|(name, _)| *name == server.name)
+                .map(|(_, why)| why.clone());
+            Outside {
+                tools: running
+                    .tools()
+                    .iter()
+                    .filter(|t| t.server == server.name)
+                    .map(|t| t.own_name.clone())
+                    .collect(),
+                name: server.name,
+                from: server.from,
+                trouble,
+            }
+        })
+        .collect())
+}
+
 /// Give a thread the name it will be remembered by.
 #[tauri::command]
 async fn call_it(held: State<'_, Held>, id: String, name: String) -> Result<(), String> {
@@ -422,6 +479,7 @@ pub fn run() {
             answer,
             engines,
             use_engine,
+            outside,
             show_in_browser,
             call_it,
             stop,

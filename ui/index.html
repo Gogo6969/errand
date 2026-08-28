@@ -33,7 +33,14 @@
         <span id="mark"></span>
         <span id="thread-name">Nothing open</span>
         <select id="engine" title="What answers this thread"></select>
+        <button id="reach" type="button" title="What this thread can reach">Tools</button>
       </header>
+
+      <!--
+        What the thread can reach, opened rather than always on screen: finding
+        out means starting the servers to ask them, which takes seconds.
+      -->
+      <aside id="reachable" hidden></aside>
 
       <ol id="messages" aria-live="polite"></ol>
 

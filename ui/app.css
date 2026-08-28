@@ -543,3 +543,53 @@ main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
 /* A file on its way in, so the window says it is ready to take it. */
 body.catching #composer { border-top-color: var(--accent); }
 body.catching #what { border-color: var(--accent); }
+
+/* ------------------------------------------------------- what it can reach -- */
+
+#reach {
+  margin-left: auto;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 11.5px;
+  padding: 3px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+#reach:hover { color: var(--ink); border-color: #4a5464; }
+#reach:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* `display` beats `hidden`, so the attribute has to be honoured explicitly or
+   the panel keeps its space while claiming to be gone. */
+#reachable[hidden] { display: none; }
+
+#reachable {
+  border-bottom: 1px solid var(--rule);
+  background: var(--side);
+  padding: 12px 18px;
+  max-height: 34vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.server { display: block; }
+.server-name { font-weight: 600; font-size: 13px; }
+.server-from {
+  margin-left: 7px;
+  font-size: 11px;
+  color: var(--ink-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.server-what {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+/* A server that did not start is not an error to apologise for, but it is not
+   the same as one that did, and the difference has to be visible. */
+.server.broken .server-name { color: #f0857d; }
+.server.broken .server-what { color: #c98079; }

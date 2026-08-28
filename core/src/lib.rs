@@ -20,6 +20,7 @@ pub mod engine;
 pub mod store;
 
 pub mod local;
+pub mod mcp;
 
 pub use engine::{Answer, Engine, Event, NeedsYou, Step};
 pub use store::{Line, Store, Thread};
