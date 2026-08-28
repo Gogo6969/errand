@@ -18,6 +18,7 @@ window.addEventListener("error", (e) => complain(e.message));
 window.addEventListener("unhandledrejection", (e) => complain(String(e.reason)));
 
 import { tile, forTool, kindOf } from "./icons.js";
+import { render } from "./markdown.js";
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -287,9 +288,15 @@ function drawMessages() {
 function draw(m) {
   const node = document.createElement("li");
   switch (m.kind) {
-    case "mine":
     case "said":
-      node.className = m.kind;
+      node.className = "said";
+      node.append(render(m.text));
+      return node;
+    // Your own words are shown exactly as you typed them. Reading somebody's
+    // asterisks as emphasis is a small thing to get wrong and an odd one to
+    // explain.
+    case "mine":
+      node.className = "mine";
       node.textContent = m.text;
       return node;
     case "doing": {
@@ -557,6 +564,16 @@ el.engine.addEventListener("change", async () => {
   }
   drawMessages();
   drawThreads();
+});
+
+// One handler for every link in every thread, rather than one per link: the
+// timeline is redrawn constantly and listeners attached to its contents would
+// be attached to nodes that are already gone.
+el.messages.addEventListener("click", (e) => {
+  const link = e.target.closest("a[data-away]");
+  if (!link) return;
+  e.preventDefault();
+  invoke("show_in_browser", { url: link.href }).catch((why) => complain(String(why)));
 });
 
 el.new.addEventListener("click", start);

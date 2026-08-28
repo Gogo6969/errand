@@ -385,3 +385,99 @@ main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
 }
 #engine:hover { background-color: var(--card); border-color: var(--rule); color: var(--ink); }
 #engine:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---------------------------------------------------------- prose ----- */
+
+/*
+  What the agent wrote, once it is elements rather than text. The bubble is
+  still a bubble, so everything here is about not letting a heading or a table
+  break out of one: tighter margins than a document would use, and the first
+  and last thing in a bubble sit flush with its edges.
+*/
+
+.said > :first-child { margin-top: 0; }
+.said > :last-child { margin-bottom: 0; }
+.said p { margin: 0 0 9px; }
+
+.said h1, .said h2, .said h3, .said h4, .said h5, .said h6 {
+  margin: 14px 0 7px;
+  line-height: 1.3;
+  font-weight: 600;
+}
+.said h1 { font-size: 18px; }
+.said h2 { font-size: 16.5px; }
+.said h3 { font-size: 15px; }
+.said h4, .said h5, .said h6 { font-size: 14px; color: var(--ink-soft); }
+
+.said ul, .said ol { margin: 0 0 9px; padding-left: 20px; }
+.said li { margin: 2px 0; }
+.said li::marker { color: var(--ink-soft); }
+
+.said a { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; }
+.said a:hover { border-bottom-color: currentColor; }
+.said a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+.said code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .88em;
+  background: var(--side);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: .05em .32em;
+}
+
+.said pre.code {
+  margin: 9px 0;
+  padding: 10px 12px;
+  background: var(--side);
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  /* Code scrolls inside its own box rather than widening the bubble, which
+     would widen the thread, which would move everything else sideways. */
+  overflow-x: auto;
+  position: relative;
+}
+.said pre.code code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre;
+}
+/* The language, where the model named one. Quiet: it is a label, not content. */
+.said pre.code[data-language]::before {
+  content: attr(data-language);
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  opacity: .6;
+}
+
+.said blockquote {
+  margin: 9px 0;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--rule);
+  color: var(--ink-soft);
+}
+
+.said hr { border: 0; border-top: 1px solid var(--rule); margin: 14px 0; }
+
+.said .table-wrap { overflow-x: auto; margin: 9px 0; }
+.said table { border-collapse: collapse; font-size: 13px; }
+.said th, .said td {
+  border: 1px solid var(--rule);
+  padding: 5px 9px;
+  text-align: left;
+  vertical-align: top;
+}
+.said th { background: var(--side); font-weight: 600; }
+/* Digits that sit under each other are digits you can compare. */
+.said td { font-variant-numeric: tabular-nums; }
+
+/* The bubble no longer wraps its own text, since the elements inside do it. */
+.said { white-space: normal; }

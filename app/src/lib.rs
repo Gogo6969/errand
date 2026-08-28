@@ -335,6 +335,41 @@ async fn use_engine(
         .map_err(|e| e.to_string())
 }
 
+/// Open a link somewhere that is not this window.
+///
+/// A link followed inside the webview replaces the app with a web page and
+/// there is no way back to the thread, so every one is handed to the browser
+/// instead.
+///
+/// The scheme is checked here as well as in the page. The page's check is the
+/// one that runs, and this is the one that still runs if somebody later finds a
+/// way past it: the text these links come from was written by a model, which
+/// read it off a web page, which anybody can write.
+#[tauri::command]
+async fn show_in_browser(url: String) -> Result<(), String> {
+    if !worth_opening(&url) {
+        return Err("that is not a kind of link this opens".into());
+    }
+    std::process::Command::new("open")
+        .arg(&url)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Is this a kind of address worth handing to the system?
+///
+/// Three schemes, and the reason for a list rather than a blocklist is that a
+/// blocklist has to be right about every scheme anybody will ever invent.
+/// Leading space is trimmed because `  javascript:...` is the oldest trick
+/// there is.
+fn worth_opening(url: &str) -> bool {
+    let url = url.trim().to_lowercase();
+    ["http://", "https://", "mailto:"]
+        .iter()
+        .any(|s| url.starts_with(s))
+}
+
 /// Give a thread the name it will be remembered by.
 #[tauri::command]
 async fn call_it(held: State<'_, Held>, id: String, name: String) -> Result<(), String> {
@@ -380,6 +415,7 @@ pub fn run() {
             answer,
             engines,
             use_engine,
+            show_in_browser,
             call_it,
             stop,
             forget
@@ -402,4 +438,50 @@ pub fn run() {
                 onscreen::ask();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ordinary_link_is_handed_to_the_browser() {
+        assert!(worth_opening("https://coindesk.com/price/bitcoin"));
+        assert!(worth_opening("http://localhost:11434/v1/models"));
+        assert!(worth_opening("mailto:somebody@example.com"));
+        assert!(worth_opening("  https://example.com  "), "trimmed first");
+        assert!(worth_opening("HTTPS://EXAMPLE.COM"), "however it is cased");
+    }
+
+    #[test]
+    fn anything_that_is_not_a_link_a_person_would_recognise_is_refused() {
+        // The page refuses these too. This is the check that still runs if
+        // somebody later finds a way past that one, and the text these come
+        // from was written by a model that read it off a page an hour ago.
+        for bad in [
+            "javascript:alert(1)",
+            "  javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html,<script>alert(1)</script>",
+            "vscode://file/Users/somebody/.ssh/id_rsa",
+            "",
+            "not a url at all",
+        ] {
+            assert!(!worth_opening(bad), "would have opened {bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_gist_of_an_answer_is_the_first_line_of_it_without_its_punctuation() {
+        assert_eq!(gist("## Bitcoin\n\nA line."), "Bitcoin");
+        assert_eq!(gist("**Done.** And so on."), "Done.** And so on.");
+        assert_eq!(gist("   \n\nAfter the blanks."), "After the blanks.");
+        assert_eq!(gist(""), "Finished.");
+        assert_eq!(
+            gist(&"x".repeat(400)).chars().count(),
+            140,
+            "139 and the mark"
+        );
+    }
 }
