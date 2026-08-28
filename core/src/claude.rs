@@ -21,6 +21,23 @@
 //!   whole two seconds later reads as a hang.
 //! - `--session-id` ties the process to the thread, so a thread that is closed
 //!   and reopened is the same conversation to Claude as it is to the person.
+//! - `--permission-mode acceptEdits` was arrived at by elimination, and the
+//!   flag next to it is worth naming so nobody reaches for it again. The
+//!   obvious-looking one is `dontAsk`, which is what Claude Code's own
+//!   scheduled tasks use, and it is a trap here: it does not mean "do not
+//!   interrupt anybody", it means "answer every prompt with no". Under it the
+//!   morning-news errand tried the web five different ways, was refused five
+//!   times, and reported a wall. The default mode already runs the ordinary
+//!   safe things unasked. `acceptEdits` adds the one thing an errand cannot
+//!   avoid, which is writing its own work down, and stops short of
+//!   `bypassPermissions`, so what remains behind a prompt stays behind it.
+//! - `--allowedTools` grants the looking-things-up tools up front, for the
+//!   reason above: a prompt nobody can answer is a refusal. Everything on that
+//!   list only reads. Bash is deliberately not on it, so an ordinary command
+//!   still runs and a destructive one still stops, and `--disallowedTools` is
+//!   not used at all, since this list adds permissions rather than being the
+//!   whole of them.
+//! - `--append-system-prompt` carries ERRAND MODE, below.
 //!
 //! What comes back is a stream of JSON objects, captured from a real run rather
 //! than from the documentation: `system` with subtypes (`init` carries the
@@ -38,6 +55,43 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::engine::{Engine, Event, Step};
+
+/// What turns a helpful assistant into somebody running an errand.
+///
+/// Without this the app fails in one particular and infuriating way: asked for
+/// the morning's Bitcoin news it answers with three numbered options and asks
+/// which one you want, having done nothing. That is the correct behaviour for
+/// an assistant sitting in a terminal beside somebody, and the wrong behaviour
+/// entirely for a thing you hand a job to and walk away from.
+///
+/// The text is appended rather than replacing the default, so everything Claude
+/// Code already knows about its own tools and this machine survives. What it
+/// adds is four things, in this order because they undo each other otherwise:
+/// act before speaking, treat a dead route as the next route rather than the
+/// end, keep the safeguards while doing it, and come back with the result or
+/// with one answerable question, never with a menu.
+const ERRAND_MODE: &str = include_str!("errand.md");
+
+/// The tools an errand may reach for without anybody being asked first.
+///
+/// Every one of them only looks: it reads a file, a page, or a search result,
+/// and changes nothing. The two that are not on the list are the point of the
+/// list. Bash is left off because it is not one tool but every tool, and the
+/// classifier underneath already lets an ordinary command through while
+/// stopping a destructive one. Anything that spends money, sends a message or
+/// signs in is not here and is not meant to be: those are the walls the agent
+/// is told to stop at and name, and it does.
+const GRANTED: &[&str] = &[
+    "WebSearch",
+    "WebFetch",
+    "Read",
+    "Glob",
+    "Grep",
+    "TodoWrite",
+    "Task",
+    "Skill",
+    "ToolSearch",
+];
 
 /// A thread's conversation with Claude Code.
 ///
@@ -97,9 +151,12 @@ impl Claude {
                 "stream-json",
                 "--include-partial-messages",
                 "--verbose",
-                pick_up,
-                session,
+                "--permission-mode",
+                "acceptEdits",
+                "--allowedTools",
             ])
+            .args(GRANTED)
+            .args(["--append-system-prompt", ERRAND_MODE, pick_up, session])
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
