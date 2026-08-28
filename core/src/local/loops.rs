@@ -263,9 +263,22 @@ async fn errand(
                     can_remember: true,
                 }));
 
-                match wait_for_an_answer(asked, &call.id).await {
+                let (said, meanwhile) = match wait_for_an_answer(asked, &call.id).await {
                     None => return Ok(Done::Abandoned),
-                    Some(Answer::No) => {
+                    Some(both) => both,
+                };
+                // Whatever they typed while deciding is part of the
+                // conversation and goes in before the tool result, so the model
+                // reads it as context for the step rather than as a new errand.
+                for text in meanwhile {
+                    history.push(ChatMessage::User {
+                        content: text,
+                        name: None,
+                        image_data_urls: vec![],
+                    });
+                }
+                match said {
+                    Answer::No => {
                         let refused = "You said no. Try another way, or say what you need.";
                         let _ = out.send(Event::Did {
                             call: call.id.clone(),
@@ -277,10 +290,10 @@ async fn errand(
                         });
                         continue;
                     }
-                    Some(Answer::Always) => {
+                    Answer::Always => {
                         allowed.insert(name.clone());
                     }
-                    Some(Answer::Yes) => {}
+                    Answer::Yes => {}
                 }
             }
 
@@ -315,23 +328,30 @@ async fn errand(
 
 /// Wait for somebody to answer this particular question.
 ///
-/// Anything else said meanwhile is not thrown away: it goes back on the queue,
-/// because a person who types instead of pressing a button has still said
-/// something, and losing it silently is the worst of the available options.
-async fn wait_for_an_answer(asked: &mut UnboundedReceiver<Turn>, call: &str) -> Option<Answer> {
-    let mut kept: Vec<Turn> = Vec::new();
-    let answer = loop {
+/// A person looking at a card does not always press a button. Sometimes they
+/// type, because what they want to say is "yes, but only the first one" and no
+/// button says that. So anything said while waiting comes back with the answer
+/// and is put into the conversation, rather than being swallowed because it
+/// arrived at an inconvenient moment.
+///
+/// Returns nothing at all only when the thread is being closed.
+async fn wait_for_an_answer(
+    asked: &mut UnboundedReceiver<Turn>,
+    call: &str,
+) -> Option<(Answer, Vec<String>)> {
+    let mut meanwhile: Vec<String> = Vec::new();
+    loop {
         match asked.recv().await {
-            Some(Turn::Answer { call: which, said }) if which == call => break Some(said),
-            Some(Turn::Stop) | None => break None,
-            Some(other) => kept.push(other),
+            Some(Turn::Answer { call: which, said }) if which == call => {
+                return Some((said, meanwhile))
+            }
+            Some(Turn::Stop) | None => return None,
+            Some(Turn::Say(text)) => meanwhile.push(text),
+            // An answer to some other question, which by now has no question
+            // behind it. Nothing to do with it but let it go.
+            Some(Turn::Answer { .. }) => {}
         }
-    };
-    // Anything said while waiting is a turn the person still meant. It cannot
-    // go back on the channel from here without racing the loop that reads it,
-    // so it is carried out and handled by the caller.
-    drop(kept);
-    answer
+    }
 }
 
 /// What the model is told before anything else.
