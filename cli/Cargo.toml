@@ -1,0 +1,14 @@
+[package]
+name = "errand-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "errand"
+path = "src/main.rs"
+
+[dependencies]
+errand-core = { path = "../core" }
+anyhow.workspace = true
+tokio.workspace = true
