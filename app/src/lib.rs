@@ -44,6 +44,26 @@ struct Happened {
     event: Event,
 }
 
+/// Where the threads and the book they are written in live.
+///
+/// Named after the app rather than keyed to its bundle identifier, which is
+/// the usual thing and was a mistake worth not repeating. An identifier can
+/// have to change: macOS records per identifier whether an app may put
+/// anything on screen, and that record cannot be argued with, only left
+/// behind. When it changed here every thread moved with it, and moving a
+/// thread is not a small thing, because each one is a working directory and
+/// the agent's memory of that conversation is filed under exactly that path.
+/// A name does not change when an identifier does.
+fn where_things_live(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let here = app
+        .path()
+        .data_dir()
+        .map_err(|e| e.to_string())?
+        .join("Errand");
+    std::fs::create_dir_all(&here).map_err(|e| e.to_string())?;
+    Ok(here)
+}
+
 /// Say on screen that an errand has ended, if nobody was there to see it end.
 ///
 /// The reason to have this at all is that these jobs take minutes. Somebody
@@ -133,12 +153,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // Its own folder per thread, so one errand cannot tidy up after
             // another, and so "the files from that thing last Tuesday" are
             // still somewhere findable.
-            let home = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| e.to_string())?
-                .join("threads")
-                .join(&id);
+            let home = where_things_live(&app)?.join("threads").join(&id);
             std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
             // Resolved, because Claude Code resolves it too, and a comparison
             // between a resolved path and an unresolved one is a comparison
@@ -220,8 +235,8 @@ async fn forget(held: State<'_, Held>, id: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            let data = app.path().app_data_dir()?;
-            let store = Store::open(&errand_core::store::beside(&data))?;
+            let here = where_things_live(&app.handle().clone())?;
+            let store = Store::open(&errand_core::store::beside(&here))?;
             app.manage(Held {
                 live: Mutex::new(HashMap::new()),
                 store: Arc::new(store),
