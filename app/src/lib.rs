@@ -22,7 +22,8 @@ use std::sync::{Arc, Mutex};
 use errand_core::{claude::Claude, Engine, Event, Line, Store, Thread};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_notification::NotificationExt;
+
+mod onscreen;
 
 /// Everything the window is holding: the conversations that are live, and the
 /// book they are all written into.
@@ -66,9 +67,7 @@ fn tell_them(app: &AppHandle, store: &Store, id: &str, event: &Event) {
     if watching {
         return;
     }
-    // Not being allowed to is an answer, not a failure: somebody said no to
-    // notifications once and that decision is theirs to keep.
-    let _ = app.notification().builder().title(title).body(body).show();
+    onscreen::show(id, &title, &body);
 }
 
 /// What a thread is called, or something honest if it is not called anything.
@@ -220,7 +219,6 @@ async fn forget(held: State<'_, Held>, id: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let data = app.path().app_data_dir()?;
             let store = Store::open(&errand_core::store::beside(&data))?;
@@ -229,18 +227,6 @@ pub fn run() {
                 store: Arc::new(store),
             });
 
-            // Asked for now, at the start, rather than at the moment the first
-            // errand finishes. The system's question arrives whenever it is
-            // first asked, and arriving hours later next to a finished job is
-            // both a worse moment to answer it and a worse question: nobody
-            // knows what they are being asked about. Whatever is answered here
-            // is remembered by the system, not by us, so this is asked once.
-            if !matches!(
-                app.notification().permission_state(),
-                Ok(tauri_plugin_notification::PermissionState::Granted)
-            ) {
-                let _ = app.notification().request_permission();
-            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -252,6 +238,22 @@ pub fn run() {
             stop,
             forget
         ])
-        .run(tauri::generate_context!())
-        .expect("running the window");
+        .build(tauri::generate_context!())
+        .expect("building the window")
+        // Asked at the start rather than at the moment the first errand lands.
+        // The system's question arrives whenever it is first asked, and hours
+        // later beside a finished job it is both a worse moment to answer and a
+        // worse question, because nobody knows what it is about. The answer is
+        // remembered by the system rather than by us, so it is asked once ever.
+        //
+        // On `Ready` specifically, and not in `setup`: setup runs before the
+        // app has finished launching, and asking that early is refused outright
+        // with "notifications are not allowed for this application", which
+        // sounds like a decision somebody made and is really just a question
+        // asked too soon.
+        .run(|_app, event| {
+            if matches!(event, tauri::RunEvent::Ready) {
+                onscreen::ask();
+            }
+        });
 }
