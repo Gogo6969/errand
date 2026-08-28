@@ -57,3 +57,15 @@ async fn one_turn_with_every_event_it_produces() {
     }
     panic!("nothing ended the turn");
 }
+
+#[test]
+fn show_the_opening_instructions() {
+    // A diagnostic: the system prompt is the one input to a turn that nothing
+    // else prints, and an empty answer usually means it is malformed.
+    if std::env::var("ERRAND_SHOW_PROMPT").is_ok() {
+        println!(
+            "{}",
+            errand_core::local::instructions_for(std::path::Path::new("/tmp/x"))
+        );
+    }
+}

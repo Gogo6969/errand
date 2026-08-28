@@ -34,6 +34,13 @@ use crate::mcp;
 /// and the only symptom is a thread that never ends.
 const ENOUGH: usize = 24;
 
+/// How many outside tools to put in front of the model without being asked.
+///
+/// Enough that an obvious job has its obvious tool to hand, few enough that the
+/// schemas stay affordable. Five of peekaboo's is about twelve thousand bytes
+/// against sixty-four for all of them.
+const LIKELY: usize = 5;
+
 /// A conversation with a model running on this machine.
 pub struct Local {
     turns: UnboundedSender<Turn>,
@@ -111,12 +118,17 @@ async fn conversation(
     let outside = mcp::Servers::open(&home).await;
 
     let mut history = vec![ChatMessage::System {
-        content: opening_instructions(&home),
+        content: opening_instructions(&home, &outside),
     }];
     // Tools somebody has said yes to for good, this conversation. Deliberately
     // not saved anywhere: a permission that outlives the thread it was granted
     // in is a permission nobody remembers granting.
     let mut allowed: HashSet<String> = HashSet::new();
+    // Tools fetched by name so far. Once a schema has been paid for it stays
+    // for the rest of the conversation: an errand that needed to take a
+    // screenshot once will very likely need to again, and paying twice for the
+    // same discovery is the thing this whole mechanism exists to avoid.
+    let mut loaded: HashSet<String> = HashSet::new();
 
     while let Some(turn) = asked.recv().await {
         let said = match turn {
@@ -126,6 +138,22 @@ async fn conversation(
             Turn::Answer { .. } => continue,
             Turn::Stop => break,
         };
+
+        // Look the request up before handing it over.
+        //
+        // `find_tools` exists and works, and a small model does not reliably
+        // think to use it: asked to check macOS permissions it guessed at shell
+        // commands three times rather than searching, while the right tool sat
+        // one lookup away. So the search runs here, on the words the person
+        // just used, and the likely tools are already in front of the model on
+        // the first round. It is the same search either way, done by the thing
+        // that already knows what was asked.
+        //
+        // Deliberately a few, not all: the whole point is not to be back at
+        // sixty-four thousand bytes of schemas per request.
+        for tool in outside.matching(&said, LIKELY) {
+            loaded.insert(tool.called.clone());
+        }
 
         history.push(ChatMessage::User {
             content: said,
@@ -139,6 +167,7 @@ async fn conversation(
             &outside,
             &mut history,
             &mut allowed,
+            &mut loaded,
             &mut asked,
             &out,
         )
@@ -172,13 +201,18 @@ async fn errand(
     outside: &mcp::Servers,
     history: &mut Vec<ChatMessage>,
     allowed: &mut HashSet<String>,
+    loaded: &mut HashSet<String>,
     asked: &mut UnboundedReceiver<Turn>,
     out: &std::sync::mpsc::Sender<Event>,
 ) -> Result<Done> {
-    // Ours and theirs, in one list, because the model should not be able to
-    // tell which is which and neither should anything below.
-    let mut defs: Vec<ToolDef> = tools::all().into_iter().map(|t| t.def).collect();
-    defs.extend(outside.tools().iter().map(|t| ToolDef {
+    // Ours always, and theirs only once somebody has asked for them.
+    //
+    // Sending every tool every time was correct and unaffordable: twenty-six
+    // servers' worth of schemas is sixty-four thousand bytes in front of every
+    // single request, which on a small model is most of the minute it takes to
+    // answer. So the model is told the names up front, which is a few hundred
+    // bytes, and fetches the schemas it actually wants.
+    let with_schemas = |t: &crate::mcp::Tool| ToolDef {
         name: t.called.clone(),
         description: t.description.clone(),
         schema: serde_json::json!({
@@ -189,9 +223,45 @@ async fn errand(
                 "parameters": t.takes,
             },
         }),
-    }));
+    };
 
     for round in 0..ENOUGH {
+        // Rebuilt each time round, because the last step may have fetched more.
+        let mut defs: Vec<ToolDef> = tools::all()
+            .into_iter()
+            .filter(|t| t.def.name != "find_tools" || !outside.tools().is_empty())
+            .map(|t| t.def)
+            .collect();
+        defs.extend(
+            outside
+                .tools()
+                .iter()
+                .filter(|t| loaded.contains(&t.called))
+                .map(&with_schemas),
+        );
+
+        // A turn's inputs are the one thing nothing else prints, and an answer
+        // that comes back empty is almost always one of them. Off unless asked
+        // for, and never the contents of a message, only their shape.
+        if std::env::var("ERRAND_TRACE").is_ok() {
+            eprintln!(
+                "round {round}: {} tools ({}), {} messages, {} bytes of instruction",
+                defs.len(),
+                defs.iter()
+                    .map(|d| d.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                history.len(),
+                history
+                    .iter()
+                    .map(|m| match m {
+                        ChatMessage::System { content } => content.len(),
+                        _ => 0,
+                    })
+                    .sum::<usize>(),
+            );
+        }
+
         let cancel = CancellationToken::new();
         let mut stream = client.stream(history, &defs, None, cancel).await?;
 
@@ -219,6 +289,18 @@ async fn errand(
                     break;
                 }
             }
+        }
+
+        if std::env::var("ERRAND_TRACE").is_ok() {
+            eprintln!(
+                "  -> {} characters, {} tool calls{}",
+                wrote.len(),
+                wants.len(),
+                match &broke {
+                    Some(why) => format!(", broke: {why}"),
+                    None => String::new(),
+                }
+            );
         }
 
         // A stream that broke after writing something has still written it.
@@ -337,9 +419,16 @@ async fn errand(
                 }
             }
 
-            let outcome = match match outside.knows(&name) {
-                Some(_) => outside.call(&name, &args).await,
-                None => tools::run(&name, &args, home).await,
+            let outcome = match match name.as_str() {
+                "find_tools" => Ok(look_up(outside, loaded, &args)),
+                _ if outside.knows(&name).is_some() => {
+                    // A model can call something it has only seen the name of,
+                    // and refusing on a technicality would be pedantry: it
+                    // knows what it wants. Keep the schema for next time.
+                    loaded.insert(name.clone());
+                    outside.call(&name, &args).await
+                }
+                _ => tools::run(&name, &args, home).await,
             } {
                 Ok(said) => said,
                 // Told to the model as a result, not raised as an error: a
@@ -397,6 +486,60 @@ async fn wait_for_an_answer(
     }
 }
 
+/// Answer a lookup, and make what it found available.
+///
+/// The reply is what the model needs to decide, and no more: names and the one
+/// line each tool leads with. The full schemas arrive with the next request,
+/// which is the whole point -- they are paid for once, when something is going
+/// to be used, rather than every time in case it is.
+fn look_up(
+    outside: &mcp::Servers,
+    loaded: &mut HashSet<String>,
+    args: &serde_json::Value,
+) -> String {
+    const AT_A_TIME: usize = 5;
+    let needing = args
+        .get("needing")
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let found = outside.matching(&needing, AT_A_TIME);
+    if found.is_empty() {
+        // A fact, and a nudge towards a better search rather than a list to
+        // pick from, for the same reason the catalogue has no names in it.
+        return format!(
+            "Nothing matched \"{needing}\". There are {} to search. Try naming the action \
+             rather than the tool: what you want to happen, in a few plain words.",
+            outside.what_else()
+        );
+    }
+
+    let mut said = String::from("These are available to you now:\n");
+    for tool in &found {
+        loaded.insert(tool.called.clone());
+        said.push_str(&format!(
+            "  {} -- {}\n",
+            tool.called,
+            one_line(&tool.description)
+        ));
+    }
+    said
+}
+
+/// The first line of something, short enough to sit in a list.
+fn one_line(s: &str) -> String {
+    let line = s
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    match line.chars().count() > 140 {
+        true => format!("{}…", line.chars().take(139).collect::<String>()),
+        false => line.to_string(),
+    }
+}
+
 /// What a step is doing, in words, wherever the tool came from.
 ///
 /// A tool from outside has no entry in our list and never will: the whole point
@@ -414,7 +557,19 @@ fn say_plainly(outside: &mcp::Servers, name: &str, args: &serde_json::Value) -> 
 }
 
 /// What the model is told before anything else.
-fn opening_instructions(home: &std::path::Path) -> String {
+pub(crate) fn opening_instructions(home: &std::path::Path, outside: &mcp::Servers) -> String {
+    // How much is out there, and never what any of it is called. See
+    // `Servers::what_else`: listing the names made a 7B model answer with
+    // nothing at all, and taking them out made the same request work.
+    let more = match outside.tools().is_empty() {
+        true => String::new(),
+        false => format!(
+            "\n\nThere are {} tools available beyond the ones you can see, fetched with \
+             find_tools. Do that before concluding something cannot be done here.",
+            outside.what_else()
+        ),
+    };
+
     format!(
         "You are Errand. You have been handed a job, not a design question, and you \
          come back having done it.\n\n\
@@ -432,7 +587,7 @@ fn opening_instructions(home: &std::path::Path) -> String {
          asking again.\n\n\
          Your working directory is {}. Paths are relative to it and it is the only \
          place you write.\n\n\
-         Finish on the result. Do not append an offer of further work.",
+         Finish on the result. Do not append an offer of further work.{more}",
         home.display()
     )
 }
@@ -447,5 +602,24 @@ fn first_line(s: &str) -> String {
     match line.chars().count() > 80 {
         true => format!("{}…", line.chars().take(79).collect::<String>()),
         false => line.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_model_is_told_the_names_of_everything_it_could_reach_but_not_the_schemas() {
+        let nothing = mcp::Servers::default();
+        let bare = opening_instructions(std::path::Path::new("/tmp/x"), &nothing);
+        assert!(
+            !bare.contains("find_tools"),
+            "with no servers there is nothing to look up, and saying so invites a wild goose chase"
+        );
+        assert!(
+            bare.contains("/tmp/x"),
+            "it still needs to know where it is working"
+        );
     }
 }

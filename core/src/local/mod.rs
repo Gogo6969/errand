@@ -29,6 +29,14 @@ mod loops;
 
 pub use loops::Local;
 
+/// The opening instructions, for looking at.
+///
+/// A turn has one input nothing prints, and an answer that comes back empty is
+/// usually that input being wrong. This is here so it can be read.
+pub fn instructions_for(home: &std::path::Path) -> String {
+    loops::opening_instructions(home, &crate::mcp::Servers::default())
+}
+
 use serde::{Deserialize, Serialize};
 
 /// Where a model lives and how to talk to it.

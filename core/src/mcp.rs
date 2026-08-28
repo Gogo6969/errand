@@ -295,6 +295,16 @@ impl Link {
     }
 }
 
+/// What something claims to do, before it starts qualifying it.
+fn first_sentence(about: &str) -> &str {
+    let end = about
+        .find(". ")
+        .map(|at| at + 1)
+        .unwrap_or(about.len())
+        .min(about.find('\n').unwrap_or(about.len()));
+    &about[..end]
+}
+
 /// What a server said went wrong, in whatever shape it said it.
 fn said_why(bad: &Value) -> String {
     bad.get("message")
@@ -382,6 +392,96 @@ impl Servers {
     /// Everything on offer.
     pub fn tools(&self) -> &[Tool] {
         &self.tools
+    }
+
+    /// The tools that best match some words, most likely first.
+    ///
+    /// Deliberately crude: word overlap, weighted by where the word was found.
+    /// A model asking for "take a screenshot" is not trying to defeat a search
+    /// engine, it is naming the thing it wants, and the names were written by
+    /// somebody hoping to be found.
+    ///
+    /// The weighting is the part that had to be learnt. A flat count put
+    /// `click` above `see` for "take a screenshot", because `click`'s notes say
+    /// "take a screenshot first" and `see`'s only say what it does. So what a
+    /// tool claims in its first sentence counts for much more than what it
+    /// mentions afterwards: the opening line is what a tool is for, and the
+    /// rest is caveats.
+    pub fn matching(&self, words: &str, most: usize) -> Vec<&Tool> {
+        let words: Vec<String> = words
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 2)
+            .map(str::to_string)
+            .collect();
+
+        let mut scored: Vec<(usize, &Tool)> = self
+            .tools
+            .iter()
+            .map(|tool| {
+                let name = tool.own_name.to_lowercase();
+                let about = tool.description.to_lowercase();
+                let summary = first_sentence(&about);
+                let score = words
+                    .iter()
+                    .map(
+                        |w| match (name.contains(w), summary.contains(w), about.contains(w)) {
+                            (true, _, _) => 6,
+                            (_, true, _) => 3,
+                            (_, _, true) => 1,
+                            _ => 0,
+                        },
+                    )
+                    .sum();
+                (score, tool)
+            })
+            .filter(|(score, _)| *score > 0)
+            .collect();
+
+        // Ties broken by name, so the same words always bring back the same
+        // tools in the same order. A search that shuffles is a search nobody
+        // can debug.
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.called.cmp(&b.1.called)));
+        scored.into_iter().take(most).map(|(_, t)| t).collect()
+    }
+
+    /// Every tool there is, by name only, grouped by the server offering it.
+    ///
+    /// This is what a model is told up front instead of the schemas. Names and
+    /// nothing else: for the servers on this machine that is a few hundred
+    /// bytes against sixty-four thousand, and a name is enough to know that
+    /// something exists and to go looking for it.
+    /// What else is out there, as counts and the servers offering them.
+    ///
+    /// Counts and server names, and deliberately not tool names. That is not a
+    /// space saving, it is the thing that makes this work at all.
+    ///
+    /// The first version listed all twenty-six names, on the reasoning that a
+    /// name is enough to know something exists and to go looking for it.
+    /// Against a 7B model it was worse than saying nothing: with the names in
+    /// the prompt the model returned an empty response, no text and no tool
+    /// call, every time; take them out and the same request produced a tool
+    /// call immediately. Reproduced three times against controls, and the list
+    /// was the only difference.
+    ///
+    /// The guess is that naming functions it cannot call is a worse position
+    /// than not knowing they exist, and it stalls. The finding stands without
+    /// the guess: say how much is out there and how to ask for it, never what
+    /// any of it is called.
+    pub fn what_else(&self) -> String {
+        let mut by_server: Vec<(&str, usize)> = Vec::new();
+        for tool in &self.tools {
+            match by_server.iter_mut().find(|(name, _)| *name == tool.server) {
+                Some((_, count)) => *count += 1,
+                None => by_server.push((&tool.server, 1)),
+            }
+        }
+        let where_from = by_server
+            .iter()
+            .map(|(server, count)| format!("{server} ({count})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{} more from {where_from}", self.tools.len())
     }
 
     /// Is this one of ours?
@@ -498,6 +598,89 @@ mod tests {
             "first\n[image]\nsecond",
             "a picture is named rather than dropped"
         );
+    }
+
+    fn pretend(tools: &[(&str, &str, &str)]) -> Servers {
+        Servers {
+            tools: tools
+                .iter()
+                .map(|(server, name, about)| Tool {
+                    called: format!("mcp__{server}__{name}"),
+                    own_name: name.to_string(),
+                    server: server.to_string(),
+                    description: about.to_string(),
+                    takes: json!({ "type": "object" }),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn asking_for_a_thing_by_name_finds_it_ahead_of_one_that_merely_mentions_it() {
+        let servers = pretend(&[
+            (
+                "peekaboo",
+                "see",
+                "Captures a screenshot and maps the elements on it.",
+            ),
+            (
+                "peekaboo",
+                "click",
+                "Clicks an element. Take a screenshot first.",
+            ),
+            ("notes", "add_note", "Write a note."),
+        ]);
+        let found = servers.matching("take a screenshot", 5);
+        assert_eq!(found.len(), 2, "the note has nothing to do with it");
+        assert_eq!(
+            found[0].own_name, "see",
+            "the one whose description is about screenshots, not the one that mentions them"
+        );
+    }
+
+    #[test]
+    fn the_same_words_always_bring_back_the_same_tools_in_the_same_order() {
+        let servers = pretend(&[
+            ("a", "window", "Manage windows."),
+            ("b", "window", "Manage windows."),
+        ]);
+        let once: Vec<&str> = servers
+            .matching("window", 5)
+            .iter()
+            .map(|t| t.called.as_str())
+            .collect();
+        let twice: Vec<&str> = servers
+            .matching("window", 5)
+            .iter()
+            .map(|t| t.called.as_str())
+            .collect();
+        assert_eq!(
+            once, twice,
+            "a search that shuffles is one nobody can debug"
+        );
+    }
+
+    #[test]
+    fn words_too_short_to_mean_anything_do_not_match_everything() {
+        let servers = pretend(&[("peekaboo", "see", "Captures a screenshot.")]);
+        assert!(servers.matching("do it to me", 5).is_empty());
+    }
+
+    #[test]
+    fn what_else_is_out_there_says_how_much_and_never_what_it_is_called() {
+        // Not a style choice. With tool names in the prompt a 7B model returned
+        // nothing at all, and without them the same request produced a tool
+        // call straight away.
+        let servers = pretend(&[
+            ("peekaboo", "see", "Captures a screenshot."),
+            ("peekaboo", "click", "Clicks something."),
+            ("notes", "add_note", "Writes a note."),
+        ]);
+        let said = servers.what_else();
+        assert_eq!(said, "3 more from peekaboo (2), notes (1)");
+        assert!(!said.contains("see"), "no tool names, ever");
+        assert!(!said.contains("add_note"));
     }
 
     #[test]

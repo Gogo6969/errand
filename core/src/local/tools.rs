@@ -30,6 +30,20 @@ pub struct Tool {
 pub fn all() -> Vec<Tool> {
     vec![
         tool(
+            "find_tools",
+            // The guidance lives here rather than in the system prompt,
+            // because this is where a model looks when it is choosing a tool
+            // and because the prompt is the one place a list of tools was shown
+            // to do harm.
+            "Search for a tool you do not have yet. Many more tools exist than the ones listed \
+             here. Call this whenever the job needs something your current tools cannot do, \
+             before concluding that it cannot be done. Pass a few words describing the job; \
+             whatever matches becomes usable on your next step.",
+            json!({ "needing": { "type": "string", "description": "What you are trying to do, in a few words" } }),
+            &["needing"],
+            false,
+        ),
+        tool(
             "read_file",
             "Read a file and return its contents. Use this before changing anything.",
             json!({ "path": { "type": "string", "description": "Absolute or relative path" } }),
@@ -122,6 +136,7 @@ pub fn in_plain_words(name: &str, args: &serde_json::Value) -> String {
             "" => format!("Running {}", one_line(get("command"))),
             said => said.to_string(),
         },
+        "find_tools" => format!("Looking for a tool to {}", get("needing")),
         "read_file" => format!("Reading {}", get("path")),
         "list_directory" => match get("path") {
             "" => "Looking at the folder".to_string(),
@@ -142,6 +157,7 @@ pub fn the_thing_itself(name: &str, args: &serde_json::Value) -> String {
             .to_string()
     };
     match name {
+        "find_tools" => get("needing"),
         "run_command" => get("command"),
         "write_file" => get("path"),
         "fetch_url" => get("url"),
@@ -243,6 +259,10 @@ pub async fn run(name: &str, args: &serde_json::Value, home: &Path) -> Result<St
             })
         }
 
+        // Handled by the loop, which is the only thing that knows what is
+        // loaded and what is not.
+        "find_tools" => Ok(String::new()),
+
         other => Ok(format!("There is no tool called {other} here.")),
     }
 }
@@ -281,6 +301,10 @@ mod tests {
         assert!(asks_first("run_command"));
         assert!(asks_first("write_file"));
         assert!(!asks_first("read_file"));
+        assert!(
+            !asks_first("find_tools"),
+            "looking at a list changes nothing"
+        );
         assert!(!asks_first("list_directory"));
         assert!(!asks_first("fetch_url"));
     }
