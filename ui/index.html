@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Errand</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <!--
+      No framework and no build step, on purpose. This window is a list of
+      threads, a list of messages and a box to type in; a toolchain to render
+      that is a toolchain to keep working, and it would mean the app could not
+      be built without node. When it earns one it can have one.
+    -->
+    <aside id="side">
+      <header>
+        <button id="new" title="Start something new">+</button>
+      </header>
+      <ol id="threads"></ol>
+      <footer id="who">Errand</footer>
+    </aside>
+
+    <main>
+      <header id="title">
+        <span id="thread-name">Nothing open</span>
+        <span id="engine"></span>
+      </header>
+
+      <ol id="messages" aria-live="polite"></ol>
+
+      <form id="composer">
+        <textarea
+          id="what"
+          rows="1"
+          placeholder="What would you like done?"
+          autocomplete="off"
+        ></textarea>
+        <button id="send" type="submit" title="Send">↑</button>
+      </form>
+    </main>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
