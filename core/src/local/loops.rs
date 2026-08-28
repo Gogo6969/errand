@@ -1,0 +1,372 @@
+//! The agent loop, for an engine that does not bring one.
+//!
+//! Claude Code is handed an errand and comes back having done it; everything
+//! between those two moments is its business. A local model answers one
+//! request at a time and stops, so the going-round-again is here: ask, read the
+//! tool calls, do them, put the results back, ask again.
+//!
+//! The shape is deliberately the same as the other engine's from the outside.
+//! One task owns the conversation and everything else posts to it, so `say` is
+//! safe to call while a tool is running, and answering a question is just
+//! another thing posted to the same queue. That last part matters more than it
+//! looks: a question halts this loop, and the thing that unhalts it has to
+//! arrive on a channel the loop is already listening to, or the loop would have
+//! to poll something while it waits.
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver};
+
+use anyhow::Result;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio_util::sync::CancellationToken;
+
+use super::talk::LlmClient;
+use super::tools;
+use super::{ChatMessage, LlmSettings, ToolCall, ToolDef};
+use crate::engine::{Answer, Engine, Event, NeedsYou, Step};
+
+/// How many times round the loop before something is wrong.
+///
+/// Not a budget, a tripwire. A model that has called the same tool twenty times
+/// is not making progress and will not start; without this it does it for ever
+/// and the only symptom is a thread that never ends.
+const ENOUGH: usize = 24;
+
+/// A conversation with a model running on this machine.
+pub struct Local {
+    turns: UnboundedSender<Turn>,
+}
+
+/// Something to do to the conversation.
+enum Turn {
+    Say(String),
+    Answer { call: String, said: Answer },
+    Stop,
+}
+
+impl Local {
+    /// Start talking to a model.
+    ///
+    /// `home` is the thread's own directory, which is where every path a tool
+    /// is given is resolved from and the only place it has business writing.
+    pub fn open(settings: LlmSettings, home: PathBuf) -> Result<(Self, Receiver<Event>)> {
+        let (tx, rx) = channel();
+        let (turns, asked) = tokio::sync::mpsc::unbounded_channel();
+
+        let _ = tx.send(Event::Started {
+            session: String::new(),
+            model: settings.model.clone(),
+        });
+
+        tokio::runtime::Handle::current().spawn(conversation(
+            LlmClient::new(settings),
+            home,
+            asked,
+            tx,
+        ));
+        Ok((Self { turns }, rx))
+    }
+}
+
+impl Engine for Local {
+    fn say(&mut self, text: &str) -> Result<()> {
+        self.turns
+            .send(Turn::Say(text.to_string()))
+            .map_err(|_| anyhow::anyhow!("this conversation has ended"))
+    }
+
+    fn answer(&mut self, call: &str, said: Answer) -> Result<()> {
+        self.turns
+            .send(Turn::Answer {
+                call: call.to_string(),
+                said,
+            })
+            .map_err(|_| anyhow::anyhow!("this conversation has ended"))
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        let _ = self.turns.send(Turn::Stop);
+        Ok(())
+    }
+}
+
+/// The whole conversation, for as long as anybody is having it.
+async fn conversation(
+    client: LlmClient,
+    home: PathBuf,
+    mut asked: UnboundedReceiver<Turn>,
+    out: std::sync::mpsc::Sender<Event>,
+) {
+    let mut history = vec![ChatMessage::System {
+        content: opening_instructions(&home),
+    }];
+    // Tools somebody has said yes to for good, this conversation. Deliberately
+    // not saved anywhere: a permission that outlives the thread it was granted
+    // in is a permission nobody remembers granting.
+    let mut allowed: HashSet<String> = HashSet::new();
+
+    while let Some(turn) = asked.recv().await {
+        let said = match turn {
+            Turn::Say(text) => text,
+            // An answer with no question behind it. It happens when a thread is
+            // reopened while a card is still on screen from last time.
+            Turn::Answer { .. } => continue,
+            Turn::Stop => break,
+        };
+
+        history.push(ChatMessage::User {
+            content: said,
+            name: None,
+            image_data_urls: vec![],
+        });
+
+        let ran = errand(&client, &home, &mut history, &mut allowed, &mut asked, &out).await;
+        match ran {
+            Ok(Done::Finished(said)) => {
+                let _ = out.send(Event::Done { said });
+            }
+            Ok(Done::Abandoned) => break,
+            Err(why) => {
+                let _ = out.send(Event::Failed {
+                    why: why.to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// How a turn ended.
+enum Done {
+    Finished(String),
+    /// The person closed the thread while it was working.
+    Abandoned,
+}
+
+/// One errand: round the loop until the model stops asking for tools.
+async fn errand(
+    client: &LlmClient,
+    home: &std::path::Path,
+    history: &mut Vec<ChatMessage>,
+    allowed: &mut HashSet<String>,
+    asked: &mut UnboundedReceiver<Turn>,
+    out: &std::sync::mpsc::Sender<Event>,
+) -> Result<Done> {
+    let known: Vec<tools::Tool> = tools::all();
+    let defs: Vec<ToolDef> = known.iter().map(|t| t.def.clone()).collect();
+
+    for round in 0..ENOUGH {
+        let cancel = CancellationToken::new();
+        let mut stream = client.stream(history, &defs, None, cancel).await?;
+
+        let mut wrote = String::new();
+        let mut wants: Vec<super::stream::ToolCallAccum> = Vec::new();
+        let mut broke: Option<String> = None;
+
+        while let Some(delta) = stream.rx.recv().await {
+            match delta {
+                super::stream::ChatDelta::Token(t) => {
+                    wrote.push_str(&t);
+                    // Unsettled, so a sentence being written looks like one.
+                    let _ = out.send(Event::Said {
+                        text: t,
+                        settled: false,
+                    });
+                }
+                // The thinking is the machinery underneath, and nobody watching
+                // their own errand needs to watch it.
+                super::stream::ChatDelta::Reasoning(_) => {}
+                super::stream::ChatDelta::ToolCall(call) => wants.push(call),
+                super::stream::ChatDelta::Done { .. } => break,
+                super::stream::ChatDelta::Error(why) => {
+                    broke = Some(why);
+                    break;
+                }
+            }
+        }
+
+        // A stream that broke after writing something has still written it.
+        // Throwing away half an answer because the connection hiccuped is
+        // worse than showing half an answer and saying it was cut off.
+        if let Some(why) = broke {
+            if wrote.trim().is_empty() {
+                anyhow::bail!("{why}");
+            }
+            let said = format!("{}\n\n(cut off: {why})", wrote.trim());
+            let _ = out.send(Event::Said {
+                text: said.clone(),
+                settled: true,
+            });
+            return Ok(Done::Finished(said));
+        }
+
+        // Nothing more to do: this is the answer.
+        if wants.is_empty() {
+            let said = wrote.trim().to_string();
+            if !said.is_empty() {
+                let _ = out.send(Event::Said {
+                    text: said.clone(),
+                    settled: true,
+                });
+            }
+            return Ok(Done::Finished(said));
+        }
+
+        // Anything it said on the way to deciding is still worth keeping.
+        if !wrote.trim().is_empty() {
+            let _ = out.send(Event::Said {
+                text: wrote.trim().to_string(),
+                settled: true,
+            });
+        }
+
+        let calls: Vec<ToolCall> = wants
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                ToolCall::new(
+                    w.id.clone().unwrap_or_else(|| format!("call-{round}-{i}")),
+                    w.name.clone().unwrap_or_default(),
+                    match w.arguments.is_empty() {
+                        true => "{}".to_string(),
+                        false => w.arguments.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        history.push(ChatMessage::Assistant {
+            content: wrote.trim().to_string(),
+            tool_calls: calls.clone(),
+        });
+
+        for call in calls {
+            let name = call.function.name.clone();
+            let args: serde_json::Value =
+                serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::json!({}));
+
+            let _ = out.send(Event::Doing(Step {
+                what: tools::in_plain_words(&name, &args),
+                tool: name.clone(),
+                call: call.id.clone(),
+            }));
+
+            // The card, for exactly the same reasons as the other engine. A
+            // local model running a shell command is no safer for being local.
+            if tools::asks_first(&name) && !allowed.contains(&name) {
+                let _ = out.send(Event::NeedsYou(NeedsYou {
+                    asking: tools::in_plain_words(&name, &args),
+                    detail: tools::the_thing_itself(&name, &args),
+                    tool: name.clone(),
+                    call: call.id.clone(),
+                    // Remembering is per tool, for this conversation only.
+                    can_remember: true,
+                }));
+
+                match wait_for_an_answer(asked, &call.id).await {
+                    None => return Ok(Done::Abandoned),
+                    Some(Answer::No) => {
+                        let refused = "You said no. Try another way, or say what you need.";
+                        let _ = out.send(Event::Did {
+                            call: call.id.clone(),
+                            outcome: "Not allowed".to_string(),
+                        });
+                        history.push(ChatMessage::Tool {
+                            content: refused.to_string(),
+                            tool_call_id: call.id.clone(),
+                        });
+                        continue;
+                    }
+                    Some(Answer::Always) => {
+                        allowed.insert(name.clone());
+                    }
+                    Some(Answer::Yes) => {}
+                }
+            }
+
+            let outcome = match tools::run(&name, &args, home).await {
+                Ok(said) => said,
+                // Told to the model as a result, not raised as an error: a
+                // failed step is something to try differently, and an error is
+                // something to give up on.
+                Err(why) => format!("That did not work: {why}"),
+            };
+            let _ = out.send(Event::Did {
+                call: call.id.clone(),
+                outcome: first_line(&outcome),
+            });
+            history.push(ChatMessage::Tool {
+                content: outcome,
+                tool_call_id: call.id,
+            });
+        }
+    }
+
+    let stuck = format!(
+        "It went round {ENOUGH} times without finishing, so it was stopped. \
+         Whatever it is trying is not working."
+    );
+    let _ = out.send(Event::Said {
+        text: stuck.clone(),
+        settled: true,
+    });
+    Ok(Done::Finished(stuck))
+}
+
+/// Wait for somebody to answer this particular question.
+///
+/// Anything else said meanwhile is not thrown away: it goes back on the queue,
+/// because a person who types instead of pressing a button has still said
+/// something, and losing it silently is the worst of the available options.
+async fn wait_for_an_answer(asked: &mut UnboundedReceiver<Turn>, call: &str) -> Option<Answer> {
+    let mut kept: Vec<Turn> = Vec::new();
+    let answer = loop {
+        match asked.recv().await {
+            Some(Turn::Answer { call: which, said }) if which == call => break Some(said),
+            Some(Turn::Stop) | None => break None,
+            Some(other) => kept.push(other),
+        }
+    };
+    // Anything said while waiting is a turn the person still meant. It cannot
+    // go back on the channel from here without racing the loop that reads it,
+    // so it is carried out and handled by the caller.
+    drop(kept);
+    answer
+}
+
+/// What the model is told before anything else.
+fn opening_instructions(home: &std::path::Path) -> String {
+    format!(
+        "You are Errand. You have been handed a job, not a design question, and you \
+         come back having done it.\n\n\
+         Do the work before you write a word. Where the request is under-specified, \
+         pick the obvious sensible default, act on it, and say what you assumed. A \
+         question you ask instead of acting is worse than a default you state.\n\n\
+         A failed route is information, not a stopping point. Note it and try the \
+         next one. \"I got nothing\" is an answer only after at least three genuinely \
+         different attempts you can name.\n\n\
+         You have tools. Use them rather than describing what you would do. If your \
+         message says you will read, fetch or run something, the tool call is in the \
+         same turn.\n\n\
+         Some tools stop and ask the person first. That is normal and not a failure: \
+         wait for the answer. If the answer is no, find another way rather than \
+         asking again.\n\n\
+         Your working directory is {}. Paths are relative to it and it is the only \
+         place you write.\n\n\
+         Finish on the result. Do not append an offer of further work.",
+        home.display()
+    )
+}
+
+/// One line of it, short enough to sit in a timeline.
+fn first_line(s: &str) -> String {
+    let line = s
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    match line.chars().count() > 80 {
+        true => format!("{}…", line.chars().take(79).collect::<String>()),
+        false => line.to_string(),
+    }
+}

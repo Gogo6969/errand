@@ -19,5 +19,7 @@ pub mod claude;
 pub mod engine;
 pub mod store;
 
+pub mod local;
+
 pub use engine::{Answer, Engine, Event, NeedsYou, Step};
 pub use store::{Line, Store, Thread};

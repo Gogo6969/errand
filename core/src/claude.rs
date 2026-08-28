@@ -711,7 +711,10 @@ mod tests {
         let Event::NeedsYou(ask) = &read(ASKED)[0] else {
             panic!("a halted step is a question");
         };
-        assert_eq!(ask.asking, "Fetch example.com", "its own words, where it has them");
+        assert_eq!(
+            ask.asking, "Fetch example.com",
+            "its own words, where it has them"
+        );
         assert_eq!(
             ask.detail, "curl -s https://example.com | head -c 40",
             "whole and uncut: the end of a command is the part worth reading"
@@ -721,7 +724,10 @@ mod tests {
             ask.call, "f719d6a2",
             "the request's own id, which is what an answer is addressed to"
         );
-        assert!(ask.can_remember, "it suggested a rule, so yes can be remembered");
+        assert!(
+            ask.can_remember,
+            "it suggested a rule, so yes can be remembered"
+        );
     }
 
     #[test]

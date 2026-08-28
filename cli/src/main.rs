@@ -11,6 +11,7 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use errand_core::local::{LlmSettings, Local};
 use errand_core::{claude::Claude, Answer, Engine, Event};
 
 #[tokio::main]
@@ -19,9 +20,24 @@ async fn main() -> anyhow::Result<()> {
     let here = std::env::current_dir()?;
     println!("errand · thread {thread}\ntype to talk to it; it can be talked to while it works. ctrl-d to leave.\n");
 
-    // Always a fresh session here: the harness makes a new uuid every time it
-    // is run, so there is never anything to resume.
-    let (mut claude, events) = Claude::open(&thread, &here, false)?;
+    // Either engine, chosen by a flag, and everything below this line is
+    // identical for both. That is the claim the protocol makes, and running the
+    // same harness against both is the only way to know it is true.
+    let local = std::env::args().any(|a| a == "--local");
+    let (mut claude, events): (Box<dyn Engine>, _) = if local {
+        let model = std::env::var("ERRAND_MODEL").unwrap_or_else(|_| "qwen2.5:7b-instruct".into());
+        let (it, events) = Local::open(
+            LlmSettings {
+                model,
+                ..Default::default()
+            },
+            here.clone(),
+        )?;
+        (Box::new(it), events)
+    } else {
+        let (it, events) = Claude::open(&thread, &here, false)?;
+        (Box::new(it), events)
+    };
 
     // Everything it says, as it says it, on its own thread so that typing is
     // never blocked by whatever it happens to be doing.
