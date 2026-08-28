@@ -17,6 +17,8 @@ if (!window.__TAURI__) {
 window.addEventListener("error", (e) => complain(e.message));
 window.addEventListener("unhandledrejection", (e) => complain(String(e.reason)));
 
+import { tile, forTool, kindOf } from "./icons.js";
+
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
@@ -43,7 +45,32 @@ const el = {
   send: document.getElementById("send"),
   form: document.getElementById("composer"),
   new: document.getElementById("new"),
+  mark: document.getElementById("mark"),
 };
+
+/**
+ * What a thread is about, as a picture.
+ *
+ * Worked out from what was asked rather than from what was done, because it has
+ * to be on the row the moment somebody presses enter, before anything has
+ * happened at all. Kept once worked out, so a row does not change its face
+ * halfway through its own job.
+ */
+function kindFor(t) {
+  if (t.kind) return t.kind;
+  const asked = t.messages.find((m) => m.kind === "mine");
+  // The name is the first few words of the request, which is the only thing
+  // there is to go on for a thread that has been read back but not opened.
+  const words = asked ? asked.text : t.name === "New errand" ? "" : t.name;
+  if (!words) return "spark";
+  t.kind = kindOf(words);
+  return t.kind;
+}
+
+/** The open thread's own mark, which is the same mark as its row in the list. */
+function drawMark(t) {
+  el.mark.replaceChildren(tile(kindFor(t), t.working));
+}
 
 // ------------------------------------------------------------- threads --
 
@@ -106,7 +133,13 @@ function fromStore(line) {
     case "said":
       return { kind: line.kind, text: line.text };
     case "doing":
-      return { kind: "doing", text: line.text, call: line.call, outcome: line.outcome || "" };
+      return {
+        kind: "doing",
+        text: line.text,
+        tool: line.tool,
+        call: line.call,
+        outcome: line.outcome || "",
+      };
     default:
       return { kind: "ended", failed: line.kind === "ended", text: line.text };
   }
@@ -115,6 +148,7 @@ function fromStore(line) {
 function show(id) {
   showing = id;
   const t = threads.get(id);
+  drawMark(t);
   el.name.textContent = t.name;
   el.engine.textContent = t.engine;
   drawThreads();
@@ -127,7 +161,10 @@ function drawThreads() {
       const li = document.createElement("li");
       li.setAttribute("aria-current", String(t.id === showing));
       li.onclick = () => open(t.id);
+      li.append(tile(kindFor(t), t.working));
 
+      const words = document.createElement("span");
+      words.className = "words";
       const name = document.createElement("span");
       name.className = "name";
       name.textContent = t.name;
@@ -137,7 +174,8 @@ function drawThreads() {
       const said = [...t.messages].reverse().find((m) => m.kind === "said" || m.kind === "mine");
       last.textContent = t.working ? "Working…" : said ? said.text : "Nothing said yet";
 
-      li.append(name, last);
+      words.append(name, last);
+      li.append(words);
       return li;
     }),
   );
@@ -162,8 +200,15 @@ function draw(m) {
       node.textContent = m.text;
       return node;
     case "doing": {
-      node.className = "doing";
-      node.append(m.text);
+      // A step with no answer yet is a step still happening, and it is the only
+      // thing on the screen that knows that. So it says so, rather than sitting
+      // there looking exactly like the four finished steps above it.
+      node.className = m.outcome ? "doing" : "doing running";
+      node.append(tile(forTool(m.tool), !m.outcome));
+      const what = document.createElement("span");
+      what.className = "what";
+      what.textContent = m.text;
+      node.append(what);
       if (m.outcome) {
         const out = document.createElement("span");
         out.className = "outcome";
@@ -236,6 +281,7 @@ listen("happened", ({ payload }) => {
   }
 
   if (payload.thread === showing) {
+    drawMark(t);
     el.engine.textContent = t.engine;
     el.name.textContent = t.name;
     drawMessages();

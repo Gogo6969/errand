@@ -61,11 +61,16 @@ body { display: grid; grid-template-columns: 232px 1fr; }
 #threads { list-style: none; margin: 0; padding: 4px 8px; overflow-y: auto; min-height: 0; }
 
 #threads li {
-  padding: 9px 10px;
+  padding: 8px 10px;
   border-radius: 8px;
   cursor: pointer;
   margin-bottom: 2px;
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: 9px;
+  align-items: center;
 }
+#threads .words { min-width: 0; }
 #threads li:hover { background: #171a20; }
 #threads li[aria-current="true"] { background: var(--card); }
 
@@ -93,6 +98,82 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   font-size: 12.5px;
 }
 
+/* --------------------------------------------------------------- marks -- */
+
+/*
+  Every errand wears the mark of the kind of thing it is. The colour is part of
+  the mark rather than decoration on top of it: at this size a line drawing on
+  its own is a smudge, and the tint is what makes an envelope readable as an
+  envelope out of the corner of an eye.
+*/
+
+.tile {
+  position: relative;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  background: color-mix(in srgb, var(--hue) 16%, transparent);
+  color: var(--hue);
+  --hue: var(--ink-soft);
+}
+
+.tile[data-kind="mail"]     { --hue: #6fa8f5; }
+.tile[data-kind="chat"]     { --hue: #63c7a6; }
+.tile[data-kind="clock"]    { --hue: #e8a850; }
+.tile[data-kind="chart"]    { --hue: #7fd07a; }
+.tile[data-kind="search"]   { --hue: #9c9cf0; }
+.tile[data-kind="globe"]    { --hue: #62bcd6; }
+.tile[data-kind="folder"]   { --hue: #d9b268; }
+.tile[data-kind="image"]    { --hue: #e089b4; }
+.tile[data-kind="code"]     { --hue: #8fb4ff; }
+.tile[data-kind="bag"]      { --hue: #f0937a; }
+.tile[data-kind="pen"]      { --hue: #c4a2ef; }
+.tile[data-kind="person"]   { --hue: #79bfae; }
+.tile[data-kind="list"]     { --hue: #9aa2b1; }
+.tile[data-kind="terminal"] { --hue: #8a93a5; }
+.tile[data-kind="helper"]   { --hue: #b9a0e8; }
+.tile[data-kind="bell"]     { --hue: #e8c250; }
+.tile[data-kind="spark"]    { --hue: #e8a850; }
+
+/*
+  Working, said on the mark itself. A ring is swept round it rather than the
+  mark being replaced by a spinner, so the row still says what it is while it
+  says that it is going: you can see which errand is running without reading a
+  word of it, which is the whole point of having marks at all.
+*/
+.tile.busy::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 10px;
+  padding: 1.5px;
+  background: conic-gradient(from 0deg, transparent 0deg 250deg, var(--hue) 340deg, transparent 360deg);
+  /* Punch the middle out, so what is left is the ring and not a filled tile. */
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: sweep 1.15s linear infinite;
+}
+.tile.busy { animation: breathe 2.2s ease-in-out infinite; }
+
+@keyframes sweep { to { transform: rotate(1turn); } }
+@keyframes breathe {
+  0%, 100% { background: color-mix(in srgb, var(--hue) 16%, transparent); }
+  50% { background: color-mix(in srgb, var(--hue) 30%, transparent); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tile.busy::after { animation: none; opacity: 0.9; }
+  .tile.busy { animation: none; }
+}
+
+/* Beside a name, the mark sits at the size of the text rather than the row. */
+#title .tile { width: 24px; height: 24px; border-radius: 7px; }
+
 /* ------------------------------------------------------------- thread --- */
 
 main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
@@ -101,7 +182,7 @@ main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
   padding: 30px 18px 12px;
   border-bottom: 1px solid var(--rule);
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
 }
 #thread-name { font-weight: 600; }
@@ -134,12 +215,20 @@ main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
 .doing {
   color: var(--ink-soft);
   font-size: 13px;
-  padding-left: 4px;
   display: flex;
-  gap: 8px;
-  align-items: baseline;
+  gap: 9px;
+  align-items: center;
 }
-.doing::before { content: "·"; color: var(--accent); }
+.doing .tile {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--hue) 12%, transparent);
+}
+.doing .tile svg { width: 14px; height: 14px; }
+.doing .what { min-width: 0; }
+/* A step that has not answered yet has not finished, and reads as still going. */
+.doing.running .what { color: var(--ink); }
 .doing .outcome {
   color: #6f7686;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

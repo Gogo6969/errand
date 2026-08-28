@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use errand_core::{claude::Claude, Engine, Event, Line, Store, Thread};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_notification::NotificationExt;
 
 /// Everything the window is holding: the conversations that are live, and the
 /// book they are all written into.
@@ -40,6 +41,66 @@ struct Happened {
     thread: String,
     #[serde(flatten)]
     event: Event,
+}
+
+/// Say on screen that an errand has ended, if nobody was there to see it end.
+///
+/// The reason to have this at all is that these jobs take minutes. Somebody
+/// hands over a thing worth walking away from, walks away, and would otherwise
+/// have to keep coming back to find out whether it is finished, which is most
+/// of the value of having handed it over in the first place.
+///
+/// And the reason it is conditional is the same reason: a notification for a
+/// thread you are watching finish is noise, and an app that sends those gets
+/// its notifications turned off, along with the ones that mattered.
+fn tell_them(app: &AppHandle, store: &Store, id: &str, event: &Event) {
+    let (title, body) = match event {
+        Event::Done { said } => (called(store, id), gist(said)),
+        Event::Failed { why } => (format!("{} stopped", called(store, id)), gist(why)),
+        _ => return,
+    };
+    let watching = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_focused().ok())
+        .unwrap_or(false);
+    if watching {
+        return;
+    }
+    // Not being allowed to is an answer, not a failure: somebody said no to
+    // notifications once and that decision is theirs to keep.
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// What a thread is called, or something honest if it is not called anything.
+fn called(store: &Store, id: &str) -> String {
+    match store.thread(id) {
+        Ok(Some(t)) => t.name,
+        _ => "Errand".to_string(),
+    }
+}
+
+/// The gist of what it said, in the room a notification actually has.
+///
+/// The first line, because that is where an answer puts its point, with any
+/// heading marks taken off: what reads as a heading in the thread reads as
+/// punctuation in a notification.
+fn gist(said: &str) -> String {
+    let line = said
+        .lines()
+        .map(|l| {
+            l.trim()
+                .trim_start_matches('#')
+                .trim_start_matches("**")
+                .trim()
+        })
+        .find(|l| !l.is_empty())
+        .unwrap_or("Finished.");
+    if line.chars().count() > 140 {
+        let short: String = line.chars().take(139).collect();
+        format!("{short}\u{2026}")
+    } else {
+        line.to_string()
+    }
 }
 
 /// Every thread there has ever been, most recently spoken to first.
@@ -105,6 +166,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 // it must not pass in silence either.
                 eprintln!("could not write down what happened in {id}: {e}");
             }
+            tell_them(&app, &store, &id, &event);
             let _ = app.emit(
                 "happened",
                 Happened {
@@ -158,6 +220,7 @@ async fn forget(held: State<'_, Held>, id: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let data = app.path().app_data_dir()?;
             let store = Store::open(&errand_core::store::beside(&data))?;
@@ -165,6 +228,19 @@ pub fn run() {
                 live: Mutex::new(HashMap::new()),
                 store: Arc::new(store),
             });
+
+            // Asked for now, at the start, rather than at the moment the first
+            // errand finishes. The system's question arrives whenever it is
+            // first asked, and arriving hours later next to a finished job is
+            // both a worse moment to answer it and a worse question: nobody
+            // knows what they are being asked about. Whatever is answered here
+            // is remembered by the system, not by us, so this is asked once.
+            if !matches!(
+                app.notification().permission_state(),
+                Ok(tauri_plugin_notification::PermissionState::Granted)
+            ) {
+                let _ = app.notification().request_permission();
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
