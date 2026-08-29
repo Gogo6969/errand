@@ -89,6 +89,8 @@ export const FIXTURE = {
       what: "Waiting on you: Running a command", waiting: true },
     { conversation: "talk-2", agent: "agent-bitcoin", who: "Bitcoin Desk", talk: "First",
       what: "Looking something up on the web", waiting: false },
+    { conversation: "talk-2", agent: "", who: "Bitcoin Desk", talk: "First",
+      what: "Building the thing", waiting: false, command: "job-1" },
   ],
   brought: {
     skills: ["pdf", "docx", "artifact-design"],

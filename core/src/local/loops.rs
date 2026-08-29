@@ -600,7 +600,15 @@ async fn errand(
                     loaded.insert(name.clone());
                     outside.call(&name, &args).await
                 }
-                _ => tools::run(&name, &args, home).await,
+                _ => {
+                    tools::run(
+                        &name,
+                        &args,
+                        home,
+                        host.map_or("", |(from, _)| from.as_str()),
+                    )
+                    .await
+                }
             } {
                 Ok(said) => said,
                 // Told to the model as a result, not raised as an error: a

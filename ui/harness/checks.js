@@ -403,7 +403,7 @@ export async function running() {
   check("it opens", !panel.hidden, `hidden=${panel.hidden}`);
   check(
     "it counts what is waiting on somebody separately from what is merely busy",
-    panel.textContent.includes("2 running, 1 stopped waiting"),
+    panel.textContent.includes("3 running, 1 stopped waiting"),
     panel.textContent.slice(0, 70),
   );
   check(
@@ -415,6 +415,40 @@ export async function running() {
     "it says which agent and which conversation, not just that something is happening",
     panel.textContent.includes("Bitcoin Desk") && panel.textContent.includes("Asked by Day Check"),
     panel.textContent.slice(0, 110),
+  );
+
+  // A command left running is the one kind of work that outlives the turn that
+  // started it, so a list that leaves it out is wrong exactly when it matters.
+  const command = panel.querySelector('[data-command="job-1"]');
+  check("a command left running is listed too", command, command ? "listed" : "missing");
+  check(
+    "and it is the only row that offers to stop something",
+    panel.querySelectorAll(".stop-command").length === 1 &&
+      command?.querySelector(".stop-command"),
+    `${panel.querySelectorAll(".stop-command").length} stop button(s)`,
+  );
+
+  // Clicking a command row must not navigate: there is no turn to open, and a
+  // conversation that has moved on is the wrong place to send anybody.
+  const wasShowing = document.getElementById("thread-name").textContent;
+  command?.click();
+  await new Promise((r) => setTimeout(r, 150));
+  check(
+    "clicking one does not pretend there is somewhere to go",
+    !panel.hidden && document.getElementById("thread-name").textContent === wasShowing,
+    panel.hidden ? "the panel closed" : "stayed put",
+  );
+
+  command?.querySelector(".stop-command")?.click();
+  await new Promise((r) => setTimeout(r, 200));
+  check(
+    "stopping one asks the app to stop that command and nothing else",
+    asked.some((a) => a.name === "stop_a_command" && a.args?.handle === "job-1") &&
+      !asked.some((a) => a.name === "stop"),
+    asked
+      .filter((a) => a.name.startsWith("stop"))
+      .map((a) => `${a.name}(${JSON.stringify(a.args)})`)
+      .join(" ") || "nothing was asked",
   );
   return found;
 }

@@ -1207,6 +1207,27 @@ body.catching #what { border-color: var(--accent); }
    will not finish on its own. */
 #working .one[data-waiting="true"] .who { color: var(--accent); }
 
+/* A command left running is not a turn: there is nothing to open, and there is
+   something to stop. Both of those are said by how the row behaves. */
+#working .one[data-command] { cursor: default; }
+#working .one[data-command]:hover { background: none; }
+#working .stop-command {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: center;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink-soft);
+  background: none;
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  padding: 2px 9px;
+}
+#working .stop-command:hover:not(:disabled) { color: var(--ink); border-color: var(--edge); }
+#working .stop-command:disabled { opacity: 0.5; cursor: default; }
+#working .stop-command:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 /* ------------------------------------------------------------ speak -- */
 
 /* Dictating instead of typing. Beside the box rather than in it, because it

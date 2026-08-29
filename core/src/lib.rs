@@ -19,6 +19,7 @@ pub mod claude;
 pub mod doctor;
 pub mod doorway;
 pub mod engine;
+pub mod jobs;
 pub mod keeping;
 pub mod store;
 

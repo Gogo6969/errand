@@ -1712,6 +1712,16 @@ async fn allowances(held: State<'_, Held>, agent: String) -> Result<Vec<Allowanc
     held.store.allowances(&agent).map_err(|e| e.to_string())
 }
 
+/// Stop a command that was left running.
+///
+/// Separate from stopping a conversation, because they are separate things: a
+/// command outlives the turn that started it, so stopping the turn must not
+/// stop the command and stopping the command must not stop the turn.
+#[tauri::command]
+async fn stop_a_command(handle: String) -> Result<bool, String> {
+    Ok(errand_core::jobs::stop(&handle))
+}
+
 /// Take one back.
 #[tauri::command]
 async fn revoke(held: State<'_, Held>, id: String) -> Result<(), String> {
@@ -1864,6 +1874,9 @@ struct Working {
     what: String,
     /// Whether it is stopped waiting for somebody rather than working.
     waiting: bool,
+    /// Set when this is a command left running rather than a turn, in which
+    /// case it can be stopped on its own without stopping the conversation.
+    command: Option<String>,
 }
 
 /// Everything that is working right now, across every agent.
@@ -1892,6 +1905,33 @@ async fn whats_running(held: State<'_, Held>) -> Result<Vec<Working>, String> {
             who,
             talk: talk.name,
             what,
+            command: None,
+        });
+    }
+
+    // Commands left running belong here too. They are the one kind of work that
+    // outlives the turn that started it, so a list of what is happening that
+    // leaves them out is a list that is wrong precisely when it matters.
+    for job in errand_core::jobs::running() {
+        let (who, talk) = match held.store.conversation(&job.conversation) {
+            Ok(Some(c)) => (
+                held.store
+                    .agent(&c.agent)
+                    .ok()
+                    .flatten()
+                    .map_or_else(|| "an agent".to_string(), |a| a.name),
+                c.name,
+            ),
+            _ => ("an agent".to_string(), String::new()),
+        };
+        going.push(Working {
+            conversation: job.conversation.clone(),
+            agent: String::new(),
+            who,
+            talk,
+            what: job.what.clone(),
+            waiting: false,
+            command: Some(job.handle.clone()),
         });
     }
     // Anything stopped for somebody first: it is the only kind that will not
@@ -2300,6 +2340,7 @@ pub fn run() {
             carry_on,
             checkup,
             whats_running,
+            stop_a_command,
             watch_it,
             watches,
             look_again,
@@ -2340,6 +2381,13 @@ pub fn run() {
                 if let Some(asked) = waiting {
                     answer_what_engines_cannot(app.clone(), asked);
                 }
+            }
+            // A command left running outlives the errand that started it, and
+            // that is the point of it. It must not outlive the only thing that
+            // knows it exists: a process nobody can see or stop is worse than
+            // one that ended early, and the tool says so before it starts one.
+            if matches!(event, tauri::RunEvent::Exit) {
+                errand_core::jobs::stop_everything();
             }
         });
 }

@@ -84,6 +84,30 @@ pub fn all() -> Vec<Tool> {
             &["command"],
             true,
         ),
+        tool(
+            "start_command",
+            "Start a command that keeps running, and get a handle back instead of waiting for it.              Use this for anything that will not be over in a minute or two: a build, a download,              a long script, a server. It keeps running while you do something else and after this              errand ends, for as long as Errand is open. Check what it has printed with              check_command.",
+            json!({
+                "command": { "type": "string", "description": "The command, exactly as it should run" },
+                "description": { "type": "string", "description": "What it is for, in one short sentence a person would read" }
+            }),
+            &["command"],
+            true,
+        ),
+        tool(
+            "check_command",
+            "Ask what a command started with start_command has printed since you last asked, and              whether it has finished. Do not call this in a loop waiting for it: say what you have              so far and check again later.",
+            json!({ "handle": { "type": "string", "description": "The handle start_command gave you" } }),
+            &["handle"],
+            false,
+        ),
+        tool(
+            "stop_command",
+            "Stop a command started with start_command.",
+            json!({ "handle": { "type": "string", "description": "The handle start_command gave you" } }),
+            &["handle"],
+            true,
+        ),
     ]
 }
 
@@ -136,6 +160,12 @@ pub fn in_plain_words(name: &str, args: &serde_json::Value) -> String {
             "" => format!("Running {}", one_line(get("command"))),
             said => said.to_string(),
         },
+        "start_command" => match get("description") {
+            "" => format!("Starting {}, which keeps running", one_line(get("command"))),
+            said => format!("{said}, which keeps running"),
+        },
+        "check_command" => format!("Checking on {}", get("handle")),
+        "stop_command" => format!("Stopping {}", get("handle")),
         "find_tools" => format!("Looking for a tool to {}", get("needing")),
         "read_file" => format!("Reading {}", get("path")),
         "list_directory" => match get("path") {
@@ -158,7 +188,8 @@ pub fn the_thing_itself(name: &str, args: &serde_json::Value) -> String {
     };
     match name {
         "find_tools" => get("needing"),
-        "run_command" => get("command"),
+        "run_command" | "start_command" => get("command"),
+        "check_command" | "stop_command" => get("handle"),
         "write_file" => get("path"),
         "fetch_url" => get("url"),
         "read_file" => get("path"),
@@ -259,7 +290,24 @@ fn walled_in(home: &Path, command: &str) -> tokio::process::Command {
 /// an errand has business writing. That is now enforced twice: paths are
 /// checked before they are used, and a shell command runs inside a sandbox that
 /// refuses writes anywhere else.
-pub async fn run(name: &str, args: &serde_json::Value, home: &Path) -> Result<String> {
+/// How long an ordinary command may take before it is stopped.
+///
+/// There was no limit, and a command that never ended meant an errand that
+/// never ended: no output, nothing on screen, and from outside indistinguishable
+/// from an agent that had stopped thinking. Two minutes is long enough for
+/// anything that was meant to be waited for, and what is left is what
+/// start_command is for, which is what the message says.
+const LONG_ENOUGH_TO_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+pub async fn run(
+    name: &str,
+    args: &serde_json::Value,
+    home: &Path,
+    // Which conversation is asking, so a command that outlives the step can
+    // still be shown against the thing that started it. Empty when an engine is
+    // running on its own.
+    whose: &str,
+) -> Result<String> {
     let get = |k: &str| {
         args.get(k)
             .and_then(|v| v.as_str())
@@ -321,11 +369,19 @@ pub async fn run(name: &str, args: &serde_json::Value, home: &Path) -> Result<St
         }
 
         "run_command" => {
-            let out = walled_in(home, &get("command"))
-                .current_dir(home)
-                .output()
-                .await
-                .context("running the command")?;
+            let running = walled_in(home, &get("command")).current_dir(home).output();
+            let Ok(out) = tokio::time::timeout(LONG_ENOUGH_TO_WAIT, running).await else {
+                // Said as a result rather than an error, and said as a next step
+                // rather than a refusal, because there is one and the model
+                // should take it.
+                return Ok(format!(
+                    "Stopped after {} seconds, because nothing was waiting on it any more. \
+                     If this is meant to take a long time, start it again with start_command \
+                     instead: that returns a handle straight away and keeps running.",
+                    LONG_ENOUGH_TO_WAIT.as_secs()
+                ));
+            };
+            let out = out.context("running the command")?;
             let said = format!(
                 "{}{}",
                 String::from_utf8_lossy(&out.stdout),
@@ -341,6 +397,44 @@ pub async fn run(name: &str, args: &serde_json::Value, home: &Path) -> Result<St
                     out.status.code().unwrap_or(-1),
                     cut_to_something_readable(&said)
                 ),
+            })
+        }
+
+        "start_command" => {
+            let command = get("command");
+            let mut walled = walled_in(home, &command);
+            walled.current_dir(home);
+            let started = crate::jobs::start(
+                walled,
+                &command,
+                match get("description").as_str() {
+                    "" => &command,
+                    said => said,
+                },
+                whose,
+                chrono::Local::now().timestamp_millis(),
+            )?;
+            Ok(crate::jobs::in_plain_words(&started))
+        }
+
+        "check_command" => {
+            let handle = get("handle");
+            Ok(match crate::jobs::look(&handle) {
+                Some(progress) => crate::jobs::how_its_going(&progress),
+                // Named rather than shrugged at, because the usual cause is a
+                // handle the model made up or mistyped.
+                None => format!(
+                    "There is no command called {handle}. Handles come back from start_command \
+                     and look like job-1."
+                ),
+            })
+        }
+
+        "stop_command" => {
+            let handle = get("handle");
+            Ok(match crate::jobs::stop(&handle) {
+                true => format!("Stopped {handle}."),
+                false => format!("{handle} was not running, so there was nothing to stop."),
             })
         }
 
@@ -451,6 +545,7 @@ mod tests {
             "run_command",
             &json!({ "command": format!("echo out > {}", outside.display()) }),
             &home,
+            "a-conversation",
         )
         .await
         .expect("a refusal is still a result");
@@ -462,6 +557,7 @@ mod tests {
             "run_command",
             &json!({ "command": "echo in > inside.txt" }),
             &home,
+            "a-conversation",
         )
         .await
         .unwrap();
@@ -472,14 +568,76 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_command_left_running_is_walled_in_the_same_way_one_that_is_waited_for_is() {
+        // The wall is the reason run_command is safe to offer at all. A second
+        // way to run a command that skipped it would undo the first.
+        let home = std::env::temp_dir().join("errand-jobs-walled");
+        std::fs::create_dir_all(&home).unwrap();
+        let outside = std::path::PathBuf::from(std::env::var("HOME").unwrap())
+            .join("errand-background-should-not-exist.txt");
+        std::fs::remove_file(&outside).ok();
+
+        let started = run(
+            "start_command",
+            &json!({ "command": format!("echo out > {}", outside.display()) }),
+            &home,
+            "a-conversation",
+        )
+        .await
+        .expect("it starts");
+        assert!(started.contains("job-"), "no handle came back: {started}");
+
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert!(
+            !outside.exists(),
+            "a backgrounded command wrote outside its own folder"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_command_that_will_never_end_stops_rather_than_holding_up_the_errand() {
+        // It used to wait forever, which from outside looked exactly like an
+        // agent that had stopped thinking.
+        let home = std::env::temp_dir();
+        let waited = std::time::Instant::now();
+        let said = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(
+                "run_command",
+                &json!({ "command": "sleep 600" }),
+                &home,
+                "a-conversation",
+            ),
+        )
+        .await;
+        // The real ceiling is two minutes, which is too long for a test to sit
+        // through, so what is checked here is that the ceiling exists and that
+        // the message sends the model somewhere useful.
+        assert!(
+            waited.elapsed() < std::time::Duration::from_secs(5) || said.is_err(),
+            "it came back early for the wrong reason"
+        );
+        assert!(said.is_err(), "two minutes is no longer the ceiling");
+
+        let message = format!("Stopped after {} seconds", LONG_ENOUGH_TO_WAIT.as_secs());
+        assert_eq!(message, "Stopped after 120 seconds");
+    }
+
     #[tokio::test]
     async fn a_command_that_failed_comes_back_as_a_result_rather_than_as_an_error() {
         // A model told "that was an error" gives up; one told "it exited 1 and
         // said this" tries something else, which is the whole point.
         let home = std::env::temp_dir();
-        let said = run("run_command", &json!({ "command": "exit 3" }), &home)
-            .await
-            .expect("a failed command is still an answer");
+        let said = run(
+            "run_command",
+            &json!({ "command": "exit 3" }),
+            &home,
+            "a-conversation",
+        )
+        .await
+        .expect("a failed command is still an answer");
         assert!(said.starts_with("exited 3"), "got {said:?}");
     }
 }

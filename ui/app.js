@@ -1840,10 +1840,13 @@ async function whatsRunning() {
       const row = document.createElement("div");
       row.className = "one";
       row.dataset.waiting = String(one.waiting);
-      row.title = "Open it";
+      row.title = one.command ? "A command that is still running" : "Open it";
       // Opening it is the thing anybody wants next, and it is the only way to
       // answer one that has stopped to ask.
       row.onclick = async () => {
+        // A command has no turn to open, and clicking through to a conversation
+        // that has moved on would be a lie about where the work is.
+        if (one.command) return;
         el.working.hidden = true;
         if (!talks.has(one.conversation)) {
           const theirs = (await invoke("conversations", { agent: one.agent })).map((c) =>
@@ -1864,6 +1867,28 @@ async function whatsRunning() {
       what.className = "what";
       what.textContent = one.what;
       row.append(who, where, what);
+
+      // A command left running is the one kind of work here that can be stopped
+      // on its own, so it is the one kind that offers to be.
+      if (one.command) {
+        row.dataset.command = one.command;
+        const stop = document.createElement("button");
+        stop.className = "stop-command";
+        stop.type = "button";
+        stop.textContent = "Stop";
+        stop.title = `Stop ${one.command}`;
+        stop.onclick = async (e) => {
+          e.stopPropagation();
+          stop.disabled = true;
+          stop.textContent = "Stopping…";
+          await invoke("stop_a_command", { handle: one.command });
+          // Asked again rather than the row being removed, so what is shown is
+          // what is running rather than what this page believes is running.
+          el.working.hidden = true;
+          whatsRunning();
+        };
+        row.append(stop);
+      }
       return row;
     }),
   );
