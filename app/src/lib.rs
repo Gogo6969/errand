@@ -509,13 +509,32 @@ struct Choice {
 /// there today should not be offered, because choosing it would fail later and
 /// somewhere less obvious.
 #[tauri::command]
-async fn engines() -> Result<Vec<Choice>, String> {
+async fn engines(wider: Option<bool>) -> Result<Vec<Choice>, String> {
     let mut all = vec![Choice {
         engine: "claude".into(),
         name: "Claude".into(),
         settings: None,
     }];
-    for found in find::detect_all().await {
+
+    // Two different questions, and only one of them is cheap. The usual ports
+    // on this machine answer in under a second, so that is what opening the
+    // picker asks. Every machine on the network is thousands of probes and
+    // most of a minute, so it is asked for by name and never on a hunch.
+    //
+    // The wider sweep still includes this machine: a model bound to 127.0.0.1
+    // is invisible from the network address the sweep walks, and "look wider"
+    // finding fewer models than looking here would be a nonsense.
+    let mut seen = std::collections::HashSet::new();
+    let mut found = find::detect_all().await;
+    if wider.unwrap_or(false) {
+        found.extend(find::scan_local_network().await);
+    }
+    let found: Vec<_> = found
+        .into_iter()
+        .filter(|b| seen.insert(b.base_url.clone()))
+        .collect();
+
+    for found in found {
         for model in found.models {
             // Asked rather than assumed. The window is what every budget in the
             // engine is worked out from -- how much conversation fits, how many
@@ -538,12 +557,35 @@ async fn engines() -> Result<Vec<Choice>, String> {
             };
             all.push(Choice {
                 engine: "local".into(),
-                name: format!("{model} · {}", found.label),
+                // Where it is, when it is not here. Two machines on a network
+                // running the same model are the same line otherwise, and
+                // choosing between them becomes guesswork.
+                name: match elsewhere(&found.base_url) {
+                    Some(host) => format!("{model} · {} on {host}", found.label),
+                    None => format!("{model} · {}", found.label),
+                },
                 settings: serde_json::to_string(&settings).ok(),
             });
         }
     }
     Ok(all)
+}
+
+/// The host, if this is not the machine somebody is sitting at.
+///
+/// Returned as an option rather than a string, because "on 127.0.0.1" is noise
+/// in a list where nearly everything is here.
+fn elsewhere(base_url: &str) -> Option<String> {
+    let authority = base_url.split("//").nth(1)?.split('/').next()?;
+    // A port is usual but not certain, and falling back to the whole URL when
+    // there is none put "on http://10.0.0.4" in the list.
+    let host = authority
+        .rsplit_once(':')
+        .map_or(authority, |(host, _)| host);
+    match host {
+        "127.0.0.1" | "localhost" | "::1" | "[::1]" => None,
+        _ => Some(host.to_string()),
+    }
 }
 
 /// Put a thread on a different engine.
@@ -1067,11 +1109,18 @@ struct Outside {
 /// know. It is why the panel is opened rather than always on screen.
 #[tauri::command]
 async fn outside(held: State<'_, Held>, id: String) -> Result<Vec<Outside>, String> {
+    // The window shows a conversation, so that is what arrives here, and the
+    // working directory belongs to the agent it is under. Looking the id up as
+    // an agent worked for exactly as long as an agent had one conversation
+    // sharing its id: every conversation opened after that found nothing and
+    // quietly fell back to ".", which reads a different project's servers.
     let home = held
         .store
-        .agent(&id)
+        .conversation(&id)
         .map_err(|e| e.to_string())?
-        .map(|t| std::path::PathBuf::from(t.cwd))
+        .map(|c| c.agent)
+        .and_then(|agent| held.store.agent(&agent).ok().flatten())
+        .map(|a| std::path::PathBuf::from(a.cwd))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     let configured = mcp::configured(&home);
@@ -1234,6 +1283,35 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_on_this_machine_is_named_without_a_host_and_one_elsewhere_with_it() {
+        // The picker is a list of one-line names. "on 127.0.0.1" after every
+        // one of them is noise, and no host at all on a model that lives on
+        // another machine is a choice somebody cannot make.
+        assert_eq!(elsewhere("http://127.0.0.1:11434"), None);
+        assert_eq!(elsewhere("http://localhost:1234"), None);
+        assert_eq!(elsewhere("http://[::1]:8080"), None);
+        assert_eq!(
+            elsewhere("http://192.168.1.42:11434"),
+            Some("192.168.1.42".to_string())
+        );
+        assert_eq!(
+            elsewhere("https://box.local:8080/v1"),
+            Some("box.local".to_string())
+        );
+    }
+
+    #[test]
+    fn a_model_reached_without_a_port_is_still_named_by_its_host() {
+        // Falling back to the whole URL when there is no port put
+        // "on http://10.0.0.4" in the list, which is not a host.
+        assert_eq!(elsewhere("http://10.0.0.4"), Some("10.0.0.4".to_string()));
+        assert_eq!(
+            elsewhere("http://10.0.0.4/v1"),
+            Some("10.0.0.4".to_string())
+        );
+    }
 
     #[test]
     fn an_agent_that_answered_the_way_it_was_asked_to_gets_the_identity_it_chose() {

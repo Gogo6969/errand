@@ -118,6 +118,38 @@ async function whatCouldAnswer() {
   return couldAnswer;
 }
 
+/**
+ * The value of the last option, which is not an engine but a question.
+ *
+ * A model somewhere else on the network is a real answer to "what can answer
+ * this", but finding one means thousands of probes across every machine on the
+ * subnet and most of a minute. So it is offered rather than done: opening the
+ * picker stays instant, and looking wider is a thing somebody asks for.
+ */
+const LOOK_WIDER = "__wider";
+
+/** Sweep the network for models, and put whatever answered into the picker. */
+async function lookWider(a) {
+  const was = el.engine.value;
+  el.engine.disabled = true;
+  const saying = el.engine.options[el.engine.selectedIndex];
+  if (saying) saying.textContent = "Looking on the network…";
+
+  try {
+    couldAnswer = await invoke("engines", { wider: true });
+  } catch (why) {
+    couldAnswer = null;
+    if (saying) saying.textContent = String(why);
+    el.engine.disabled = false;
+    return;
+  }
+
+  el.engine.disabled = false;
+  await drawEngines(a);
+  // Nothing was chosen, only looked for, so the agent stays on what it was on.
+  el.engine.value = was === LOOK_WIDER ? keyOf(a.on, a.onSettings) : was;
+}
+
 /** How one choice is recognised again, since a model id alone does not say where it lives. */
 function keyOf(engine, settings) {
   if (engine !== "local" || !settings) return "claude";
@@ -145,6 +177,11 @@ async function drawEngines(a) {
       return option;
     }),
   );
+
+  const wider = document.createElement("option");
+  wider.value = LOOK_WIDER;
+  wider.textContent = "Look on the network…";
+  el.engine.append(wider);
 
   // A thread on a model that has since gone quiet still has to say what it is
   // on, or the picker silently claims it is something else.
@@ -816,6 +853,10 @@ el.what.addEventListener("input", () => {
 el.engine.addEventListener("change", async () => {
   const t = whose();
   if (!t) return;
+  if (el.engine.value === LOOK_WIDER) {
+    await lookWider(t);
+    return;
+  }
   const choice = (await whatCouldAnswer()).find(
     (c) => keyOf(c.engine, c.settings) === el.engine.value,
   );
@@ -963,12 +1004,17 @@ el.reach.addEventListener("click", async () => {
 
   if (!servers.length) {
     el.reachable.replaceChildren(
-      saying("Nothing configured. Servers are read from ~/.claude.json, the same ones Claude Code uses."),
+      note(
+        "p",
+        "No MCP servers configured. They are read from ~/.claude.json, the " +
+          "same ones Claude Code uses, so anything set up there works here too.",
+      ),
     );
     return;
   }
 
   el.reachable.replaceChildren(
+    note("p", "MCP servers, read from ~/.claude.json. Both engines get the same ones."),
     ...servers.map((s) => {
       const box = document.createElement("div");
       box.className = s.trouble ? "server broken" : "server";
@@ -994,12 +1040,17 @@ el.reach.addEventListener("click", async () => {
   );
 });
 
+/** One line of explanation in a panel, as whichever element belongs there. */
+function note(as, text) {
+  const line = document.createElement(as);
+  line.className = "server-what";
+  line.textContent = text;
+  return line;
+}
+
 /** One line in the panel, for when there is nothing to list. */
 function saying(text) {
-  const p = document.createElement("p");
-  p.className = "server-what";
-  p.textContent = text;
-  return p;
+  return note("p", text);
 }
 
 /**
@@ -1171,7 +1222,13 @@ async function drawGranted() {
           row.append(what, take);
           return row;
         })
-      : [saying("Nothing yet. It asks every time.")]),
+      : [
+          note(
+            "li",
+            "Nothing yet, so it asks every time. Choose Always on one of its " +
+              "questions and the rule appears here, where you can take it back.",
+          ),
+        ]),
   );
 }
 
