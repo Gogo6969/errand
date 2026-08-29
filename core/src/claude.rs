@@ -114,6 +114,7 @@ const GRANTED: &[&str] = &[
     "Grep",
     "TodoWrite",
     "Task",
+    "Agent",
     "Skill",
     "ToolSearch",
     // Looking at who else there is changes nothing, which is the same reason
@@ -325,6 +326,11 @@ impl Claude {
                 "stream-json",
                 "--include-partial-messages",
                 "--verbose",
+                // What a helper says, so that handing part of an errand to one
+                // is something you can watch rather than a step that sits
+                // there. It arrives tagged with the step that started it, and
+                // is shown underneath that step.
+                "--forward-subagent-text",
                 "--permission-mode",
                 // The agent's, not one decision for the whole app. A research
                 // agent and one that edits your files do not deserve the same
@@ -680,6 +686,41 @@ pub fn read(line: &str) -> Vec<Event> {
             model: at("model"),
         }],
 
+        // A helper talking, rather than the agent itself.
+        //
+        // Shown underneath the step that started it rather than in the
+        // conversation, which is the whole point of separating them: a
+        // subagent is one step of somebody's errand, and its working out
+        // dropped into the middle of the conversation reads as the agent
+        // changing the subject. Before this the window said "Handing part of
+        // this to a helper" and then nothing at all until the helper finished,
+        // which for a long piece of work is indistinguishable from a hang.
+        "assistant" if v.get("parent_tool_use_id").is_some_and(|p| !p.is_null()) => {
+            let call = at("parent_tool_use_id");
+            v.pointer("/message/content")
+                .and_then(|c| c.as_array())
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter_map(|b| match b.get("type")?.as_str()? {
+                            "text" => Some(b.get("text")?.as_str()?.trim().to_string())
+                                .filter(|t| !t.is_empty()),
+                            // What the helper is doing, in the same words the
+                            // agent's own steps use.
+                            "tool_use" => {
+                                Some(in_plain_words(b.get("name")?.as_str()?, b.get("input")))
+                            }
+                            _ => None,
+                        })
+                        .map(|outcome| Event::Did {
+                            call: call.clone(),
+                            outcome,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+
         "assistant" => v
             .pointer("/message/content")
             .and_then(|c| c.as_array())
@@ -839,7 +880,10 @@ fn in_plain_words(tool: &str, input: Option<&serde_json::Value>) -> String {
             None => "Writing a file".into(),
         },
         "WebFetch" | "WebSearch" => "Looking something up on the web".into(),
-        "Task" => "Handing part of this to a helper".into(),
+        // Both names, because it has had both. It was `Task` when this was
+        // written and is `Agent` now, and a name that quietly stops matching
+        // leaves a wording nobody notices is dead.
+        "Task" | "Agent" => "Handing part of this to a helper".into(),
         // The end of a plan, and the moment somebody is asked whether to
         // start. Named for what it is rather than for the function, because
         // "Using ExitPlanMode" is the machinery and the plan is the point.
@@ -1098,6 +1142,38 @@ mod tests {
         assert!(
             found,
             "the transcript was on disk and it still wanted to start as new"
+        );
+    }
+
+    #[test]
+    fn a_helper_is_shown_under_the_step_that_started_it_and_not_in_the_conversation() {
+        // A subagent is one step of somebody's errand. Its working out dropped
+        // into the middle of the conversation reads as the agent changing the
+        // subject, and before this the window said "Handing part of this to a
+        // helper" and then nothing until it finished.
+        const HELPER: &str = r#"{"type":"assistant","parent_tool_use_id":"toolu_parent","message":{"content":[{"type":"text","text":"I'll count the files."},{"type":"tool_use","id":"toolu_kid","name":"Bash","input":{"command":"ls | wc -l"}}]}}"#;
+        let said = read(HELPER);
+        assert_eq!(said.len(), 2, "{said:?}");
+        for one in &said {
+            let Event::Did { call, .. } = one else {
+                panic!("a helper spoke into the conversation: {one:?}");
+            };
+            assert_eq!(call, "toolu_parent", "it did not land under its own step");
+        }
+        let Event::Did { outcome, .. } = &said[1] else {
+            unreachable!()
+        };
+        assert_eq!(outcome, "Running ls | wc -l", "{outcome}");
+    }
+
+    #[test]
+    fn the_agent_itself_still_speaks_into_the_conversation() {
+        // The guard is on the presence of a parent, and an ordinary message
+        // has the field set to null rather than absent.
+        const ITS_OWN: &str = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"text","text":"Here is the answer."}]}}"#;
+        assert!(
+            matches!(read(ITS_OWN).first(), Some(Event::Said { .. })),
+            "the agent's own words stopped reaching the conversation"
         );
     }
 
