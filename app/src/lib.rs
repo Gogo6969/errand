@@ -284,6 +284,11 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         }
         _ => {
             let asks = known.as_ref().map_or("ask", |a| a.asks.as_str());
+            // The store's flag, or the transcript itself, whichever says yes.
+            // They disagree after an engine change, which clears the flag but
+            // cannot clear the file, and starting as new against a session that
+            // exists is a failure the agent never recovers from.
+            let again = again || errand_core::claude::already_going(&id, &home);
             // A socket of this conversation's own, so that the two tools the
             // local engine gets in process are reachable by an engine that
             // runs outside it. Which conversation is asking is the socket,

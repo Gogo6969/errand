@@ -380,6 +380,10 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let at: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
 
+        // Measured once, before anything is applied, so each change is judged
+        // on what it did rather than on what it found.
+        let mut inherited = points_at_nothing(&conn)?;
+
         for (i, change) in CHANGES.iter().enumerate().skip(at as usize) {
             let version = i + 1;
             conn.pragma_update(None, "foreign_keys", false)?;
@@ -394,14 +398,23 @@ impl Store {
             conn.pragma_update(None, "foreign_keys", true)?;
             applied?;
 
-            let dangling: i64 =
-                conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
-                    r.get(0)
-                })?;
+            // What this change broke, not what it inherited. Counting only the
+            // rows dangling afterwards makes every future change answer for
+            // damage done long before it, and the way that shows up is the
+            // worst way anything can: the app will not start, and the message
+            // names the one change that is innocent. Which is exactly what
+            // happened -- rows orphaned months earlier by a delete made with
+            // foreign keys off stopped a change that only added a column.
+            let dangling = points_at_nothing(&conn)?;
             anyhow::ensure!(
-                dangling == 0,
-                "change {version} left {dangling} rows pointing at nothing"
+                dangling <= inherited,
+                "change {version} left {} more rows pointing at nothing",
+                dangling - inherited
             );
+            // Whatever was already wrong stays wrong and stays visible. It is
+            // not this change's to repair, and quietly deleting somebody's rows
+            // to get past a check is worse than the check.
+            inherited = dangling;
         }
         Ok(())
     }
@@ -981,6 +994,15 @@ impl Store {
     }
 }
 
+/// How many rows refer to something that is not there.
+fn points_at_nothing(conn: &Connection) -> Result<i64> {
+    Ok(
+        conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })?,
+    )
+}
+
 pub fn beside(data_dir: &Path) -> PathBuf {
     data_dir.join("errand.db")
 }
@@ -1034,6 +1056,36 @@ mod tests {
             tool: "Bash".into(),
             call: call.into(),
         })
+    }
+
+    #[test]
+    fn a_change_answers_for_what_it_broke_and_not_for_what_it_found_broken() {
+        // A store can carry rows pointing at nothing from long before -- a
+        // delete made somewhere with foreign keys off is all it takes. Judging
+        // each change on the total rather than on the difference makes the next
+        // change to come along answer for all of it, and the way that shows up
+        // is the app refusing to start with a message naming the one change
+        // that is innocent.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.asked("a1", "Something").unwrap();
+
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.pragma_update(None, "foreign_keys", false).unwrap();
+            conn.execute("DELETE FROM conversations WHERE id = 'a1'", [])
+                .unwrap();
+            conn.pragma_update(None, "foreign_keys", true).unwrap();
+            assert!(
+                points_at_nothing(&conn).unwrap() > 0,
+                "the damage this test is about did not happen"
+            );
+        }
+
+        // Bringing it up to date again applies nothing, and must still not
+        // treat what it found as something it did.
+        s.bring_up_to_date()
+            .expect("it blamed itself for damage that was already there");
     }
 
     #[test]

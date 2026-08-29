@@ -160,6 +160,39 @@ enum Turn {
     Stop,
 }
 
+/// Has this conversation already got a session on disk?
+///
+/// Asked rather than remembered, because the flag in the store and the file on
+/// disk can disagree and only one of them decides whether `--session-id` or
+/// `--resume` is the right thing to say. Changing an agent's engine sets the
+/// flag back to nothing, quite correctly -- the new engine has not had this
+/// conversation -- but it cannot delete a transcript Claude Code wrote, so an
+/// agent moved to a local model and back was then started as new against a
+/// session that already existed. That fails with exit 1, one line on stderr and
+/// nothing on stdout, every time, for ever. The agent is simply dead, and
+/// nothing in the window can say why.
+///
+/// Claude Code files a transcript under a flattening of the working directory,
+/// which is why the directory has to be the same one it was started in.
+pub fn already_going(session: &str, cwd: &std::path::Path) -> bool {
+    let Ok(home) = std::env::var("HOME") else {
+        return false;
+    };
+    let flattened: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| match c {
+            '/' | '.' | ' ' => '-',
+            other => other,
+        })
+        .collect();
+    std::path::Path::new(&home)
+        .join(".claude/projects")
+        .join(flattened)
+        .join(format!("{session}.jsonl"))
+        .exists()
+}
+
 impl Claude {
     /// Start a conversation, or pick up the one this thread already had.
     ///
@@ -572,9 +605,21 @@ fn block(b: &serde_json::Value) -> Option<Event> {
         }
         "tool_use" => {
             let tool = b.get("name")?.as_str()?.to_string();
+            // Converted here for the same reason it is converted for a
+            // question. A line in the timeline reading "Using
+            // mcp__errand__ask" tells somebody watching that a server they
+            // never configured is doing something they cannot name, when what
+            // is happening is one of their own agents asking another.
+            let plain = team::which_of_ours(&tool);
             Some(Event::Doing(Step {
-                what: in_plain_words(&tool, b.get("input")),
-                tool,
+                what: match plain {
+                    Some(name) => team::in_plain_words(
+                        name,
+                        b.get("input").unwrap_or(&serde_json::Value::Null),
+                    ),
+                    None => in_plain_words(&tool, b.get("input")),
+                },
+                tool: plain.map_or(tool, str::to_string),
                 // Every tool_use block carries one, and the tool_result that
                 // answers it carries the same string back as `tool_use_id`.
                 call: b.get("id")?.as_str()?.to_string(),
@@ -731,6 +776,24 @@ mod tests {
     }
 
     #[test]
+    fn handing_work_to_somebody_is_shown_as_that_and_not_as_a_server_nobody_configured() {
+        // What this looked like before: a timeline that said "Using
+        // mcp__errand__ask" while one of somebody's own agents asked another.
+        let asking = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_03","name":"mcp__errand__ask","input":{"agent":"Day Check","request":"What is today's date?"}}]}}"#;
+        let Event::Doing(step) = &read(asking)[0] else {
+            panic!("it was not a step");
+        };
+        assert_eq!(step.what, "Asking Day Check");
+        assert_eq!(step.tool, "ask");
+
+        let looking = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_04","name":"mcp__errand__who_else","input":{}}]}}"#;
+        let Event::Doing(step) = &read(looking)[0] else {
+            panic!("it was not a step");
+        };
+        assert_eq!(step.what, "Looking for somebody to hand this to");
+    }
+
+    #[test]
     fn a_tool_with_nothing_to_say_for_itself_is_still_said_in_plain_words() {
         let bare = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_02","name":"Bash","input":{"command":"ls -la /tmp"}}]}}"#;
         let Event::Doing(step) = &read(bare)[0] else {
@@ -801,6 +864,39 @@ mod tests {
         assert!(
             ask.can_remember,
             "it suggested a rule, so yes can be remembered"
+        );
+    }
+
+    #[test]
+    fn a_conversation_with_a_transcript_is_known_to_be_going_whatever_was_written_down() {
+        // The bug this exists to stop: an agent moved to a local model and back
+        // had its "already started" flag cleared, quite correctly, but the
+        // transcript stayed. Every start after that said `--session-id` about a
+        // session that existed, which fails with nothing on stdout, and the
+        // agent was dead with nothing in the window able to say why.
+        let home = std::env::var("HOME").expect("a home");
+        let cwd = std::path::Path::new("/tmp/errand test/a.b");
+        let flattened = "-tmp-errand-test-a-b";
+        let id = format!("probe-{}", std::process::id());
+
+        let holds = std::path::Path::new(&home)
+            .join(".claude/projects")
+            .join(flattened);
+        assert!(
+            !already_going(&id, cwd),
+            "it claimed a session nobody has ever started"
+        );
+
+        std::fs::create_dir_all(&holds).expect("somewhere for it to live");
+        let transcript = holds.join(format!("{id}.jsonl"));
+        std::fs::write(&transcript, "{}\n").expect("a transcript");
+        let found = already_going(&id, cwd);
+        let _ = std::fs::remove_file(&transcript);
+        let _ = std::fs::remove_dir(&holds);
+
+        assert!(
+            found,
+            "the transcript was on disk and it still wanted to start as new"
         );
     }
 
