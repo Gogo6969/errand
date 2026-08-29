@@ -1226,12 +1226,22 @@ el.reach.addEventListener("click", async () => {
     // An engine that has not started yet has nothing to say, which is not a
     // failure worth showing.
   }
-  const itsOwn = [
+  const lists = [
     ["skills", "Skills"],
     ["helpers", "Kinds of helper"],
     ["plugins", "Plugins"],
     ["commands", "Commands"],
-  ]
+  ];
+  // Claude Code says what it has on its first turn and not before, so a
+  // conversation that has been opened and not yet spoken to has nothing here.
+  // Said rather than left blank: a section that is silently absent looks like
+  // an engine that brought nothing, which for Claude Code is untrue by about
+  // sixty skills.
+  const engine = whose()?.on || "claude";
+  const nothingYet =
+    engine !== "local" && lists.every(([which]) => !(kit[which] || []).length);
+
+  const itsOwn = lists
     .filter(([which]) => (kit[which] || []).length)
     .map(([which, called]) => {
       const box = document.createElement("div");
@@ -1253,6 +1263,16 @@ el.reach.addEventListener("click", async () => {
 
   el.reachable.replaceChildren(
     ...itsOwn,
+    ...(nothingYet
+      ? [
+          note(
+            "p",
+            "What the engine itself brought will appear here once it has answered " +
+              "something. Claude Code says what skills, helpers and plugins it has " +
+              "on its first turn, not when it starts.",
+          ),
+        ]
+      : []),
     note("p", "MCP servers, read from ~/.claude.json. Both engines get the same ones."),
     ...servers.map((s) => {
       const box = document.createElement("div");
