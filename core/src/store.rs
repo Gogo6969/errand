@@ -964,8 +964,18 @@ impl Store {
             // answering rather than of what is being talked about.
             Event::Started { model, .. } => {
                 let conn = self.conn.lock().unwrap();
+                // `carries_on` is spent the moment something runs here. It is
+                // an instruction for the first launch and nothing else, and a
+                // conversation that has spoken has a history of its own: told
+                // to carry on from its parent a second time it would throw
+                // that history away and start again from somebody else's
+                // words. Cleared here rather than where the fork is made,
+                // because a fork can be made and the app quit before anything
+                // runs, and then the next launch still has to be told.
                 conn.execute(
-                    "UPDATE conversations SET opened = 1, spoke_at = ? WHERE id = ?",
+                    "UPDATE conversations
+                        SET opened = 1, spoke_at = ?, carries_on = 0, carries_on_at = NULL
+                      WHERE id = ?",
                     params![now(), conversation],
                 )?;
                 conn.execute(
@@ -1411,6 +1421,40 @@ mod tests {
         // treat what it found as something it did.
         s.bring_up_to_date()
             .expect("it blamed itself for damage that was already there");
+    }
+
+    #[test]
+    fn a_conversation_that_has_run_is_no_longer_told_to_carry_on_from_anywhere() {
+        // The instruction is for the first launch and nothing else. Left set,
+        // a conversation that has spoken would be told to carry on from its
+        // parent again, throwing away everything said in it and starting from
+        // somebody else's words. Where it came from is kept for ever; the
+        // instruction is not.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.asked("a1", "something").unwrap();
+        s.carry_on("fork", "a1", 1, "First, again", Some("earlier"))
+            .unwrap();
+        assert!(s.conversation("fork").unwrap().unwrap().carries_on);
+
+        s.happened(
+            "fork",
+            &Event::Started {
+                session: "fork".into(),
+                model: "claude-opus-5".into(),
+            },
+        )
+        .unwrap();
+
+        let after = s.conversation("fork").unwrap().unwrap();
+        assert!(!after.carries_on, "it would carry on from its parent again");
+        assert_eq!(after.carries_on_at, None);
+        assert!(after.opened);
+        assert_eq!(
+            after.came_from.as_deref(),
+            Some("a1"),
+            "the way back was thrown away with the instruction"
+        );
     }
 
     #[test]
