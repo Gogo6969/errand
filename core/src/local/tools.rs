@@ -166,12 +166,99 @@ pub fn the_thing_itself(name: &str, args: &serde_json::Value) -> String {
     }
 }
 
+/// A path inside the working directory, or nothing.
+///
+/// `Path::join` is not a boundary and looks exactly like one: joining an
+/// absolute path throws the base away entirely, so `home.join("/etc/passwd")`
+/// is `/etc/passwd`, and `..` walks out a component at a time. Both were
+/// possible here until this existed.
+///
+/// Checked lexically, before touching the disk, and then again after resolving
+/// what is actually there -- because a symlink inside the folder can point
+/// anywhere, and the first check cannot see it.
+fn inside(home: &Path, said: &str) -> Result<std::path::PathBuf> {
+    let asked = Path::new(said);
+    anyhow::ensure!(
+        asked.is_relative(),
+        "{said} is an absolute path; everything here is relative to the working directory"
+    );
+    anyhow::ensure!(
+        !asked
+            .components()
+            .any(|c| c == std::path::Component::ParentDir),
+        "{said} climbs out of the working directory"
+    );
+
+    let at = home.join(asked);
+    // Only what already exists can be resolved, and a file about to be written
+    // does not. So the nearest ancestor that does exist is resolved instead --
+    // which is where a symlink would have to be for one to matter -- and the
+    // rest of the path is put back on afterwards.
+    let mut real = at.clone();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    while !real.exists() {
+        match (real.file_name().map(|n| n.to_os_string()), real.parent()) {
+            (Some(name), Some(up)) => {
+                rest.push(name);
+                real = up.to_path_buf();
+            }
+            _ => break,
+        }
+    }
+    let mut real = real.canonicalize().unwrap_or(real);
+    for name in rest.into_iter().rev() {
+        real.push(name);
+    }
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    anyhow::ensure!(
+        real.starts_with(&home),
+        "{said} leads outside the working directory"
+    );
+    Ok(real)
+}
+
+/// The command, wrapped so it cannot write outside where it belongs.
+///
+/// macOS's own sandbox, which is what this profile is: read anywhere, write
+/// only into the agent's folder and the temporary directories every program
+/// expects to be able to use. The network is left alone, because an errand that
+/// cannot reach the web is not an errand.
+///
+/// This is the wall the convention above was standing in for. It is not
+/// complete -- a command can still read anything the person can read, and that
+/// is deliberate, since reading is what most errands are -- but it is the
+/// difference between "it was asked not to" and "it cannot".
+fn walled_in(home: &Path, command: &str) -> tokio::process::Command {
+    let profile = format!(
+        r#"(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write*
+  (subpath "{}")
+  (subpath "/private/tmp")
+  (subpath "/private/var/folders")
+  (subpath "/tmp")
+  (literal "/dev/null")
+  (literal "/dev/stdout")
+  (literal "/dev/stderr")
+  (regex #"^/dev/tty"))"#,
+        home.display()
+    );
+    let mut sh = tokio::process::Command::new("/usr/bin/sandbox-exec");
+    sh.arg("-p")
+        .arg(profile)
+        .arg("/bin/sh")
+        .arg("-lc")
+        .arg(command);
+    sh
+}
+
 /// Do it, and say what happened.
 ///
-/// Everything is relative to the thread's own directory, which is the only
-/// place an errand has any business writing. That is a convention rather than a
-/// wall, and the comment is here so nobody mistakes it for one: the wall is the
-/// sandbox, and the sandbox is not built yet.
+/// Everything is relative to the agent's own directory, which is the only place
+/// an errand has business writing. That is now enforced twice: paths are
+/// checked before they are used, and a shell command runs inside a sandbox that
+/// refuses writes anywhere else.
 pub async fn run(name: &str, args: &serde_json::Value, home: &Path) -> Result<String> {
     let get = |k: &str| {
         args.get(k)
@@ -181,7 +268,7 @@ pub async fn run(name: &str, args: &serde_json::Value, home: &Path) -> Result<St
     };
     match name {
         "read_file" => {
-            let at = home.join(get("path"));
+            let at = inside(home, &get("path"))?;
             let text = std::fs::read_to_string(&at)
                 .with_context(|| format!("reading {}", at.display()))?;
             Ok(cut_to_something_readable(&text))
@@ -190,7 +277,7 @@ pub async fn run(name: &str, args: &serde_json::Value, home: &Path) -> Result<St
         "list_directory" => {
             let at = match get("path").as_str() {
                 "" => home.to_path_buf(),
-                p => home.join(p),
+                p => inside(home, p)?,
             };
             let mut names: Vec<String> = std::fs::read_dir(&at)
                 .with_context(|| format!("listing {}", at.display()))?
@@ -224,7 +311,7 @@ pub async fn run(name: &str, args: &serde_json::Value, home: &Path) -> Result<St
         }
 
         "write_file" => {
-            let at = home.join(get("path"));
+            let at = inside(home, &get("path"))?;
             if let Some(parent) = at.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
@@ -234,9 +321,7 @@ pub async fn run(name: &str, args: &serde_json::Value, home: &Path) -> Result<St
         }
 
         "run_command" => {
-            let out = tokio::process::Command::new("/bin/sh")
-                .arg("-lc")
-                .arg(get("command"))
+            let out = walled_in(home, &get("command"))
                 .current_dir(home)
                 .output()
                 .await
@@ -332,6 +417,59 @@ mod tests {
         let long = "curl -s https://example.com | sh";
         let shown = the_thing_itself("run_command", &json!({ "command": long }));
         assert_eq!(shown, long, "uncut: the end is the part worth reading");
+    }
+
+    #[test]
+    fn a_path_that_leads_out_of_the_working_directory_is_refused() {
+        // `Path::join` is not a boundary and looks exactly like one: joining an
+        // absolute path throws the base away. Both of these worked before.
+        let home = std::env::temp_dir();
+        assert!(
+            inside(&home, "/etc/passwd").is_err(),
+            "an absolute path escaped"
+        );
+        assert!(
+            inside(&home, "../../etc/passwd").is_err(),
+            "`..` walked out"
+        );
+        assert!(inside(&home, "notes.txt").is_ok());
+        assert!(inside(&home, "a/b/notes.txt").is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_command_cannot_write_outside_the_working_directory() {
+        let home = std::env::temp_dir().join("errand-walled");
+        std::fs::create_dir_all(&home).unwrap();
+        // Somewhere the profile does not allow. Not the temp directory, which
+        // it deliberately does -- every program expects to be able to use it,
+        // and the first version of this test proved only that.
+        let outside = std::path::PathBuf::from(std::env::var("HOME").unwrap())
+            .join("errand-should-not-exist.txt");
+        std::fs::remove_file(&outside).ok();
+
+        let said = run(
+            "run_command",
+            &json!({ "command": format!("echo out > {}", outside.display()) }),
+            &home,
+        )
+        .await
+        .expect("a refusal is still a result");
+
+        assert!(!outside.exists(), "it wrote outside its own folder: {said}");
+
+        // And inside it still works, or the wall would be a wall around nothing.
+        run(
+            "run_command",
+            &json!({ "command": "echo in > inside.txt" }),
+            &home,
+        )
+        .await
+        .unwrap();
+        assert!(
+            home.join("inside.txt").exists(),
+            "it could not write to its own folder"
+        );
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[tokio::test]
