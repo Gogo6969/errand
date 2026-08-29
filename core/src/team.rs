@@ -81,6 +81,39 @@ pub fn ours(tool: &str) -> bool {
     matches!(tool, "ask" | "who_else")
 }
 
+/// The name Claude Code has to reach these tools under.
+///
+/// It will only take a tool from an MCP server, and it names every tool after
+/// the server it came from. So this is the server's name, and the first half of
+/// what Claude Code calls the two tools below.
+pub const DOORWAY: &str = "errand";
+
+/// Which of the app's tools this is, whichever engine named it.
+///
+/// The same delegation arrives as `ask` from a local model and as
+/// `mcp__errand__ask` from Claude Code, because one of them is inside our tool
+/// loop and the other reaches us through a server. Both are the same tool, and
+/// the plain name is the one written down: the allowlist is the app's and is
+/// shared between engines, so a yes remembered while Claude Code was answering
+/// has to still hold when a local model is, and it only does if there is one
+/// name in the table rather than two.
+///
+/// Deliberately not folded into `ours`. A widened `ours` would also match a
+/// genuinely third-party server that happened to be called `errand`, and
+/// answer its tools with "there is nobody else here to ask" instead of calling
+/// them. Converting at the two edges where a prefixed name can appear is both
+/// smaller and safer than accepting it everywhere.
+pub fn which_of_ours(tool: &str) -> Option<&'static str> {
+    let plain = tool
+        .strip_prefix(&format!("mcp__{DOORWAY}__"))
+        .unwrap_or(tool);
+    match plain {
+        "ask" => Some("ask"),
+        "who_else" => Some("who_else"),
+        _ => None,
+    }
+}
+
 /// What a step is doing, in words.
 pub fn in_plain_words(tool: &str, args: &Value) -> String {
     let get = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
@@ -133,6 +166,26 @@ mod tests {
             "Scribe: Draft a reply to Sarah.",
             "a card that hides who is being asked is not a question anybody can answer"
         );
+    }
+
+    #[test]
+    fn an_ask_is_the_same_tool_whether_or_not_claude_code_prefixed_it() {
+        // The whole of why an "always" given under one engine still holds
+        // under the other: both arrive at the allowlist as one name.
+        assert_eq!(which_of_ours("ask"), Some("ask"));
+        assert_eq!(which_of_ours("mcp__errand__ask"), Some("ask"));
+        assert_eq!(which_of_ours("who_else"), Some("who_else"));
+        assert_eq!(which_of_ours("mcp__errand__who_else"), Some("who_else"));
+    }
+
+    #[test]
+    fn a_tool_from_somebody_elses_server_is_not_ours() {
+        // Including one from a server that happens to share our name. Ours are
+        // two, they are named, and anything else belongs to whoever offered it.
+        assert_eq!(which_of_ours("mcp__errand__something_else"), None);
+        assert_eq!(which_of_ours("mcp__peekaboo__ask"), None);
+        assert_eq!(which_of_ours("run_command"), None);
+        assert_eq!(which_of_ours(""), None);
     }
 
     #[test]

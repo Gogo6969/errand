@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use errand_core::doorway;
 use errand_core::local::{find, LlmSettings, Local};
 use errand_core::mcp;
 use errand_core::routine::When;
@@ -68,7 +69,13 @@ struct Held {
     /// here is more direct than listening on the window's event bus and does
     /// not depend on a window being open at all -- which matters, because a
     /// routine at seven in the morning may delegate.
-    watching: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<Event>>>>,
+    watching: Arc<Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<Event>>>>,
+    /// The socket each Claude conversation can reach this app's own tools on.
+    ///
+    /// Held here because holding it is what keeps it open: dropping one stops
+    /// answering and takes the file away, so a conversation that has been
+    /// closed cannot be reached by a process that outlived it.
+    doorways: Mutex<HashMap<String, doorway::Doorway>>,
     store: Arc<Store>,
 }
 
@@ -277,7 +284,26 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         }
         _ => {
             let asks = known.as_ref().map_or("ask", |a| a.asks.as_str());
-            let (it, events) = Claude::open(&id, &home, again, asks).map_err(|e| e.to_string())?;
+            // A socket of this conversation's own, so that the two tools the
+            // local engine gets in process are reachable by an engine that
+            // runs outside it. Which conversation is asking is the socket,
+            // never anything said over it.
+            //
+            // Bound before the process that will use it exists. The doorway
+            // only connects when a tool is actually called, so the order is
+            // not load-bearing, but there is no reason to have a race here.
+            let door = doorway::listen(
+                where_things_live(&app)?
+                    .join("mcp")
+                    .join(format!("{}.sock", &id.replace('-', "")[..16])),
+                id.clone(),
+                held.wants.clone(),
+            )
+            .map_err(|e| e.to_string())?;
+
+            let (it, events) = Claude::open(&id, &home, again, asks, Some(door.at()))
+                .map_err(|e| e.to_string())?;
+            held.doorways.lock().unwrap().insert(id.clone(), door);
             (Box::new(it), events)
         }
     };
@@ -614,7 +640,12 @@ async fn use_engine(
         .collect();
     {
         let mut live = held.live.lock().unwrap();
+        let mut doors = held.doorways.lock().unwrap();
         for conversation in theirs {
+            // Both, and for the same reason: an agent moved onto a local model
+            // reaches these tools in process and has no use for a socket, and
+            // one moved back gets a fresh doorway when it is next opened.
+            doors.remove(&conversation);
             if let Some(mut was) = live.remove(&conversation) {
                 let _ = was.stop();
             }
@@ -702,6 +733,42 @@ fn read_what_it_settled_on(said: &str) -> Option<Settled> {
     })
 }
 
+/// Sockets left behind by an app that did not get to tidy up.
+///
+/// A doorway unlinks its own socket when its conversation closes, and the app
+/// unlinks before binding, so this is only about the ones nothing will ever
+/// bind again. Safe to do at startup because two copies of this app were never
+/// supported anyway: they would share one SQLite store.
+fn sweep_up_after_a_crash(here: &std::path::Path) {
+    let Ok(left) = std::fs::read_dir(here.join("mcp")) else {
+        return;
+    };
+    for one in left.flatten() {
+        if one.path().extension().is_some_and(|e| e == "sock") {
+            let _ = std::fs::remove_file(one.path());
+        }
+    }
+}
+
+/// Say so if somebody already has a server by the name we use.
+///
+/// Which of two servers with one name wins is not something this app decides,
+/// and it is not written down anywhere either. So rather than depend on it,
+/// this looks, and says what it found. A delegation that quietly reached
+/// somebody else's server would be very hard to work out from the symptom.
+fn say_if_the_name_is_taken(here: &std::path::Path) {
+    if mcp::configured(here)
+        .iter()
+        .any(|server| server.name == team::DOORWAY)
+    {
+        eprintln!(
+            "warning: an MCP server called `{}` is already configured. Handing work between \
+             agents may reach that one instead of this app's own.",
+            team::DOORWAY
+        );
+    }
+}
+
 /// The receiving end, held between setup and Ready.
 struct Waiting(Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<team::Wants>>>);
 
@@ -718,12 +785,22 @@ fn answer_what_engines_cannot(
 ) {
     tauri::async_runtime::spawn(async move {
         while let Some(asked) = wants.recv().await {
-            let said = match asked.tool.as_str() {
-                "who_else" => who_else(&app, &asked.from),
-                "ask" => ask_teammate(&app, &asked).await,
-                other => Err(anyhow::anyhow!("there is no {other} here")),
-            };
-            let _ = asked.answer.send(said);
+            // One task each. Handling these one at a time was the careful
+            // first version and stopped being careful the moment a delegated
+            // conversation could delegate: the second request waits behind the
+            // first, and the first is waiting for the second. What that looked
+            // like was not a hang but a lie -- the first agent was told "it did
+            // not finish within ten minutes" about work that had never
+            // started.
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let said = match team::which_of_ours(&asked.tool) {
+                    Some("who_else") => who_else(&app, &asked.from),
+                    Some("ask") => ask_teammate(&app, &asked).await,
+                    _ => Err(anyhow::anyhow!("there is no {} here", asked.tool)),
+                };
+                let _ = asked.answer.send(said);
+            });
         }
     });
 }
@@ -791,6 +868,24 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
         "that is you; ask somebody else or do it yourself"
     );
 
+    // Not just you: anybody already waiting further up the chain. Two agents
+    // that each think the other should handle a job will hand it back and forth
+    // for ever, and every round costs a conversation, a process and ten minutes
+    // of somebody's money. Handling one hand-off at a time used to hide this by
+    // making the second wait for the first; running them at once is what turns
+    // it into a real loop.
+    {
+        let held: State<Held> = app.state();
+        let waiting = held.store.who_is_waiting(&asked.from)?;
+        if waiting.contains(&them.id) {
+            anyhow::bail!(
+                "{} is already waiting on this job, so handing it back would go round in \
+                 circles. Do it yourself, or ask somebody who is not already involved.",
+                them.name
+            );
+        }
+    }
+
     // Its own conversation, so the delegated work does not land in the middle
     // of whatever else that agent was doing.
     let talk = uuid::Uuid::new_v4().to_string();
@@ -800,8 +895,14 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
             .as_deref()
             .and_then(|a| held.store.agent(a).ok().flatten())
             .map_or_else(|| "another agent".to_string(), |a| a.name);
-        held.store
-            .begin_conversation(&talk, &them.id, &format!("Asked by {who}"))?;
+        held.store.begin_conversation_for(
+            &talk,
+            &them.id,
+            &format!("Asked by {who}"),
+            // The conversation that asked, so the next hand-off can be
+            // followed back past this one.
+            Some(&asked.from),
+        )?;
         who
     };
 
@@ -811,7 +912,7 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
 
     // Registered before it is asked, or a fast answer arrives before anybody
     // is waiting for it.
-    let (finished, done) = std::sync::mpsc::channel();
+    let (finished, done) = tokio::sync::mpsc::unbounded_channel();
     {
         let held: State<Held> = app.state();
         held.watching.lock().unwrap().insert(talk.clone(), finished);
@@ -824,7 +925,7 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
     )
     .await
     {
-        Ok(()) => wait_for_the_answer(&done),
+        Ok(()) => wait_for_the_answer(done).await,
         Err(why) => Err(anyhow::anyhow!("{why}")),
     };
 
@@ -836,40 +937,70 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
 }
 
 /// Collect what the other agent said, until its turn ends.
-fn wait_for_the_answer(done: &std::sync::mpsc::Receiver<Event>) -> anyhow::Result<String> {
-    use std::time::{Duration, Instant};
-    let deadline = Instant::now() + Duration::from_secs(600);
-    let mut said = String::new();
+///
+/// Waiting on a task rather than on a thread, and that is not a tidiness
+/// preference. The old version parked an OS worker in a blocking receive for up
+/// to ten minutes, and the task that reads an engine's output lives on the same
+/// runtime: park enough workers and nothing is left to produce the very events
+/// this is waiting for. The symptom of that is silence, which reads exactly
+/// like an agent with nothing to say.
+async fn wait_for_the_answer(
+    mut done: tokio::sync::mpsc::UnboundedReceiver<Event>,
+) -> anyhow::Result<String> {
+    use std::time::Duration;
+    // Shared with the collecting task, so that giving up still reports what was
+    // said before the deadline. An agent that worked for nine minutes and then
+    // ran out of time has usually produced something worth passing back, and
+    // "it did not finish" on its own throws that away.
+    let said = Arc::new(Mutex::new(String::new()));
+    let filling = said.clone();
 
-    while Instant::now() < deadline {
-        let Ok(event) = done.recv_timeout(Duration::from_secs(5)) else {
-            continue;
+    let collect = async move {
+        let push = |text: &str| {
+            let mut said = filling.lock().unwrap();
+            said.push_str(text);
+            said.push('\n');
         };
-        match event {
-            Event::Said {
-                text,
-                settled: true,
-            } => {
-                said.push_str(&text);
-                said.push('\n');
+        let so_far = || filling.lock().unwrap().clone();
+
+        while let Some(event) = done.recv().await {
+            match event {
+                Event::Said {
+                    text,
+                    settled: true,
+                } => push(&text),
+                // A question in a delegated conversation has nobody at the
+                // keyboard for it, and saying so beats waiting out the ten
+                // minutes.
+                Event::NeedsYou(ask) => {
+                    return format!(
+                        "It stopped to ask permission to {} and there was nobody to answer, so \
+                         it did not finish. What it got to: {}",
+                        ask.asking,
+                        so_far()
+                    )
+                }
+                Event::Done { .. } => return so_far().trim().to_string(),
+                Event::Failed { why } => return format!("It could not: {why}"),
+                _ => {}
             }
-            // A question in a delegated conversation has nobody at the keyboard
-            // for it, and saying so beats waiting out the ten minutes.
-            Event::NeedsYou(ask) => {
-                return Ok(format!(
-                    "It stopped to ask permission to {} and there was nobody to answer, so it \
-                     did not finish. What it got to: {said}",
-                    ask.asking
-                ))
-            }
-            Event::Done { .. } => return Ok(said.trim().to_string()),
-            Event::Failed { why } => return Ok(format!("It could not: {why}")),
-            _ => {}
         }
-    }
-    Ok(format!(
-        "It did not finish within ten minutes. What it got to: {said}"
-    ))
+        // The conversation's pump has gone, which is not an answer either.
+        format!(
+            "It stopped before it finished. What it got to: {}",
+            so_far()
+        )
+    };
+
+    Ok(
+        match tokio::time::timeout(Duration::from_secs(600), collect).await {
+            Ok(answer) => answer,
+            Err(_) => format!(
+                "It did not finish within ten minutes. What it got to: {}",
+                said.lock().unwrap()
+            ),
+        },
+    )
 }
 
 /// Watch the clock, and run what is due.
@@ -1185,6 +1316,9 @@ async fn hide(held: State<'_, Held>, id: String, hidden: bool) -> Result<(), Str
 /// Stop it, whatever it is in the middle of. The thread itself is kept.
 #[tauri::command]
 async fn stop(held: State<'_, Held>, id: String) -> Result<(), String> {
+    // The doorway goes with it. A socket that outlives the conversation behind
+    // it is a way in to something that is no longer there.
+    held.doorways.lock().unwrap().remove(&id);
     if let Some(mut thread) = held.live.lock().unwrap().remove(&id) {
         thread.stop().map_err(|e| e.to_string())?;
     }
@@ -1194,6 +1328,7 @@ async fn stop(held: State<'_, Held>, id: String) -> Result<(), String> {
 /// Forget a thread and everything said in it.
 #[tauri::command]
 async fn forget(held: State<'_, Held>, id: String) -> Result<(), String> {
+    held.doorways.lock().unwrap().remove(&id);
     if let Some(mut thread) = held.live.lock().unwrap().remove(&id) {
         let _ = thread.stop();
     }
@@ -1202,6 +1337,28 @@ async fn forget(held: State<'_, Held>, id: String) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before anything Tauri touches. Claude Code starts this same binary to
+    // reach the app's own two tools, and that process has to be a program on a
+    // pipe and nothing else: build a window here and every delegated errand
+    // puts a second Errand in the dock.
+    //
+    // The same binary rather than one bundled beside it, because
+    // `current_exe()` is right in a signed .app and right under `cargo run`,
+    // and a second executable would have to be built, copied, signed and kept
+    // in step for no gain.
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some(doorway::IN_ARGV) {
+        match args.next() {
+            Some(socket) => doorway::serve_blocking(std::path::Path::new(&socket)),
+            // Nothing to serve. Said on stderr, which is the only pipe here
+            // that is not somebody else's protocol.
+            None => {
+                eprintln!("{} needs the socket to answer on", doorway::IN_ARGV);
+                std::process::exit(2)
+            }
+        }
+    }
+
     tauri::Builder::default()
         .setup(|app| {
             let here = where_things_live(&app.handle().clone())?;
@@ -1213,6 +1370,7 @@ pub fn run() {
                 wants,
                 running: Arc::default(),
                 watching: Arc::default(),
+                doorways: Mutex::new(HashMap::new()),
                 store: Arc::new(store),
             });
             // The receiving end is parked here and started on Ready, for the
@@ -1220,6 +1378,9 @@ pub fn run() {
             // being built, and spawning work into it there is how the window
             // stops appearing at all.
             app.manage(Waiting(Mutex::new(Some(asked))));
+
+            sweep_up_after_a_crash(&here);
+            say_if_the_name_is_taken(&here);
 
             Ok(())
         })

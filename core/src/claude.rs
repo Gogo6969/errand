@@ -70,6 +70,7 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::engine::{Answer, Engine, Event, NeedsYou, Step};
+use crate::team;
 
 /// What turns a helpful assistant into somebody running an errand.
 ///
@@ -115,6 +116,12 @@ const GRANTED: &[&str] = &[
     "Task",
     "Skill",
     "ToolSearch",
+    // Looking at who else there is changes nothing, which is the same reason
+    // every other name on this list is here. Handing work to one of them is
+    // deliberately not beside it: `team::asks_first` says that one is worth
+    // stopping for, and leaving it off is how that gets honoured without a
+    // second rule saying the same thing.
+    "mcp__errand__who_else",
 ];
 
 /// A thread's conversation with Claude Code.
@@ -179,8 +186,19 @@ impl Claude {
         cwd: &std::path::Path,
         again: bool,
         asks: &str,
+        doorway: Option<&std::path::Path>,
     ) -> Result<(Self, Receiver<Event>)> {
         let pick_up = if again { "--resume" } else { "--session-id" };
+
+        // Where to reach this app's own two tools, if this conversation has a
+        // doorway open. Passed on the command line rather than written into a
+        // file, so there is nothing to leave behind and nothing for the local
+        // engine to find and take a second route through.
+        let reach_us = doorway.and_then(|socket| {
+            let program = std::env::current_exe().ok()?;
+            Some(crate::doorway::config(&program, socket))
+        });
+
         let mut child = tokio::process::Command::new("claude")
             .args([
                 "--print",
@@ -210,6 +228,13 @@ impl Claude {
                 pick_up,
                 session,
             ])
+            // Not `--strict-mcp-config`, which would silently switch off every
+            // server the person has set up for Claude Code. Ours is added to
+            // theirs, the way anybody would expect.
+            .args(match &reach_us {
+                Some(config) => vec!["--mcp-config", config.as_str()],
+                None => vec![],
+            })
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -415,9 +440,25 @@ pub fn read(line: &str) -> Vec<Event> {
                     .unwrap_or("")
                     .to_string();
                 let input = request.get("input");
+                // A tool of ours arrives under the name of the server it came
+                // through, and that name is Claude Code's business rather than
+                // this app's. Converted here, at the edge, so that everything
+                // past this point -- the card, the allowlist, the line in the
+                // conversation -- sees the one plain name the local engine
+                // already uses. Checked before anything else, so a card about
+                // delegation cannot be reworded by an argument that happens to
+                // be called "description".
+                let plain = team::which_of_ours(&tool);
+                let ours = input.cloned().unwrap_or(serde_json::Value::Null);
                 vec![Event::NeedsYou(NeedsYou {
-                    asking: in_plain_words(&tool, input),
-                    detail: the_thing_itself(&tool, input),
+                    asking: match plain {
+                        Some(name) => team::in_plain_words(name, &ours),
+                        None => in_plain_words(&tool, input),
+                    },
+                    detail: match plain {
+                        Some(name) => team::the_thing_itself(name, &ours),
+                        None => the_thing_itself(&tool, input),
+                    },
                     // Offered only when the agent named a rule that would
                     // cover it. Without one there is nothing to remember, and
                     // a button that quietly does nothing is worse than no
@@ -436,7 +477,7 @@ pub fn read(line: &str) -> Vec<Event> {
                         .and_then(|t| t.as_str())
                         .unwrap_or("")
                         .to_string(),
-                    tool,
+                    tool: plain.map_or(tool, str::to_string),
                     call,
                 })]
             }
@@ -761,6 +802,40 @@ mod tests {
             ask.can_remember,
             "it suggested a rule, so yes can be remembered"
         );
+    }
+
+    #[test]
+    fn a_question_about_delegation_reads_the_same_whichever_engine_raised_it() {
+        // Captured from a real run against the doorway. Claude Code names the
+        // tool after the server it came through; the card, the allowlist and
+        // the line in the conversation must all see the plain name, or an
+        // "always" given here would not hold when a local model is answering
+        // and the card would read "Using mcp__errand__ask" over raw JSON.
+        const ASKED: &str = r#"{"type":"control_request","request_id":"c5f5","request":{"subtype":"can_use_tool","tool_name":"mcp__errand__ask","display_name":"Ask","input":{"agent":"Scribe","request":"Draft a reply to Sarah."},"permission_suggestions":[{"type":"addRules","rules":[{"toolName":"mcp__errand__ask"}],"behavior":"allow","destination":"localSettings"}],"tool_use_id":"toolu_01X"}}"#;
+
+        let Event::NeedsYou(ask) = &read(ASKED)[0] else {
+            panic!("it was not a question");
+        };
+        assert_eq!(ask.tool, "ask", "the prefix reached the allowlist");
+        assert_eq!(ask.asking, "Asking Scribe");
+        assert_eq!(ask.detail, "Scribe: Draft a reply to Sarah.");
+        // Claude Code suggests a rule naming only the tool, with nothing to
+        // narrow it. An empty rule is what the local engine writes down too,
+        // which is what makes one row serve both.
+        assert_eq!(ask.rule, "");
+        assert!(ask.can_remember);
+    }
+
+    #[test]
+    fn a_tool_from_somebody_elses_server_is_still_described_the_ordinary_way() {
+        // Only our own two names are converted. Anything else keeps the name
+        // its server gave it, because that is the name that identifies it.
+        const ASKED: &str = r#"{"type":"control_request","request_id":"r9","request":{"subtype":"can_use_tool","tool_name":"mcp__peekaboo__click","input":{"x":10}}}"#;
+        let Event::NeedsYou(ask) = &read(ASKED)[0] else {
+            panic!("it was not a question");
+        };
+        assert_eq!(ask.tool, "mcp__peekaboo__click");
+        assert_eq!(ask.asking, "Using mcp__peekaboo__click");
     }
 
     #[test]

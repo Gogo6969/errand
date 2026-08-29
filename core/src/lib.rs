@@ -16,6 +16,7 @@
 //! by a loop of our own. See `engine` for the protocol they both speak.
 
 pub mod claude;
+pub mod doorway;
 pub mod engine;
 pub mod store;
 

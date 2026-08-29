@@ -86,6 +86,8 @@ pub struct Conversation {
     pub runs_what: Option<String>,
     /// When it last ran, which is what the next run is counted from.
     pub ran_at: Option<i64>,
+    /// The conversation that asked for this one, if it was delegated.
+    pub asked_by: Option<String>,
 }
 
 /// One standing job, and whoever is doing it.
@@ -305,6 +307,24 @@ const CHANGES: &[&str] = &[
      );
      CREATE INDEX allowed_by_agent ON allowed(agent);
      ALTER TABLE agents ADD COLUMN asks TEXT NOT NULL DEFAULT 'ask';",
+    // 7. Who asked for this conversation, when somebody did.
+    //
+    // Kept so a chain of hand-offs can be walked back. Two agents that each
+    // think the other should handle a job will hand it to each other for ever,
+    // and every round of that costs a conversation, a process and ten minutes
+    // of somebody's money. Handling delegations one at a time used to hide it,
+    // because the second hand-off simply waited for the first; running them at
+    // once is what turns it into a real loop.
+    //
+    // Not a column on the asking side and not a field passed along with the
+    // request, because when the delegate delegates the app is told only which
+    // conversation is asking. The chain has to be recoverable from what
+    // outlives the call, which is the store.
+    //
+    // No foreign key: the conversation that asked may be forgotten while this
+    // one is kept, and losing the record of who asked is not a reason to lose
+    // the conversation.
+    "ALTER TABLE conversations ADD COLUMN asked_by TEXT;",
 ];
 
 impl Store {
@@ -403,13 +423,58 @@ impl Store {
     /// it must be a fresh one every time. Reusing one would resume a
     /// conversation somebody meant to leave behind.
     pub fn begin_conversation(&self, id: &str, agent: &str, name: &str) -> Result<()> {
+        self.begin_conversation_for(id, agent, name, None)
+    }
+
+    /// The same, for a conversation one agent opened by asking another.
+    ///
+    /// `asked_by` is the conversation that asked, not the agent, because that
+    /// is what can be followed back another step. A chain of hand-offs is a
+    /// chain of conversations.
+    pub fn begin_conversation_for(
+        &self,
+        id: &str,
+        agent: &str,
+        name: &str,
+        asked_by: Option<&str>,
+    ) -> Result<()> {
         let now = now();
         self.conn.lock().unwrap().execute(
-            "INSERT OR IGNORE INTO conversations (id, agent, name, opened, started_at, spoke_at)
-             VALUES (?, ?, ?, 0, ?, ?)",
-            params![id, agent, name, now, now],
+            "INSERT OR IGNORE INTO conversations
+                 (id, agent, name, opened, started_at, spoke_at, asked_by)
+             VALUES (?, ?, ?, 0, ?, ?, ?)",
+            params![id, agent, name, now, now, asked_by],
         )?;
         Ok(())
+    }
+
+    /// Every agent already on the chain of hand-offs that led here.
+    ///
+    /// Nearest first, starting with the agent of the conversation given. Used
+    /// to refuse a job being handed back to somebody who is already waiting on
+    /// it, which without this is two processes waiting ten minutes for each
+    /// other and, once several hand-offs can run at once, a chain that grows a
+    /// conversation and a process at every step.
+    ///
+    /// Bounded rather than trusted. Following a chain by reading rows is
+    /// exactly the shape of thing that loops for ever if a row is ever wrong,
+    /// and a delegation depth in double figures is already a runaway.
+    pub fn who_is_waiting(&self, conversation: &str) -> Result<Vec<String>> {
+        const DEEP_ENOUGH: usize = 12;
+        let mut chain = Vec::new();
+        let mut at = Some(conversation.to_string());
+
+        while let Some(id) = at.take() {
+            if chain.len() >= DEEP_ENOUGH {
+                break;
+            }
+            let Some(talk) = self.conversation(&id)? else {
+                break;
+            };
+            chain.push(talk.agent);
+            at = talk.asked_by;
+        }
+        Ok(chain)
     }
 
     /// One agent's conversations, most recently spoken to first.
@@ -417,7 +482,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
             "SELECT id, agent, name, opened, started_at, spoke_at,
-                    runs_at, runs_what, ran_at
+                    runs_at, runs_what, ran_at, asked_by
                FROM conversations WHERE agent = ? ORDER BY spoke_at DESC",
         )?;
         let rows = q.query_map([agent], read_conversation)?;
@@ -429,7 +494,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
             "SELECT id, agent, name, opened, started_at, spoke_at,
-                    runs_at, runs_what, ran_at
+                    runs_at, runs_what, ran_at, asked_by
                FROM conversations WHERE id = ?",
         )?;
         let mut rows = q.query_map([id], read_conversation)?;
@@ -522,7 +587,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
             "SELECT id, agent, name, opened, started_at, spoke_at,
-                    runs_at, runs_what, ran_at
+                    runs_at, runs_what, ran_at, asked_by
                FROM conversations
               WHERE runs_at IS NOT NULL AND runs_what IS NOT NULL
               ORDER BY spoke_at DESC",
@@ -932,6 +997,7 @@ fn read_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
         runs_at: r.get(6)?,
         runs_what: r.get(7)?,
         ran_at: r.get(8)?,
+        asked_by: r.get(9)?,
     })
 }
 
@@ -968,6 +1034,81 @@ mod tests {
             tool: "Bash".into(),
             call: call.into(),
         })
+    }
+
+    #[test]
+    fn an_always_granted_under_one_engine_is_still_in_force_under_the_other() {
+        // The allowlist is the app's, not an engine's, and the two engines name
+        // the same tool differently on the wire. Both are converted to the
+        // plain name before they reach here, so one row serves both and a yes
+        // given while Claude Code was answering still holds when a local model
+        // is. If this ever fails, somebody has started writing the prefixed
+        // name down and the window will show two entries for one permission.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.allow("a1", "ask", "").unwrap();
+
+        assert!(s
+            .already_allowed("a1", "ask", "Scribe: Draft a reply to Sarah.")
+            .unwrap());
+        assert!(s
+            .already_allowed("a1", "ask", "Somebody Else: anything at all")
+            .unwrap());
+        assert!(
+            !s.already_allowed("a1", "mcp__errand__ask", "Scribe: ...")
+                .unwrap(),
+            "the prefixed name reached the table, so there are now two of everything"
+        );
+    }
+
+    #[test]
+    fn an_agent_that_was_asked_by_somebody_can_see_who_is_already_waiting() {
+        // Two agents that each think the other should handle a job will hand it
+        // back and forth for ever, and every round costs a conversation, a
+        // process and ten minutes. This is what a hand-off is checked against.
+        let s = Store::in_memory().unwrap();
+        one(&s, "first", "/tmp/first");
+        s.begin("second", "Second", Path::new("/tmp/second"))
+            .unwrap();
+        s.begin("third", "Third", Path::new("/tmp/third")).unwrap();
+
+        // first asks second, second asks third.
+        s.begin_conversation_for("c2", "second", "Asked by First", Some("first"))
+            .unwrap();
+        s.begin_conversation_for("c3", "third", "Asked by Second", Some("c2"))
+            .unwrap();
+
+        assert_eq!(s.who_is_waiting("first").unwrap(), ["first"]);
+        assert_eq!(s.who_is_waiting("c2").unwrap(), ["second", "first"]);
+        assert_eq!(
+            s.who_is_waiting("c3").unwrap(),
+            ["third", "second", "first"],
+            "the whole chain, or a job can be handed back to somebody two steps up"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_conversation_was_asked_for_by_nobody() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        assert_eq!(s.conversation("a1").unwrap().unwrap().asked_by, None);
+        assert_eq!(s.who_is_waiting("a1").unwrap(), ["a1"]);
+    }
+
+    #[test]
+    fn a_chain_that_somehow_loops_stops_rather_than_following_it_for_ever() {
+        // Reading a chain out of rows is exactly the shape of thing that spins
+        // for ever if a row is ever wrong, and this walk happens on the path of
+        // every hand-off.
+        let s = Store::in_memory().unwrap();
+        s.begin("a", "A", Path::new("/tmp/a")).unwrap();
+        s.begin_conversation_for("one", "a", "One", Some("two"))
+            .unwrap();
+        s.begin_conversation_for("two", "a", "Two", Some("one"))
+            .unwrap();
+
+        let walked = s.who_is_waiting("one").unwrap();
+        assert!(walked.len() <= 12, "it followed the loop: {walked:?}");
     }
 
     #[test]
