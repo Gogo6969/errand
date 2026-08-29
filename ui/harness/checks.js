@@ -318,6 +318,74 @@ export function carryingOn() {
  * conversations somebody has opened, and a routine firing at seven on an agent
  * nobody has clicked is exactly the work worth being able to see.
  */
+/**
+ * Stopping says it stopped.
+ *
+ * A turn ends in the window when an ending arrives from the engine. Killing the
+ * engine means no ending ever arrives, so the conversation went on saying
+ * "Working" and offering to stop something that had stopped minutes ago. Seen
+ * on screen, after the same fault had already been fixed twice behind it.
+ */
+export async function stopping() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  const open = () =>
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  const ask = (what) => {
+    const typing = document.getElementById("palette-what");
+    typing.value = what;
+    typing.dispatchEvent(new Event("input"));
+  };
+  const offered = () => [...document.querySelectorAll("#palette-list li")].map((l) => l.textContent);
+
+  // Driven the way somebody drives it: send something, which is what makes a
+  // conversation working in the first place.
+  const what = document.getElementById("what");
+  what.value = "Count from 1 to 3000.";
+  what.dispatchEvent(new Event("input"));
+  document.getElementById("composer").dispatchEvent(new Event("submit", { cancelable: true }));
+  await new Promise((r) => setTimeout(r, 300));
+  check(
+    "sending something makes it working",
+    document.getElementById("threads").textContent.includes("Working"),
+    document.getElementById("threads").textContent.includes("Working") ? "Working" : "not working",
+  );
+
+  open();
+  ask("stop what");
+  await new Promise((r) => setTimeout(r, 150));
+  check(
+    "a conversation that is working can be stopped",
+    offered().some((l) => l.includes("Stop what it is doing")),
+    offered().join(" / ") || "nothing offered",
+  );
+
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await new Promise((r) => setTimeout(r, 300));
+
+  const stillSaysWorking = document.getElementById("threads").textContent.includes("Working");
+  const stillThinking = !!document.getElementById("messages").querySelector(".thinking");
+  check(
+    "it stops saying it is working",
+    !stillSaysWorking && !stillThinking,
+    [stillSaysWorking && "the list still says Working", stillThinking && "the dots are still there"]
+      .filter(Boolean)
+      .join(" and ") || "clear",
+  );
+
+  open();
+  ask("stop what");
+  await new Promise((r) => setTimeout(r, 150));
+  check(
+    "and stops offering to stop something that has stopped",
+    !offered().some((l) => l.includes("Stop what it is doing")),
+    offered().join(" / ") || "nothing offered",
+  );
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  return found;
+}
+
 export async function running() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });

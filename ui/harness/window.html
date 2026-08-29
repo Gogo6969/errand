@@ -78,13 +78,14 @@
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
 
-  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, whatItCanReach, dictation, watching } =
+  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, whatItCanReach, dictation, watching } =
     await import("./checks.js");
   const found = checks().concat(
     carryingOn(),
     palette(),
     await setupCheck(),
     await running(),
+    await stopping(),
     await whatItCanReach(),
     await dictation(),
     await watching(),

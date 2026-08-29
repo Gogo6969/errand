@@ -1573,7 +1573,24 @@ function whatCouldBeDone() {
       looksLike() !== how,
     );
   }
-  add("Stop what it is doing", "", () => invoke("stop", { id: showing }), !!t?.working);
+  add(
+    "Stop what it is doing",
+    "",
+    async () => {
+      const stopping = showing;
+      await invoke("stop", { id: stopping });
+      // Nothing else will say it stopped. A turn ends in the window when an
+      // ending arrives from the engine, and an engine that was killed never
+      // sends one, so without this the conversation goes on saying "Working"
+      // and offering to stop something that stopped minutes ago.
+      const talk = talks.get(stopping);
+      if (talk) talk.working = false;
+      if (showing === stopping) drawMessages();
+      drawThreads();
+      drawTalks();
+    },
+    !!t?.working,
+  );
   return could;
 }
 

@@ -950,6 +950,46 @@ impl Drop for Looking {
     }
 }
 
+/// A turn claimed for a conversation, so the clock does not start the same
+/// routine on top of itself.
+///
+/// Unlike looking, this is handed over rather than simply released: once a turn
+/// is really in flight the engine owns it and gives it back when the turn ends.
+/// What this guards is everything before that point. Starting used to be two
+/// fallible steps after the claim, each with a `?`, and either one failing left
+/// the conversation claimed for as long as the app stayed open. The clock then
+/// skipped that routine every morning afterwards and said nothing, which is the
+/// worst shape a bug can have here: a thing that quietly stops happening.
+struct Turn {
+    among: Arc<Mutex<std::collections::HashSet<String>>>,
+    id: String,
+    engine_has_it: bool,
+}
+
+impl Turn {
+    fn claim(among: Arc<Mutex<std::collections::HashSet<String>>>, id: String) -> Self {
+        among.lock().unwrap().insert(id.clone());
+        Self {
+            among,
+            id,
+            engine_has_it: false,
+        }
+    }
+
+    /// The engine is running this turn and will release it at the end of it.
+    fn handed_to_the_engine(mut self) {
+        self.engine_has_it = true;
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        if !self.engine_has_it {
+            self.among.lock().unwrap().remove(&self.id);
+        }
+    }
+}
+
 /// Look at everything that is due to be looked at.
 ///
 /// Rides on the clock that already ticks rather than bringing a second way of
@@ -1132,16 +1172,13 @@ async fn look_once(
             // Written down before anybody is woken, for the reason a routine's
             // last run is: if starting fails it has still had its turn, rather
             // than trying again every thirty seconds for the rest of the day.
-            {
+            let turn = {
                 let held: State<Held> = app.state();
                 held.store
                     .woke(conversation, &seen.mark, &seen.note, today)
                     .map_err(|e| e.to_string())?;
-                held.running
-                    .lock()
-                    .unwrap()
-                    .insert(conversation.to_string());
-            }
+                Turn::claim(held.running.clone(), conversation.to_string())
+            };
             say(
                 app.clone(),
                 app.state(),
@@ -1150,6 +1187,7 @@ async fn look_once(
                 None,
             )
             .await?;
+            turn.handed_to_the_engine();
             Ok(())
         }
     }
@@ -1649,10 +1687,10 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
         }
 
-        {
+        let turn = {
             let held: State<Held> = app.state();
-            held.running.lock().unwrap().insert(conversation.clone());
-        }
+            Turn::claim(held.running.clone(), conversation.clone())
+        };
         open_thread(app.clone(), app.state(), conversation.clone()).await?;
         let said = match late {
             false => what,
@@ -1663,6 +1701,7 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
         };
         // A routine says what it was set to say, and nothing else.
         say(app.clone(), app.state(), conversation, said, None).await?;
+        turn.handed_to_the_engine();
     }
     Ok(())
 }
@@ -2165,6 +2204,12 @@ async fn stop(held: State<'_, Held>, id: String) -> Result<(), String> {
     // The doorway goes with it. A socket that outlives the conversation behind
     // it is a way in to something that is no longer there.
     held.doorways.lock().unwrap().remove(&id);
+    // Nothing else will say the turn is over. The engine releases a turn when
+    // it reaches an ending, and a killed process never reaches one, so without
+    // this a stopped conversation stays "working" in the window forever and the
+    // clock quietly skips it every morning after.
+    held.running.lock().unwrap().remove(&id);
+    held.doing.lock().unwrap().remove(&id);
     if let Some(mut thread) = held.live.lock().unwrap().remove(&id) {
         thread.stop().map_err(|e| e.to_string())?;
     }
@@ -2175,6 +2220,8 @@ async fn stop(held: State<'_, Held>, id: String) -> Result<(), String> {
 #[tauri::command]
 async fn forget(held: State<'_, Held>, id: String) -> Result<(), String> {
     held.doorways.lock().unwrap().remove(&id);
+    held.running.lock().unwrap().remove(&id);
+    held.doing.lock().unwrap().remove(&id);
     if let Some(mut thread) = held.live.lock().unwrap().remove(&id) {
         let _ = thread.stop();
     }
@@ -2300,6 +2347,33 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_routine_that_fails_to_start_can_still_be_started_tomorrow() {
+        // The claim used to be made by hand and released only by the engine, so
+        // the two fallible steps between them each had a `?` that walked out
+        // holding it. The routine was then skipped every morning afterwards,
+        // silently, until the app was restarted.
+        let among: Arc<Mutex<std::collections::HashSet<String>>> = Arc::default();
+
+        let gave_up = Turn::claim(among.clone(), "morning-briefing".into());
+        assert!(among.lock().unwrap().contains("morning-briefing"));
+        drop(gave_up);
+        assert!(
+            among.lock().unwrap().is_empty(),
+            "a turn that never started is still claimed"
+        );
+
+        // A turn that really started belongs to the engine until the engine
+        // says otherwise, so dropping the guard must not release it: that would
+        // let the clock start the same routine on top of itself.
+        let started = Turn::claim(among.clone(), "morning-briefing".into());
+        started.handed_to_the_engine();
+        assert!(
+            among.lock().unwrap().contains("morning-briefing"),
+            "a turn in flight was released by the wrong thing"
+        );
+    }
 
     #[test]
     fn a_pasted_picture_and_a_dropped_one_arrive_the_same_way() {
