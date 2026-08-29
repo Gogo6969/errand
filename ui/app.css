@@ -188,6 +188,14 @@ main {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* The line that stops the header running off the side of the window.
+     `1fr` is `minmax(auto, 1fr)`, so this column cannot be narrower than its
+     own content's smallest possible width. A header that will not wrap has a
+     large one, so the column grew past the window, the body clipped the
+     overflow, and the last buttons in the row were simply not on screen -- with
+     no scrollbar and nothing to say they existed. `min-width: 0` lets the
+     column be the width it was given, and the row inside it shrink to fit. */
+  min-width: 0;
 }
 main > #messages { flex: 1 1 auto; }
 main > aside, main > #title, main > #composer { flex: none; }
@@ -216,7 +224,7 @@ main > aside, main > #title, main > #composer { flex: none; }
 /* Below this there is genuinely not room, and wrapping is the least bad thing
    left: a second row is readable, and a button squeezed past the edge is not
    there at all. */
-@media (max-width: 900px) {
+@media (max-width: 700px) {
   #title { flex-wrap: wrap; }
 }
 #title .tile,
@@ -231,6 +239,10 @@ main > aside, main > #title, main > #composer { flex: none; }
 #thread-name {
   font-weight: 600;
   flex: 0 1 auto;
+  /* An agent that has not settled on a name is called by its first errand,
+     which is a whole sentence and was taking 236px of a row that has eight
+     other things in it. */
+  max-width: 190px;
   min-width: 3ch;
   overflow: hidden;
   text-overflow: ellipsis;

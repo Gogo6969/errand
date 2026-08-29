@@ -1,0 +1,129 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Errand window, under test</title>
+<link rel="stylesheet" href="../app.css">
+<style>
+  /* The report sits over the window it is reporting on. */
+  #report { position: fixed; inset: auto 0 0 0; max-height: 45vh; overflow: auto;
+            background: #0c0e12; border-top: 2px solid #e8a850; padding: 10px 14px;
+            font: 12px/1.6 ui-monospace, Menlo, monospace; z-index: 9999; }
+  #report .ok { color: #7fd07a; }
+  #report .no { color: #f0857d; }
+  #report h1 { font-size: 13px; margin: 0 0 6px; color: #e6e8ec; }
+</style>
+</head>
+<body>
+
+    <!--
+      No framework and no build step, on purpose. This window is a list of
+      threads, a list of messages and a box to type in; a toolchain to render
+      that is a toolchain to keep working, and it would mean the app could not
+      be built without node. When it earns one it can have one.
+    -->
+    <aside id="side">
+      <header>
+        <input
+          id="find"
+          type="search"
+          placeholder="Search"
+          autocomplete="off"
+          aria-label="Search every errand"
+        />
+        <button id="new" title="Start something new">+</button>
+      </header>
+      <ol id="threads"></ol>
+      <footer id="who">Errand</footer>
+    </aside>
+
+    <main>
+      <header id="title">
+        <span id="mark"></span>
+        <button id="thread-name" type="button" title="Who this is">Nothing open</button>
+        <button id="pin" type="button" title="Keep at the top">Pin</button>
+        <button id="hide" type="button" title="Out of the way, still running">Hide</button>
+        <select id="talks" title="Which conversation"></select>
+        <select id="engine" title="What answers this agent"></select>
+        <button id="repeat" type="button" title="Make this run on a schedule">Repeat</button>
+        <button id="granted" type="button" title="What it may do without asking">Allowed</button>
+        <button id="reach" type="button" title="What this thread can reach">Tools</button>
+        <!-- Only while the network is being swept, which takes seconds. -->
+        <span id="sweeping" hidden aria-label="Looking on the network"></span>
+      </header>
+
+      <!--
+        What the thread can reach, opened rather than always on screen: finding
+        out means starting the servers to ask them, which takes seconds.
+      -->
+      <!-- Who this agent is, and a way to overrule what it decided. -->
+      <aside id="whois" hidden>
+        <label>Name <input id="whois-name" type="text" autocomplete="off" /></label>
+        <label>Role <input id="whois-title" type="text" autocomplete="off" /></label>
+        <label>Handles <input id="whois-about" type="text" autocomplete="off" /></label>
+        <button id="whois-save" type="button">Save</button>
+      </aside>
+
+      <!-- A conversation that runs itself. -->
+      <aside id="routine" hidden>
+        <label>When <input id="routine-at" type="text" placeholder="daily 07:00" autocomplete="off" /></label>
+        <label>Do this <input id="routine-what" type="text" placeholder="What it should do each time" autocomplete="off" /></label>
+        <button id="routine-save" type="button">Save</button>
+        <button id="routine-stop" type="button">Stop repeating</button>
+        <p id="routine-says"></p>
+      </aside>
+
+      <!-- What this agent may do, and how much it asks first. -->
+      <aside id="granting" hidden>
+        <label>Asks
+          <select id="asks">
+            <option value="ask">Before anything that changes something</option>
+            <option value="edits">Before anything but writing files</option>
+            <option value="auto">Never</option>
+          </select>
+        </label>
+        <ul id="allowed"></ul>
+      </aside>
+
+      <aside id="reachable" hidden></aside>
+
+      <ol id="messages" aria-live="polite"></ol>
+
+      <form id="composer">
+        <textarea
+          id="what"
+          rows="1"
+          placeholder="What would you like done?"
+          autocomplete="off"
+        ></textarea>
+        <button id="send" type="submit" title="Send">↑</button>
+      </form>
+    </main>
+
+    
+<pre id="report">running…</pre>
+<script type="module">
+  import { standIn } from "./harness.js";
+  // `?slow` makes opening a conversation take as long as it really does when
+  // an engine has to be started behind it.
+  const slow = new URLSearchParams(location.search).has("slow");
+  window.__TAURI__ = standIn(undefined, {}, slow ? { open_thread: 3000 } : {});
+  await import("../app.js");
+  // The page starts itself; give its opening round of awaits a moment to land.
+  await new Promise((r) => setTimeout(r, 400));
+  const { checks, headerFitsOnOneRow } = await import("./checks.js");
+  const found = checks();
+  const header = headerFitsOnOneRow();
+  found.push({ what: "everything in the header is on one row",
+               ok: header.rows === 1, saw: `${header.rows} row(s)` });
+  found.push({ what: "Tools is inside the header rather than past its edge",
+               ok: header.toolsInside, saw: String(header.toolsInside) });
+
+  const failed = found.filter((f) => !f.ok);
+  document.getElementById("report").innerHTML =
+    `<h1>${failed.length ? failed.length + " FAILED" : "all " + found.length + " passed"}</h1>` +
+    found.map((f) => `<span class="${f.ok ? "ok" : "no"}">${f.ok ? "PASS" : "FAIL"}</span>  ${f.what}  <em>(${f.saw})</em>`).join("\n");
+  window.__RESULT__ = { passed: found.length - failed.length, failed: failed.length, found };
+</script>
+</body>
+</html>

@@ -340,10 +340,13 @@ async function show(id) {
     t.messages = (await invoke("lines", { id })).map(fromStore);
     t.loaded = true;
   }
-  // Reopening is what makes it a conversation rather than a transcript: the
-  // engine is handed back its own memory of this one, not just our copy of it.
-  await invoke("open_thread", { id });
 
+  // Drawn from what is already known, before anything slow is started. This
+  // used to wait on `open_thread` first, which was harmless while that only
+  // read a row and became the whole window when it grew to start an engine and
+  // bind a socket: for those seconds the header said "Nothing open", both
+  // pickers were empty, and nothing anywhere said why. A window must never wait
+  // on a subprocess to say what it already knows.
   const a = whose();
   el.whois.hidden = true;
   el.routine.hidden = true;
@@ -357,6 +360,12 @@ async function show(id) {
   drawTalks();
   drawThreads();
   drawMessages();
+
+  // Reopening is what makes it a conversation rather than a transcript: the
+  // engine is handed back its own memory of this one, not just our copy of it.
+  // Started after the drawing and not waited on, because nothing on screen
+  // depends on it -- but its failure is still somebody's to see.
+  invoke("open_thread", { id }).catch((why) => complain(String(why)));
 }
 
 /**
