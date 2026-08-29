@@ -176,7 +176,21 @@ body { display: grid; grid-template-columns: 232px 1fr; }
 
 /* ------------------------------------------------------------- thread --- */
 
-main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
+/* A column rather than three named rows. It was a grid of exactly three rows
+   and there are seven children: the moment any panel is opened it becomes the
+   second child, takes the row that was meant for the conversation, and the
+   conversation falls to whatever height its content happens to be. What that
+   looked like was a panel squashed against the messages underneath it, both of
+   them fighting for the same space and neither readable.
+   A column has no such assumption: panels take the height they need, and the
+   conversation takes the rest however many of them are open. */
+main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+main > #messages { flex: 1 1 auto; }
+main > aside, main > #title, main > #composer { flex: none; }
 
 /* The row of everything you can do to the agent that is open.
    It has to hold at the window's own width. It did not: the name and the two
@@ -189,9 +203,21 @@ main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
   padding: 30px 18px 12px;
   border-bottom: 1px solid var(--rule);
   display: flex;
-  flex-wrap: wrap;
+  /* Not wrapping, and that is the whole of the fix. A wrapping flex line does
+     not shrink its items to avoid breaking -- it breaks first, and shrinking
+     only ever happens inside a line that is already too long. So every
+     give-way rule below was dead, and the row broke with the last button on it
+     alone. Holding the line is what makes them apply. */
+  flex-wrap: nowrap;
   align-items: center;
   gap: 10px 8px;
+}
+
+/* Below this there is genuinely not room, and wrapping is the least bad thing
+   left: a second row is readable, and a button squeezed past the edge is not
+   there at all. */
+@media (max-width: 900px) {
+  #title { flex-wrap: wrap; }
 }
 #title .tile,
 #pin,
@@ -214,7 +240,30 @@ main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
 /* The pickers give way second. Their widths are set where they are styled,
    further down: a second max-width here loses to that one and looks for all
    the world like it is not applying. */
-#talks, #engine { flex: 0 1 auto; min-width: 0; }
+/* Sharing what is left after everything that cannot shrink, and never below
+   the point where the chevron has nothing to sit beside. */
+#talks, #engine { flex: 0 1 auto; min-width: 62px; }
+
+/* Something turning, because a sweep of the network takes seconds and a picker
+   that has merely gone grey for five of them is indistinguishable from one
+   that has broken. */
+#sweeping[hidden] { display: none; }
+#sweeping {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid var(--rule);
+  border-top-color: var(--accent);
+  animation: turning .7s linear infinite;
+}
+@keyframes turning { to { transform: rotate(360deg); } }
+/* Somebody who has asked not to be shown movement still needs to know it is
+   working, so it pulses rather than spins. */
+@media (prefers-reduced-motion: reduce) {
+  #sweeping { animation: breathing 1.4s ease-in-out infinite; }
+  @keyframes breathing { 50% { opacity: .25; } }
+}
 
 #messages {
   list-style: none;
@@ -616,7 +665,8 @@ body.catching #what { border-color: var(--accent); }
 }
 .server-what {
   margin: 3px 0 0;
-  font-size: 12.5px;
+  font-size: 13px;
+  line-height: 1.5;
   color: var(--ink-soft);
   overflow-wrap: anywhere;
 }

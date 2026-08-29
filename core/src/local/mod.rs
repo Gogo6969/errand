@@ -21,6 +21,7 @@
 //! afternoon as a hosted one, and it goes through the same card.
 
 pub mod find;
+pub mod ready;
 pub mod stream;
 pub mod talk;
 pub mod tokens;

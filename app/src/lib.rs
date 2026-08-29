@@ -587,7 +587,19 @@ async fn engines(wider: Option<bool>) -> Result<Vec<Choice>, String> {
         .collect();
 
     for found in found {
-        for model in found.models {
+        // What it lists and what it can answer with are not the same thing. A
+        // server names everything it has downloaded, which on a network with a
+        // few machines on it is twenty entries, most unloaded and at least one
+        // an embedding model that cannot hold a conversation at all.
+        let usable = errand_core::local::ready::what_can_answer(
+            &found.provider,
+            &found.base_url,
+            &found.models,
+        )
+        .await;
+
+        for ready in usable {
+            let model = ready.model;
             // Asked rather than assumed. The window is what every budget in the
             // engine is worked out from -- how much conversation fits, how many
             // tools are worth putting in front of it -- and a default guess of
@@ -612,9 +624,19 @@ async fn engines(wider: Option<bool>) -> Result<Vec<Choice>, String> {
                 // Where it is, when it is not here. Two machines on a network
                 // running the same model are the same line otherwise, and
                 // choosing between them becomes guesswork.
-                name: match elsewhere(&found.base_url) {
-                    Some(host) => format!("{model} · {} on {host}", found.label),
-                    None => format!("{model} · {}", found.label),
+                name: {
+                    let where_it_is = match elsewhere(&found.base_url) {
+                        Some(host) => format!("{} on {host}", found.label),
+                        None => found.label.clone(),
+                    };
+                    match ready.loaded {
+                        true => format!("{model} · {where_it_is}"),
+                        // Said rather than hidden. Both servers load on demand,
+                        // so this one works; it just keeps you waiting the
+                        // first time, and that is worth knowing before you
+                        // choose it rather than after.
+                        false => format!("{model} · {where_it_is} · needs loading"),
+                    }
                 },
                 settings: serde_json::to_string(&settings).ok(),
             });

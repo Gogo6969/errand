@@ -53,6 +53,7 @@ const el = {
   messages: document.getElementById("messages"),
   name: document.getElementById("thread-name"),
   engine: document.getElementById("engine"),
+  sweeping: document.getElementById("sweeping"),
   what: document.getElementById("what"),
   send: document.getElementById("send"),
   form: document.getElementById("composer"),
@@ -133,6 +134,11 @@ async function lookWider(a) {
   const was = el.engine.value;
   const hereBefore = (couldAnswer || []).filter((c) => c.engine === "local").length;
   el.engine.disabled = true;
+  // Beside the picker rather than inside it. A closed select shows only the
+  // line that is selected, so changing an option's words says nothing at all
+  // until somebody opens it again -- and a select that has merely gone grey
+  // for five seconds reads as one that has stopped working.
+  el.sweeping.hidden = false;
   const saying = el.engine.options[el.engine.selectedIndex];
   if (saying) saying.textContent = "Looking on the network…";
 
@@ -142,10 +148,12 @@ async function lookWider(a) {
     couldAnswer = null;
     if (saying) saying.textContent = String(why);
     el.engine.disabled = false;
+    el.sweeping.hidden = true;
     return;
   }
 
   el.engine.disabled = false;
+  el.sweeping.hidden = true;
   const found = couldAnswer.filter((c) => c.engine === "local").length - hereBefore;
   await drawEngines(a);
   // Nothing was chosen, only looked for, so the agent stays on what it was on.
