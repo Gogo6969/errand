@@ -92,6 +92,7 @@ const el = {
   sweeping: document.getElementById("sweeping"),
   checkup: document.getElementById("checkup"),
   working: document.getElementById("working"),
+  speak: document.getElementById("speak"),
   attached: document.getElementById("attached"),
   palette: document.getElementById("palette"),
   paletteWhat: document.getElementById("palette-what"),
@@ -1689,6 +1690,11 @@ async function checkup() {
     return;
   }
 
+  // What only the window can answer. The app can see the machine; it cannot
+  // see what this particular webview will let a page do, and the two together
+  // are what somebody means by "is this set up right".
+  found = found.concat(whatThisWindowCanDo());
+
   const wrong = found.filter((f) => f.how !== "fine").length;
   el.checkup.replaceChildren(
     note(
@@ -1828,3 +1834,152 @@ async function whatsRunning() {
     }),
   );
 }
+
+
+/**
+ * What only the window can answer about this setup.
+ *
+ * The app knows about the machine. It cannot know what this particular webview
+ * will let a page do, and a capability that is quietly missing here looks from
+ * the outside like a feature nobody built.
+ */
+function whatThisWindowCanDo() {
+  const found = [];
+  const say = (what, how, said, fix = "") => found.push({ what, how, said, fix });
+
+  const listens = window.SpeechRecognition || window.webkitSpeechRecognition;
+  say(
+    "Dictation",
+    listens ? "fine" : "odd",
+    listens
+      ? "this window can turn speech into words"
+      : "this window cannot turn speech into words",
+    listens
+      ? ""
+      : "Dictating an errand is not available here. macOS dictation still works: " +
+        "put the cursor in the box and press the dictation key.",
+  );
+
+  const hears = !!navigator.mediaDevices?.getUserMedia;
+  say(
+    "Microphone",
+    hears ? "fine" : "odd",
+    hears ? "this window may ask for it" : "this window cannot ask for it",
+    hears ? "" : "Anything needing the microphone will not work.",
+  );
+
+  const remembers = (() => {
+    try {
+      localStorage.setItem("probe", "1");
+      localStorage.removeItem("probe");
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  say(
+    "Remembering how you like it",
+    remembers ? "fine" : "odd",
+    remembers ? "kept between launches" : "cannot be kept",
+    remembers ? "" : "The light or dark choice will go back to following the Mac each time.",
+  );
+
+  return found;
+}
+
+
+/* -------------------------------------------------------------- speak -- */
+
+/**
+ * Dictating an errand instead of typing it.
+ *
+ * An errand is a thing you hand over and walk away from, and saying one out
+ * loud suits that better than typing it does. This window can turn speech into
+ * words, which is not true of every webview, so the button is not there at all
+ * where it would do nothing: a control that silently fails is worse than one
+ * that is absent, and the setup check says why it is absent.
+ *
+ * What is heard goes into the box rather than being sent. Speech recognition
+ * mishears, and sending on silence would mean an errand nobody read leaving
+ * before it could be corrected.
+ */
+const Listening = window.SpeechRecognition || window.webkitSpeechRecognition;
+let ears = null;
+
+if (Listening) {
+  el.speak.hidden = false;
+  el.speak.setAttribute("aria-pressed", "false");
+}
+
+function stopListening() {
+  if (!ears) return;
+  const going = ears;
+  ears = null;
+  el.speak.setAttribute("aria-pressed", "false");
+  try {
+    going.stop();
+  } catch {
+    // Already stopped, which is the thing we wanted.
+  }
+}
+
+el.speak.addEventListener("click", () => {
+  if (ears) {
+    stopListening();
+    el.what.focus();
+    return;
+  }
+
+  const hearing = new Listening();
+  hearing.continuous = true;
+  hearing.interimResults = true;
+  // The language the Mac is set to, because an errand is dictated in whatever
+  // somebody actually speaks and the default is not always that.
+  hearing.lang = navigator.language || "en-US";
+
+  // What was in the box before, kept whole. Dictation adds to what somebody
+  // has typed rather than replacing it, so half a typed errand can be
+  // finished out loud.
+  const already = el.what.value;
+  let settled = "";
+
+  hearing.onresult = (e) => {
+    let saying = "";
+    for (let i = e.resultIndex; i < e.results.length; i += 1) {
+      const heard = e.results[i][0].transcript;
+      if (e.results[i].isFinal) settled += heard;
+      else saying += heard;
+    }
+    // The unsettled part is shown too, so a long sentence looks like it is
+    // being heard rather than like nothing is happening.
+    const joined = [already.trim(), (settled + saying).trim()].filter(Boolean).join(" ");
+    el.what.value = joined;
+    el.what.dispatchEvent(new Event("input"));
+  };
+
+  // Any of these means it has stopped, whether or not anybody asked it to.
+  hearing.onend = stopListening;
+  hearing.onerror = (e) => {
+    stopListening();
+    // The one worth saying out loud: a refusal is permanent until somebody
+    // changes it in System Settings, and it looks exactly like a broken button.
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      complain(
+        "Errand was not allowed to use the microphone. Turn it on for Errand in " +
+          "System Settings, under Privacy and Security.",
+      );
+    }
+  };
+
+  try {
+    hearing.start();
+    ears = hearing;
+    el.speak.setAttribute("aria-pressed", "true");
+  } catch (why) {
+    complain(String(why));
+  }
+});
+
+// Sending ends the dictation. Carrying on listening into the next errand is
+// how somebody ends up dictating a reply they meant to think about.
+el.form.addEventListener("submit", stopListening);

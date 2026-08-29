@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  What macOS has to be told before it will let this app ask.
+
+  A usage string is not a nicety: without one the system refuses the request
+  outright rather than showing anybody a prompt, so the feature fails in a way
+  that looks like a bug in the app. Both strings are here because dictation
+  needs both -- the microphone to hear, and speech recognition to turn what it
+  heard into words.
+-->
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Errand uses the microphone when you dictate an errand instead of typing it.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Errand turns what you dictate into the words of an errand.</string>
+</dict>
+</plist>

@@ -32,6 +32,41 @@
   real.body.querySelectorAll("script").forEach((s) => s.remove());
   document.body.replaceChildren(...real.body.children, report);
 
+  // A stand-in for the thing that listens, so dictation can be exercised
+  // without anybody's microphone being turned on. The real one is a browser
+  // capability; what is being tested is what this page does with it.
+  window.__HEARD__ = [];
+  // Both names, and the unprefixed one especially: a real browser has it, the
+  // page prefers it, and without this the harness quietly drives the browser's
+  // own recogniser and asks for a microphone nobody wanted turned on.
+  window.SpeechRecognition = window.webkitSpeechRecognition = class {
+    constructor() {
+      this.continuous = false;
+      this.interimResults = false;
+      this.lang = "";
+    }
+    start() {
+      window.__HEARD__.push("start");
+      // Answer the way a real one does: an unsettled guess, then the words.
+      setTimeout(() => {
+        this.onresult?.({
+          resultIndex: 0,
+          results: [Object.assign([{ transcript: "check the" }], { isFinal: false })],
+        });
+        this.onresult?.({
+          resultIndex: 0,
+          results: [
+            Object.assign([{ transcript: "check the invoices" }], { isFinal: true }),
+          ],
+        });
+      }, 10);
+    }
+    stop() {
+      window.__HEARD__.push("stop");
+      this.onend?.();
+    }
+  };
+
   const { standIn } = await import("./harness.js");
   // `?slow` makes opening a conversation take as long as it really does when
   // an engine has to start behind it. That switch is what reproduced a window
@@ -43,7 +78,7 @@
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
 
-  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, whatItCanReach } =
+  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, whatItCanReach, dictation } =
     await import("./checks.js");
   const found = checks().concat(
     carryingOn(),
@@ -51,6 +86,7 @@
     await setupCheck(),
     await running(),
     await whatItCanReach(),
+    await dictation(),
     themes(),
   );
   const header = headerFitsOnOneRow();

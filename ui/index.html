@@ -110,6 +110,20 @@
           placeholder="What would you like done?"
           autocomplete="off"
         ></textarea>
+        <!--
+          Hidden until the window is asked whether it can hear, because a mic
+          that does nothing is worse than no mic at all.
+        -->
+        <button id="speak" type="button" hidden title="Dictate instead of typing"
+                aria-label="Dictate instead of typing">
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+            <path d="M8 1.6a2 2 0 0 1 2 2v4.2a2 2 0 1 1-4 0V3.6a2 2 0 0 1 2-2Z"
+                  fill="currentColor"/>
+            <path d="M3.6 7.4v.6a4.4 4.4 0 0 0 8.8 0v-.6M8 12.4v2"
+                  fill="none" stroke="currentColor" stroke-width="1.4"
+                  stroke-linecap="round"/>
+          </svg>
+        </button>
         <button id="send" type="submit" title="Send">↑</button>
       </form>
     </main>

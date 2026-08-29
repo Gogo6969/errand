@@ -153,10 +153,18 @@ export async function setupCheck() {
   await new Promise((r) => setTimeout(r, 250));
 
   check("running it opens the panel", !panel.hidden, `hidden=${panel.hidden}`);
+  // Three from the app and three the window answers for itself, and the count
+  // has to be of all of them: a check that reported only half the setup would
+  // be a check somebody trusted for the wrong half.
   check(
-    "it counts what wants attention rather than only listing everything",
-    panel.textContent.includes("2 of 3"),
-    panel.textContent.slice(0, 60),
+    "it counts everything it checked, including what only the window can answer",
+    /2 of 6 things want attention/.test(panel.textContent),
+    panel.textContent.slice(0, 70),
+  );
+  check(
+    "it says what this window itself can and cannot do",
+    ["Dictation", "Microphone", "Remembering"].every((w) => panel.textContent.includes(w)),
+    panel.textContent.slice(0, 140),
   );
   check(
     "something broken says what to do about it",
@@ -374,6 +382,52 @@ export async function whatItCanReach() {
 
   document.getElementById("reach").click();
   check("clicking again closes it", panel.hidden, `hidden=${panel.hidden}`);
+  return found;
+}
+
+/**
+ * Dictating an errand instead of typing it.
+ *
+ * Exercised against a stand-in, so no microphone is ever turned on. What is
+ * being checked is what the page does with what it hears, not whether the
+ * machine can hear.
+ */
+export async function dictation() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const speak = document.getElementById("speak");
+  const box = document.getElementById("what");
+
+  check("there is a way to dictate where the window can hear", !speak.hidden, `hidden=${speak.hidden}`);
+  check("it does not look like it is listening before it is", speak.getAttribute("aria-pressed") === "false", speak.getAttribute("aria-pressed"));
+
+  // Half an errand typed, to be finished out loud.
+  box.value = "Tomorrow morning,";
+  speak.click();
+  check("clicking it starts listening", window.__HEARD__.includes("start"), window.__HEARD__.join(","));
+  check(
+    "it looks unmistakably like it is listening",
+    speak.getAttribute("aria-pressed") === "true",
+    speak.getAttribute("aria-pressed"),
+  );
+
+  await new Promise((r) => setTimeout(r, 60));
+  check(
+    "what it heard is added to what was already typed, not put over it",
+    box.value === "Tomorrow morning, check the invoices",
+    box.value,
+  );
+  check(
+    "nothing was sent",
+    !document.getElementById("messages").textContent.includes("check the invoices"),
+    "not sent",
+  );
+
+  speak.click();
+  check("clicking again stops it", window.__HEARD__.includes("stop"), window.__HEARD__.join(","));
+  check("it stops looking like it is listening", speak.getAttribute("aria-pressed") === "false", speak.getAttribute("aria-pressed"));
+
+  box.value = "";
   return found;
 }
 

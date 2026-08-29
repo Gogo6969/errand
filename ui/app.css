@@ -1206,3 +1206,39 @@ body.catching #what { border-color: var(--accent); }
 /* Stopped for somebody is not the same as busy, and it is the only kind that
    will not finish on its own. */
 #working .one[data-waiting="true"] .who { color: var(--accent); }
+
+/* ------------------------------------------------------------ speak -- */
+
+/* Dictating instead of typing. Beside the box rather than in it, because it
+   does the same job as the box and not a job to the box. */
+#speak[hidden] { display: none; }
+#speak {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  align-self: flex-end;
+  margin-bottom: 3px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--rule);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+#speak:hover { color: var(--ink); border-color: var(--edge); }
+/* Listening has to be unmistakable. A microphone that is on and does not look
+   on is the one state where somebody would keep talking into nothing, or
+   worse, keep talking having forgotten it is. */
+#speak[aria-pressed="true"] {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+  animation: listening 1.6s ease-in-out infinite;
+}
+@keyframes listening {
+  50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 28%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #speak[aria-pressed="true"] { animation: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 34%, transparent); }
+}
