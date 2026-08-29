@@ -306,10 +306,23 @@ async fn engines() -> Result<Vec<Choice>, String> {
     }];
     for found in find::detect_all().await {
         for model in found.models {
+            // Asked rather than assumed. The window is what every budget in the
+            // engine is worked out from -- how much conversation fits, how many
+            // tools are worth putting in front of it -- and a default guess of
+            // 32k is wrong in both directions: it starves a model with 128k and
+            // overfills one with 8k. Where the server will not say, the default
+            // stands, which is the only honest thing left to do.
+            let asked = find::query_model_caps(&found.provider, &found.base_url, None, &model)
+                .await
+                .ok()
+                .and_then(|caps| caps.context_length)
+                .map(|n| n as usize);
+
             let settings = LlmSettings {
                 provider: found.provider.clone(),
                 base_url: found.base_url.clone(),
                 model: model.clone(),
+                context_window: asked.unwrap_or(LlmSettings::default().context_window),
                 ..Default::default()
             };
             all.push(Choice {

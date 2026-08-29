@@ -23,6 +23,7 @@
 pub mod find;
 pub mod stream;
 pub mod talk;
+pub mod tokens;
 pub mod tools;
 
 mod loops;
@@ -103,6 +104,18 @@ pub enum ChatMessage {
         content: String,
         tool_call_id: String,
     },
+}
+
+impl ChatMessage {
+    /// What was said, whoever said it.
+    pub fn content(&self) -> &str {
+        match self {
+            ChatMessage::System { content } => content,
+            ChatMessage::User { content, .. } => content,
+            ChatMessage::Assistant { content, .. } => content,
+            ChatMessage::Tool { content, .. } => content,
+        }
+    }
 }
 
 /// A tool call as it goes back into the conversation.

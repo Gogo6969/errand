@@ -389,6 +389,13 @@ impl Servers {
         servers
     }
 
+    /// Add a tool without a server behind it, for tests that are about what is
+    /// offered rather than about talking to anything.
+    #[doc(hidden)]
+    pub fn add_for_testing(&mut self, tool: Tool) {
+        self.tools.push(tool);
+    }
+
     /// Everything on offer.
     pub fn tools(&self) -> &[Tool] {
         &self.tools

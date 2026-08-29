@@ -22,6 +22,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use super::talk::LlmClient;
+use super::tokens;
 use super::tools;
 use super::{ChatMessage, LlmSettings, ToolCall, ToolDef};
 use crate::engine::{Answer, Engine, Event, NeedsYou, Step};
@@ -34,12 +35,29 @@ use crate::mcp;
 /// and the only symptom is a thread that never ends.
 const ENOUGH: usize = 24;
 
-/// How many outside tools to put in front of the model without being asked.
+/// The share of the context window that tool schemas may never exceed.
 ///
-/// Enough that an obvious job has its obvious tool to hand, few enough that the
-/// schemas stay affordable. Five of peekaboo's is about twelve thousand bytes
-/// against sixty-four for all of them.
-const LIKELY: usize = 5;
+/// A ceiling, not a target. The rest of the window belongs to the conversation,
+/// which is what somebody is actually having, and tools crowding that out is
+/// the failure this exists to prevent.
+const TOOLS_MAY_TAKE: usize = 4;
+
+/// Roughly how many tokens of window buy one speculative tool.
+///
+/// The second bound, and the one that turned out to matter. Filling the whole
+/// allowance is affordable and slow: on a 32k model the share alone took
+/// twenty-one tools and nine thousand tokens of schema, and the answer went
+/// from nineteen seconds to fifty-three for tools that were never called.
+///
+/// Cost is linear in tokens and benefit is not: the search puts the likeliest
+/// tool first, so the second is worth less than the first and the twentieth is
+/// worth almost nothing. This buys a few more on a model with room for them
+/// without paying for a long tail nobody uses.
+const PER_SPECULATION: usize = 4_000;
+
+/// Never fewer than this, or a small model gets nothing to work with, and never
+/// more, because past a handful the search has already been right or wrong.
+const SPECULATION: std::ops::RangeInclusive<usize> = 3..=12;
 
 /// A conversation with a model running on this machine.
 pub struct Local {
@@ -149,10 +167,10 @@ async fn conversation(
         // the first round. It is the same search either way, done by the thing
         // that already knows what was asked.
         //
-        // Deliberately a few, not all: the whole point is not to be back at
-        // sixty-four thousand bytes of schemas per request.
-        for tool in outside.matching(&said, LIKELY) {
-            loaded.insert(tool.called.clone());
+        // As many as fit rather than a fixed few: what fits depends on the
+        // model, and a number chosen for one is wrong for every other.
+        for called in as_many_as_fit(&client.settings, &outside, &said, &history) {
+            loaded.insert(called);
         }
 
         history.push(ChatMessage::User {
@@ -245,25 +263,39 @@ async fn errand(
         // for, and never the contents of a message, only their shape.
         if std::env::var("ERRAND_TRACE").is_ok() {
             eprintln!(
-                "round {round}: {} tools ({}), {} messages, {} bytes of instruction",
+                "round {round}: {} tools ({}), {} messages, {} tokens of schema",
                 defs.len(),
                 defs.iter()
                     .map(|d| d.name.as_str())
                     .collect::<Vec<_>>()
                     .join(", "),
                 history.len(),
-                history
-                    .iter()
-                    .map(|m| match m {
-                        ChatMessage::System { content } => content.len(),
-                        _ => 0,
-                    })
-                    .sum::<usize>(),
+                tokens_in(&defs),
             );
         }
 
+        // Trimmed to fit, on a copy, every round.
+        //
+        // Without this a long errand simply stops working: tool results are the
+        // biggest things in a conversation and there is no warning before the
+        // window is full, only a request that fails or an answer that ignores
+        // the beginning. The guard drops the oldest turns and never the
+        // instructions or the thing just asked.
+        //
+        // A copy because `history` is the conversation, and dropping a turn to
+        // make one request fit is not a reason to forget it happened.
+        let mut asking = history.clone();
+        tokens::trim_to_fit(
+            &mut asking,
+            client
+                .settings
+                .context_window
+                .saturating_sub(client.settings.max_tokens)
+                .saturating_sub(tokens_in(&defs)),
+        );
+
         let cancel = CancellationToken::new();
-        let mut stream = client.stream(history, &defs, None, cancel).await?;
+        let mut stream = client.stream(&asking, &defs, None, cancel).await?;
 
         let mut wrote = String::new();
         let mut wants: Vec<super::stream::ToolCallAccum> = Vec::new();
@@ -486,6 +518,60 @@ async fn wait_for_an_answer(
     }
 }
 
+/// What the tool declarations cost, in the model's own units.
+fn tokens_in(defs: &[ToolDef]) -> usize {
+    defs.iter()
+        .map(|d| tokens::count_tokens(&d.schema.to_string()))
+        .sum()
+}
+
+/// The tools worth putting in front of the model for this request.
+///
+/// Best matches first, taken while they fit. What fits is worked out from the
+/// model's own context window rather than guessed: whatever is left after the
+/// reply is reserved and the conversation so far is accounted for, capped at a
+/// share of the window so that tools can never crowd out the conversation.
+///
+/// Counted with a real tokenizer rather than by dividing bytes by four. The
+/// difference is not academic for JSON Schema, which is mostly punctuation and
+/// short keys and tokenizes far worse than prose.
+fn as_many_as_fit(
+    settings: &LlmSettings,
+    outside: &mcp::Servers,
+    said: &str,
+    history: &[ChatMessage],
+) -> Vec<String> {
+    let reserved_for_the_reply = settings.max_tokens;
+    let already_used = tokens::estimate_messages(history) + tokens::count_tokens(said);
+    let left = settings
+        .context_window
+        .saturating_sub(reserved_for_the_reply)
+        .saturating_sub(already_used);
+
+    let mut room = left.min(settings.context_window / TOOLS_MAY_TAKE);
+    let most =
+        (settings.context_window / PER_SPECULATION).clamp(*SPECULATION.start(), *SPECULATION.end());
+
+    let mut taking = Vec::new();
+    // Every tool there is, in match order, so a long conversation still gets
+    // the best one it can afford rather than the first alphabetically.
+    for tool in outside.matching(said, usize::MAX) {
+        if taking.len() >= most {
+            break;
+        }
+        let costs =
+            tokens::count_tokens(&tool.description) + tokens::count_tokens(&tool.takes.to_string());
+        if costs > room {
+            // Not `break`: a small tool after a large one is still worth
+            // having, and the large one is what did not fit.
+            continue;
+        }
+        room -= costs;
+        taking.push(tool.called.clone());
+    }
+    taking
+}
+
 /// Answer a lookup, and make what it found available.
 ///
 /// The reply is what the model needs to decide, and no more: names and the one
@@ -497,6 +583,9 @@ fn look_up(
     loaded: &mut HashSet<String>,
     args: &serde_json::Value,
 ) -> String {
+    // A handful, because this is a list for a model to read and choose from
+    // rather than everything it could afford. The budget is what bounds how
+    // much is actually sent; this bounds how much is worth reading.
     const AT_A_TIME: usize = 5;
     let needing = args
         .get("needing")
@@ -608,6 +697,138 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server offering tools whose schemas cost roughly `each` tokens.
+    fn offering(count: usize, each: usize) -> mcp::Servers {
+        let mut servers = mcp::Servers::default();
+        for i in 0..count {
+            servers.add_for_testing(mcp::Tool {
+                called: format!("mcp__pretend__tool_{i}"),
+                own_name: format!("tool_{i}"),
+                server: "pretend".into(),
+                description: format!("Take a screenshot. {}", "padding ".repeat(each / 2)),
+                takes: serde_json::json!({ "type": "object" }),
+            });
+        }
+        servers
+    }
+
+    #[test]
+    fn a_bigger_window_takes_more_tools_and_a_smaller_one_takes_fewer() {
+        let servers = offering(40, 200);
+        let asking = "take a screenshot";
+
+        let small = LlmSettings {
+            context_window: 8_192,
+            max_tokens: 2_048,
+            ..Default::default()
+        };
+        let large = LlmSettings {
+            context_window: 128_000,
+            max_tokens: 4_096,
+            ..Default::default()
+        };
+
+        let few = as_many_as_fit(&small, &servers, asking, &[]);
+        let many = as_many_as_fit(&large, &servers, asking, &[]);
+        assert!(!few.is_empty(), "even a small window affords something");
+        assert!(
+            many.len() > few.len(),
+            "a model with sixteen times the room took {} and {}",
+            many.len(),
+            few.len()
+        );
+        assert!(
+            many.len() <= *SPECULATION.end(),
+            "past a handful the search has already been right or wrong"
+        );
+        assert!(
+            few.len() >= *SPECULATION.start(),
+            "a small model still gets something"
+        );
+    }
+
+    #[test]
+    fn a_conversation_too_long_for_the_window_is_trimmed_from_the_oldest_end() {
+        // The instructions and the thing just asked are the two that cannot go.
+        let mut talk = vec![ChatMessage::System {
+            content: "the instructions".into(),
+        }];
+        for i in 0..60 {
+            talk.push(ChatMessage::User {
+                content: format!("turn {i} {}", "words ".repeat(200)),
+                name: None,
+                image_data_urls: vec![],
+            });
+        }
+        talk.push(ChatMessage::User {
+            content: "the thing just asked".into(),
+            name: None,
+            image_data_urls: vec![],
+        });
+
+        let before = talk.len();
+        tokens::trim_to_fit(&mut talk, 2_000);
+        assert!(talk.len() < before, "nothing was dropped");
+        assert!(
+            matches!(talk.first(), Some(ChatMessage::System { .. })),
+            "it lost its instructions"
+        );
+        assert_eq!(
+            talk.last().map(|m| m.content()),
+            Some("the thing just asked"),
+            "it forgot what it was asked"
+        );
+    }
+
+    #[test]
+    fn tools_never_take_more_than_their_share_however_big_the_window() {
+        // The conversation is what somebody is actually having. A thousand
+        // tools fitting is not a reason to send a thousand.
+        let servers = offering(1_000, 400);
+        let huge = LlmSettings {
+            context_window: 200_000,
+            max_tokens: 4_096,
+            ..Default::default()
+        };
+        let taken = as_many_as_fit(&huge, &servers, "take a screenshot", &[]);
+
+        // Asserted as the cost of what was taken rather than as a count, since
+        // the share is the rule and the count is only what falls out of it.
+        let spent: usize = taken
+            .iter()
+            .filter_map(|called| servers.knows(called))
+            .map(|t| {
+                tokens::count_tokens(&t.description) + tokens::count_tokens(&t.takes.to_string())
+            })
+            .sum();
+        assert!(
+            spent <= huge.context_window / TOOLS_MAY_TAKE,
+            "spent {spent} of a {} allowance",
+            huge.context_window / TOOLS_MAY_TAKE
+        );
+        assert!(taken.len() < 1_000, "took all of them anyway");
+    }
+
+    #[test]
+    fn a_conversation_that_has_filled_the_window_leaves_no_room_for_tools() {
+        // And says so by taking none, rather than by sending a request that
+        // cannot be answered.
+        let servers = offering(10, 200);
+        let small = LlmSettings {
+            context_window: 4_096,
+            max_tokens: 2_048,
+            ..Default::default()
+        };
+        let long: Vec<ChatMessage> = (0..40)
+            .map(|_| ChatMessage::User {
+                content: "words ".repeat(200),
+                name: None,
+                image_data_urls: vec![],
+            })
+            .collect();
+        assert!(as_many_as_fit(&small, &servers, "take a screenshot", &long).is_empty());
+    }
 
     #[test]
     fn the_model_is_told_the_names_of_everything_it_could_reach_but_not_the_schemas() {

@@ -54,3 +54,35 @@ async fn whatever_is_running_on_this_machine_is_found_by_asking_rather_than_by_a
         settings.model
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a local model server; run with --ignored"]
+async fn a_model_is_asked_how_much_it_can_hold_rather_than_assumed() {
+    // Every budget in the engine is worked out from this number: how much
+    // conversation fits, how many tools are worth putting in front of it. A
+    // default guess is wrong in both directions, so it is asked for.
+    let found = find::detect_all().await;
+    let backend = found
+        .iter()
+        .find(|b| !b.models.is_empty())
+        .expect("something with a model loaded");
+
+    let caps = find::query_model_caps(
+        &backend.provider,
+        &backend.base_url,
+        None,
+        &backend.models[0],
+    )
+    .await
+    .expect("asking it");
+
+    println!(
+        "{} on {}: context {:?}",
+        backend.models[0], backend.provider, caps.context_length
+    );
+    assert!(
+        caps.context_length.is_some_and(|n| n >= 2_048),
+        "it did not say, or said something implausible: {:?}",
+        caps.context_length
+    );
+}
