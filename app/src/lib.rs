@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use errand_core::local::{find, LlmSettings, Local};
 use errand_core::mcp;
 use errand_core::routine::When;
+use errand_core::store::Allowance;
 use errand_core::store::{Settled, NOT_YET_NAMED};
 use errand_core::{claude::Claude, Agent, Answer, Conversation, Engine, Event, Line, Store};
 use serde::Serialize;
@@ -251,11 +252,13 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // holds none.
             let settings: LlmSettings = serde_json::from_str(&settings.unwrap_or_default())
                 .map_err(|_| "this thread has no model chosen".to_string())?;
-            let (it, events) = Local::open(settings, home).map_err(|e| e.to_string())?;
+            let asks = known.as_ref().map_or("ask", |a| a.asks.as_str());
+            let (it, events) = Local::open(settings, home, asks).map_err(|e| e.to_string())?;
             (Box::new(it), events)
         }
         _ => {
-            let (it, events) = Claude::open(&id, &home, again).map_err(|e| e.to_string())?;
+            let asks = known.as_ref().map_or("ask", |a| a.asks.as_str());
+            let (it, events) = Claude::open(&id, &home, again, asks).map_err(|e| e.to_string())?;
             (Box::new(it), events)
         }
     };
@@ -332,6 +335,37 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 }
             }
 
+            // A question somebody has already answered for good is answered
+            // here rather than shown again. The list is ours and applies to
+            // both engines, so "always" means the same thing whichever is
+            // running and can be taken back in one place.
+            if let Event::NeedsYou(ask) = &event {
+                let known = store
+                    .conversation(&id)
+                    .ok()
+                    .flatten()
+                    .map(|c| c.agent)
+                    .filter(|agent| {
+                        store
+                            .already_allowed(agent, &ask.tool, &ask.detail)
+                            .unwrap_or(false)
+                    });
+                if known.is_some() {
+                    let held: State<Held> = app.state();
+                    let answered = held
+                        .live
+                        .lock()
+                        .unwrap()
+                        .get_mut(&id)
+                        .map(|engine| engine.answer(&ask.call, Answer::Yes));
+                    // Only skipped if the answer actually went. Otherwise the
+                    // card is shown, which is the safe way round.
+                    if matches!(answered, Some(Ok(()))) {
+                        continue;
+                    }
+                }
+            }
+
             if let Err(e) = store.happened(&id, &event) {
                 // Losing a line is not worth ending the conversation over, but
                 // it must not pass in silence either.
@@ -377,6 +411,8 @@ async fn answer(
     call: String,
     step: String,
     said: String,
+    tool: String,
+    rule: String,
 ) -> Result<(), String> {
     let said = match said.as_str() {
         "yes" => Answer::Yes,
@@ -387,6 +423,23 @@ async fn answer(
     held.store
         .answered(&id, &step, in_a_word(said))
         .map_err(|e| e.to_string())?;
+
+    // Remembered here rather than handed to the engine. Claude Code would file
+    // an "always" in its own settings, where this app could neither show it nor
+    // take it back, and the local engine would keep it in memory until the
+    // conversation ended. One list, ours, either way.
+    if matches!(said, Answer::Always) {
+        if let Some(agent) = held
+            .store
+            .conversation(&id)
+            .map_err(|e| e.to_string())?
+            .map(|c| c.agent)
+        {
+            held.store
+                .allow(&agent, &tool, &rule)
+                .map_err(|e| e.to_string())?;
+        }
+    }
 
     let mut live = held.live.lock().unwrap();
     let thread = live
@@ -652,6 +705,27 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Everything an agent may do without being asked again.
+#[tauri::command]
+async fn allowances(held: State<'_, Held>, agent: String) -> Result<Vec<Allowance>, String> {
+    held.store.allowances(&agent).map_err(|e| e.to_string())
+}
+
+/// Take one back.
+#[tauri::command]
+async fn revoke(held: State<'_, Held>, id: String) -> Result<(), String> {
+    held.store.revoke(&id).map_err(|e| e.to_string())
+}
+
+/// How much an agent asks before acting.
+#[tauri::command]
+async fn asks(held: State<'_, Held>, id: String, how: String) -> Result<(), String> {
+    if !["ask", "edits", "auto"].contains(&how.as_str()) {
+        return Err(format!("there is no `{how}` way of asking"));
+    }
+    held.store.asks(&id, &how).map_err(|e| e.to_string())
+}
+
 /// Give a conversation a schedule, or take one away.
 #[tauri::command]
 async fn runs(
@@ -895,6 +969,9 @@ pub fn run() {
             use_engine,
             runs,
             routines,
+            allowances,
+            revoke,
+            asks,
             outside,
             show_in_browser,
             rename,

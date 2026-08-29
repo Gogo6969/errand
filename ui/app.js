@@ -62,6 +62,10 @@ const el = {
   reach: document.getElementById("reach"),
   talks: document.getElementById("talks"),
   repeat: document.getElementById("repeat"),
+  granted: document.getElementById("granted"),
+  granting: document.getElementById("granting"),
+  asks: document.getElementById("asks"),
+  allowed: document.getElementById("allowed"),
   routine: document.getElementById("routine"),
   routineAt: document.getElementById("routine-at"),
   routineWhat: document.getElementById("routine-what"),
@@ -270,6 +274,7 @@ async function show(id) {
   const a = whose();
   el.whois.hidden = true;
   el.routine.hidden = true;
+  el.granting.hidden = true;
   if (a) {
     drawMark(a);
     drawPinned(a);
@@ -323,6 +328,7 @@ function asAgent(a, keeping) {
     about: a.about || "",
     mark: a.mark || null,
     hue: a.hue || null,
+    asks: a.asks || "ask",
     pinned: !!a.pinned,
     hidden: !!a.hidden,
     engine: a.model || "",
@@ -560,7 +566,14 @@ async function answer(m, said, label) {
   drawMessages();
   drawThreads();
   try {
-    await invoke("answer", { id: t.id, call: m.call, step: m.step, said });
+    await invoke("answer", {
+      id: t.id,
+      call: m.call,
+      step: m.step,
+      said,
+      tool: m.tool || "",
+      rule: m.rule || "",
+    });
   } catch (why) {
     m.answered = String(why);
     drawMessages();
@@ -646,6 +659,9 @@ listen("happened", ({ payload }) => {
         call: payload.call,
         step: payload.step,
         can_remember: payload.can_remember,
+        // What "always" would actually allow, so the app can store it and show
+        // it back. Empty means any use of the tool.
+        rule: payload.rule || "",
         answered: null,
       };
       // The step it halted is already on screen. Turn that line into the
@@ -1112,6 +1128,58 @@ el.routineStop.addEventListener("click", async () => {
   el.routineSays.textContent = sayWhen(null);
   t.repeats = false;
   drawTalks();
+});
+
+/**
+ * What this agent may already do, and how much it asks.
+ *
+ * The list is the point. An "always" used to go into Claude Code's own
+ * settings, where this app could neither show it nor take it back, and an
+ * allowlist you cannot read is not a boundary.
+ */
+el.granted.addEventListener("click", async () => {
+  if (!el.granting.hidden) {
+    el.granting.hidden = true;
+    return;
+  }
+  await drawGranted();
+  el.granting.hidden = false;
+});
+
+async function drawGranted() {
+  const a = whose();
+  if (!a) return;
+  el.asks.value = a.asks || "ask";
+
+  const allowed = await invoke("allowances", { agent: a.id });
+  el.allowed.replaceChildren(
+    ...(allowed.length
+      ? allowed.map((one) => {
+          const row = document.createElement("li");
+          const what = document.createElement("span");
+          // A rule is the beginning of what is allowed; nothing means the whole
+          // tool, and saying which is the difference between a boundary and a
+          // blank cheque.
+          what.textContent = one.rule ? `${one.tool} · ${one.rule}` : `${one.tool} · anything`;
+          const take = document.createElement("button");
+          take.type = "button";
+          take.textContent = "Take back";
+          take.onclick = async () => {
+            await invoke("revoke", { id: one.id });
+            await drawGranted();
+          };
+          row.append(what, take);
+          return row;
+        })
+      : [saying("Nothing yet. It asks every time.")]),
+  );
+}
+
+el.asks.addEventListener("change", async () => {
+  const a = whose();
+  if (!a) return;
+  a.asks = el.asks.value;
+  await invoke("asks", { id: a.id, how: a.asks });
 });
 
 el.new.addEventListener("click", start);

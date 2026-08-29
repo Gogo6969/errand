@@ -37,6 +37,7 @@
         <select id="talks" title="Which conversation"></select>
         <select id="engine" title="What answers this agent"></select>
         <button id="repeat" type="button" title="Make this run on a schedule">Repeat</button>
+        <button id="granted" type="button" title="What it may do without asking">Allowed</button>
         <button id="reach" type="button" title="What this thread can reach">Tools</button>
       </header>
 
@@ -59,6 +60,18 @@
         <button id="routine-save" type="button">Save</button>
         <button id="routine-stop" type="button">Stop repeating</button>
         <p id="routine-says"></p>
+      </aside>
+
+      <!-- What this agent may do, and how much it asks first. -->
+      <aside id="granting" hidden>
+        <label>Asks
+          <select id="asks">
+            <option value="ask">Before anything that changes something</option>
+            <option value="edits">Before anything but writing files</option>
+            <option value="auto">Never</option>
+          </select>
+        </label>
+        <ul id="allowed"></ul>
       </aside>
 
       <aside id="reachable" hidden></aside>

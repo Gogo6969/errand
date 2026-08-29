@@ -76,7 +76,11 @@ impl Local {
     ///
     /// `home` is the thread's own directory, which is where every path a tool
     /// is given is resolved from and the only place it has business writing.
-    pub fn open(settings: LlmSettings, home: PathBuf) -> Result<(Self, Receiver<Event>)> {
+    pub fn open(
+        settings: LlmSettings,
+        home: PathBuf,
+        asks: &str,
+    ) -> Result<(Self, Receiver<Event>)> {
         let (tx, rx) = channel();
         let (turns, asked) = tokio::sync::mpsc::unbounded_channel();
 
@@ -88,6 +92,7 @@ impl Local {
         tokio::runtime::Handle::current().spawn(conversation(
             LlmClient::new(settings),
             home,
+            asks.to_string(),
             asked,
             tx,
         ));
@@ -121,6 +126,7 @@ impl Engine for Local {
 async fn conversation(
     client: LlmClient,
     home: PathBuf,
+    asks: String,
     mut asked: UnboundedReceiver<Turn>,
     out: std::sync::mpsc::Sender<Event>,
 ) {
@@ -183,6 +189,7 @@ async fn conversation(
             &client,
             &home,
             &outside,
+            &asks,
             &mut history,
             &mut allowed,
             &mut loaded,
@@ -217,6 +224,7 @@ async fn errand(
     client: &LlmClient,
     home: &std::path::Path,
     outside: &mcp::Servers,
+    asks: &str,
     history: &mut Vec<ChatMessage>,
     allowed: &mut HashSet<String>,
     loaded: &mut HashSet<String>,
@@ -403,7 +411,16 @@ async fn errand(
 
             // The card, for exactly the same reasons as the other engine. A
             // local model running a shell command is no safer for being local.
-            if tools::asks_first(&name) && !allowed.contains(&name) {
+            // The agent's posture, the same three words the other engine uses.
+            // `auto` asks about nothing, `edits` lets a file be written, and
+            // `ask` -- the default -- asks about everything that changes
+            // anything.
+            let must_ask = match asks {
+                "auto" => false,
+                "edits" => tools::asks_first(&name) && name != "write_file",
+                _ => tools::asks_first(&name),
+            };
+            if must_ask && !allowed.contains(&name) {
                 let _ = out.send(Event::NeedsYou(NeedsYou {
                     asking: say_plainly(outside, &name, &args),
                     detail: tools::the_thing_itself(&name, &args),
@@ -413,8 +430,13 @@ async fn errand(
                     // with no request of their own in between.
                     call: call.id.clone(),
                     step: call.id.clone(),
-                    // Remembering is per tool, for this conversation only.
                     can_remember: true,
+                    // The whole tool. A local model's tools are coarse enough
+                    // that anything finer would be guesswork: allowing one
+                    // exact shell command is not a permission anybody wants to
+                    // grant twice, and allowing a prefix of one is a rule this
+                    // side has no basis for inventing.
+                    rule: String::new(),
                 }));
 
                 let (said, meanwhile) = match wait_for_an_answer(asked, &call.id).await {

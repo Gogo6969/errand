@@ -21,6 +21,12 @@
 //!   whole two seconds later reads as a hang.
 //! - `--session-id` ties the process to the thread, so a thread that is closed
 //!   and reopened is the same conversation to Claude as it is to the person.
+//! - `--permission-mode` is the agent's now rather than one decision for the
+//!   whole app: `ask` is the default and asks about everything not granted
+//!   below, `edits` adds file writing, `auto` is `bypassPermissions` and is
+//!   the one somebody has to choose deliberately. What follows is why
+//!   `acceptEdits` was the compiled-in default before there was a choice.
+//!
 //! - `--permission-mode acceptEdits` was arrived at by elimination, and the
 //!   flag next to it is worth naming so nobody reaches for it again. The
 //!   obvious-looking one is `dontAsk`, which is what Claude Code's own
@@ -172,6 +178,7 @@ impl Claude {
         session: &str,
         cwd: &std::path::Path,
         again: bool,
+        asks: &str,
     ) -> Result<(Self, Receiver<Event>)> {
         let pick_up = if again { "--resume" } else { "--session-id" };
         let mut child = tokio::process::Command::new("claude")
@@ -184,7 +191,14 @@ impl Claude {
                 "--include-partial-messages",
                 "--verbose",
                 "--permission-mode",
-                "acceptEdits",
+                // The agent's, not one decision for the whole app. A research
+                // agent and one that edits your files do not deserve the same
+                // posture, and it was compiled in until now.
+                match asks {
+                    "auto" => "bypassPermissions",
+                    "edits" => "acceptEdits",
+                    _ => "default",
+                },
                 "--allowedTools",
             ])
             .args(GRANTED)
@@ -333,17 +347,13 @@ impl Engine for Claude {
                 // route is closed rather than that something went wrong.
                 "message": "Not this one. Find another way or say what you need.",
             }),
-            Answer::Yes => serde_json::json!({
+            // Always is a plain yes on the wire. The remembering is the app's,
+            // because a rule filed in Claude Code's own settings is one this
+            // app can neither show you nor take back -- and an allowlist you
+            // cannot read is not a boundary.
+            Answer::Yes | Answer::Always => serde_json::json!({
                 "behavior": "allow",
                 "updatedInput": asked.get("input").cloned().unwrap_or_default(),
-            }),
-            Answer::Always => serde_json::json!({
-                "behavior": "allow",
-                "updatedInput": asked.get("input").cloned().unwrap_or_default(),
-                "updatedPermissions": asked
-                    .get("permission_suggestions")
-                    .cloned()
-                    .unwrap_or(serde_json::json!([])),
             }),
         };
         let line = format!(
@@ -416,6 +426,11 @@ pub fn read(line: &str) -> Vec<Event> {
                         .get("permission_suggestions")
                         .and_then(|s| s.as_array())
                         .is_some_and(|s| !s.is_empty()),
+                    rule: request
+                        .pointer("/permission_suggestions/0/rules/0/ruleContent")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     step: request
                         .get("tool_use_id")
                         .and_then(|t| t.as_str())

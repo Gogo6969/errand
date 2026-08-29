@@ -48,6 +48,16 @@ pub struct Settled {
     pub hue: String,
 }
 
+/// Something an agent may do without asking again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Allowance {
+    pub id: String,
+    pub tool: String,
+    /// The beginning of what it may do, or empty for any use of the tool.
+    pub rule: String,
+    pub said_at: i64,
+}
+
 /// One conversation with an agent.
 ///
 /// The unit an engine session belongs to. Its id *is* the session id: Claude
@@ -98,6 +108,8 @@ pub struct Agent {
     /// and the window falls back to guessing from the words.
     pub mark: Option<String>,
     pub hue: Option<String>,
+    /// How much it asks before acting: `ask`, `edits` or `auto`.
+    pub asks: String,
     /// Kept at the top of the list, by somebody who uses it constantly.
     pub pinned: bool,
     /// Out of the list but still alive, still running whatever it runs.
@@ -273,6 +285,26 @@ const CHANGES: &[&str] = &[
     "ALTER TABLE conversations ADD COLUMN runs_at TEXT;
      ALTER TABLE conversations ADD COLUMN runs_what TEXT;
      ALTER TABLE conversations ADD COLUMN ran_at INTEGER;",
+    // 6. What an agent is allowed to do without being asked again.
+    //
+    // Ours rather than the engine's. Claude Code will happily remember an
+    // "always" in its own settings, and then the list of what this app may do
+    // to your machine lives somewhere the app cannot show you and cannot take
+    // anything off. An allowlist you cannot read is not a boundary, it is a
+    // rumour.
+    //
+    // A rule is a tool and optionally the beginning of the thing it does, so
+    // "curl -s https://example.com" can be allowed without allowing every
+    // command. An empty rule means any use of that tool.
+    "CREATE TABLE allowed (
+        id      TEXT PRIMARY KEY,
+        agent   TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        tool    TEXT NOT NULL,
+        rule    TEXT NOT NULL DEFAULT '',
+        said_at INTEGER NOT NULL
+     );
+     CREATE INDEX allowed_by_agent ON allowed(agent);
+     ALTER TABLE agents ADD COLUMN asks TEXT NOT NULL DEFAULT 'ask';",
 ];
 
 impl Store {
@@ -404,6 +436,64 @@ impl Store {
         rows.next().transpose().map_err(Into::into)
     }
 
+    /// How much this agent asks before acting.
+    pub fn asks(&self, agent: &str, how: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE agents SET asks = ? WHERE id = ?",
+            params![how, agent],
+        )?;
+        Ok(())
+    }
+
+    /// Remember that somebody said yes to this, for good.
+    pub fn allow(&self, agent: &str, tool: &str, rule: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO allowed (id, agent, tool, rule, said_at) VALUES (?, ?, ?, ?, ?)",
+            params![uuid(), agent, tool, rule, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Everything this agent may do without being asked.
+    pub fn allowances(&self, agent: &str) -> Result<Vec<Allowance>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT id, tool, rule, said_at FROM allowed WHERE agent = ? ORDER BY said_at DESC",
+        )?;
+        let rows = q.query_map([agent], |r| {
+            Ok(Allowance {
+                id: r.get(0)?,
+                tool: r.get(1)?,
+                rule: r.get(2)?,
+                said_at: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Take one back.
+    pub fn revoke(&self, id: &str) -> Result<()> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM allowed WHERE id = ?", [id])?;
+        Ok(())
+    }
+
+    /// Has this exact thing already been allowed?
+    ///
+    /// A rule matches when the tool is the same and the thing being done starts
+    /// with the rule. Prefix rather than equality, because the rule an engine
+    /// suggests is the shape of the command and not the command: allowing
+    /// `curl -s https://example.com` should cover fetching a second page of it
+    /// and must not cover `curl` on its own.
+    pub fn already_allowed(&self, agent: &str, tool: &str, doing: &str) -> Result<bool> {
+        Ok(self
+            .allowances(agent)?
+            .into_iter()
+            .any(|a| a.tool == tool && (a.rule.is_empty() || doing.starts_with(&a.rule))))
+    }
+
     /// Give a conversation a schedule, or take one away.
     ///
     /// `ran_at` is cleared with it. A schedule that has just been set has never
@@ -454,7 +544,7 @@ impl Store {
     pub fn agents(&self) -> Result<Vec<Agent>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
-            "SELECT id, name, title, about, mark, hue, pinned, hidden,
+            "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
                     cwd, model, started_at, spoke_at, engine, engine_settings
                FROM agents ORDER BY pinned DESC, spoke_at DESC",
         )?;
@@ -466,14 +556,15 @@ impl Store {
                 about: r.get(3)?,
                 mark: r.get(4)?,
                 hue: r.get(5)?,
-                pinned: r.get::<_, i64>(6)? != 0,
-                hidden: r.get::<_, i64>(7)? != 0,
-                cwd: r.get(8)?,
-                model: r.get(9)?,
-                started_at: r.get(10)?,
-                spoke_at: r.get(11)?,
-                engine: r.get(12)?,
-                engine_settings: r.get(13)?,
+                asks: r.get(6)?,
+                pinned: r.get::<_, i64>(7)? != 0,
+                hidden: r.get::<_, i64>(8)? != 0,
+                cwd: r.get(9)?,
+                model: r.get(10)?,
+                started_at: r.get(11)?,
+                spoke_at: r.get(12)?,
+                engine: r.get(13)?,
+                engine_settings: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -750,7 +841,7 @@ impl Store {
         );
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
-            "SELECT id, name, title, about, mark, hue, pinned, hidden,
+            "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
                     cwd, model, started_at, spoke_at, engine, engine_settings
                FROM agents
               WHERE name LIKE ?1 ESCAPE '\\'
@@ -768,14 +859,15 @@ impl Store {
                 about: r.get(3)?,
                 mark: r.get(4)?,
                 hue: r.get(5)?,
-                pinned: r.get::<_, i64>(6)? != 0,
-                hidden: r.get::<_, i64>(7)? != 0,
-                cwd: r.get(8)?,
-                model: r.get(9)?,
-                started_at: r.get(10)?,
-                spoke_at: r.get(11)?,
-                engine: r.get(12)?,
-                engine_settings: r.get(13)?,
+                asks: r.get(6)?,
+                pinned: r.get::<_, i64>(7)? != 0,
+                hidden: r.get::<_, i64>(8)? != 0,
+                cwd: r.get(9)?,
+                model: r.get(10)?,
+                started_at: r.get(11)?,
+                spoke_at: r.get(12)?,
+                engine: r.get(13)?,
+                engine_settings: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -841,6 +933,11 @@ fn read_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
         runs_what: r.get(7)?,
         ran_at: r.get(8)?,
     })
+}
+
+/// An id for a row nobody else names.
+fn uuid() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 fn now() -> i64 {

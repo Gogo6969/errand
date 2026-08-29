@@ -787,3 +787,77 @@ body.catching #what { border-color: var(--accent); }
   font-size: 12.5px;
   color: var(--ink-soft);
 }
+
+/* -------------------------------------------------------- what it may -- */
+
+#granted {
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 11.5px;
+  padding: 3px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+#granted:hover { color: var(--ink); border-color: #4a5464; }
+#granted:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+#granting[hidden] { display: none; }
+#granting {
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--side);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 34vh;
+  overflow-y: auto;
+}
+#granting label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+#asks {
+  padding: 5px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+#allowed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+#allowed li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: space-between;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+#allowed li span {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+#allowed button {
+  flex: none;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+#allowed button:hover { color: #f0857d; border-color: #f0857d; }

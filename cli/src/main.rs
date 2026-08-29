@@ -32,10 +32,12 @@ async fn main() -> anyhow::Result<()> {
                 ..Default::default()
             },
             here.clone(),
+            // The harness always asks. It is here to watch a card appear.
+            "ask",
         )?;
         (Box::new(it), events)
     } else {
-        let (it, events) = Claude::open(&thread, &here, false)?;
+        let (it, events) = Claude::open(&thread, &here, false, "ask")?;
         (Box::new(it), events)
     };
 

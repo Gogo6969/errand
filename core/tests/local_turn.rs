@@ -24,6 +24,7 @@ async fn one_turn_with_every_event_it_produces() {
             ..Default::default()
         },
         home,
+        "ask",
     )
     .expect("opening");
 

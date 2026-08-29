@@ -72,6 +72,14 @@ pub struct NeedsYou {
     /// Whether yes can be remembered, so the same question is not asked again.
     /// Only offered when the engine says there is a rule that would cover it.
     pub can_remember: bool,
+    /// What remembering would actually allow: the beginning of the thing, as
+    /// the engine describes it. Empty means any use of the tool.
+    ///
+    /// Kept because the app does the remembering, not the engine. A rule that
+    /// says `curl -s https://example.com` covers fetching another page of that
+    /// site and does not cover `curl`, and that distinction has to survive the
+    /// trip from the engine to the list somebody can read.
+    pub rule: String,
 }
 
 /// What a person says back.

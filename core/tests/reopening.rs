@@ -54,7 +54,7 @@ async fn a_thread_reopened_tomorrow_is_the_same_conversation() {
     let home = home.canonicalize().unwrap();
 
     // First time: a session that does not exist yet.
-    let (mut first, events) = Claude::open(&id, &home, false).expect("starting a thread");
+    let (mut first, events) = Claude::open(&id, &home, false, "ask").expect("starting a thread");
     first
         .say("Remember the word MANGO. Reply with just OK.")
         .unwrap();
@@ -69,7 +69,7 @@ async fn a_thread_reopened_tomorrow_is_the_same_conversation() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Tomorrow: the same thread, reopened. This is the flag that matters.
-    let (mut again, events) = Claude::open(&id, &home, true).expect("reopening the thread");
+    let (mut again, events) = Claude::open(&id, &home, true, "ask").expect("reopening the thread");
     again
         .say("What word did I ask you to remember? Reply with just that word.")
         .unwrap();
@@ -92,7 +92,7 @@ async fn reopening_something_that_was_never_there_says_so_rather_than_hanging() 
     // waits for ever. Both failures must arrive as something a person can read.
     let home = std::env::temp_dir();
     let never = "00000000-0000-4000-8000-000000000000";
-    let (_it, events) = Claude::open(never, &home, true).expect("spawning at all");
+    let (_it, events) = Claude::open(never, &home, true, "ask").expect("spawning at all");
 
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
