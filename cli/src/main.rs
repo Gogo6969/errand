@@ -34,6 +34,8 @@ async fn main() -> anyhow::Result<()> {
             here.clone(),
             // The harness always asks. It is here to watch a card appear.
             "ask",
+            // No app behind it, so no notebook either.
+            "",
             // No app behind it, so nobody to hand work to.
             None,
         )?;
@@ -41,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         // No app behind it, so no doorway and nobody to hand work to, which
         // matches what the local branch above says for the same reason.
-        let (it, events) = Claude::open(&thread, &here, false, "ask", None, None)?;
+        let (it, events) = Claude::open(&thread, &here, false, "ask", None, None, "")?;
         (Box::new(it), events)
     };
 

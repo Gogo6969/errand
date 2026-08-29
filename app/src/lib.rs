@@ -24,6 +24,7 @@ use errand_core::doorway;
 use errand_core::keeping;
 use errand_core::local::{find, LlmSettings, Local};
 use errand_core::mcp;
+use errand_core::memory;
 use errand_core::routine::When;
 use errand_core::store::Allowance;
 use errand_core::store::{Settled, NOT_YET_NAMED};
@@ -270,6 +271,19 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         }
     };
 
+    // What this agent has already been told about its job. Read here, in the
+    // app, because the store is the app's: an engine is handed a string and
+    // never a database, which is what keeps there being one idea of what a note
+    // is rather than one per engine.
+    let remembers = held
+        .store
+        .conversation(&id)
+        .ok()
+        .flatten()
+        .map(|c| c.agent)
+        .and_then(|agent| memory::opening(&held.store, &agent).ok())
+        .unwrap_or_default();
+
     let (engine, events): (Box<dyn Engine + Send>, _) = match on_engine.as_str() {
         "local" => {
             // Everything about a local model has to be told to it. Nothing is
@@ -279,9 +293,14 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             let settings: LlmSettings = serde_json::from_str(&settings.unwrap_or_default())
                 .map_err(|_| "this thread has no model chosen".to_string())?;
             let asks = known.as_ref().map_or("ask", |a| a.asks.as_str());
-            let (it, events) =
-                Local::open(settings, home, asks, Some((id.clone(), held.wants.clone())))
-                    .map_err(|e| e.to_string())?;
+            let (it, events) = Local::open(
+                settings,
+                home,
+                asks,
+                &remembers,
+                Some((id.clone(), held.wants.clone())),
+            )
+            .map_err(|e| e.to_string())?;
             (Box::new(it), events)
         }
         _ => {
@@ -315,9 +334,16 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             )
             .map_err(|e| e.to_string())?;
 
-            let (it, events) =
-                Claude::open(&id, &home, again, asks, Some(door.at()), model.as_deref())
-                    .map_err(|e| e.to_string())?;
+            let (it, events) = Claude::open(
+                &id,
+                &home,
+                again,
+                asks,
+                Some(door.at()),
+                model.as_deref(),
+                &remembers,
+            )
+            .map_err(|e| e.to_string())?;
             held.doorways.lock().unwrap().insert(id.clone(), door);
             (Box::new(it), events)
         }
@@ -853,12 +879,79 @@ fn answer_what_engines_cannot(
                 let said = match team::which_of_ours(&asked.tool) {
                     Some(team::Ours::WhoElse) => who_else(&app, &asked.from),
                     Some(team::Ours::Ask) => ask_teammate(&app, &asked).await,
+                    Some(team::Ours::Remember) => write_it_down(&app, &asked),
+                    Some(team::Ours::Recall) => look_it_up(&app, &asked),
+                    Some(team::Ours::Forget) => take_it_back(&app, &asked),
                     None => Err(anyhow::anyhow!("there is no {} here", asked.tool)),
                 };
                 let _ = asked.answer.send(said);
             });
         }
     });
+}
+
+/// Whose notebook this is.
+///
+/// Loud where `who_else` is tolerant, and the difference is deliberate: "who
+/// else is there" is still an answerable question without knowing who is
+/// asking, and a note with no agent behind it is not a smaller note, it is a
+/// note in somebody else's book. The row always exists by the time an engine
+/// can call a tool, because opening a conversation writes it before either
+/// engine starts, so this failing means something is wrong that guessing would
+/// hide.
+fn whose_notebook(app: &AppHandle, from: &str) -> anyhow::Result<String> {
+    let held: State<Held> = app.state();
+    held.store
+        .conversation(from)?
+        .map(|c| c.agent)
+        .ok_or_else(|| {
+            anyhow::anyhow!("this conversation has no agent, so there is no notebook to write in")
+        })
+}
+
+/// Write something down, or correct what was written before.
+fn write_it_down(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let agent = whose_notebook(app, &asked.from)?;
+    let said = |k: &str| asked.args.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let about = memory::a_handle(said("about"))?;
+    let note = memory::a_note(said("note"))?;
+
+    let held: State<Held> = app.state();
+    held.store.remember(&agent, &about, &note)?;
+    Ok(format!(
+        "Written down under `{about}`. Saying that handle again will replace it."
+    ))
+}
+
+/// What this agent already knows about something.
+fn look_it_up(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let agent = whose_notebook(app, &asked.from)?;
+    let about = asked
+        .args
+        .get("about")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let held: State<Held> = app.state();
+    memory::search(&held.store, &agent, about)
+}
+
+/// Take a note back.
+fn take_it_back(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let agent = whose_notebook(app, &asked.from)?;
+    let about = memory::a_handle(
+        asked
+            .args
+            .get("about")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
+    )?;
+    let held: State<Held> = app.state();
+    Ok(match held.store.forget_note(&agent, &about)? {
+        true => format!("Forgotten. You no longer know anything about {about}."),
+        // Said plainly rather than as a failure, because trying to forget
+        // something twice is not a mistake worth stopping over.
+        false => format!("There was no note about {about} to take back."),
+    })
 }
 
 /// Everybody else there is, and what each handles.

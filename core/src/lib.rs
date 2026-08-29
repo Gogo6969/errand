@@ -24,6 +24,7 @@ pub mod store;
 
 pub mod local;
 pub mod mcp;
+pub mod memory;
 pub mod routine;
 pub mod team;
 

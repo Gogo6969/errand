@@ -66,6 +66,75 @@ pub fn declarations() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "remember",
+                "description":
+                    "Write something down about how this job is done, so you still know it in \
+                     later conversations. Use it the moment you are told something that will \
+                     still be true next week: where things go, which template or account or \
+                     flag to use, what somebody is actually called, what went wrong last time \
+                     and what fixed it. Saying the same handle again replaces what you wrote \
+                     before, which is how you correct yourself. Never write down something you \
+                     were not told.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "about": {
+                            "type": "string",
+                            "description": "A word or two naming what this is about, like \
+                                            invoice_template or where_the_briefing_goes. Saying \
+                                            it again replaces the note."
+                        },
+                        "note": {
+                            "type": "string",
+                            "description": "The thing itself, in a sentence or two"
+                        }
+                    },
+                    "required": ["about", "note"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "recall",
+                "description":
+                    "Look through your own notes about this job. Use it before deciding how to \
+                     do something, when there is a good chance you have been told already. \
+                     Ordinary words are fine.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "about": {
+                            "type": "string",
+                            "description": "What you want to know about, in ordinary words"
+                        }
+                    },
+                    "required": ["about"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "forget",
+                "description":
+                    "Take back a note that has stopped being true and has nothing to replace \
+                     it. To correct one instead, use remember again with the same handle.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "about": {
+                            "type": "string",
+                            "description": "The handle of the note to take back"
+                        }
+                    },
+                    "required": ["about"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "who_else",
                 "description":
                     "List the other agents you can hand work to, with what each one handles. \
@@ -90,6 +159,9 @@ pub fn declarations() -> Vec<Value> {
 pub enum Ours {
     Ask,
     WhoElse,
+    Remember,
+    Recall,
+    Forget,
 }
 
 impl Ours {
@@ -98,6 +170,9 @@ impl Ours {
         match self {
             Ours::Ask => "ask",
             Ours::WhoElse => "who_else",
+            Ours::Remember => "remember",
+            Ours::Recall => "recall",
+            Ours::Forget => "forget",
         }
     }
 }
@@ -107,6 +182,9 @@ pub fn ours(tool: &str) -> Option<Ours> {
     match tool {
         "ask" => Some(Ours::Ask),
         "who_else" => Some(Ours::WhoElse),
+        "remember" => Some(Ours::Remember),
+        "recall" => Some(Ours::Recall),
+        "forget" => Some(Ours::Forget),
         _ => None,
     }
 }
@@ -149,6 +227,18 @@ pub fn in_plain_words(tool: Ours, args: &Value) -> String {
             who => format!("Asking {who}"),
         },
         Ours::WhoElse => "Looking for somebody to hand this to".to_string(),
+        Ours::Remember => match get("about") {
+            "" => "Making a note".to_string(),
+            about => format!("Making a note about {}", about.replace('_', " ")),
+        },
+        Ours::Recall => match get("about") {
+            "" => "Looking through its own notes".to_string(),
+            about => format!("Looking up what it knows about {about}"),
+        },
+        Ours::Forget => match get("about") {
+            "" => "Forgetting a note".to_string(),
+            about => format!("Forgetting what it knew about {}", about.replace('_', " ")),
+        },
     }
 }
 
@@ -160,6 +250,20 @@ pub fn the_thing_itself(tool: Ours, args: &Value) -> String {
             args.get("agent").and_then(|v| v.as_str()).unwrap_or("?"),
             args.get("request").and_then(|v| v.as_str()).unwrap_or("")
         ),
+        // Filled in even though none of these stops to ask, because an empty
+        // string is what makes an "always" rule prefix-match everything, and
+        // leaving that trap for the day somebody flips `asks_first` costs
+        // three lines to avoid.
+        Ours::Remember => format!(
+            "{}: {}",
+            args.get("about").and_then(|v| v.as_str()).unwrap_or("?"),
+            args.get("note").and_then(|v| v.as_str()).unwrap_or("")
+        ),
+        Ours::Recall | Ours::Forget => args
+            .get("about")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         // Nothing, and deliberately: an empty rule in the allowlist means the
         // whole tool, which for a tool that only looks is the right grant.
         Ours::WhoElse => String::new(),
@@ -174,10 +278,21 @@ pub fn the_thing_itself(tool: Ours, args: &Value) -> String {
 pub fn asks_first(tool: Ours) -> bool {
     match tool {
         Ours::Ask => true,
-        // Nothing that only reads this app's own records stops to ask. See
-        // GRANTED in claude.rs, which has to agree with this and is checked
+        // Nothing that only reaches this app's own records stops to ask. Not
+        // because writing is harmless, but because a note is written mid-errand
+        // and half of these errands run at seven in the morning with nobody at
+        // the window: the card goes unanswered, and an unanswered card is a
+        // refusal. The symptom would be an agent that quietly learns nothing,
+        // which is exactly what a broken notebook looks like from outside.
+        //
+        // What makes that safe is that a note can never grant anything. The
+        // allowlist is read from `allowed` and never from `memories`, so the
+        // worst a bad note can do is give bad advice, in writing, in a line of
+        // the conversation somebody can read.
+        //
+        // See GRANTED in claude.rs, which has to agree with this and is checked
         // against it by a test there.
-        Ours::WhoElse => false,
+        Ours::WhoElse | Ours::Remember | Ours::Recall | Ours::Forget => false,
     }
 }
 
@@ -190,6 +305,10 @@ pub fn asks_first(tool: Ours) -> bool {
 pub fn without_the_app(tool: Ours) -> &'static str {
     match tool {
         Ours::Ask | Ours::WhoElse => "There is nobody else here to ask.",
+        Ours::Remember | Ours::Recall | Ours::Forget => {
+            "There is nowhere to keep notes here. This is an engine with no app behind it, \
+             so anything you learn lasts as long as this conversation."
+        }
     }
 }
 
@@ -237,13 +356,13 @@ mod tests {
     }
 
     #[test]
-    fn both_tools_are_declared_the_way_an_engine_expects_them() {
+    fn every_tool_the_app_provides_is_declared_the_way_an_engine_expects_it() {
         let declared = declarations();
         let named: Vec<&str> = declared
             .iter()
             .filter_map(|d| d.pointer("/function/name")?.as_str())
             .collect();
-        assert_eq!(named, ["ask", "who_else"]);
+        assert_eq!(named, ["ask", "remember", "recall", "forget", "who_else"]);
         assert!(declared.iter().all(|d| d["type"] == "function"));
         assert!(
             ours("ask").is_some() && ours("who_else").is_some() && ours("run_command").is_none()

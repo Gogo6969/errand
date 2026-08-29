@@ -133,6 +133,21 @@ pub struct Agent {
     pub engine_settings: Option<String>,
 }
 
+/// One thing an agent has written down about how its own job is done.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Memory {
+    /// A short handle, which is also what a correction replaces and what
+    /// forgetting names. Free text alone has no key, so nothing can ever be
+    /// corrected and both the old answer and the new one sit there for ever.
+    pub about: String,
+    pub note: String,
+    /// How often this has come up. The only importance signal here, and one is
+    /// enough: a thing an agent has been told three times outranks one it
+    /// wrote down once.
+    pub told: i64,
+    pub told_at: i64,
+}
+
 /// One line of a conversation, as it will be shown again tomorrow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Line {
@@ -327,6 +342,57 @@ const CHANGES: &[&str] = &[
     // one is kept, and losing the record of who asked is not a reason to lose
     // the conversation.
     "ALTER TABLE conversations ADD COLUMN asked_by TEXT;",
+    // 8. What an agent has learnt about how its own job is done.
+    //
+    // The agent and not the conversation, and that is the whole design in one
+    // foreign key. A conversation already remembers itself: Claude Code holds a
+    // transcript and the local engine holds a history. What neither holds is
+    // the thing worth keeping across all of them, which is how this particular
+    // job is done here -- where the briefing goes, which template the invoices
+    // use, the flag that export needs. That belongs to the standing job, so it
+    // belongs to the agent, and cascading from `agents` means forgetting one
+    // takes its notes with it rather than leaving a second thing to remember.
+    //
+    // Not global, for the same reason conversations exist at all: one agent's
+    // notes in front of an unrelated agent is the same failure as this
+    // morning's briefing sitting in front of an unrelated question.
+    //
+    // An ordinary table with a full-text index over it, rather than the index
+    // as the table. A virtual table has no foreign keys, so notes kept only in
+    // one would survive `forget()` entirely: the agent gone and its notes still
+    // searchable, and `points_at_nothing` unable to see it because there is no
+    // reference left to check. All three triggers go in now rather than only
+    // the insert one, because an index that is correct only while nothing is
+    // ever deleted is an index that is wrong the first time anybody uses this.
+    "CREATE TABLE memories (
+        id       TEXT PRIMARY KEY,
+        agent    TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        about    TEXT NOT NULL,
+        note     TEXT NOT NULL,
+        told     INTEGER NOT NULL DEFAULT 1,
+        noted_at INTEGER NOT NULL,
+        told_at  INTEGER NOT NULL,
+        UNIQUE(agent, about)
+     );
+     CREATE INDEX memories_by_agent ON memories(agent, told DESC, told_at DESC);
+     CREATE VIRTUAL TABLE memories_fts USING fts5(
+        about, note, content='memories', content_rowid='rowid',
+        tokenize='porter unicode61'
+     );
+     CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+        INSERT INTO memories_fts(rowid, about, note)
+        VALUES (new.rowid, new.about, new.note);
+     END;
+     CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, about, note)
+        VALUES ('delete', old.rowid, old.about, old.note);
+     END;
+     CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, about, note)
+        VALUES ('delete', old.rowid, old.about, old.note);
+        INSERT INTO memories_fts(rowid, about, note)
+        VALUES (new.rowid, new.about, new.note);
+     END;",
 ];
 
 impl Store {
@@ -481,6 +547,78 @@ impl Store {
     /// the app because everything is looked up through the conversation it
     /// belongs to. Worth reporting, and not worth deleting behind somebody's
     /// back to make a check pass.
+    /// Write something down, or correct what was written before.
+    ///
+    /// One row per handle per agent, so saying the same thing twice is a
+    /// confirmation and saying something different under the same handle is a
+    /// correction. Without that, "the briefing goes to email" and "the briefing
+    /// goes to Telegram" both sit there and nothing can settle which is true.
+    pub fn remember(&self, agent: &str, about: &str, note: &str) -> Result<()> {
+        let now = now();
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO memories (id, agent, about, note, told, noted_at, told_at)
+                  VALUES (?, ?, ?, ?, 1, ?, ?)
+             ON CONFLICT(agent, about) DO UPDATE SET
+                  note = excluded.note,
+                  told = told + 1,
+                  told_at = excluded.told_at",
+            params![
+                uuid_like(&format!("{agent}{about}")),
+                agent,
+                about,
+                note,
+                now,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// What this agent knows, most-confirmed first.
+    pub fn remembers(&self, agent: &str, most: usize) -> Result<Vec<Memory>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT about, note, told, told_at FROM memories
+              WHERE agent = ? ORDER BY told DESC, told_at DESC LIMIT ?",
+        )?;
+        let rows = q.query_map(params![agent, most as i64], read_memory)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// What this agent knows about something in particular.
+    ///
+    /// Ranked, which is the whole reason this is a full-text index rather than
+    /// a LIKE: the one right note has to come above four that share a word, and
+    /// LIKE cannot order at all. The handle is weighted four times the note,
+    /// because it is the thing that most identifies what a note is about and
+    /// would otherwise be drowned by the note's own prose.
+    pub fn recall(&self, agent: &str, looking_for: &str, most: usize) -> Result<Vec<Memory>> {
+        let asking = as_a_query(looking_for);
+        if asking.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT m.about, m.note, m.told, m.told_at
+               FROM memories_fts
+               JOIN memories m ON m.rowid = memories_fts.rowid
+              WHERE memories_fts MATCH ?1 AND m.agent = ?2
+              ORDER BY bm25(memories_fts, 4.0, 1.0) ASC
+              LIMIT ?3",
+        )?;
+        let rows = q.query_map(params![asking, agent, most as i64], read_memory)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Take a note back. True when there was one to take back.
+    pub fn forget_note(&self, agent: &str, about: &str) -> Result<bool> {
+        let gone = self.conn.lock().unwrap().execute(
+            "DELETE FROM memories WHERE agent = ? AND about = ?",
+            params![agent, about],
+        )?;
+        Ok(gone > 0)
+    }
+
     pub fn points_at_nothing(&self) -> Result<i64> {
         points_at_nothing(&self.conn.lock().unwrap())
     }
@@ -1025,6 +1163,57 @@ pub fn beside(data_dir: &Path) -> PathBuf {
     data_dir.join("errand.db")
 }
 
+/// One note, from a row that selected its columns in order.
+fn read_memory(r: &rusqlite::Row) -> rusqlite::Result<Memory> {
+    Ok(Memory {
+        about: r.get(0)?,
+        note: r.get(1)?,
+        told: r.get(2)?,
+        told_at: r.get(3)?,
+    })
+}
+
+/// A search phrase, turned into something the index will actually accept.
+///
+/// Every word quoted and joined with OR, because what arrives here is ordinary
+/// language and ordinary language contains apostrophes, hyphens and the
+/// occasional emoji, any one of which is a syntax error to MATCH. A syntax
+/// error is not a poor result, it is a tool that fails, and a tool that fails
+/// on "what do I know about O'Brien's invoice" is a tool an agent stops
+/// reaching for.
+///
+/// A word has to keep at least one letter or digit after the filtering. One
+/// like `--` survives the character filter and then tokenises to an empty
+/// phrase, which the index rejects outright.
+fn as_a_query(said: &str) -> String {
+    let mut words: Vec<String> = said
+        .split_whitespace()
+        .map(|word| {
+            word.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_')
+                .collect::<String>()
+        })
+        .filter(|word| word.chars().count() >= 3 && word.chars().any(char::is_alphanumeric))
+        .map(|word| format!("\"{word}\"*"))
+        .collect();
+    // Enough to say what is wanted. A hundred-word question is not a better
+    // search, it is a search that matches everything.
+    words.truncate(8);
+    words.join(" OR ")
+}
+
+/// A stable id from something that identifies the row.
+///
+/// Not randomness: a note is keyed by agent and handle, and giving the same
+/// note the same id makes the row easy to reason about in the store.
+fn uuid_like(from: &str) -> String {
+    let mut hash: u128 = 0xcbf2_9ce4_8422_2325;
+    for byte in from.as_bytes() {
+        hash = hash.wrapping_mul(0x1000_0000_01b3) ^ u128::from(*byte);
+    }
+    format!("{hash:032x}")
+}
+
 /// One conversation, from a row that selected its columns in order.
 fn read_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
     Ok(Conversation {
@@ -1104,6 +1293,133 @@ mod tests {
         // treat what it found as something it did.
         s.bring_up_to_date()
             .expect("it blamed itself for damage that was already there");
+    }
+
+    #[test]
+    fn a_note_written_twice_under_one_handle_is_one_note_and_a_correction() {
+        // Without a handle there is no key, so nothing can ever be corrected
+        // and both the old answer and the new one sit there for ever with no
+        // way to settle which is true.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.remember("a1", "where_the_briefing_goes", "By email to Sarah")
+            .unwrap();
+        s.remember("a1", "where_the_briefing_goes", "By Telegram, not email")
+            .unwrap();
+
+        let kept = s.remembers("a1", 10).unwrap();
+        assert_eq!(kept.len(), 1, "it kept both answers: {kept:?}");
+        assert_eq!(kept[0].note, "By Telegram, not email");
+        assert_eq!(kept[0].told, 2, "it did not count as a confirmation");
+
+        // And the old wording must be gone from the search as well as the
+        // table. This is the update trigger, and without it a correction
+        // leaves the thing it corrected findable for ever.
+        assert!(
+            s.recall("a1", "email Sarah", 5)
+                .unwrap()
+                .iter()
+                .all(|m| m.note.contains("Telegram")),
+            "the wording it replaced is still findable"
+        );
+    }
+
+    #[test]
+    fn looking_something_up_finds_it_by_what_it_is_about_before_its_wording() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.remember("a1", "invoice_template", "Use the Acme one")
+            .unwrap();
+        s.remember("a1", "how_to_export", "It needs --force or it says nothing")
+            .unwrap();
+
+        let found = s.recall("a1", "which invoice template", 5).unwrap();
+        assert_eq!(
+            found.first().map(|m| m.about.as_str()),
+            Some("invoice_template")
+        );
+    }
+
+    #[test]
+    fn looking_up_something_nobody_ever_said_finds_nothing_rather_than_the_newest_thing() {
+        // The failure this prevents is the quiet one: handing back whatever was
+        // most recent when nothing matched, so the agent cannot tell what it
+        // was told from what happened to be lying around, and acts on the
+        // second as though it were the first.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.remember("a1", "invoice_template", "Use the Acme one")
+            .unwrap();
+        assert!(s.recall("a1", "pelican husbandry", 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn one_agents_notes_are_never_found_by_another() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.begin("a2", "Other", Path::new("/tmp/two")).unwrap();
+        s.remember("a1", "invoice_template", "Use the Acme one")
+            .unwrap();
+
+        assert!(s.recall("a2", "invoice template", 5).unwrap().is_empty());
+        assert!(s.remembers("a2", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_search_made_of_nothing_but_punctuation_finds_nothing_rather_than_failing() {
+        // A syntax error here is not a poor result, it is a tool that fails,
+        // and a tool that fails is one an agent stops reaching for.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.remember("a1", "invoice_template", "Use the Acme one")
+            .unwrap();
+        for nonsense in ["--", "?!", "  ", "\"", "a", "O'Brien's"] {
+            let said = s.recall("a1", nonsense, 5);
+            assert!(said.is_ok(), "{nonsense:?} was an error: {said:?}");
+        }
+    }
+
+    #[test]
+    fn forgetting_an_agent_takes_its_notes_out_of_the_search_as_well_as_the_table() {
+        // Asserted on the search and not only on the table, because the whole
+        // reason the notes are an ordinary table with an index over it is that
+        // an index has no foreign keys: notes kept only in one would survive
+        // the agent, still findable, with nothing able to notice.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.remember("a1", "invoice_template", "Use the Acme one")
+            .unwrap();
+        assert_eq!(s.recall("a1", "invoice", 5).unwrap().len(), 1);
+
+        s.forget("a1").unwrap();
+        s.begin("a1", "Reused", Path::new("/tmp/one")).unwrap();
+        assert!(
+            s.recall("a1", "invoice", 5).unwrap().is_empty(),
+            "a forgotten agent's notes are still findable"
+        );
+    }
+
+    #[test]
+    fn taking_one_note_back_says_whether_there_was_one_to_take() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.remember("a1", "invoice_template", "Use the Acme one")
+            .unwrap();
+        assert!(s.forget_note("a1", "invoice_template").unwrap());
+        assert!(!s.forget_note("a1", "invoice_template").unwrap());
+        assert!(s.remembers("a1", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn how_often_something_has_come_up_is_what_puts_it_at_the_top() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.remember("a1", "rarely", "once").unwrap();
+        s.remember("a1", "often", "twice").unwrap();
+        s.remember("a1", "often", "twice").unwrap();
+
+        let kept = s.remembers("a1", 10).unwrap();
+        assert_eq!(kept.first().map(|m| m.about.as_str()), Some("often"));
     }
 
     #[test]

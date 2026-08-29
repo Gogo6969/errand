@@ -156,7 +156,7 @@ fn hello(params: &Value) -> Value {
     })
 }
 
-/// The two tools, in the shape MCP wants them.
+/// Every tool the app provides, in the shape MCP wants them.
 ///
 /// Read from `team::declarations()` rather than written out again, so that the
 /// wording an agent reads cannot drift between the engine that gets them as
@@ -442,12 +442,12 @@ mod tests {
     }
 
     #[test]
-    fn both_tools_are_offered_with_a_schema_that_is_an_object() {
+    fn every_tool_is_offered_with_a_schema_that_is_an_object() {
         // One tool with a missing or non-object schema fails validation for the
         // whole server, taking the other one with it.
         let tools = offered();
         let named: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(named, ["ask", "who_else"]);
+        assert_eq!(named, ["ask", "remember", "recall", "forget", "who_else"]);
         for tool in &tools {
             assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
             assert!(

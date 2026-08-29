@@ -84,6 +84,9 @@ async fn claude_code_finds_both_tools_and_a_call_reaches_the_conversation_that_o
             "stdio",
             "--allowedTools",
             "mcp__errand__who_else",
+            "mcp__errand__remember",
+            "mcp__errand__recall",
+            "mcp__errand__forget",
             "--mcp-config",
             &config,
         ])
@@ -170,12 +173,14 @@ async fn claude_code_finds_both_tools_and_a_call_reaches_the_conversation_that_o
         .expect("the collector finished")
         .expect("it did not panic");
 
-    assert!(
-        listed.iter().any(|t| t.ends_with("__ask"))
-            && listed.iter().any(|t| t.ends_with("__who_else")),
-        "both tools have to be in front of the model at the start, not behind a \
-         search. It was offered: {listed:?}"
-    );
+    // Every one of them, by name. `.any()` would pass with four of the five
+    // missing, and a tool the model cannot see is a tool that does not exist.
+    for wanted in ["ask", "who_else", "remember", "recall", "forget"] {
+        assert!(
+            listed.iter().any(|t| t.ends_with(&format!("__{wanted}"))),
+            "`{wanted}` was not in front of the model at the start. It was offered: {listed:?}"
+        );
+    }
     assert!(
         !searched_first,
         "it had to go looking for the tools, which means alwaysLoad stopped working"

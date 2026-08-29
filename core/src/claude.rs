@@ -122,6 +122,21 @@ const GRANTED: &[&str] = &[
     // stopping for, and leaving it off is how that gets honoured without a
     // second rule saying the same thing.
     "mcp__errand__who_else",
+    // The three that write, and the only three here that do. What this list
+    // actually holds is not "tools that read" but "tools that cannot reach
+    // outside this app": these reach one agent's own notebook and nothing else.
+    // They spend nothing, send nothing and sign in to nothing, and every call
+    // leaves a line in the conversation saying what was noted.
+    //
+    // A card on any of them would be worse than useless, for the same reason
+    // the permission mode above is never `dontAsk`. A note is written
+    // mid-errand, and half of these errands run at seven in the morning with
+    // nobody at the window: the card goes unanswered, and an unanswered card is
+    // a refusal. The symptom is an agent that quietly learns nothing, which is
+    // exactly what a broken notebook looks like from outside.
+    "mcp__errand__remember",
+    "mcp__errand__recall",
+    "mcp__errand__forget",
 ];
 
 /// A thread's conversation with Claude Code.
@@ -240,8 +255,24 @@ impl Claude {
         asks: &str,
         doorway: Option<&std::path::Path>,
         model: Option<&str>,
+        // What this agent has already been told about its job, if anything.
+        remembers: &str,
     ) -> Result<(Self, Receiver<Event>)> {
         let pick_up = if again { "--resume" } else { "--session-id" };
+
+        // In front of the model from the first word, rather than waiting to be
+        // searched for. An agent that has to think to go looking for what it
+        // was told is an agent that mostly will not, and the whole point of a
+        // standing job is that it does not have to be told twice.
+        //
+        // Owned, because it has to outlive the command builder that borrows it.
+        let steering = match remembers.trim().is_empty() {
+            true => format!("{ERRAND_MODE}\n\n{}", crate::memory::HOW_TO_USE_IT),
+            false => format!(
+                "{ERRAND_MODE}\n\n{}\n\n{remembers}",
+                crate::memory::HOW_TO_USE_IT
+            ),
+        };
 
         // Where to reach this app's own two tools, if this conversation has a
         // doorway open. Passed on the command line rather than written into a
@@ -277,7 +308,7 @@ impl Claude {
                 "--permission-prompt-tool",
                 "stdio",
                 "--append-system-prompt",
-                ERRAND_MODE,
+                &steering,
                 pick_up,
                 session,
             ])
@@ -944,6 +975,29 @@ mod tests {
             found,
             "the transcript was on disk and it still wanted to start as new"
         );
+    }
+
+    #[test]
+    fn a_tool_is_granted_up_front_exactly_when_it_does_not_stop_to_ask() {
+        // The two lists that have to agree and had nothing making them.
+        // GRANTED is Claude Code's; `team::asks_first` is the local engine's,
+        // which has never heard of GRANTED. Break the correspondence and one
+        // engine acts unasked while the other shows a card every time,
+        // silently, for ever. That is the exact asymmetry this app exists to
+        // prevent, arriving without a single test failing.
+        for declared in team::declarations() {
+            let name = declared
+                .pointer("/function/name")
+                .and_then(|n| n.as_str())
+                .expect("a declared tool has a name");
+            let tool = team::ours(name).expect("a declared tool is one of ours");
+            let prefixed = format!("mcp__{}__{name}", team::DOORWAY);
+            assert_eq!(
+                GRANTED.contains(&prefixed.as_str()),
+                !team::asks_first(tool),
+                "`{name}` is granted up front on one engine and asked about on the other"
+            );
+        }
     }
 
     #[test]

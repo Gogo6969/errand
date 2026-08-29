@@ -81,11 +81,14 @@ impl Local {
         settings: LlmSettings,
         home: PathBuf,
         asks: &str,
+        // What this agent has already been told about its job, if anything.
+        remembers: &str,
         // Where to send the things only the app can do, and which conversation
         // is asking. Nothing here means an engine on its own, which is what the
         // terminal harness is.
         host: Option<(String, tokio::sync::mpsc::UnboundedSender<team::Wants>)>,
     ) -> Result<(Self, Receiver<Event>)> {
+        let remembers = remembers.to_string();
         let (tx, rx) = channel();
         let (turns, asked) = tokio::sync::mpsc::unbounded_channel();
 
@@ -98,6 +101,7 @@ impl Local {
             LlmClient::new(settings),
             home,
             asks.to_string(),
+            remembers,
             host,
             asked,
             tx,
@@ -133,6 +137,7 @@ async fn conversation(
     client: LlmClient,
     home: PathBuf,
     asks: String,
+    remembers: String,
     host: Option<(String, tokio::sync::mpsc::UnboundedSender<team::Wants>)>,
     mut asked: UnboundedReceiver<Turn>,
     out: std::sync::mpsc::Sender<Event>,
@@ -149,7 +154,7 @@ async fn conversation(
     let outside = mcp::Servers::open(&home).await;
 
     let mut history = vec![ChatMessage::System {
-        content: opening_instructions(&home, &outside),
+        content: opening_instructions(&home, &outside, &remembers),
     }];
     // Tools somebody has said yes to for good, this conversation. Deliberately
     // not saved anywhere: a permission that outlives the thread it was granted
@@ -725,10 +730,20 @@ fn say_plainly(outside: &mcp::Servers, name: &str, args: &serde_json::Value) -> 
 }
 
 /// What the model is told before anything else.
-pub(crate) fn opening_instructions(home: &std::path::Path, outside: &mcp::Servers) -> String {
+pub(crate) fn opening_instructions(
+    home: &std::path::Path,
+    outside: &mcp::Servers,
+    remembers: &str,
+) -> String {
     // How much is out there, and never what any of it is called. See
     // `Servers::what_else`: listing the names made a 7B model answer with
     // nothing at all, and taking them out made the same request work.
+    // What it already knows, and how to keep knowing things. Before the rest,
+    // because it is about the job rather than about the machinery.
+    let notes = match remembers.trim().is_empty() {
+        true => format!("\n\n{}", crate::memory::HOW_TO_USE_IT),
+        false => format!("\n\n{}\n\n{remembers}", crate::memory::HOW_TO_USE_IT),
+    };
     let more = match outside.tools().is_empty() {
         true => String::new(),
         false => format!(
@@ -755,7 +770,7 @@ pub(crate) fn opening_instructions(home: &std::path::Path, outside: &mcp::Server
          asking again.\n\n\
          Your working directory is {}. Paths are relative to it and it is the only \
          place you write.\n\n\
-         Finish on the result. Do not append an offer of further work.{more}",
+         Finish on the result. Do not append an offer of further work.{more}{notes}",
         home.display()
     )
 }
@@ -912,7 +927,7 @@ mod tests {
     #[test]
     fn the_model_is_told_the_names_of_everything_it_could_reach_but_not_the_schemas() {
         let nothing = mcp::Servers::default();
-        let bare = opening_instructions(std::path::Path::new("/tmp/x"), &nothing);
+        let bare = opening_instructions(std::path::Path::new("/tmp/x"), &nothing, "");
         assert!(
             !bare.contains("find_tools"),
             "with no servers there is nothing to look up, and saying so invites a wild goose chase"
