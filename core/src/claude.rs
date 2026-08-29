@@ -433,12 +433,31 @@ impl Claude {
 }
 
 impl Engine for Claude {
-    fn say(&mut self, text: &str) -> Result<()> {
+    fn say(&mut self, text: &str, pictures: &[crate::Picture]) -> Result<()> {
+        // Pictures first, then the words. Both engines and every model behind
+        // them read a question about an image better when the image is already
+        // above it, and putting the text first makes "what is in this" a
+        // question about nothing yet.
+        let mut content: Vec<serde_json::Value> = pictures
+            .iter()
+            .map(|one| {
+                serde_json::json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": one.kind,
+                        "data": one.base64,
+                    },
+                })
+            })
+            .collect();
+        content.push(serde_json::json!({ "type": "text", "text": text }));
+
         let line = format!(
             "{}\n",
             serde_json::json!({
                 "type": "user",
-                "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
+                "message": { "role": "user", "content": content },
             })
         );
         self.turns

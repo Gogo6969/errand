@@ -133,9 +133,32 @@ impl Event {
 /// engine's business and worth knowing: Claude Code takes the message at the
 /// next turn boundary rather than interrupting the tool in flight, which is the
 /// same thing the person sees in any chat with somebody who is concentrating.
+/// A picture somebody attached to what they said.
+///
+/// Carried as bytes rather than as a path, because the two engines want it in
+/// two different shapes and neither of them wants a filename: Claude Code takes
+/// a base64 block on its pipe, and a local model takes a data URL. A path would
+/// mean each engine reading the file itself, which is two chances to disagree
+/// about what happens when it is missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picture {
+    /// `image/png` and the like, as both engines label it.
+    pub kind: String,
+    pub base64: String,
+}
+
+impl Picture {
+    /// The form a local model wants, which is the form a browser writes.
+    pub fn as_data_url(&self) -> String {
+        format!("data:{};base64,{}", self.kind, self.base64)
+    }
+}
+
 pub trait Engine {
-    /// Send a turn. Safe to call while the engine is working.
-    fn say(&mut self, text: &str) -> anyhow::Result<()>;
+    /// Send a turn, with anything attached to it.
+    ///
+    /// Safe to call while the engine is working.
+    fn say(&mut self, text: &str, pictures: &[Picture]) -> anyhow::Result<()>;
     /// Answer a question it stopped to ask. `call` is the one it came with.
     ///
     /// Nothing happens on the other side until this arrives, which is the

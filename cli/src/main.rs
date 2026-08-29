@@ -95,11 +95,11 @@ async fn main() -> anyhow::Result<()> {
                 // than losing it, or the thread hangs with nothing to say why.
                 *asked.lock().unwrap() = Some(call);
                 working.store(true, Ordering::SeqCst);
-                claude.say(said)?;
+                claude.say(said, &[])?;
             }
             (None, _) => {
                 working.store(true, Ordering::SeqCst);
-                claude.say(said)?;
+                claude.say(said, &[])?;
             }
         }
     }

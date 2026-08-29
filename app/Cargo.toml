@@ -24,3 +24,4 @@ block2 = "0.6.2"
 chrono = "0.4.45"
 anyhow.workspace = true
 uuid = { version = "1.26.0", features = ["v4"] }
+base64 = "0.22"

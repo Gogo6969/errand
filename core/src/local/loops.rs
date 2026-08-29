@@ -67,8 +67,12 @@ pub struct Local {
 
 /// Something to do to the conversation.
 enum Turn {
-    Say(String),
-    Answer { call: String, said: Answer },
+    /// What was said, and anything attached to it as a data URL.
+    Say(String, Vec<String>),
+    Answer {
+        call: String,
+        said: Answer,
+    },
     Stop,
 }
 
@@ -111,9 +115,12 @@ impl Local {
 }
 
 impl Engine for Local {
-    fn say(&mut self, text: &str) -> Result<()> {
+    fn say(&mut self, text: &str, pictures: &[crate::Picture]) -> Result<()> {
         self.turns
-            .send(Turn::Say(text.to_string()))
+            .send(Turn::Say(
+                text.to_string(),
+                pictures.iter().map(crate::Picture::as_data_url).collect(),
+            ))
             .map_err(|_| anyhow::anyhow!("this conversation has ended"))
     }
 
@@ -167,8 +174,8 @@ async fn conversation(
     let mut loaded: HashSet<String> = HashSet::new();
 
     while let Some(turn) = asked.recv().await {
-        let said = match turn {
-            Turn::Say(text) => text,
+        let (said, pictures) = match turn {
+            Turn::Say(text, pictures) => (text, pictures),
             // An answer with no question behind it. It happens when a thread is
             // reopened while a card is still on screen from last time.
             Turn::Answer { .. } => continue,
@@ -194,7 +201,7 @@ async fn conversation(
         history.push(ChatMessage::User {
             content: said,
             name: None,
-            image_data_urls: vec![],
+            image_data_urls: pictures,
         });
 
         let ran = errand(
@@ -591,7 +598,7 @@ async fn wait_for_an_answer(
                 return Some((said, meanwhile))
             }
             Some(Turn::Stop) | None => return None,
-            Some(Turn::Say(text)) => meanwhile.push(text),
+            Some(Turn::Say(text, _)) => meanwhile.push(text),
             // An answer to some other question, which by now has no question
             // behind it. Nothing to do with it but let it go.
             Some(Turn::Answer { .. }) => {}

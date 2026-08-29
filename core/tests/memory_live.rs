@@ -48,7 +48,7 @@ async fn a_model_writes_down_what_it_is_told_and_looks_it_up_again() {
     )
     .expect("opening");
 
-    it.say("The morning briefing goes to Telegram, not email. Write that down so you still know it next week.")
+    it.say("The morning briefing goes to Telegram, not email. Write that down so you still know it next week.", &[])
         .expect("saying");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(180);

@@ -128,6 +128,15 @@ fn tell_them(app: &AppHandle, store: &Store, id: &str, event: &Event) {
     let (title, body) = match event {
         Event::Done { said } => (called(store, id), gist(said)),
         Event::Failed { why } => (format!("{} stopped", called(store, id)), gist(why)),
+        // An agent that has stopped to ask is the one thing here that is
+        // actually waiting on somebody. Finishing can be read whenever; a
+        // question holds the whole errand until it is answered, and a routine
+        // at seven in the morning will sit on one until it times out with
+        // nobody ever knowing it asked.
+        Event::NeedsYou(ask) => (
+            format!("{} needs you", called(store, id)),
+            gist(&ask.asking),
+        ),
         _ => return,
     };
     let watching = app
@@ -142,10 +151,17 @@ fn tell_them(app: &AppHandle, store: &Store, id: &str, event: &Event) {
 
 /// What a thread is called, or something honest if it is not called anything.
 fn called(store: &Store, id: &str) -> String {
-    match store.agent(id) {
-        Ok(Some(t)) => t.name,
-        _ => "Errand".to_string(),
-    }
+    // The conversation's agent, not the id as an agent. They are the same
+    // string only for an agent's first conversation, so every conversation
+    // opened after that was announced as "Errand" rather than by name, which
+    // is the one thing a notification is for.
+    store
+        .conversation(id)
+        .ok()
+        .flatten()
+        .map(|c| c.agent)
+        .and_then(|agent| store.agent(&agent).ok().flatten())
+        .map_or_else(|| "Errand".to_string(), |a| a.name)
 }
 
 /// The gist of what it said, in the room a notification actually has.
@@ -413,7 +429,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 let asked = {
                     let held: State<Held> = app.state();
                     let mut live = held.live.lock().unwrap();
-                    live.get_mut(&id).map(|engine| engine.say(WHO_ARE_YOU))
+                    live.get_mut(&id).map(|engine| engine.say(WHO_ARE_YOU, &[]))
                 };
                 // Nothing to ask, or it would not take the question. Either
                 // way it keeps the name it has and is asked again next time.
@@ -485,16 +501,96 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
 
 /// Say something. Safe while it is working: that is the point of the thing.
 #[tauri::command]
-async fn say(held: State<'_, Held>, id: String, text: String) -> Result<(), String> {
+async fn say(
+    held: State<'_, Held>,
+    id: String,
+    text: String,
+    // Files dropped on the window, or images pasted into it as data URLs.
+    // Nothing here means the ordinary case, which is most of them.
+    attached: Option<Vec<String>>,
+) -> Result<(), String> {
+    let pictures = attached
+        .map(|these| pictures_from(&these))
+        .transpose()?
+        .unwrap_or_default();
+
     // Written down first. If the agent cannot be reached, what was said is
     // still what was said, and it will be there when the thread is reopened.
-    held.store.asked(&id, &text).map_err(|e| e.to_string())?;
+    // The pictures are not written down: the store holds a conversation, not
+    // an album, and a base64 image in a transcript line would be read back
+    // into the window on every reopen.
+    let said = match pictures.len() {
+        0 => text.clone(),
+        1 => format!("{text}\n\n(with a picture)"),
+        n => format!("{text}\n\n(with {n} pictures)"),
+    };
+    held.store.asked(&id, &said).map_err(|e| e.to_string())?;
 
     let mut live = held.live.lock().unwrap();
     let thread = live
         .get_mut(&id)
         .ok_or_else(|| "that conversation is not open".to_string())?;
-    thread.say(&text).map_err(|e| e.to_string())
+    thread.say(&text, &pictures).map_err(|e| e.to_string())
+}
+
+/// The most an attached picture may be, before base64.
+///
+/// Generous for a screenshot and firm about a video somebody dragged in by
+/// mistake. Both engines have their own limits and neither says so kindly: the
+/// failure is a turn that dies somewhere far from the drop.
+const A_PICTURE_AT_MOST: u64 = 8 * 1024 * 1024;
+
+/// Turn what the window handed over into something an engine can be given.
+///
+/// Two shapes arrive, because two gestures produce them: dropping a file gives
+/// a path, and pasting gives the bytes with no name at all.
+fn pictures_from(these: &[String]) -> Result<Vec<errand_core::Picture>, String> {
+    use base64::Engine as _;
+    let mut ready = Vec::new();
+    for one in these {
+        if let Some(rest) = one.strip_prefix("data:") {
+            let (kind, data) = rest
+                .split_once(";base64,")
+                .ok_or("that is not a picture this understands")?;
+            ready.push(errand_core::Picture {
+                kind: kind.to_string(),
+                base64: data.to_string(),
+            });
+            continue;
+        }
+
+        let at = std::path::Path::new(one);
+        let kind = match at
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase)
+            .as_deref()
+        {
+            Some("png") => "image/png",
+            Some("jpg" | "jpeg") => "image/jpeg",
+            Some("gif") => "image/gif",
+            Some("webp") => "image/webp",
+            // Not a picture. Left alone rather than refused: a dropped file is
+            // still a path the agent can open, which is what dropping one did
+            // before pictures were understood at all.
+            _ => continue,
+        };
+        let how_big = std::fs::metadata(at).map_err(|e| e.to_string())?.len();
+        if how_big > A_PICTURE_AT_MOST {
+            return Err(format!(
+                "{} is {}MB, and a picture has to be under {}MB",
+                at.file_name().unwrap_or_default().to_string_lossy(),
+                how_big / 1024 / 1024,
+                A_PICTURE_AT_MOST / 1024 / 1024
+            ));
+        }
+        let bytes = std::fs::read(at).map_err(|e| e.to_string())?;
+        ready.push(errand_core::Picture {
+            kind: kind.to_string(),
+            base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        });
+    }
+    Ok(ready)
 }
 
 /// Answer a question the thread stopped to ask.
@@ -1071,6 +1167,8 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
         app.state(),
         talk.clone(),
         format!("{asked_by} asks: {request}"),
+        // An agent asking another sends words and nothing else.
+        None,
     )
     .await
     {
@@ -1232,7 +1330,8 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
                 now.format("%H:%M")
             ),
         };
-        say(app.state(), conversation, said).await?;
+        // A routine says what it was set to say, and nothing else.
+        say(app.state(), conversation, said, None).await?;
     }
     Ok(())
 }
@@ -1645,6 +1744,52 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pasted_picture_and_a_dropped_one_arrive_the_same_way() {
+        // Two gestures, two shapes: dropping a file gives a path, and pasting
+        // gives the bytes with no name at all. Both have to end up as the one
+        // thing an engine can be handed.
+        let pasted = pictures_from(&["data:image/png;base64,iVBORw0KGgo=".to_string()])
+            .expect("a pasted picture");
+        assert_eq!(pasted.len(), 1);
+        assert_eq!(pasted[0].kind, "image/png");
+        assert_eq!(pasted[0].base64, "iVBORw0KGgo=");
+        assert_eq!(
+            pasted[0].as_data_url(),
+            "data:image/png;base64,iVBORw0KGgo=",
+            "it did not survive the round trip a local model needs"
+        );
+    }
+
+    #[test]
+    fn a_dropped_file_that_is_not_a_picture_is_left_alone_rather_than_refused() {
+        // Dropping a spreadsheet used to put its path in the box, which is
+        // still the right thing: the agent can open it. Refusing it now would
+        // take away something that worked.
+        let mixed = pictures_from(&["/tmp/accounts.xlsx".to_string(), "/tmp/notes".to_string()])
+            .expect("nothing to complain about");
+        assert!(mixed.is_empty());
+    }
+
+    #[test]
+    fn something_that_says_it_is_a_picture_and_is_not_says_so() {
+        assert!(pictures_from(&["data:image/png,notbase64".to_string()]).is_err());
+    }
+
+    #[test]
+    fn a_picture_too_big_to_send_says_which_one_and_how_big() {
+        // Both engines have their own limit and neither says so kindly: the
+        // failure is a turn that dies somewhere far from the drop.
+        let big = std::env::temp_dir().join("errand-too-big.png");
+        std::fs::write(&big, vec![0u8; (A_PICTURE_AT_MOST + 1) as usize]).expect("a big file");
+        let said = pictures_from(&[big.to_string_lossy().to_string()]);
+        let _ = std::fs::remove_file(&big);
+
+        let why = said.expect_err("it accepted a picture over the limit");
+        assert!(why.contains("errand-too-big.png"), "{why}");
+        assert!(why.contains("MB"), "{why}");
+    }
 
     #[test]
     fn a_model_on_this_machine_is_named_without_a_host_and_one_elsewhere_with_it() {

@@ -33,7 +33,7 @@ async fn one_turn_with_every_event_it_produces() {
     let asking = std::env::var("ERRAND_ASK")
         .unwrap_or_else(|_| "List the files in the working directory.".into());
     println!("--> {asking}");
-    it.say(&asking).unwrap();
+    it.say(&asking, &[]).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(300);
     while Instant::now() < deadline {

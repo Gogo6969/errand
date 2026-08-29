@@ -57,7 +57,7 @@ async fn a_thread_reopened_tomorrow_is_the_same_conversation() {
     let (mut first, events) =
         Claude::open(&id, &home, false, "ask", None, None, "").expect("starting a thread");
     first
-        .say("Remember the word MANGO. Reply with just OK.")
+        .say("Remember the word MANGO. Reply with just OK.", &[])
         .unwrap();
     let answered = until_done(&events);
     assert!(
@@ -73,7 +73,10 @@ async fn a_thread_reopened_tomorrow_is_the_same_conversation() {
     let (mut again, events) =
         Claude::open(&id, &home, true, "ask", None, None, "").expect("reopening the thread");
     again
-        .say("What word did I ask you to remember? Reply with just that word.")
+        .say(
+            "What word did I ask you to remember? Reply with just that word.",
+            &[],
+        )
         .unwrap();
     let remembered = until_done(&events);
     again.stop().unwrap();

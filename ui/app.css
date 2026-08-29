@@ -1139,3 +1139,32 @@ body.catching #what { border-color: var(--accent); }
 .finding[data-how="odd"] .finding-what { color: var(--accent); }
 .finding[data-how="broken"] .finding-what { color: var(--wrong); }
 .finding[data-how="broken"] .finding-fix { border-left-color: var(--wrong); }
+
+/* --------------------------------------------------------- attached -- */
+
+/* What is going with the next thing said, above the box rather than inside
+   it. A path pasted into the box is a thing somebody has to be careful not to
+   delete, and a pasted screenshot has no path to paste. */
+#attached[hidden] { display: none; }
+#attached {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 18px 0;
+}
+#attached .chip {
+  border: 1px solid var(--rule);
+  background: var(--card);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#attached .chip:hover { color: var(--wrong); border-color: var(--wrong); }
+#attached .chip::after { content: " ×"; opacity: .6; }

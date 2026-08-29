@@ -91,6 +91,7 @@ const el = {
   engine: document.getElementById("engine"),
   sweeping: document.getElementById("sweeping"),
   checkup: document.getElementById("checkup"),
+  attached: document.getElementById("attached"),
   palette: document.getElementById("palette"),
   paletteWhat: document.getElementById("palette-what"),
   paletteList: document.getElementById("palette-list"),
@@ -858,20 +859,81 @@ function doneWith(m) {
 
 // -------------------------------------------------------------- saying --
 
+/**
+ * Pictures waiting to go with the next thing said.
+ *
+ * Held apart from the text rather than pasted into it as a path, because a
+ * path in the box is a thing somebody has to not delete by accident, and a
+ * pasted image has no path at all. Cleared when it is sent, so an image never
+ * goes twice.
+ */
+let attached = [];
+
+function drawAttached() {
+  el.attached.hidden = attached.length === 0;
+  el.attached.replaceChildren(
+    ...attached.map((one, at) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip";
+      chip.textContent = one.name;
+      chip.title = "Take this off again";
+      chip.onclick = () => {
+        attached.splice(at, 1);
+        drawAttached();
+      };
+      return chip;
+    }),
+  );
+}
+
 el.form.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = el.what.value.trim();
-  if (!text) return;
+  // A picture on its own is a question: "what is this". So something has to be
+  // said, but it does not have to be typed.
+  if (!text && !attached.length) return;
   el.what.value = "";
   el.what.style.height = "auto";
-  sayIt(text);
+  sayIt(text || "What is this?");
+});
+
+/**
+ * Anything pasted that is a picture rather than words.
+ *
+ * A screenshot on the clipboard has no filename and never touches disk, so
+ * this is the only way one ever arrives. Read here into a data URL, because
+ * the window is the only place that can see it.
+ */
+el.what.addEventListener("paste", (e) => {
+  const pictures = [...(e.clipboardData?.items || [])].filter((one) =>
+    one.type.startsWith("image/"),
+  );
+  if (!pictures.length) return;
+  e.preventDefault();
+  for (const one of pictures) {
+    const file = one.getAsFile();
+    if (!file) continue;
+    const read = new FileReader();
+    read.onload = () => {
+      attached.push({ name: file.name || "pasted picture", url: String(read.result) });
+      drawAttached();
+    };
+    read.readAsDataURL(file);
+  }
 });
 
 /** Say something to the thread that is open, from wherever it was typed. */
 async function sayIt(text) {
   const t = talking();
   if (!t) return;
-  t.messages.push({ kind: "mine", text });
+  const going = attached.map((one) => one.url);
+  const withThem = going.length
+    ? `${text}\n\n(with ${going.length === 1 ? "a picture" : `${going.length} pictures`})`
+    : text;
+  attached = [];
+  drawAttached();
+  t.messages.push({ kind: "mine", text: withThem });
   // Working from the moment it is sent, not from the moment something comes
   // back: the gap between the two is exactly when a person wonders whether the
   // thing they typed went anywhere.
@@ -880,7 +942,7 @@ async function sayIt(text) {
   drawThreads();
 
   try {
-    await invoke("say", { id: t.id, text });
+    await invoke("say", { id: t.id, text, attached: going.length ? going : null });
   } catch (why) {
     t.working = false;
     t.messages.push({ kind: "ended", failed: true, text: String(why) });
@@ -1050,10 +1112,25 @@ function catchFiles() {
     }
     document.body.classList.remove("catching");
     if (payload.type !== "drop" || !payload.paths?.length) return;
-    const already = el.what.value.trim();
-    el.what.value = already ? `${already}\n${payload.paths.join("\n")}` : payload.paths.join("\n");
+
+    // A picture is attached; anything else is still a path in the box, which
+    // is what dropping a file did before pictures were understood and is
+    // still the right thing for a spreadsheet or a folder.
+    const looksLikeAPicture = /\.(png|jpe?g|gif|webp)$/i;
+    const pictures = payload.paths.filter((p) => looksLikeAPicture.test(p));
+    const rest = payload.paths.filter((p) => !looksLikeAPicture.test(p));
+
+    for (const path of pictures) {
+      attached.push({ name: path.split("/").pop(), url: path });
+    }
+    if (pictures.length) drawAttached();
+
+    if (rest.length) {
+      const already = el.what.value.trim();
+      el.what.value = already ? `${already}\n${rest.join("\n")}` : rest.join("\n");
+      el.what.dispatchEvent(new Event("input"));
+    }
     el.what.focus();
-    el.what.dispatchEvent(new Event("input"));
   });
 }
 catchFiles();
