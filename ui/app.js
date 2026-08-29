@@ -91,6 +91,7 @@ const el = {
   engine: document.getElementById("engine"),
   sweeping: document.getElementById("sweeping"),
   checkup: document.getElementById("checkup"),
+  working: document.getElementById("working"),
   attached: document.getElementById("attached"),
   palette: document.getElementById("palette"),
   paletteWhat: document.getElementById("palette-what"),
@@ -1483,6 +1484,7 @@ function whatCouldBeDone() {
   add("Make this run on a schedule", "", () => el.repeat.click(), !!showing);
   add("Look for models on the network", "takes a moment", () => a && lookWider(a), !!a);
   add("Check this setup", "what is wrong, and what to do", () => checkup());
+  add("What is running", "everywhere, not just here", () => whatsRunning());
   add(
     "Carry this on in a new conversation",
     "leaves this one alone",
@@ -1698,4 +1700,75 @@ async function carryOn(upTo, saidAgain) {
     el.what.select();
   }
   el.what.focus();
+}
+
+
+/**
+ * Everything working right now, wherever it is happening.
+ *
+ * The window knows only about conversations somebody has opened, and the work
+ * worth being able to see is exactly the work happening somewhere nobody is
+ * looking: a routine firing at seven, an agent answering another agent. So the
+ * app is asked rather than the page working it out.
+ */
+async function whatsRunning() {
+  if (!el.working.hidden) {
+    el.working.hidden = true;
+    return;
+  }
+  el.working.hidden = false;
+  el.working.replaceChildren(note("p", "Looking…"));
+
+  let going;
+  try {
+    going = await invoke("whats_running");
+  } catch (why) {
+    el.working.replaceChildren(note("p", String(why)));
+    return;
+  }
+
+  if (!going.length) {
+    el.working.replaceChildren(note("p", "Nothing is running. Everything has finished."));
+    return;
+  }
+
+  const waiting = going.filter((one) => one.waiting).length;
+  el.working.replaceChildren(
+    note(
+      "p",
+      waiting
+        ? `${going.length} running, ${waiting} stopped waiting on you.`
+        : `${going.length} running.`,
+    ),
+    ...going.map((one) => {
+      const row = document.createElement("div");
+      row.className = "one";
+      row.dataset.waiting = String(one.waiting);
+      row.title = "Open it";
+      // Opening it is the thing anybody wants next, and it is the only way to
+      // answer one that has stopped to ask.
+      row.onclick = async () => {
+        el.working.hidden = true;
+        if (!talks.has(one.conversation)) {
+          const theirs = (await invoke("conversations", { agent: one.agent })).map((c) =>
+            asTalk(c, talks.get(c.id)),
+          );
+          for (const t of theirs) talks.set(t.id, t);
+        }
+        await show(one.conversation);
+      };
+
+      const who = document.createElement("span");
+      who.className = "who";
+      who.textContent = one.who;
+      const where = document.createElement("span");
+      where.className = "where";
+      where.textContent = one.talk;
+      const what = document.createElement("p");
+      what.className = "what";
+      what.textContent = one.what;
+      row.append(who, where, what);
+      return row;
+    }),
+  );
 }

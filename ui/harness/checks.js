@@ -292,6 +292,46 @@ export function carryingOn() {
   return found;
 }
 
+/**
+ * Seeing what is running somewhere nobody is looking.
+ *
+ * The whole reason this panel exists: the window knows only about
+ * conversations somebody has opened, and a routine firing at seven on an agent
+ * nobody has clicked is exactly the work worth being able to see.
+ */
+export async function running() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const panel = document.getElementById("working");
+
+  check("it starts closed", panel.hidden, `hidden=${panel.hidden}`);
+
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  const typing = document.getElementById("palette-what");
+  typing.value = "what is running";
+  typing.dispatchEvent(new Event("input"));
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await new Promise((r) => setTimeout(r, 250));
+
+  check("it opens", !panel.hidden, `hidden=${panel.hidden}`);
+  check(
+    "it counts what is waiting on somebody separately from what is merely busy",
+    panel.textContent.includes("2 running, 1 stopped waiting"),
+    panel.textContent.slice(0, 70),
+  );
+  check(
+    "what is waiting on somebody is marked, since it is the only kind that will not finish",
+    panel.querySelector('[data-waiting="true"]'),
+    [...panel.querySelectorAll("[data-waiting]")].map((r) => r.dataset.waiting).join(","),
+  );
+  check(
+    "it says which agent and which conversation, not just that something is happening",
+    panel.textContent.includes("Bitcoin Desk") && panel.textContent.includes("Asked by Day Check"),
+    panel.textContent.slice(0, 110),
+  );
+  return found;
+}
+
 /** Everything in the header on one row, which is what a header is. */
 export function headerFitsOnOneRow() {
   const title = document.getElementById("title");

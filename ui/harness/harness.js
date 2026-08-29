@@ -84,6 +84,12 @@ export const FIXTURE = {
     { what: "Models on the network", how: "odd", said: "everything found is bound to this machine only",
       fix: "Start Ollama with OLLAMA_HOST=0.0.0.0." },
   ],
+  whats_running: [
+    { conversation: "talk-3", agent: "agent-bitcoin", who: "Bitcoin Desk", talk: "Asked by Day Check",
+      what: "Waiting on you: Running a command", waiting: true },
+    { conversation: "talk-2", agent: "agent-bitcoin", who: "Bitcoin Desk", talk: "First",
+      what: "Looking something up on the web", waiting: false },
+  ],
   outside: [
     { name: "peekaboo", from: "~/.claude.json", tools: ["see", "click", "type"], trouble: null },
     { name: "mempalace", from: "~/.claude.json", tools: [], trouble: "starting it: No such file or directory" },
@@ -123,6 +129,8 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.outside);
           case "checkup":
             return Promise.resolve(fixture.checkup);
+          case "whats_running":
+            return Promise.resolve(fixture.whats_running);
           case "allowances":
           case "routines":
           case "runs":

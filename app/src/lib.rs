@@ -73,6 +73,13 @@ struct Held {
     /// not depend on a window being open at all -- which matters, because a
     /// routine at seven in the morning may delegate.
     watching: Arc<Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<Event>>>>,
+    /// What each conversation is doing, for the ones that are doing something.
+    ///
+    /// Kept by the app rather than worked out in the window, because the window
+    /// only knows about conversations somebody has opened. A routine firing at
+    /// seven on an agent nobody is looking at is exactly the work worth being
+    /// able to see, and it is the work the window cannot see at all.
+    doing: Arc<Mutex<HashMap<String, String>>>,
     /// The socket each Claude conversation can reach this app's own tools on.
     ///
     /// Held here because holding it is what keeps it open: dropping one stops
@@ -536,6 +543,21 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             if event.ends_the_turn() {
                 let held: State<Held> = app.state();
                 held.running.lock().unwrap().remove(&id);
+                held.doing.lock().unwrap().remove(&id);
+            } else {
+                // What it is on, in the words the window would use. Anything
+                // that is not an ending means a turn is in flight; a step says
+                // what it is, and everything else is at least "thinking".
+                let held: State<Held> = app.state();
+                let now = match &event {
+                    Event::Doing(step) => Some(step.what.clone()),
+                    Event::Said { .. } | Event::Started { .. } => Some("Writing".to_string()),
+                    Event::NeedsYou(ask) => Some(format!("Waiting on you: {}", ask.asking)),
+                    _ => None,
+                };
+                if let Some(now) = now {
+                    held.doing.lock().unwrap().insert(id.clone(), now);
+                }
             }
 
             // Anybody waiting on this conversation ending -- which is another
@@ -1545,6 +1567,55 @@ async fn carry_on(
         .map_err(|e| e.to_string())
 }
 
+/// One conversation that is doing something, as the window shows it.
+#[derive(Clone, Serialize)]
+struct Working {
+    conversation: String,
+    agent: String,
+    /// The agent's name, so a list of these reads without a second lookup.
+    who: String,
+    /// What the conversation is called, since an agent may have several.
+    talk: String,
+    /// What it is on, in the same words the timeline uses.
+    what: String,
+    /// Whether it is stopped waiting for somebody rather than working.
+    waiting: bool,
+}
+
+/// Everything that is working right now, across every agent.
+///
+/// The answer to a question the window cannot answer for itself: it knows only
+/// about conversations somebody has opened, and the work worth being able to
+/// see is exactly the work happening somewhere nobody is looking.
+#[tauri::command]
+async fn whats_running(held: State<'_, Held>) -> Result<Vec<Working>, String> {
+    let doing = held.doing.lock().unwrap().clone();
+    let mut going = Vec::new();
+    for (conversation, what) in doing {
+        let Ok(Some(talk)) = held.store.conversation(&conversation) else {
+            continue;
+        };
+        let who = held
+            .store
+            .agent(&talk.agent)
+            .ok()
+            .flatten()
+            .map_or_else(|| "an agent".to_string(), |a| a.name);
+        going.push(Working {
+            waiting: what.starts_with("Waiting on you"),
+            conversation,
+            agent: talk.agent,
+            who,
+            talk: talk.name,
+            what,
+        });
+    }
+    // Anything stopped for somebody first: it is the only kind that will not
+    // finish on its own.
+    going.sort_by_key(|w| (!w.waiting, w.who.clone()));
+    Ok(going)
+}
+
 /// What is wrong with this setup, before it goes wrong in the middle of a job.
 ///
 /// Everything it checks is something that has actually gone wrong here, and
@@ -1780,6 +1851,7 @@ pub fn run() {
                 wants,
                 running: Arc::default(),
                 watching: Arc::default(),
+                doing: Arc::default(),
                 doorways: Mutex::new(HashMap::new()),
                 store: Arc::new(store),
             });
@@ -1814,6 +1886,7 @@ pub fn run() {
             outside,
             carry_on,
             checkup,
+            whats_running,
             export_conversation,
             show_in_browser,
             rename,
