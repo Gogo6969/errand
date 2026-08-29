@@ -161,6 +161,12 @@ pub struct Claude {
     /// Both arrive with the question and neither is worth making the window
     /// carry back and forth.
     waiting: Waiting,
+    /// What it said it had, when it started.
+    ///
+    /// Filled by the task reading its output, because that is the only place
+    /// the line goes past. Read by the window when somebody asks what this
+    /// agent can reach.
+    brought: Arc<Mutex<crate::Brought>>,
 }
 
 /// The questions in flight, shared between the task reading them and the
@@ -379,6 +385,8 @@ impl Claude {
             .spawn()
             .context("starting claude; is Claude Code installed and on the PATH?")?;
         let waiting: Waiting = Arc::default();
+        let brought: Arc<Mutex<crate::Brought>> = Arc::default();
+        let turning_up = brought.clone();
 
         let mut stdin = child.stdin.take().context("claude stdin")?;
         let stdout = child.stdout.take().context("claude stdout")?;
@@ -414,6 +422,14 @@ impl Claude {
             let mut lines = BufReader::new(stdout).lines();
             let mut said_anything = false;
             while let Ok(Some(line)) = lines.next_line().await {
+                // What it turned up with, said once at the start. Kept rather
+                // than passed on, because it is a fact about what is answering
+                // and not something that happened: the window asks for it when
+                // somebody opens the panel, which is long after this line went
+                // by.
+                if let Some(kit) = what_it_brought(&line) {
+                    *turning_up.lock().unwrap() = kit;
+                }
                 // A question is the one thing that has to be kept rather than
                 // only passed on: answering it needs what it arrived with.
                 if let Some((id, request)) = a_question(&line) {
@@ -473,7 +489,14 @@ impl Claude {
 
         // Said before anything else, so the agent knows there is somebody here.
         let _ = turns.send(Turn::Say(format!("{HELLO}\n")));
-        Ok((Self { turns, waiting }, rx))
+        Ok((
+            Self {
+                turns,
+                waiting,
+                brought,
+            },
+            rx,
+        ))
     }
 }
 
@@ -553,10 +576,48 @@ impl Engine for Claude {
         let _ = self.turns.send(Turn::Stop);
         Ok(())
     }
+
+    fn brought(&self) -> crate::Brought {
+        self.brought.lock().unwrap().clone()
+    }
 }
 
 /// A question, if this line is one, as its id and everything it came with.
 ///
+/// What Claude Code says it has, from the line where it says it.
+///
+/// Read off the same stream everything else comes from rather than asked for
+/// separately, because asking means starting a second process and waiting for
+/// it to say the one thing this one already said.
+fn what_it_brought(line: &str) -> Option<crate::Brought> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("type")?.as_str()? != "system" || v.get("subtype")?.as_str()? != "init" {
+        return None;
+    }
+    let names = |which: &str| -> Vec<String> {
+        v.get(which)
+            .and_then(|list| list.as_array())
+            .map(|list| {
+                list.iter()
+                    // Plugins arrive as objects with a name and a path; the
+                    // rest arrive as plain strings.
+                    .filter_map(|one| {
+                        one.as_str()
+                            .or_else(|| one.get("name")?.as_str())
+                            .map(str::to_string)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    Some(crate::Brought {
+        skills: names("skills"),
+        helpers: names("agents"),
+        plugins: names("plugins"),
+        commands: names("slash_commands"),
+    })
+}
+
 /// Separate from `read` because the two want different things from the same
 /// line: the window wants a question it can show, and answering wants the
 /// request exactly as it arrived. Parsing it twice is cheaper than threading
@@ -586,6 +647,51 @@ pub fn read(line: &str) -> Vec<Event> {
     let at = |k: &str| v.get(k).and_then(|s| s.as_str()).unwrap_or("").to_string();
 
     match at("type").as_str() {
+        // A hook of somebody's own, but only when it did something.
+        //
+        // Hooks run constantly and most of them run silently, so showing every
+        // one would bury the conversation in machinery. What is worth a line
+        // is a hook that refused something or had something to say: those are
+        // the ones that change what the agent does, and before this they
+        // changed it invisibly, leaving an agent that would not do a thing and
+        // could not say why.
+        "system" if at("subtype") == "hook_response" => {
+            let failed = v
+                .get("exit_code")
+                .and_then(serde_json::Value::as_i64)
+                .is_some_and(|code| code != 0);
+            // Both fields are always there and either may be empty, so this
+            // is the first non-empty one rather than the first present one.
+            let said = ["output", "stderr"]
+                .iter()
+                .filter_map(|which| v.get(*which).and_then(|o| o.as_str()))
+                .map(str::trim)
+                .find(|o| !o.is_empty());
+            match (failed, said) {
+                (false, None) => vec![],
+                (failed, said) => {
+                    let name = at("hook_name");
+                    let call = format!("hook-{}", at("hook_id"));
+                    vec![
+                        Event::Doing(Step {
+                            what: match failed {
+                                true => format!("A hook stopped this: {name}"),
+                                false => format!("A hook of yours ran: {name}"),
+                            },
+                            tool: "hook".into(),
+                            call: call.clone(),
+                        }),
+                        Event::Did {
+                            call,
+                            outcome: said
+                                .unwrap_or("It refused, and said nothing about why.")
+                                .to_string(),
+                        },
+                    ]
+                }
+            }
+        }
+
         // Claude Code has made room for itself, which it does on its own and
         // said nothing about until now.
         //
@@ -1143,6 +1249,77 @@ mod tests {
             found,
             "the transcript was on disk and it still wanted to start as new"
         );
+    }
+
+    #[test]
+    fn what_it_turned_up_with_is_read_from_the_line_where_it_says_so() {
+        // Plugins arrive as objects with a name and a path; everything else
+        // arrives as a plain string. Reading only one shape drops the other
+        // silently, and a panel that lists skills and no plugins looks like a
+        // machine with no plugins on it.
+        const OPENING: &str = r#"{"type":"system","subtype":"init","skills":["pdf","docx"],"agents":["Explore","general-purpose"],"plugins":[{"name":"marketing","path":"/x"},{"name":"productivity","path":"/y"}],"slash_commands":["init","review"]}"#;
+        let kit = what_it_brought(OPENING).expect("it said what it had");
+        assert_eq!(kit.skills, ["pdf", "docx"]);
+        assert_eq!(kit.helpers, ["Explore", "general-purpose"]);
+        assert_eq!(
+            kit.plugins,
+            ["marketing", "productivity"],
+            "plugins were dropped"
+        );
+        assert_eq!(kit.commands, ["init", "review"]);
+        assert!(!kit.is_empty());
+    }
+
+    #[test]
+    fn any_other_line_is_not_mistaken_for_it() {
+        assert!(what_it_brought(r#"{"type":"assistant","message":{"content":[]}}"#).is_none());
+        assert!(what_it_brought(r#"{"type":"system","subtype":"hook_started"}"#).is_none());
+        assert!(what_it_brought("not json at all").is_none());
+    }
+
+    #[test]
+    fn an_engine_that_brought_nothing_says_so_rather_than_looking_broken() {
+        // The honest answer for a local model: it has what this app hands it
+        // and not a thing more.
+        assert!(crate::Brought::default().is_empty());
+    }
+
+    #[test]
+    fn a_hook_that_did_nothing_is_not_shown_and_one_that_refused_is() {
+        // Hooks run constantly and mostly silently. Showing every one would
+        // bury the conversation in machinery; showing none leaves an agent
+        // that will not do a thing and cannot say why.
+        const QUIET: &str = r#"{"type":"system","subtype":"hook_response","hook_id":"h1","hook_name":"PreToolUse:Bash","exit_code":0,"output":"","stderr":""}"#;
+        assert!(read(QUIET).is_empty(), "a silent hook was shown");
+
+        const REFUSED: &str = r#"{"type":"system","subtype":"hook_response","hook_id":"h2","hook_name":"PreToolUse:Bash","exit_code":2,"output":"","stderr":"not on this branch"}"#;
+        let said = read(REFUSED);
+        assert_eq!(said.len(), 2, "{said:?}");
+        let Event::Doing(step) = &said[0] else {
+            panic!("it was not shown as something that happened");
+        };
+        assert!(step.what.contains("stopped this"), "{}", step.what);
+        assert!(
+            step.what.contains("PreToolUse:Bash"),
+            "it did not say which"
+        );
+        let Event::Did { outcome, .. } = &said[1] else {
+            panic!("it did not say why");
+        };
+        assert_eq!(outcome, "not on this branch");
+    }
+
+    #[test]
+    fn a_hook_that_succeeded_but_had_something_to_say_is_still_shown() {
+        // The startup hook that says a plugin is ready is worth a line: it is
+        // something a person put there to be told.
+        const SAID: &str = r#"{"type":"system","subtype":"hook_response","hook_id":"h3","hook_name":"SessionStart:startup","exit_code":0,"output":"the tunnel is up"}"#;
+        let said = read(SAID);
+        assert_eq!(said.len(), 2);
+        let Event::Doing(step) = &said[0] else {
+            panic!()
+        };
+        assert!(step.what.contains("ran"), "{}", step.what);
     }
 
     #[test]

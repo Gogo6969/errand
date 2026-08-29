@@ -1698,6 +1698,22 @@ fn worth_opening(url: &str) -> bool {
         .any(|s| url.starts_with(s))
 }
 
+/// What the engine answering this conversation turned up with.
+///
+/// Beside the tool servers rather than in a panel of its own, because it is
+/// the same question: what can this reach. Empty for a local model, which is
+/// the honest answer rather than a gap.
+#[tauri::command]
+async fn brought(held: State<'_, Held>, id: String) -> Result<errand_core::Brought, String> {
+    Ok(held
+        .live
+        .lock()
+        .unwrap()
+        .get(&id)
+        .map(|engine| engine.brought())
+        .unwrap_or_default())
+}
+
 /// One server of tools, as the window shows it.
 #[derive(Clone, Serialize)]
 struct Outside {
@@ -1887,6 +1903,7 @@ pub fn run() {
             carry_on,
             checkup,
             whats_running,
+            brought,
             export_conversation,
             show_in_browser,
             rename,

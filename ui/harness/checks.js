@@ -332,6 +332,51 @@ export async function running() {
   return found;
 }
 
+/**
+ * The Tools panel, which answers "what can this reach".
+ *
+ * Two sources and both belong there: the servers the app gives every engine,
+ * and what the engine itself turned up with. The second was true and invisible
+ * for as long as this app has existed.
+ */
+export async function whatItCanReach() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const panel = document.getElementById("reachable");
+
+  document.getElementById("reach").click();
+  await new Promise((r) => setTimeout(r, 300));
+
+  check("it opens", !panel.hidden, `hidden=${panel.hidden}`);
+  check(
+    "the servers the app gives it are listed",
+    panel.textContent.includes("peekaboo") && panel.textContent.includes("mempalace"),
+    panel.textContent.slice(0, 80),
+  );
+  check(
+    "a server that did not start says why rather than being left out",
+    panel.querySelector(".server.broken") &&
+      panel.textContent.includes("No such file or directory"),
+    panel.querySelector(".server.broken") ? "shown" : "missing",
+  );
+  check(
+    "what the engine itself brought is listed too",
+    ["Skills", "Kinds of helper", "Plugins", "Commands"].every((h) =>
+      panel.textContent.includes(h),
+    ),
+    panel.textContent.slice(0, 120),
+  );
+  check(
+    "the things themselves are named, not just counted",
+    panel.textContent.includes("artifact-design") && panel.textContent.includes("Explore"),
+    panel.textContent.includes("artifact-design") ? "named" : panel.textContent.slice(0, 90),
+  );
+
+  document.getElementById("reach").click();
+  check("clicking again closes it", panel.hidden, `hidden=${panel.hidden}`);
+  return found;
+}
+
 /** Everything in the header on one row, which is what a header is. */
 export function headerFitsOnOneRow() {
   const title = document.getElementById("title");

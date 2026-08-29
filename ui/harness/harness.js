@@ -90,6 +90,12 @@ export const FIXTURE = {
     { conversation: "talk-2", agent: "agent-bitcoin", who: "Bitcoin Desk", talk: "First",
       what: "Looking something up on the web", waiting: false },
   ],
+  brought: {
+    skills: ["pdf", "docx", "artifact-design"],
+    helpers: ["Explore", "general-purpose"],
+    plugins: ["marketing", "productivity"],
+    commands: ["init", "review"],
+  },
   outside: [
     { name: "peekaboo", from: "~/.claude.json", tools: ["see", "click", "type"], trouble: null },
     { name: "mempalace", from: "~/.claude.json", tools: [], trouble: "starting it: No such file or directory" },
@@ -131,6 +137,8 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.checkup);
           case "whats_running":
             return Promise.resolve(fixture.whats_running);
+          case "brought":
+            return Promise.resolve(fixture.brought);
           case "allowances":
           case "routines":
           case "runs":

@@ -154,6 +154,35 @@ impl Picture {
     }
 }
 
+/// What an engine turned up with, beyond the tools the app gave it.
+///
+/// Not an event, because it is not something that happens: it is a fact about
+/// what is answering, and the window asks for it when somebody opens the panel
+/// rather than being told at a moment nobody was looking. Empty for an engine
+/// that brought nothing, which is the honest answer for a local model: it has
+/// what this app hands it and not a thing more.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Brought {
+    /// Things somebody wrote for it to know how to do.
+    pub skills: Vec<String>,
+    /// Kinds of helper it can hand part of a job to.
+    pub helpers: Vec<String>,
+    /// Bundles somebody installed, by name.
+    pub plugins: Vec<String>,
+    /// What it will answer to, typed with a slash.
+    pub commands: Vec<String>,
+}
+
+impl Brought {
+    /// Did it turn up with anything at all?
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty()
+            && self.helpers.is_empty()
+            && self.plugins.is_empty()
+            && self.commands.is_empty()
+    }
+}
+
 pub trait Engine {
     /// Send a turn, with anything attached to it.
     ///
@@ -167,4 +196,12 @@ pub trait Engine {
     fn answer(&mut self, call: &str, said: Answer) -> anyhow::Result<()>;
     /// Stop it, whatever it is doing.
     fn stop(&mut self) -> anyhow::Result<()>;
+    /// What it turned up with, once it has said.
+    ///
+    /// Nothing until the first turn has started, because that is when it says.
+    /// A default of nothing rather than a required method, since an engine
+    /// that brings nothing should not have to say so in code.
+    fn brought(&self) -> Brought {
+        Brought::default()
+    }
 }

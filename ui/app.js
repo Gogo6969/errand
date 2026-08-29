@@ -1216,7 +1216,43 @@ el.reach.addEventListener("click", async () => {
     return;
   }
 
+  // What the engine itself turned up with, above the servers the app gives it.
+  // Same question, two sources: an agent can reach these and they are not
+  // ours, which until now was true and invisible.
+  let kit = {};
+  try {
+    kit = await invoke("brought", { id: showing });
+  } catch {
+    // An engine that has not started yet has nothing to say, which is not a
+    // failure worth showing.
+  }
+  const itsOwn = [
+    ["skills", "Skills"],
+    ["helpers", "Kinds of helper"],
+    ["plugins", "Plugins"],
+    ["commands", "Commands"],
+  ]
+    .filter(([which]) => (kit[which] || []).length)
+    .map(([which, called]) => {
+      const box = document.createElement("div");
+      box.className = "server";
+      const name = document.createElement("span");
+      name.className = "server-name";
+      name.textContent = called;
+      const from = document.createElement("span");
+      from.className = "server-from";
+      from.textContent = `${kit[which].length}, from the engine`;
+      const what = document.createElement("p");
+      what.className = "server-what";
+      // All of them, because a list that stops at ten is a list somebody has
+      // to go elsewhere to finish reading.
+      what.textContent = kit[which].join(", ");
+      box.append(name, from, what);
+      return box;
+    });
+
   el.reachable.replaceChildren(
+    ...itsOwn,
     note("p", "MCP servers, read from ~/.claude.json. Both engines get the same ones."),
     ...servers.map((s) => {
       const box = document.createElement("div");
