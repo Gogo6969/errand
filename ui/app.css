@@ -1168,3 +1168,8 @@ body.catching #what { border-color: var(--accent); }
 }
 #attached .chip:hover { color: var(--wrong); border-color: var(--wrong); }
 #attached .chip::after { content: " ×"; opacity: .6; }
+
+/* Your own words, and the row of things to do with them underneath. The words
+   keep their line breaks; the row must not inherit them. */
+.mine-words { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mine .did-with { justify-content: flex-end; }

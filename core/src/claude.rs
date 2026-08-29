@@ -175,6 +175,26 @@ enum Turn {
     Stop,
 }
 
+/// How the next process picks a conversation up.
+///
+/// A bool could say two of these, and the third is the one that goes badly
+/// when it is guessed wrong: `--session-id` on an id that already has a
+/// transcript fails with exit 1 and nothing at all on stdout, so a reader
+/// waiting for the usual opening event waits for ever.
+#[derive(Debug, Clone, Copy)]
+pub enum PickUp<'a> {
+    /// Nothing has ever run here.
+    New,
+    /// It has run here before.
+    Again,
+    /// It carries on from another conversation, and has not run yet.
+    ///
+    /// Claude Code is asked to resume that one and fork it under the id we
+    /// chose. Verified that it honours our id rather than inventing one, which
+    /// is what lets a conversation's id stay the engine's session id.
+    From(&'a str),
+}
+
 /// The models Claude Code will answer as, by alias and by the name to show.
 ///
 /// Aliases rather than dated ids, and that is the whole reason this is a list
@@ -251,14 +271,27 @@ impl Claude {
     pub fn open(
         session: &str,
         cwd: &std::path::Path,
-        again: bool,
+        pick_up: PickUp<'_>,
         asks: &str,
         doorway: Option<&std::path::Path>,
         model: Option<&str>,
         // What this agent has already been told about its job, if anything.
         remembers: &str,
     ) -> Result<(Self, Receiver<Event>)> {
-        let pick_up = if again { "--resume" } else { "--session-id" };
+        // Three shapes, and the third is why this is not a bool. Forking asks
+        // Claude Code to read one conversation and continue it under a
+        // different name, which needs both ids on the command line at once.
+        let opening: Vec<String> = match pick_up {
+            PickUp::New => vec!["--session-id".into(), session.to_string()],
+            PickUp::Again => vec!["--resume".into(), session.to_string()],
+            PickUp::From(parent) => vec![
+                "--resume".into(),
+                parent.to_string(),
+                "--fork-session".into(),
+                "--session-id".into(),
+                session.to_string(),
+            ],
+        };
 
         // In front of the model from the first word, rather than waiting to be
         // searched for. An agent that has to think to go looking for what it
@@ -309,9 +342,8 @@ impl Claude {
                 "stdio",
                 "--append-system-prompt",
                 &steering,
-                pick_up,
-                session,
             ])
+            .args(&opening)
             // Not `--strict-mcp-config`, which would silently switch off every
             // server the person has set up for Claude Code. Ours is added to
             // theirs, the way anybody would expect.

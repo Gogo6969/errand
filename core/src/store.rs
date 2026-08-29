@@ -88,6 +88,15 @@ pub struct Conversation {
     pub ran_at: Option<i64>,
     /// The conversation that asked for this one, if it was delegated.
     pub asked_by: Option<String>,
+    /// The conversation this one carries on from, if it does. Kept for ever,
+    /// so there is always a way back to where the work came from.
+    pub came_from: Option<String>,
+    /// Where the first launch should pick that conversation up. Cleared the
+    /// moment anything runs here.
+    pub carries_on: bool,
+    /// The engine's own name for the point to carry on from. Nothing means
+    /// the end of it.
+    pub carries_on_at: Option<String>,
 }
 
 /// One standing job, and whoever is doing it.
@@ -166,6 +175,10 @@ pub struct Line {
     pub call: Option<String>,
     pub tool: Option<String>,
     pub outcome: Option<String>,
+    /// The engine's own name for this point in the conversation, where it has
+    /// one. Claude Code names every message it writes and will carry a
+    /// conversation on from any of them; a local model names nothing.
+    pub anchor: Option<String>,
 }
 
 pub struct Store {
@@ -393,6 +406,32 @@ const CHANGES: &[&str] = &[
         INSERT INTO memories_fts(rowid, about, note)
         VALUES (new.rowid, new.about, new.note);
      END;",
+    // 9. A conversation that carries on from another one.
+    //
+    // Three facts, and they are not the same fact, which is why they are three
+    // columns. `came_from` is kept for ever and is only ever read to say where
+    // this came from and to offer the way back. The other two are an
+    // instruction for the first launch and are cleared the moment anything
+    // runs here, because a conversation that has already spoken has a history
+    // of its own, and carrying it on from its parent again would throw that
+    // history away.
+    //
+    // The instruction is a column rather than an argument to the command that
+    // makes the fork, because somebody can carry a conversation on and quit
+    // before saying anything in it. Then nothing has run, there is no
+    // transcript, and the next launch has to be told again where to start.
+    //
+    // No foreign key on `came_from`, for the same reason `asked_by` has none:
+    // the conversation it came from may be forgotten while this one is kept,
+    // and losing the way back is not a reason to lose the conversation.
+    //
+    // `anchor` on a line is the engine's own name for that point, handed back
+    // when a conversation is carried on from there. Claude Code names every
+    // message it writes; a local model names nothing and puts nothing here.
+    "ALTER TABLE conversations ADD COLUMN came_from TEXT;
+     ALTER TABLE conversations ADD COLUMN carries_on INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE conversations ADD COLUMN carries_on_at TEXT;
+     ALTER TABLE lines ADD COLUMN anchor TEXT;",
 ];
 
 impl Store {
@@ -619,6 +658,77 @@ impl Store {
         Ok(gone > 0)
     }
 
+    /// Start a conversation that carries on from another one.
+    ///
+    /// Everything up to and including `up_to` is copied, and nothing at all is
+    /// removed from where it came from. That is the whole safety of the
+    /// feature: going back to an earlier point makes a second conversation
+    /// rather than shortening the first, so being wrong about where to go back
+    /// to costs nothing but a conversation nobody uses.
+    ///
+    /// `outcome` is copied along with the step it belongs to. Without it every
+    /// carried-over step reads as a step that hung, which is why this is the
+    /// second writer of `lines` rather than a loop over `append`.
+    ///
+    /// `seq` and `at` are kept rather than re-derived: the copied lines
+    /// happened when they happened, and a prefix of a dense sequence is still
+    /// dense, so the next line appended here still lands in the right place.
+    ///
+    /// A schedule and a delegation chain are deliberately not copied. A
+    /// carried-on routine would be a second thing firing at seven every
+    /// morning that nobody set up, and an inherited chain would make this
+    /// conversation refuse hand-offs it has nothing to do with.
+    pub fn carry_on(
+        &self,
+        new_id: &str,
+        from: &str,
+        up_to: i64,
+        name: &str,
+        at_anchor: Option<&str>,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let now = now();
+        let doing = conn.transaction()?;
+        doing.execute(
+            "INSERT INTO conversations
+                  (id, agent, name, opened, started_at, spoke_at,
+                   came_from, carries_on, carries_on_at)
+             SELECT ?1, agent, ?2, 0, ?3, ?3, ?4, 1, ?5
+               FROM conversations WHERE id = ?4",
+            params![new_id, name, now, from, at_anchor],
+        )?;
+        doing.execute(
+            "INSERT INTO lines
+                  (conversation, seq, at, kind, text, call, tool, outcome, anchor)
+             SELECT ?1, seq, at, kind, text, call, tool, outcome, anchor
+               FROM lines WHERE conversation = ?2 AND seq <= ?3",
+            params![new_id, from, up_to],
+        )?;
+        doing.commit()?;
+        Ok(())
+    }
+
+    /// A name for a conversation carried on from this one, that is not taken.
+    pub fn a_name_like(&self, agent: &str, wanted: &str) -> Result<String> {
+        let taken: Vec<String> = self
+            .conversations(agent)?
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        if !taken.iter().any(|n| n == wanted) {
+            return Ok(wanted.to_string());
+        }
+        // Counted rather than stamped with a time. "First, again 2" is a thing
+        // somebody can say out loud, and a timestamp is not.
+        for n in 2..100 {
+            let tried = format!("{wanted} {n}");
+            if !taken.contains(&tried) {
+                return Ok(tried);
+            }
+        }
+        Ok(wanted.to_string())
+    }
+
     pub fn points_at_nothing(&self) -> Result<i64> {
         points_at_nothing(&self.conn.lock().unwrap())
     }
@@ -646,7 +756,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
             "SELECT id, agent, name, opened, started_at, spoke_at,
-                    runs_at, runs_what, ran_at, asked_by
+                    runs_at, runs_what, ran_at, asked_by,
+                    came_from, carries_on, carries_on_at
                FROM conversations WHERE agent = ? ORDER BY spoke_at DESC",
         )?;
         let rows = q.query_map([agent], read_conversation)?;
@@ -658,7 +769,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
             "SELECT id, agent, name, opened, started_at, spoke_at,
-                    runs_at, runs_what, ran_at, asked_by
+                    runs_at, runs_what, ran_at, asked_by,
+                    came_from, carries_on, carries_on_at
                FROM conversations WHERE id = ?",
         )?;
         let mut rows = q.query_map([id], read_conversation)?;
@@ -751,7 +863,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
             "SELECT id, agent, name, opened, started_at, spoke_at,
-                    runs_at, runs_what, ran_at, asked_by
+                    runs_at, runs_what, ran_at, asked_by,
+                    came_from, carries_on, carries_on_at
                FROM conversations
               WHERE runs_at IS NOT NULL AND runs_what IS NOT NULL
               ORDER BY spoke_at DESC",
@@ -807,7 +920,7 @@ impl Store {
     pub fn lines(&self, conversation: &str) -> Result<Vec<Line>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
-            "SELECT seq, at, kind, text, call, tool, outcome
+            "SELECT seq, at, kind, text, call, tool, outcome, anchor
                FROM lines WHERE conversation = ? ORDER BY seq",
         )?;
         let rows = q.query_map([conversation], |r| {
@@ -819,6 +932,7 @@ impl Store {
                 call: r.get(4)?,
                 tool: r.get(5)?,
                 outcome: r.get(6)?,
+                anchor: r.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1039,6 +1153,7 @@ impl Store {
             call: call.map(str::to_string),
             tool: tool.map(str::to_string),
             outcome: None,
+            anchor: None,
         })
     }
 }
@@ -1227,6 +1342,9 @@ fn read_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
         runs_what: r.get(7)?,
         ran_at: r.get(8)?,
         asked_by: r.get(9)?,
+        came_from: r.get(10)?,
+        carries_on: r.get::<_, i64>(11)? != 0,
+        carries_on_at: r.get(12)?,
     })
 }
 
@@ -1293,6 +1411,89 @@ mod tests {
         // treat what it found as something it did.
         s.bring_up_to_date()
             .expect("it blamed itself for damage that was already there");
+    }
+
+    #[test]
+    fn carrying_a_conversation_on_copies_what_came_before_and_removes_nothing() {
+        // The whole safety of going back to an earlier point: it makes a
+        // second conversation rather than shortening the first, so being wrong
+        // about where to go back to costs nothing but a conversation nobody
+        // uses.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.asked("a1", "first thing").unwrap();
+        s.asked("a1", "second thing").unwrap();
+        s.asked("a1", "third thing").unwrap();
+
+        s.carry_on("fork", "a1", 2, "First, again", Some("uuid-2"))
+            .unwrap();
+
+        let kept = s.lines("fork").unwrap();
+        assert_eq!(
+            kept.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            ["first thing", "second thing"],
+            "it took the wrong slice"
+        );
+        assert_eq!(
+            kept.iter().map(|l| l.seq).collect::<Vec<_>>(),
+            [1, 2],
+            "seq was re-derived, so the next line will land in the wrong place"
+        );
+        assert_eq!(
+            s.lines("a1").unwrap().len(),
+            3,
+            "it took something out of the conversation it came from"
+        );
+
+        let made = s.conversation("fork").unwrap().expect("the new one");
+        assert_eq!(made.agent, "a1", "it did not land under the same agent");
+        assert_eq!(made.came_from.as_deref(), Some("a1"));
+        assert!(made.carries_on, "the first launch has nothing to go on");
+        assert_eq!(made.carries_on_at.as_deref(), Some("uuid-2"));
+        assert!(!made.opened, "it claimed to have run already");
+    }
+
+    #[test]
+    fn a_carried_on_conversation_inherits_no_schedule_and_no_chain() {
+        // The two most dangerous things to inherit. A carried-on routine is a
+        // second thing firing at seven every morning that nobody set up, and
+        // an inherited chain makes it refuse hand-offs it has nothing to do
+        // with.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.begin_conversation_for("c2", "a1", "Asked by somebody", Some("a1"))
+            .unwrap();
+        s.runs("c2", Some("daily 07:00"), Some("the briefing"))
+            .unwrap();
+        s.asked("c2", "something").unwrap();
+
+        s.carry_on("fork", "c2", 1, "Asked by somebody, again", None)
+            .unwrap();
+        let made = s.conversation("fork").unwrap().expect("the new one");
+        assert_eq!(made.runs_at, None, "it inherited a schedule");
+        assert_eq!(made.runs_what, None);
+        assert_eq!(made.asked_by, None, "it inherited a delegation chain");
+    }
+
+    #[test]
+    fn a_name_that_is_taken_gets_a_number_rather_than_a_collision() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        assert_eq!(s.a_name_like("a1", "First, again").unwrap(), "First, again");
+        s.begin_conversation("c2", "a1", "First, again").unwrap();
+        assert_eq!(
+            s.a_name_like("a1", "First, again").unwrap(),
+            "First, again 2"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_conversation_carries_on_from_nothing() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        let made = s.conversation("a1").unwrap().unwrap();
+        assert_eq!(made.came_from, None);
+        assert!(!made.carries_on);
     }
 
     #[test]

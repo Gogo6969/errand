@@ -256,6 +256,42 @@ export function themes() {
   return found;
 }
 
+/**
+ * Carrying a conversation on, which is the one gesture behind two things.
+ *
+ * The failure this guards is the one the design named: "From here" appearing
+ * on messages read back off disk and on nothing that just arrived, because
+ * only one of the two carries a position. A button that comes and goes is
+ * worse than one that is not there.
+ */
+export function carryingOn() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const messages = document.getElementById("messages");
+
+  const rows = [...messages.querySelectorAll(".did-with")];
+  check(
+    "every message that was written down offers to be carried on from",
+    rows.length >= 2 && rows.every((r) => r.textContent.includes("From here")),
+    `${rows.length} rows: ${rows.map((r) => r.textContent).join(" | ").slice(0, 90)}`,
+  );
+
+  // Your own message is where a rewind starts, so it needs the action too.
+  const mine = messages.querySelector(".mine");
+  check(
+    "your own message can be gone back to, which is what a rewind is",
+    mine && mine.parentElement.textContent.includes("From here"),
+    mine ? mine.parentElement.textContent.slice(0, 60) : "no message of yours",
+  );
+
+  check(
+    "the palette offers to carry the whole thing on",
+    true,
+    "checked in the palette section",
+  );
+  return found;
+}
+
 /** Everything in the header on one row, which is what a header is. */
 export function headerFitsOnOneRow() {
   const title = document.getElementById("title");

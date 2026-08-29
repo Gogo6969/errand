@@ -43,8 +43,9 @@
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
 
-  const { checks, headerFitsOnOneRow, palette, setupCheck, themes } = await import("./checks.js");
-  const found = checks().concat(palette(), await setupCheck(), themes());
+  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn } =
+    await import("./checks.js");
+  const found = checks().concat(carryingOn(), palette(), await setupCheck(), themes());
   const header = headerFitsOnOneRow();
   found.push({ what: "everything in the header is on one row",
                ok: header.rows === 1, saw: `${header.rows} row(s)` });

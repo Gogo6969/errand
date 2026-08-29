@@ -489,7 +489,7 @@ function fromStore(line) {
   switch (line.kind) {
     case "mine":
     case "said":
-      return { kind: line.kind, text: line.text };
+      return { kind: line.kind, text: line.text, seq: line.seq };
     case "asking":
       // A question that was answered is settled history; one that was not is
       // a question nobody will ever answer now, because the process that asked
@@ -497,6 +497,7 @@ function fromStore(line) {
       // buttons.
       return {
         kind: "asking",
+        seq: line.seq,
         text: line.text,
         tool: line.tool,
         step: line.call,
@@ -505,13 +506,14 @@ function fromStore(line) {
     case "doing":
       return {
         kind: "doing",
+        seq: line.seq,
         text: line.text,
         tool: line.tool,
         call: line.call,
         outcome: line.outcome || "",
       };
     default:
-      return { kind: "ended", failed: line.kind === "ended", text: line.text };
+      return { kind: "ended", failed: line.kind === "ended", text: line.text, seq: line.seq };
   }
 }
 
@@ -590,10 +592,18 @@ function draw(m) {
     // Your own words are shown exactly as you typed them. Reading somebody's
     // asterisks as emphasis is a small thing to get wrong and an odd one to
     // explain.
-    case "mine":
+    //
+    // With the same row of things to do with it as an answer has, because
+    // going back to something you said and saying it differently is the whole
+    // of a rewind, and this is the line somebody points at to do it.
+    case "mine": {
       node.className = "mine";
-      node.textContent = m.text;
+      const words = document.createElement("span");
+      words.className = "mine-words";
+      words.textContent = m.text;
+      node.append(words, doneWith(m));
       return node;
+    }
     case "doing": {
       // A step with no answer yet is a step still happening, and it is the only
       // thing on the screen that knows that. So it says so, rather than sitting
@@ -748,11 +758,18 @@ listen("happened", ({ payload }) => {
     // being written looks like a sentence being written, and keeping them all
     // would mean keeping every prefix of every sentence.
     case "said":
-      if (payload.settled) t.messages.push({ kind: "said", text: payload.text });
+      if (payload.settled)
+        t.messages.push({ kind: "said", text: payload.text, seq: payload.seq });
       break;
 
     case "doing":
-      t.messages.push({ kind: "doing", text: payload.what, tool: payload.tool, call: payload.call });
+      t.messages.push({
+        kind: "doing",
+        text: payload.what,
+        tool: payload.tool,
+        call: payload.call,
+        seq: payload.seq,
+      });
       break;
 
     // A step that has answered stops looking like a step that has hung, so the
@@ -840,6 +857,23 @@ function doneWith(m) {
     setTimeout(() => (copy.textContent = "Copy"), 1400);
   };
   row.append(copy);
+
+  // Carrying on from here is the answer to the limit below. "Ask again" can
+  // only be offered on the last answer, because a reply to something halfway
+  // up would land at the bottom under everything that came after it. This
+  // makes halfway up the thread the bottom of somewhere else instead, and
+  // takes nothing away from where it came from.
+  //
+  // Only on lines that were written down. A message still on its way has no
+  // position in the conversation yet, so there is no "here" to carry on from.
+  if (typeof m.seq === "number") {
+    const onward = document.createElement("button");
+    onward.type = "button";
+    onward.textContent = "From here";
+    onward.title = "Carry on in a new conversation, leaving this one alone";
+    onward.onclick = () => carryOn(m.seq, m.kind === "mine" ? m.text : "");
+    row.append(onward);
+  }
 
   // Offered on the last answer only. Asking again from halfway up the thread
   // would put the reply at the bottom, under everything that came after it.
@@ -933,7 +967,8 @@ async function sayIt(text) {
     : text;
   attached = [];
   drawAttached();
-  t.messages.push({ kind: "mine", text: withThem });
+  const mine = { kind: "mine", text: withThem };
+  t.messages.push(mine);
   // Working from the moment it is sent, not from the moment something comes
   // back: the gap between the two is exactly when a person wonders whether the
   // thing they typed went anywhere.
@@ -942,7 +977,12 @@ async function sayIt(text) {
   drawThreads();
 
   try {
-    await invoke("say", { id: t.id, text, attached: going.length ? going : null });
+    // Stamped with where it landed, so it can be carried on from without
+    // waiting for a reload. Optimistic on the way out and corrected on the way
+    // back, because the alternative is a message that sits there unshown until
+    // the store has answered.
+    mine.seq = await invoke("say", { id: t.id, text, attached: going.length ? going : null });
+    drawMessages();
   } catch (why) {
     t.working = false;
     t.messages.push({ kind: "ended", failed: true, text: String(why) });
@@ -1443,6 +1483,12 @@ function whatCouldBeDone() {
   add("Make this run on a schedule", "", () => el.repeat.click(), !!showing);
   add("Look for models on the network", "takes a moment", () => a && lookWider(a), !!a);
   add("Check this setup", "what is wrong, and what to do", () => checkup());
+  add(
+    "Carry this on in a new conversation",
+    "leaves this one alone",
+    () => carryOn(null, ""),
+    !!showing,
+  );
   for (const how of LOOKS) {
     add(
       `Look ${how === "system" ? "however the Mac does" : how}`,
@@ -1617,4 +1663,39 @@ async function checkup() {
       return box;
     }),
   );
+}
+
+
+/**
+ * Carry this conversation on somewhere else, from a point in it.
+ *
+ * The one gesture behind two things somebody would name separately. Carrying
+ * on from the end is "try something without disturbing this"; carrying on from
+ * your own message is "go back and say that differently", and it puts those
+ * words back in the box for you to edit. Nothing is removed from where it came
+ * from either way, which is what makes going back safe enough to do casually.
+ */
+async function carryOn(upTo, saidAgain) {
+  const from = showing;
+  if (!from) return;
+  const id = uuid();
+  try {
+    await invoke("carry_on", { id, from, upTo });
+  } catch (why) {
+    complain(String(why));
+    return;
+  }
+  // Read back rather than assumed, because the name is decided in the store:
+  // it has to not collide with one this agent already has.
+  const theirs = (await invoke("conversations", { agent: showingAgent })).map((c) =>
+    asTalk(c, talks.get(c.id)),
+  );
+  for (const t of theirs) talks.set(t.id, t);
+  await show(id);
+  if (saidAgain) {
+    el.what.value = saidAgain;
+    el.what.dispatchEvent(new Event("input"));
+    el.what.select();
+  }
+  el.what.focus();
 }

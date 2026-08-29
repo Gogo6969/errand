@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use errand_core::local::{LlmSettings, Local};
-use errand_core::{claude::Claude, Answer, Engine, Event};
+use errand_core::{claude, claude::Claude, Answer, Engine, Event};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -43,7 +43,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         // No app behind it, so no doorway and nobody to hand work to, which
         // matches what the local branch above says for the same reason.
-        let (it, events) = Claude::open(&thread, &here, false, "ask", None, None, "")?;
+        let (it, events) =
+            Claude::open(&thread, &here, claude::PickUp::New, "ask", None, None, "")?;
         (Box::new(it), events)
     };
 

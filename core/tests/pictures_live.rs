@@ -52,8 +52,16 @@ async fn claude_code_can_see_a_picture_that_was_attached() {
     let here = std::env::temp_dir().join(format!("errand-pic-{}", std::process::id()));
     std::fs::create_dir_all(&here).unwrap();
     let id = uuid_ish();
-    let (mut it, events) =
-        Claude::open(&id, &here, false, "auto", None, None, "").expect("starting claude");
+    let (mut it, events) = Claude::open(
+        &id,
+        &here,
+        errand_core::claude::PickUp::New,
+        "auto",
+        None,
+        None,
+        "",
+    )
+    .expect("starting claude");
 
     it.say(
         "What single colour fills this image? Answer with one word.",

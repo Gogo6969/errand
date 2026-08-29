@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use errand_core::{claude::Claude, Engine, Event};
+use errand_core::{claude::Claude, claude::PickUp, Engine, Event};
 
 /// Wait for the turn to end, collecting everything said along the way.
 fn until_done(events: &Receiver<Event>) -> String {
@@ -55,7 +55,7 @@ async fn a_thread_reopened_tomorrow_is_the_same_conversation() {
 
     // First time: a session that does not exist yet.
     let (mut first, events) =
-        Claude::open(&id, &home, false, "ask", None, None, "").expect("starting a thread");
+        Claude::open(&id, &home, PickUp::New, "ask", None, None, "").expect("starting a thread");
     first
         .say("Remember the word MANGO. Reply with just OK.", &[])
         .unwrap();
@@ -70,8 +70,8 @@ async fn a_thread_reopened_tomorrow_is_the_same_conversation() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Tomorrow: the same thread, reopened. This is the flag that matters.
-    let (mut again, events) =
-        Claude::open(&id, &home, true, "ask", None, None, "").expect("reopening the thread");
+    let (mut again, events) = Claude::open(&id, &home, PickUp::Again, "ask", None, None, "")
+        .expect("reopening the thread");
     again
         .say(
             "What word did I ask you to remember? Reply with just that word.",
@@ -98,7 +98,7 @@ async fn reopening_something_that_was_never_there_says_so_rather_than_hanging() 
     let home = std::env::temp_dir();
     let never = "00000000-0000-4000-8000-000000000000";
     let (_it, events) =
-        Claude::open(never, &home, true, "ask", None, None, "").expect("spawning at all");
+        Claude::open(never, &home, PickUp::Again, "ask", None, None, "").expect("spawning at all");
 
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {

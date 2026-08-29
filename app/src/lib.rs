@@ -90,6 +90,14 @@ struct Held {
 #[derive(Clone, Serialize)]
 struct Happened {
     conversation: String,
+    /// Where this landed in the conversation, when it was written down.
+    ///
+    /// Carried so that a message just received can be carried on from, the
+    /// same as one read back off disk. Without it "From here" would appear on
+    /// everything above the fold and on nothing below it, which reads as a
+    /// button that comes and goes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seq: Option<i64>,
     #[serde(flatten)]
     event: Event,
 }
@@ -309,6 +317,21 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             let settings: LlmSettings = serde_json::from_str(&settings.unwrap_or_default())
                 .map_err(|_| "this thread has no model chosen".to_string())?;
             let asks = known.as_ref().map_or("ask", |a| a.asks.as_str());
+            // A local model keeps no session at all, so a conversation carried
+            // on from another needs what happened told to it, the same way
+            // Claude does when it cannot fork its own.
+            let carried = match conversation.as_ref().filter(|c| c.carries_on) {
+                Some(_) => held
+                    .store
+                    .lines(&id)
+                    .map(|lines| keeping::as_a_reminder(&lines))
+                    .unwrap_or_default(),
+                None => String::new(),
+            };
+            let remembers = match carried.is_empty() {
+                true => remembers.clone(),
+                false => format!("{remembers}\n\n{carried}"),
+            };
             let (it, events) = Local::open(
                 settings,
                 home,
@@ -326,6 +349,37 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // cannot clear the file, and starting as new against a session that
             // exists is a failure the agent never recovers from.
             let again = again || errand_core::claude::already_going(&id, &home);
+            // Three ways in, and the third only ever happens once. A
+            // conversation that carries on from another is forked from it on
+            // its first launch and is an ordinary conversation for ever after.
+            let carrying = conversation.as_ref().filter(|c| c.carries_on && !again);
+            let pick_up = match (again, carrying.and_then(|c| c.came_from.as_deref())) {
+                (true, _) => errand_core::claude::PickUp::Again,
+                // Only when the point to carry on from is the end of it. Going
+                // back to somewhere earlier is handled by telling it what
+                // happened, below, because Claude Code will only fork from a
+                // message it named and it does not name the point you chose.
+                (false, Some(parent)) if carrying.is_some_and(|c| c.carries_on_at.is_none()) => {
+                    errand_core::claude::PickUp::From(parent)
+                }
+                _ => errand_core::claude::PickUp::New,
+            };
+            // What was said before, when there is no session to inherit it
+            // from. Appended to the steering rather than said as a first
+            // message, so it never appears in the window as something somebody
+            // typed.
+            let carried = match carrying {
+                Some(c) if c.carries_on_at.is_some() => held
+                    .store
+                    .lines(&id)
+                    .map(|lines| keeping::as_a_reminder(&lines))
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            let remembers = match carried.is_empty() {
+                true => remembers.clone(),
+                false => format!("{remembers}\n\n{carried}"),
+            };
             // Which model, if this agent was put on one. Held in the same
             // column a local engine keeps its whole settings blob in, because
             // for Claude the entire setting is one word.
@@ -353,7 +407,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             let (it, events) = Claude::open(
                 &id,
                 &home,
-                again,
+                pick_up,
                 asks,
                 Some(door.at()),
                 model.as_deref(),
@@ -469,11 +523,15 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 }
             }
 
-            if let Err(e) = store.happened(&id, &event) {
-                // Losing a line is not worth ending the conversation over, but
-                // it must not pass in silence either.
-                eprintln!("could not write down what happened in {id}: {e}");
-            }
+            let written = match store.happened(&id, &event) {
+                Ok(line) => line.map(|l| l.seq),
+                Err(e) => {
+                    // Losing a line is not worth ending the conversation over,
+                    // but it must not pass in silence either.
+                    eprintln!("could not write down what happened in {id}: {e}");
+                    None
+                }
+            };
             // A routine's turn is over, so the clock may start it again.
             if event.ends_the_turn() {
                 let held: State<Held> = app.state();
@@ -491,6 +549,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 "happened",
                 Happened {
                     conversation: id.clone(),
+                    seq: written,
                     event,
                 },
             );
@@ -508,7 +567,10 @@ async fn say(
     // Files dropped on the window, or images pasted into it as data URLs.
     // Nothing here means the ordinary case, which is most of them.
     attached: Option<Vec<String>>,
-) -> Result<(), String> {
+    // Answers with where this landed, so the window can offer to carry the
+    // conversation on from a message somebody has only just sent rather than
+    // only from ones read back off disk.
+) -> Result<Option<i64>, String> {
     let pictures = attached
         .map(|these| pictures_from(&these))
         .transpose()?
@@ -524,13 +586,14 @@ async fn say(
         1 => format!("{text}\n\n(with a picture)"),
         n => format!("{text}\n\n(with {n} pictures)"),
     };
-    held.store.asked(&id, &said).map_err(|e| e.to_string())?;
+    let written = held.store.asked(&id, &said).map_err(|e| e.to_string())?;
 
     let mut live = held.live.lock().unwrap();
     let thread = live
         .get_mut(&id)
         .ok_or_else(|| "that conversation is not open".to_string())?;
-    thread.say(&text, &pictures).map_err(|e| e.to_string())
+    thread.say(&text, &pictures).map_err(|e| e.to_string())?;
+    Ok(Some(written.seq))
 }
 
 /// The most an attached picture may be, before base64.
@@ -1172,7 +1235,8 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
     )
     .await
     {
-        Ok(()) => wait_for_the_answer(done).await,
+        // Where it landed is of no interest to a delegated errand.
+        Ok(_) => wait_for_the_answer(done).await,
         Err(why) => Err(anyhow::anyhow!("{why}")),
     };
 
@@ -1433,6 +1497,54 @@ fn counting_from(
 /// Open a link somewhere that is not this window.
 ///
 /// A link followed inside the webview replaces the app with a web page and
+/// Carry a conversation on somewhere else, from a point in it.
+///
+/// Nothing is removed from where it came from. That is the whole safety of it:
+/// going back to an earlier point makes a second conversation rather than
+/// shortening the first, so being wrong about where to go back to costs a
+/// conversation nobody uses and never a word of work.
+#[tauri::command]
+async fn carry_on(
+    held: State<'_, Held>,
+    id: String,
+    from: String,
+    // The last line to keep. Nothing means all of it, which is the ordinary
+    // case: carry this on somewhere new and leave this one alone.
+    up_to: Option<i64>,
+) -> Result<(), String> {
+    let parent = held
+        .store
+        .conversation(&from)
+        .map_err(|e| e.to_string())?
+        .ok_or("there is no such conversation")?;
+    let lines = held.store.lines(&from).map_err(|e| e.to_string())?;
+    let last = lines.last().map_or(0, |l| l.seq);
+    let up_to = up_to.unwrap_or(last);
+
+    // Whether the engine can fork its own session or has to be told what
+    // happened. The end of a conversation is the only point Claude Code will
+    // fork from without being handed a name for the message to stop at, and it
+    // does not name the point somebody clicked.
+    let from_the_end = up_to >= last;
+    let name = held
+        .store
+        .a_name_like(&parent.agent, &format!("{}, again", parent.name))
+        .map_err(|e| e.to_string())?;
+
+    held.store
+        .carry_on(
+            &id,
+            &from,
+            up_to,
+            &name,
+            match from_the_end {
+                true => None,
+                false => Some("earlier"),
+            },
+        )
+        .map_err(|e| e.to_string())
+}
+
 /// What is wrong with this setup, before it goes wrong in the middle of a job.
 ///
 /// Everything it checks is something that has actually gone wrong here, and
@@ -1700,6 +1812,7 @@ pub fn run() {
             revoke,
             asks,
             outside,
+            carry_on,
             checkup,
             export_conversation,
             show_in_browser,

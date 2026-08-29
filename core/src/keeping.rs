@@ -100,6 +100,48 @@ pub fn as_filename(agent: &str, talk: &str) -> String {
     format!("{}.md", name.trim_matches(|c| c == '-' || c == ' '))
 }
 
+/// The conversation so far, for an engine that has no memory of it.
+///
+/// Used when a conversation carries on from a point in another one rather than
+/// from its end. Claude Code can fork its own session, but only from a message
+/// it named, and it does not name the point you go back to; a local model
+/// keeps no session at all. Both are handed the same thing: what was said,
+/// written out, so that continuing reads as continuing rather than as starting
+/// again in a room with the same wallpaper.
+///
+/// Steps are folded in as prose rather than rebuilt as tool calls. A stored
+/// step keeps the sentence and not the arguments, so a faithful call cannot be
+/// reconstructed from it, and a result with no call to pair with is a message
+/// most endpoints refuse outright.
+pub fn as_a_reminder(lines: &[Line]) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "WHERE THIS CARRIES ON FROM
+
+         This conversation continues an earlier one. What follows is what was          said in it, up to the point it was carried on from. Treat it as          something you and this person already went through together, not as          something being said to you now.\n\n",
+    );
+    for line in lines {
+        match line.kind.as_str() {
+            "mine" => out.push_str(&format!("They said: {}\n\n", line.text.trim())),
+            "said" => out.push_str(&format!("You said: {}\n\n", line.text.trim())),
+            "doing" => {
+                out.push_str(&format!("You did: {}", line.text.trim()));
+                match line.outcome.as_deref().map(str::trim) {
+                    Some(got) if !got.is_empty() => {
+                        out.push_str(&format!(" and got: {}\n", one_line(got)));
+                    }
+                    _ => out.push('\n'),
+                }
+            }
+            _ => {}
+        }
+    }
+    out.push_str("\nThat is where it was carried on from. Carry on.\n");
+    out
+}
+
 /// Where a fork or a rewind stops.
 ///
 /// Given inclusively: everything up to and including this line is kept, which
@@ -121,6 +163,7 @@ mod tests {
             call: None,
             tool: None,
             outcome: outcome.map(str::to_string),
+            anchor: None,
         }
     }
 
@@ -156,6 +199,9 @@ mod tests {
             runs_what: None,
             ran_at: None,
             asked_by: None,
+            came_from: None,
+            carries_on: false,
+            carries_on_at: None,
         }
     }
 
@@ -224,6 +270,28 @@ mod tests {
         );
         assert!(!as_filename("a".repeat(200).as_str(), "b").contains(char::is_whitespace));
         assert!(as_filename(&"a".repeat(200), "b").len() < 100);
+    }
+
+    #[test]
+    fn a_reminder_reads_as_something_that_already_happened() {
+        // Without that framing an engine treats the whole prefix as an
+        // instruction it has just been given, and starts doing all of it again.
+        let said = as_a_reminder(&[
+            line(1, "mine", "Find the invoice", None),
+            line(2, "doing", "Reading the folder", Some("three files")),
+            line(3, "said", "It is invoice-42.pdf.", None),
+        ]);
+        assert!(said.contains("already went through together"), "{said}");
+        assert!(said.contains("They said: Find the invoice"));
+        assert!(said.contains("You did: Reading the folder and got: three files"));
+        assert!(said.contains("You said: It is invoice-42.pdf."));
+    }
+
+    #[test]
+    fn a_reminder_of_nothing_is_nothing_rather_than_a_heading() {
+        // A block that says "here is what happened" above nothing reads as
+        // history that has been lost.
+        assert_eq!(as_a_reminder(&[]), "");
     }
 
     #[test]
