@@ -54,6 +54,7 @@ const el = {
   name: document.getElementById("thread-name"),
   engine: document.getElementById("engine"),
   sweeping: document.getElementById("sweeping"),
+  checkup: document.getElementById("checkup"),
   palette: document.getElementById("palette"),
   paletteWhat: document.getElementById("palette-what"),
   paletteList: document.getElementById("palette-list"),
@@ -1328,6 +1329,7 @@ function whatCouldBeDone() {
   add("What this thread can reach", "MCP servers", () => el.reach.click(), !!showing);
   add("Make this run on a schedule", "", () => el.repeat.click(), !!showing);
   add("Look for models on the network", "takes a moment", () => a && lookWider(a), !!a);
+  add("Check this setup", "what is wrong, and what to do", () => checkup());
   add("Stop what it is doing", "", () => invoke("stop", { id: showing }), !!t?.working);
   return could;
 }
@@ -1435,3 +1437,63 @@ window.addEventListener("keydown", (e) => {
     run(picked);
   }
 });
+
+
+/**
+ * What is wrong with this setup, asked all at once.
+ *
+ * Everything it reports is something that has gone wrong here and was invisible
+ * from inside a conversation: a tool server whose interpreter an upgrade had
+ * removed, a model server bound so that nothing on the network could see it,
+ * rows left pointing at a conversation that no longer existed. None of those
+ * announces itself. All of them are one question away.
+ */
+async function checkup() {
+  if (!el.checkup.hidden) {
+    el.checkup.hidden = true;
+    return;
+  }
+  el.checkup.hidden = false;
+  el.checkup.replaceChildren(note("p", "Looking…"));
+
+  let found;
+  try {
+    found = await invoke("checkup");
+  } catch (why) {
+    el.checkup.replaceChildren(note("p", String(why)));
+    return;
+  }
+
+  const wrong = found.filter((f) => f.how !== "fine").length;
+  el.checkup.replaceChildren(
+    note(
+      "p",
+      wrong
+        ? `${wrong} of ${found.length} things want attention.`
+        : `All ${found.length} checks are fine.`,
+    ),
+    ...found.map((f) => {
+      const box = document.createElement("div");
+      box.className = "finding";
+      box.dataset.how = f.how;
+
+      const what = document.createElement("span");
+      what.className = "finding-what";
+      what.textContent = f.what;
+      const said = document.createElement("p");
+      said.className = "finding-said";
+      said.textContent = f.said;
+      box.append(what, said);
+
+      // The half that makes it worth reading. A check that says something is
+      // wrong and leaves somebody to work out the fix has done the easy part.
+      if (f.fix) {
+        const fix = document.createElement("p");
+        fix.className = "finding-fix";
+        fix.textContent = f.fix;
+        box.append(fix);
+      }
+      return box;
+    }),
+  );
+}

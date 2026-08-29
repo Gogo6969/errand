@@ -126,6 +126,51 @@ export function palette() {
   return found;
 }
 
+/**
+ * The setup check, which is only worth having if it says what to do.
+ *
+ * Returns a promise, because it asks the app rather than reading the page.
+ */
+export async function setupCheck() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const panel = document.getElementById("checkup");
+
+  check("the setup check starts closed", panel.hidden, `hidden=${panel.hidden}`);
+
+  // Opened the way somebody would: through the palette.
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  const typing = document.getElementById("palette-what");
+  typing.value = "check setup";
+  typing.dispatchEvent(new Event("input"));
+  const list = document.getElementById("palette-list");
+  check(
+    "the palette offers to check the setup",
+    list.children.length === 1 && list.children[0].textContent.includes("Check"),
+    list.children[0]?.textContent,
+  );
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await new Promise((r) => setTimeout(r, 250));
+
+  check("running it opens the panel", !panel.hidden, `hidden=${panel.hidden}`);
+  check(
+    "it counts what wants attention rather than only listing everything",
+    panel.textContent.includes("2 of 3"),
+    panel.textContent.slice(0, 60),
+  );
+  check(
+    "something broken says what to do about it",
+    panel.textContent.includes("~/.claude.json"),
+    panel.textContent.includes("~/.claude.json") ? "yes" : panel.textContent.slice(0, 80),
+  );
+  check(
+    "a broken thing and an odd thing are told apart",
+    panel.querySelector('[data-how="broken"]') && panel.querySelector('[data-how="odd"]'),
+    [...panel.querySelectorAll("[data-how]")].map((f) => f.dataset.how).join(","),
+  );
+  return found;
+}
+
 /** Everything in the header on one row, which is what a header is. */
 export function headerFitsOnOneRow() {
   const title = document.getElementById("title");

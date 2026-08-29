@@ -474,6 +474,17 @@ impl Store {
     /// Bounded rather than trusted. Following a chain by reading rows is
     /// exactly the shape of thing that loops for ever if a row is ever wrong,
     /// and a delegation depth in double figures is already a runaway.
+    /// How many rows refer to something that is not there.
+    ///
+    /// Asked by the doctor rather than acted on. Rows can be orphaned by a
+    /// delete made anywhere with foreign keys off, and they are invisible to
+    /// the app because everything is looked up through the conversation it
+    /// belongs to. Worth reporting, and not worth deleting behind somebody's
+    /// back to make a check pass.
+    pub fn points_at_nothing(&self) -> Result<i64> {
+        points_at_nothing(&self.conn.lock().unwrap())
+    }
+
     pub fn who_is_waiting(&self, conversation: &str) -> Result<Vec<String>> {
         const DEEP_ENOUGH: usize = 12;
         let mut chain = Vec::new();

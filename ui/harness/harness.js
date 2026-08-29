@@ -77,6 +77,13 @@ export const FIXTURE = {
     { engine: "local", name: "qwen2.5:7b-instruct · Ollama", settings: JSON.stringify({ base_url: "http://127.0.0.1:11434", model: "qwen2.5:7b-instruct" }) },
     { engine: "local", name: "gemma-4-31b-it · LM Studio on 192.168.1.92 · needs loading", settings: JSON.stringify({ base_url: "http://192.168.1.92:1234", model: "gemma-4-31b-it" }) },
   ],
+  checkup: [
+    { what: "Claude Code", how: "fine", said: "2.1.221", fix: "" },
+    { what: "Tool server: mempalace", how: "broken", said: "starting it: No such file or directory",
+      fix: "Check the command in ~/.claude.json still exists." },
+    { what: "Models on the network", how: "odd", said: "everything found is bound to this machine only",
+      fix: "Start Ollama with OLLAMA_HOST=0.0.0.0." },
+  ],
   outside: [
     { name: "peekaboo", from: "~/.claude.json", tools: ["see", "click", "type"], trouble: null },
     { name: "mempalace", from: "~/.claude.json", tools: [], trouble: "starting it: No such file or directory" },
@@ -114,6 +121,8 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.engines);
           case "outside":
             return Promise.resolve(fixture.outside);
+          case "checkup":
+            return Promise.resolve(fixture.checkup);
           case "allowances":
           case "routines":
           case "runs":

@@ -1013,3 +1013,27 @@ body.catching #what { border-color: var(--accent); }
 #palette-list .what { color: var(--ink); }
 #palette-list .why { color: var(--ink-soft); font-size: 12px; margin-left: auto; text-align: right; }
 #palette-list .none { color: var(--ink-soft); cursor: default; }
+
+/* ---------------------------------------------------------- checkup -- */
+
+/* The same shape as the tool list, because it is the same kind of thing: a
+   panel that opens, says what it found, and closes. */
+#checkup[hidden] { display: none; }
+#checkup {
+  border-bottom: 1px solid var(--rule);
+  background: var(--side);
+  padding: 12px 18px;
+  max-height: 40vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.finding { display: block; }
+.finding-what { font-weight: 600; font-size: 13px; }
+.finding-said { margin: 3px 0 0; font-size: 13px; color: var(--ink-soft); overflow-wrap: anywhere; }
+/* What to do about it, which is the half that makes a diagnostic useful. */
+.finding-fix { margin: 3px 0 0; font-size: 12.5px; color: var(--ink-soft); border-left: 2px solid var(--rule); padding-left: 9px; overflow-wrap: anywhere; }
+.finding[data-how="odd"] .finding-what { color: var(--accent); }
+.finding[data-how="broken"] .finding-what { color: #f0857d; }
+.finding[data-how="broken"] .finding-fix { border-left-color: #f0857d; }

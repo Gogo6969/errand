@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use errand_core::doctor;
 use errand_core::doorway;
 use errand_core::keeping;
 use errand_core::local::{find, LlmSettings, Local};
@@ -1234,6 +1235,17 @@ fn counting_from(
 /// Open a link somewhere that is not this window.
 ///
 /// A link followed inside the webview replaces the app with a web page and
+/// What is wrong with this setup, before it goes wrong in the middle of a job.
+///
+/// Everything it checks is something that has actually gone wrong here, and
+/// every one of them failed the same unhelpful way: not as an error, but as an
+/// agent that quietly could not do something and had no way to say why.
+#[tauri::command]
+async fn checkup(app: AppHandle, held: State<'_, Held>) -> Result<Vec<doctor::Finding>, String> {
+    let here = where_things_live(&app)?;
+    Ok(doctor::everything(&held.store, &here, &here).await)
+}
+
 /// Write a conversation out as Markdown and show it in the Finder.
 ///
 /// To the Desktop rather than to a folder chosen in a dialog. A file picker is
@@ -1490,6 +1502,7 @@ pub fn run() {
             revoke,
             asks,
             outside,
+            checkup,
             export_conversation,
             show_in_browser,
             rename,
