@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use errand_core::local::{find, LlmSettings, Local};
 use errand_core::mcp;
+use errand_core::routine::When;
 use errand_core::store::{Settled, NOT_YET_NAMED};
 use errand_core::{claude::Claude, Agent, Answer, Conversation, Engine, Event, Line, Store};
 use serde::Serialize;
@@ -574,6 +575,156 @@ fn read_what_it_settled_on(said: &str) -> Option<Settled> {
     })
 }
 
+/// Watch the clock, and run what is due.
+///
+/// In the app rather than in launchd, and the difference is worth being honest
+/// about rather than discovering. Grok Bot keeps "every morning at 7am" because
+/// every bot has a machine in the cloud. This runs on your Mac, so a routine
+/// happens when Errand is running and the machine is awake, and does not
+/// happen otherwise.
+///
+/// What it does instead of pretending is notice. A routine whose time passed
+/// while the app was shut is overdue rather than skipped: it runs when the app
+/// comes back and says in the conversation that it is late. Silently running
+/// yesterday's briefing as though it were today's would be worse than either.
+///
+/// Every thirty seconds, because a minute-accurate schedule needs to be looked
+/// at more often than once a minute or it drifts by up to a minute, and looking
+/// twice a minute costs one query against a table with a handful of rows in it.
+fn watch_the_clock(app: AppHandle) {
+    // Tauri's own spawn, not tokio's. `tokio::spawn` needs to be called from
+    // inside a runtime and this is called from Tauri's event loop, which is not
+    // one -- so the task was never started and every routine simply never ran,
+    // with nothing anywhere saying so.
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            if let Err(why) = run_what_is_due(&app).await {
+                eprintln!("the clock: {why}");
+            }
+        }
+    });
+}
+
+/// Anything whose time has come, started once each.
+async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
+    let now = chrono::Local::now();
+    let due: Vec<(String, String, bool)> = {
+        let held: State<Held> = app.state();
+        held.store
+            .routines()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter_map(|c| {
+                let when = When::read(c.runs_at.as_deref()?).ok()?;
+                let next = when.next_after(counting_from(&c, now))?;
+                // Late by more than a schedule's own patience is worth saying
+                // out loud. Ten minutes is arbitrary and only decides whether
+                // the run announces itself as late.
+                let late = now.signed_duration_since(next).num_minutes() > 10;
+                let what = c.runs_what.clone()?;
+                (next <= now).then_some((c.id.clone(), what, late))
+            })
+            .collect()
+    };
+
+    for (conversation, what, late) in due {
+        // Written down before it is started. If starting fails, the routine has
+        // still had its turn and will not spend the rest of the day retrying
+        // every thirty seconds.
+        {
+            let held: State<Held> = app.state();
+            held.store
+                .ran(&conversation, now.timestamp_millis())
+                .map_err(|e| e.to_string())?;
+        }
+
+        open_thread(app.clone(), app.state(), conversation.clone()).await?;
+        let said = match late {
+            false => what,
+            true => format!(
+                "{what}\n\n(This is late: it was due at {} and nothing was running then.)",
+                now.format("%H:%M")
+            ),
+        };
+        say(app.state(), conversation, said).await?;
+    }
+    Ok(())
+}
+
+/// Give a conversation a schedule, or take one away.
+#[tauri::command]
+async fn runs(
+    held: State<'_, Held>,
+    id: String,
+    at: Option<String>,
+    what: Option<String>,
+) -> Result<(), String> {
+    // Read before it is stored, so a schedule nobody can parse is refused here
+    // and not at seven in the morning by not happening.
+    if let Some(at) = at.as_deref() {
+        When::read(at).map_err(|e| e.to_string())?;
+    }
+    held.store
+        .runs(&id, at.as_deref(), what.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// Every conversation that runs itself, and when each is next due.
+#[derive(Clone, Serialize)]
+struct Routine {
+    conversation: String,
+    agent: String,
+    name: String,
+    at: String,
+    what: String,
+    /// Unix millis, or nothing when the schedule cannot say.
+    due: Option<i64>,
+    ran: Option<i64>,
+}
+
+#[tauri::command]
+async fn routines(held: State<'_, Held>) -> Result<Vec<Routine>, String> {
+    let now = chrono::Local::now();
+    Ok(held
+        .store
+        .routines()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter_map(|c| {
+            let at = c.runs_at.clone()?;
+            let when = When::read(&at).ok()?;
+            Some(Routine {
+                due: when
+                    .next_after(counting_from(&c, now))
+                    .map(|d| d.timestamp_millis()),
+                conversation: c.id,
+                agent: c.agent,
+                name: c.name,
+                at,
+                what: c.runs_what.unwrap_or_default(),
+                ran: c.ran_at,
+            })
+        })
+        .collect())
+}
+
+/// The moment a routine's next run is counted from.
+///
+/// Its last run, or the moment the schedule was set. Not "now" -- a routine
+/// whose time passed while the app was closed is overdue, and treating it as
+/// though it had only just been set would quietly move it to tomorrow.
+fn counting_from(
+    c: &errand_core::Conversation,
+    now: chrono::DateTime<chrono::Local>,
+) -> chrono::DateTime<chrono::Local> {
+    use chrono::TimeZone;
+    c.ran_at
+        .or(Some(c.started_at))
+        .and_then(|ms| chrono::Local.timestamp_millis_opt(ms).single())
+        .unwrap_or(now)
+}
+
 /// Open a link somewhere that is not this window.
 ///
 /// A link followed inside the webview replaces the app with a web page and
@@ -742,6 +893,8 @@ pub fn run() {
             answer,
             engines,
             use_engine,
+            runs,
+            routines,
             outside,
             show_in_browser,
             rename,
@@ -763,9 +916,12 @@ pub fn run() {
         // with "notifications are not allowed for this application", which
         // sounds like a decision somebody made and is really just a question
         // asked too soon.
-        .run(|_app, event| {
+        .run(|app, event| {
             if matches!(event, tauri::RunEvent::Ready) {
                 onscreen::ask();
+                // Started here rather than in setup, so it never looks at the
+                // clock before the store it reads is in place.
+                watch_the_clock(app.clone());
             }
         });
 }

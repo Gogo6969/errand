@@ -21,3 +21,4 @@ objc2-user-notifications = { version = "0.3.2", features = ["UNUserNotificationC
 objc2-foundation = { version = "0.3.2", features = ["NSString", "NSBundle"] }
 objc2 = "0.6.4"
 block2 = "0.6.2"
+chrono = "0.4.45"

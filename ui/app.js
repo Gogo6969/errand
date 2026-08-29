@@ -61,6 +61,13 @@ const el = {
   find: document.getElementById("find"),
   reach: document.getElementById("reach"),
   talks: document.getElementById("talks"),
+  repeat: document.getElementById("repeat"),
+  routine: document.getElementById("routine"),
+  routineAt: document.getElementById("routine-at"),
+  routineWhat: document.getElementById("routine-what"),
+  routineSave: document.getElementById("routine-save"),
+  routineStop: document.getElementById("routine-stop"),
+  routineSays: document.getElementById("routine-says"),
   pin: document.getElementById("pin"),
   hide: document.getElementById("hide"),
   whois: document.getElementById("whois"),
@@ -262,6 +269,7 @@ async function show(id) {
 
   const a = whose();
   el.whois.hidden = true;
+  el.routine.hidden = true;
   if (a) {
     drawMark(a);
     drawPinned(a);
@@ -286,7 +294,9 @@ function drawTalks() {
     ...theirs.map((t) => {
       const option = document.createElement("option");
       option.value = t.id;
-      option.textContent = t.name;
+      // A clock on the name, so a scheduled conversation is recognisable
+      // without opening the panel that would tell you.
+      option.textContent = t.repeats ? `${t.name} ⏱` : t.name;
       option.selected = t.id === showing;
       return option;
     }),
@@ -328,6 +338,7 @@ function asTalk(c, keeping) {
     id: c.id,
     agent: c.agent,
     name: c.name,
+    repeats: !!c.runs_at,
     messages: keeping?.messages ?? [],
     working: keeping?.working ?? false,
     loaded: keeping?.loaded ?? false,
@@ -1036,6 +1047,71 @@ function drawPinned(t) {
 el.talks.addEventListener("change", async () => {
   if (el.talks.value === "+") return alsoAsk();
   await show(el.talks.value);
+});
+
+/**
+ * A conversation that runs itself.
+ *
+ * Set on the conversation rather than on the agent, so an agent can have a
+ * morning briefing and an ordinary conversation at the same time and the
+ * briefing accumulates in one place: yesterday's directly above today's.
+ */
+el.repeat.addEventListener("click", async () => {
+  if (!el.routine.hidden) {
+    el.routine.hidden = true;
+    return;
+  }
+  const t = talking();
+  if (!t) return;
+  const mine = (await invoke("routines")).find((r) => r.conversation === t.id);
+  el.routineAt.value = mine?.at || "";
+  el.routineWhat.value = mine?.what || "";
+  el.routineSays.textContent = sayWhen(mine);
+  el.routine.hidden = false;
+  el.routineAt.focus();
+});
+
+/** When it next runs, in words, or what is wrong with what was typed. */
+function sayWhen(routine) {
+  if (!routine) return "This runs only when you ask it to.";
+  if (!routine.due) return `${routine.at} · nothing due`;
+  const due = new Date(routine.due);
+  const ran = routine.ran ? ` · last ran ${new Date(routine.ran).toLocaleString()}` : " · never run";
+  return `Next ${due.toLocaleString()}${ran}`;
+}
+
+el.routineSave.addEventListener("click", async () => {
+  const t = talking();
+  if (!t) return;
+  const at = el.routineAt.value.trim();
+  const what = el.routineWhat.value.trim();
+  if (!at || !what) {
+    el.routineSays.textContent = "It needs both a time and something to do.";
+    return;
+  }
+  try {
+    await invoke("runs", { id: t.id, at, what });
+  } catch (why) {
+    // The schedule is read before it is stored, so an unreadable one is
+    // refused here rather than at seven in the morning by not happening.
+    el.routineSays.textContent = String(why);
+    return;
+  }
+  const mine = (await invoke("routines")).find((r) => r.conversation === t.id);
+  el.routineSays.textContent = sayWhen(mine);
+  t.repeats = true;
+  drawTalks();
+});
+
+el.routineStop.addEventListener("click", async () => {
+  const t = talking();
+  if (!t) return;
+  await invoke("runs", { id: t.id, at: null, what: null });
+  el.routineAt.value = "";
+  el.routineWhat.value = "";
+  el.routineSays.textContent = sayWhen(null);
+  t.repeats = false;
+  drawTalks();
 });
 
 el.new.addEventListener("click", start);

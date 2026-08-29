@@ -69,6 +69,13 @@ pub struct Conversation {
     pub opened: bool,
     pub started_at: i64,
     pub spoke_at: i64,
+    /// The schedule, as somebody would write it: `daily 07:00`. Nothing here
+    /// means this is an ordinary conversation that never runs on its own.
+    pub runs_at: Option<String>,
+    /// What it says to itself when the time comes.
+    pub runs_what: Option<String>,
+    /// When it last ran, which is what the next run is counted from.
+    pub ran_at: Option<i64>,
 }
 
 /// One standing job, and whoever is doing it.
@@ -254,6 +261,18 @@ const CHANGES: &[&str] = &[
      ALTER TABLE lines_next RENAME TO lines;
      CREATE INDEX lines_by_call ON lines(conversation, call);
      CREATE INDEX conversations_by_agent ON conversations(agent, spoke_at DESC);",
+    // 5. A conversation that runs itself.
+    //
+    // Not a routines table, because a routine is not a separate thing: it is a
+    // conversation with a schedule and something to say. Keeping it here means
+    // yesterday's briefing sits directly above today's in the same place, and
+    // "what did it say last Tuesday" is scrolling rather than archaeology.
+    //
+    // `ran_at` is when it last actually ran, and is what the next run is
+    // counted from. Nothing means it has never run.
+    "ALTER TABLE conversations ADD COLUMN runs_at TEXT;
+     ALTER TABLE conversations ADD COLUMN runs_what TEXT;
+     ALTER TABLE conversations ADD COLUMN ran_at INTEGER;",
 ];
 
 impl Store {
@@ -365,7 +384,8 @@ impl Store {
     pub fn conversations(&self, agent: &str) -> Result<Vec<Conversation>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
-            "SELECT id, agent, name, opened, started_at, spoke_at
+            "SELECT id, agent, name, opened, started_at, spoke_at,
+                    runs_at, runs_what, ran_at
                FROM conversations WHERE agent = ? ORDER BY spoke_at DESC",
         )?;
         let rows = q.query_map([agent], read_conversation)?;
@@ -376,11 +396,49 @@ impl Store {
     pub fn conversation(&self, id: &str) -> Result<Option<Conversation>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
-            "SELECT id, agent, name, opened, started_at, spoke_at
+            "SELECT id, agent, name, opened, started_at, spoke_at,
+                    runs_at, runs_what, ran_at
                FROM conversations WHERE id = ?",
         )?;
         let mut rows = q.query_map([id], read_conversation)?;
         rows.next().transpose().map_err(Into::into)
+    }
+
+    /// Give a conversation a schedule, or take one away.
+    ///
+    /// `ran_at` is cleared with it. A schedule that has just been set has never
+    /// run, whatever the conversation did before, and counting the first run
+    /// from an old timestamp would either fire it at once or hold it back by
+    /// however long it happened to be since.
+    pub fn runs(&self, conversation: &str, at: Option<&str>, what: Option<&str>) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE conversations SET runs_at = ?, runs_what = ?, ran_at = NULL WHERE id = ?",
+            params![at, what, conversation],
+        )?;
+        Ok(())
+    }
+
+    /// Say that a routine has just run.
+    pub fn ran(&self, conversation: &str, at: i64) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE conversations SET ran_at = ? WHERE id = ?",
+            params![at, conversation],
+        )?;
+        Ok(())
+    }
+
+    /// Every conversation with a schedule on it, whichever agent it belongs to.
+    pub fn routines(&self) -> Result<Vec<Conversation>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT id, agent, name, opened, started_at, spoke_at,
+                    runs_at, runs_what, ran_at
+               FROM conversations
+              WHERE runs_at IS NOT NULL AND runs_what IS NOT NULL
+              ORDER BY spoke_at DESC",
+        )?;
+        let rows = q.query_map([], read_conversation)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Give a conversation the name it will be picked out by.
@@ -779,6 +837,9 @@ fn read_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
         opened: r.get::<_, i64>(3)? != 0,
         started_at: r.get(4)?,
         spoke_at: r.get(5)?,
+        runs_at: r.get(6)?,
+        runs_what: r.get(7)?,
+        ran_at: r.get(8)?,
     })
 }
 

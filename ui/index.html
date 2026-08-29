@@ -36,6 +36,7 @@
         <button id="hide" type="button" title="Out of the way, still running">Hide</button>
         <select id="talks" title="Which conversation"></select>
         <select id="engine" title="What answers this agent"></select>
+        <button id="repeat" type="button" title="Make this run on a schedule">Repeat</button>
         <button id="reach" type="button" title="What this thread can reach">Tools</button>
       </header>
 
@@ -49,6 +50,15 @@
         <label>Role <input id="whois-title" type="text" autocomplete="off" /></label>
         <label>Handles <input id="whois-about" type="text" autocomplete="off" /></label>
         <button id="whois-save" type="button">Save</button>
+      </aside>
+
+      <!-- A conversation that runs itself. -->
+      <aside id="routine" hidden>
+        <label>When <input id="routine-at" type="text" placeholder="daily 07:00" autocomplete="off" /></label>
+        <label>Do this <input id="routine-what" type="text" placeholder="What it should do each time" autocomplete="off" /></label>
+        <button id="routine-save" type="button">Save</button>
+        <button id="routine-stop" type="button">Stop repeating</button>
+        <p id="routine-says"></p>
       </aside>
 
       <aside id="reachable" hidden></aside>
