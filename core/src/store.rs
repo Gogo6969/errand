@@ -65,7 +65,7 @@ pub struct Allowance {
 /// under it. So a conversation id is never reused and never regenerated once
 /// anything has been said, or the conversation becomes unreachable while its
 /// transcript sits on disk under a name nothing will ask for again.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     pub id: String,
     pub agent: String,
@@ -97,6 +97,28 @@ pub struct Conversation {
     /// The engine's own name for the point to carry on from. Nothing means
     /// the end of it.
     pub carries_on_at: Option<String>,
+    /// What this conversation watches, as somebody wrote it. Nothing means it
+    /// watches nothing.
+    pub watches: Option<String>,
+    /// What it says to itself when what it watches changes.
+    pub watches_what: Option<String>,
+    /// The mark of what was there when somebody was last woken.
+    pub saw: Option<String>,
+    /// Enough of what was there to say later what changed.
+    pub saw_note: Option<String>,
+    /// A mark seen since, not yet seen twice.
+    pub seeing: Option<String>,
+    pub looked_at: Option<i64>,
+    pub woke_at: Option<i64>,
+    /// How many times it has woken somebody today, and which day that is.
+    pub woke_today: i64,
+    pub woke_on: Option<i64>,
+    /// Looks that found something different and never the same thing twice.
+    pub unsettled: i64,
+    /// Looks that failed outright.
+    pub misses: i64,
+    /// Why it stopped, if it has. Nothing means it is still looking.
+    pub paused: Option<String>,
 }
 
 /// One standing job, and whoever is doing it.
@@ -432,6 +454,43 @@ const CHANGES: &[&str] = &[
      ALTER TABLE conversations ADD COLUMN carries_on INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE conversations ADD COLUMN carries_on_at TEXT;
      ALTER TABLE lines ADD COLUMN anchor TEXT;",
+    // 10. A conversation woken by something changing.
+    //
+    // Beside the schedule rather than instead of it. They are different
+    // questions and one conversation may want both: a briefing every morning
+    // that also wakes when the folder it reports on gets a new file. Putting
+    // the interval in `runs_at` would mean every reader of that column had to
+    // check another one to know what the string in it meant, and a column with
+    // two meanings is the shape of mistake this file already carries two scars
+    // from.
+    //
+    // Not a watches table, for change 5's reason unchanged: a watch is not a
+    // separate thing. It is a conversation with something to look at and
+    // something to say.
+    //
+    // `saw` is the mark of what was there when somebody was last woken, and
+    // `seeing` is a mark seen since that has not yet repeated. Both are needed
+    // because a difference is not a change until it has been seen twice the
+    // same way: a page with a fresh token in every response differs on every
+    // look and must never wake anybody, and without `seeing` there is nothing
+    // to tell that from a page that really moved.
+    //
+    // `unsettled` and `misses` count the two ways a watch can be useless: one
+    // that can never settle, and one that cannot be reached. Both pause it,
+    // because a watch failing quietly forever is worse than one that stops and
+    // says why.
+    "ALTER TABLE conversations ADD COLUMN watches TEXT;
+     ALTER TABLE conversations ADD COLUMN watches_what TEXT;
+     ALTER TABLE conversations ADD COLUMN saw TEXT;
+     ALTER TABLE conversations ADD COLUMN saw_note TEXT;
+     ALTER TABLE conversations ADD COLUMN seeing TEXT;
+     ALTER TABLE conversations ADD COLUMN looked_at INTEGER;
+     ALTER TABLE conversations ADD COLUMN woke_at INTEGER;
+     ALTER TABLE conversations ADD COLUMN woke_today INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE conversations ADD COLUMN woke_on INTEGER;
+     ALTER TABLE conversations ADD COLUMN unsettled INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE conversations ADD COLUMN misses INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE conversations ADD COLUMN paused TEXT;",
 ];
 
 impl Store {
@@ -708,6 +767,142 @@ impl Store {
         Ok(())
     }
 
+    /// Say something into a conversation that nobody has to answer.
+    ///
+    /// For the kind of news that costs no engine turn to deliver: a watch that
+    /// has stopped, and why. It belongs in the conversation because that is
+    /// where this program says things, and putting it anywhere else means
+    /// somebody has to go and look for it.
+    pub fn noted(&self, conversation: &str, said: &str) -> Result<()> {
+        self.append(conversation, "ended", said, None, None)?;
+        Ok(())
+    }
+
+    /// Set or clear what a conversation watches.
+    ///
+    /// Everything it had seen is forgotten along with it, for the same reason
+    /// changing a schedule clears when it last ran: what a watch saw is only
+    /// meaningful against the thing it was watching, and keeping it would mean
+    /// comparing a folder's mark against a page's.
+    pub fn watch(
+        &self,
+        conversation: &str,
+        watches: Option<&str>,
+        what: Option<&str>,
+    ) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE conversations
+                SET watches = ?, watches_what = ?,
+                    saw = NULL, saw_note = NULL, seeing = NULL, looked_at = NULL,
+                    woke_at = NULL, woke_today = 0, woke_on = NULL,
+                    unsettled = 0, misses = 0, paused = NULL
+              WHERE id = ?",
+            params![watches, what, conversation],
+        )?;
+        Ok(())
+    }
+
+    /// Every conversation that is watching something and has not stopped.
+    pub fn watching(&self) -> Result<Vec<Conversation>> {
+        Ok(self
+            .every_conversation()?
+            .into_iter()
+            .filter(|c| c.watches.is_some() && c.paused.is_none())
+            .collect())
+    }
+
+    /// Every conversation that watches something, stopped or not.
+    pub fn watchers(&self) -> Result<Vec<Conversation>> {
+        Ok(self
+            .every_conversation()?
+            .into_iter()
+            .filter(|c| c.watches.is_some())
+            .collect())
+    }
+
+    /// Write down what a look found, without waking anybody.
+    pub fn looked(
+        &self,
+        conversation: &str,
+        saw: Option<&str>,
+        saw_note: Option<&str>,
+        seeing: Option<&str>,
+        unsettled: i64,
+        misses: i64,
+    ) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE conversations
+                SET looked_at = ?, saw = COALESCE(?, saw), saw_note = COALESCE(?, saw_note),
+                    seeing = ?, unsettled = ?, misses = ?
+              WHERE id = ?",
+            params![
+                now(),
+                saw,
+                saw_note,
+                seeing,
+                unsettled,
+                misses,
+                conversation
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Write down that somebody was woken, before they are.
+    ///
+    /// Before, for the same reason a routine's last run is written before it
+    /// starts: if starting fails it has still had its turn, and a watch that
+    /// retried every thirty seconds because starting kept failing would be the
+    /// worst thing in this file.
+    pub fn woke(&self, conversation: &str, saw: &str, saw_note: &str, today: i64) -> Result<()> {
+        let now = now();
+        self.conn.lock().unwrap().execute(
+            "UPDATE conversations
+                SET saw = ?, saw_note = ?, seeing = NULL, looked_at = ?,
+                    woke_at = ?, unsettled = 0, misses = 0,
+                    woke_today = CASE WHEN woke_on = ? THEN woke_today + 1 ELSE 1 END,
+                    woke_on = ?
+              WHERE id = ?",
+            params![saw, saw_note, now, now, today, today, conversation],
+        )?;
+        Ok(())
+    }
+
+    /// Stop a watch, with the reason somebody can act on.
+    pub fn pause_watch(&self, conversation: &str, why: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE conversations SET paused = ? WHERE id = ?",
+            params![why, conversation],
+        )?;
+        Ok(())
+    }
+
+    /// Start a stopped watch looking again, forgiving whatever stopped it.
+    pub fn look_again(&self, conversation: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE conversations
+                SET paused = NULL, unsettled = 0, misses = 0, seeing = NULL
+              WHERE id = ?",
+            params![conversation],
+        )?;
+        Ok(())
+    }
+
+    /// Every conversation there is, whoever it belongs to.
+    fn every_conversation(&self) -> Result<Vec<Conversation>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT id, agent, name, opened, started_at, spoke_at,
+                    runs_at, runs_what, ran_at, asked_by,
+                    came_from, carries_on, carries_on_at,
+                    watches, watches_what, saw, saw_note, seeing, looked_at,
+                    woke_at, woke_today, woke_on, unsettled, misses, paused
+               FROM conversations",
+        )?;
+        let rows = q.query_map([], read_conversation)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// A name for a conversation carried on from this one, that is not taken.
     pub fn a_name_like(&self, agent: &str, wanted: &str) -> Result<String> {
         let taken: Vec<String> = self
@@ -757,7 +952,9 @@ impl Store {
         let mut q = conn.prepare(
             "SELECT id, agent, name, opened, started_at, spoke_at,
                     runs_at, runs_what, ran_at, asked_by,
-                    came_from, carries_on, carries_on_at
+                    came_from, carries_on, carries_on_at,
+                    watches, watches_what, saw, saw_note, seeing, looked_at,
+                    woke_at, woke_today, woke_on, unsettled, misses, paused
                FROM conversations WHERE agent = ? ORDER BY spoke_at DESC",
         )?;
         let rows = q.query_map([agent], read_conversation)?;
@@ -770,7 +967,9 @@ impl Store {
         let mut q = conn.prepare(
             "SELECT id, agent, name, opened, started_at, spoke_at,
                     runs_at, runs_what, ran_at, asked_by,
-                    came_from, carries_on, carries_on_at
+                    came_from, carries_on, carries_on_at,
+                    watches, watches_what, saw, saw_note, seeing, looked_at,
+                    woke_at, woke_today, woke_on, unsettled, misses, paused
                FROM conversations WHERE id = ?",
         )?;
         let mut rows = q.query_map([id], read_conversation)?;
@@ -864,7 +1063,9 @@ impl Store {
         let mut q = conn.prepare(
             "SELECT id, agent, name, opened, started_at, spoke_at,
                     runs_at, runs_what, ran_at, asked_by,
-                    came_from, carries_on, carries_on_at
+                    came_from, carries_on, carries_on_at,
+                    watches, watches_what, saw, saw_note, seeing, looked_at,
+                    woke_at, woke_today, woke_on, unsettled, misses, paused
                FROM conversations
               WHERE runs_at IS NOT NULL AND runs_what IS NOT NULL
               ORDER BY spoke_at DESC",
@@ -1355,6 +1556,18 @@ fn read_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
         came_from: r.get(10)?,
         carries_on: r.get::<_, i64>(11)? != 0,
         carries_on_at: r.get(12)?,
+        watches: r.get(13)?,
+        watches_what: r.get(14)?,
+        saw: r.get(15)?,
+        saw_note: r.get(16)?,
+        seeing: r.get(17)?,
+        looked_at: r.get(18)?,
+        woke_at: r.get(19)?,
+        woke_today: r.get(20)?,
+        woke_on: r.get(21)?,
+        unsettled: r.get(22)?,
+        misses: r.get(23)?,
+        paused: r.get(24)?,
     })
 }
 
@@ -1421,6 +1634,106 @@ mod tests {
         // treat what it found as something it did.
         s.bring_up_to_date()
             .expect("it blamed itself for damage that was already there");
+    }
+
+    #[test]
+    fn setting_a_watch_forgets_everything_the_old_one_had_seen() {
+        // What a watch saw is only meaningful against the thing it watched.
+        // Kept across a change it would be compared against something else
+        // entirely, which is a change that never happened.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.watch("a1", Some("/tmp every 10m"), Some("sort them"))
+            .unwrap();
+        s.woke("a1", "files aaa", "one.pdf", 20260829).unwrap();
+        assert_eq!(
+            s.conversation("a1").unwrap().unwrap().saw.as_deref(),
+            Some("files aaa")
+        );
+
+        s.watch("a1", Some("https://example.com every 1h"), Some("read it"))
+            .unwrap();
+        let after = s.conversation("a1").unwrap().unwrap();
+        assert_eq!(after.saw, None, "it kept a folder's mark against a page");
+        assert_eq!(after.seeing, None);
+        assert_eq!(after.woke_today, 0);
+        assert_eq!(after.paused, None);
+    }
+
+    #[test]
+    fn a_watch_and_a_schedule_on_one_conversation_do_not_read_each_other() {
+        // The whole argument for not putting the interval in `runs_at`: a
+        // briefing every morning that also wakes when the folder it reports on
+        // changes is an ordinary thing to want.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.runs("a1", Some("daily 07:00"), Some("the briefing"))
+            .unwrap();
+        s.watch("a1", Some("/tmp every 10m"), Some("sort them"))
+            .unwrap();
+
+        let both = s.conversation("a1").unwrap().unwrap();
+        assert_eq!(both.runs_at.as_deref(), Some("daily 07:00"));
+        assert_eq!(both.watches.as_deref(), Some("/tmp every 10m"));
+        assert_eq!(both.runs_what.as_deref(), Some("the briefing"));
+        assert_eq!(both.watches_what.as_deref(), Some("sort them"));
+    }
+
+    #[test]
+    fn waking_counts_up_within_a_day_and_starts_again_on_the_next() {
+        // The count is what stops a watch costing more than an hourly routine,
+        // so it has to be a count of today and not of ever.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.watch("a1", Some("/tmp every 10m"), Some("go")).unwrap();
+
+        s.woke("a1", "files a", "", 20260829).unwrap();
+        s.woke("a1", "files b", "", 20260829).unwrap();
+        assert_eq!(s.conversation("a1").unwrap().unwrap().woke_today, 2);
+
+        s.woke("a1", "files c", "", 20260830).unwrap();
+        let tomorrow = s.conversation("a1").unwrap().unwrap();
+        assert_eq!(tomorrow.woke_today, 1, "yesterday's count carried over");
+        assert_eq!(tomorrow.woke_on, Some(20260830));
+    }
+
+    #[test]
+    fn a_watch_that_stopped_is_not_looked_at_until_somebody_says_so() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.watch("a1", Some("/tmp every 10m"), Some("go")).unwrap();
+        assert_eq!(s.watching().unwrap().len(), 1);
+
+        s.pause_watch("a1", "it is different every time I look")
+            .unwrap();
+        assert!(
+            s.watching().unwrap().is_empty(),
+            "a stopped watch kept looking"
+        );
+        assert_eq!(
+            s.watchers().unwrap().len(),
+            1,
+            "it vanished instead of stopping"
+        );
+
+        s.look_again("a1").unwrap();
+        assert_eq!(s.watching().unwrap().len(), 1);
+        assert_eq!(s.conversation("a1").unwrap().unwrap().unsettled, 0);
+    }
+
+    #[test]
+    fn a_carried_on_conversation_inherits_no_watch() {
+        // The same danger as an inherited schedule: a second thing looking at
+        // the world and spending money that nobody set up.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.watch("a1", Some("/tmp every 10m"), Some("go")).unwrap();
+        s.asked("a1", "something").unwrap();
+
+        s.carry_on("fork", "a1", 1, "First, again", None).unwrap();
+        let made = s.conversation("fork").unwrap().unwrap();
+        assert_eq!(made.watches, None, "it inherited a watch");
+        assert_eq!(made.watches_what, None);
     }
 
     #[test]

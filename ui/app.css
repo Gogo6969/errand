@@ -920,8 +920,8 @@ body.catching #what { border-color: var(--accent); }
 #repeat:hover { color: var(--ink); border-color: var(--edge); }
 #repeat:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-#routine[hidden] { display: none; }
-#routine {
+#routine[hidden], #watching[hidden] { display: none; }
+#routine, #watching {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
@@ -930,7 +930,7 @@ body.catching #what { border-color: var(--accent); }
   border-bottom: 1px solid var(--rule);
   background: var(--side);
 }
-#routine label {
+#routine label, #watching label {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -940,8 +940,8 @@ body.catching #what { border-color: var(--accent); }
   color: var(--ink-soft);
   flex: 1 1 150px;
 }
-#routine label:nth-child(2) { flex: 3 1 340px; }
-#routine input {
+#routine label:nth-child(2), #watching label:nth-child(2) { flex: 3 1 340px; }
+#routine input, #watching input {
   padding: 6px 9px;
   border-radius: 8px;
   border: 1px solid var(--rule);
@@ -952,8 +952,8 @@ body.catching #what { border-color: var(--accent); }
   text-transform: none;
   letter-spacing: 0;
 }
-#routine input:focus { outline: none; border-color: var(--edge); }
-#routine-save {
+#routine input:focus, #watching input:focus { outline: none; border-color: var(--edge); }
+#routine-save, #watch-save {
   padding: 7px 16px;
   border-radius: 8px;
   border: 0;
@@ -964,7 +964,7 @@ body.catching #what { border-color: var(--accent); }
   font-weight: 500;
   cursor: pointer;
 }
-#routine-stop {
+#routine-stop, #watch-stop, #watch-again {
   padding: 7px 14px;
   border-radius: 8px;
   border: 1px solid var(--rule);
@@ -974,9 +974,9 @@ body.catching #what { border-color: var(--accent); }
   font-size: 13px;
   cursor: pointer;
 }
-#routine-stop:hover { color: var(--ink); border-color: var(--edge); }
+#routine-stop:hover, #watch-stop:hover, #watch-again:hover { color: var(--ink); border-color: var(--edge); }
 /* What it says back: when it next runs, or why what was typed is not a time. */
-#routine-says {
+#routine-says, #watch-says {
   flex: 1 0 100%;
   margin: 0;
   font-size: 12.5px;
@@ -1242,3 +1242,7 @@ body.catching #what { border-color: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   #speak[aria-pressed="true"] { animation: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 34%, transparent); }
 }
+
+/* A watch that has stopped is not a note, it is something to act on. */
+#watch-says[data-paused="true"] { color: var(--wrong); }
+#watch-again[hidden] { display: none; }

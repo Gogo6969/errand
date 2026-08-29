@@ -27,6 +27,7 @@ pub mod mcp;
 pub mod memory;
 pub mod routine;
 pub mod team;
+pub mod watch;
 
 pub use engine::{Answer, Brought, Engine, Event, NeedsYou, Picture, Step};
 pub use store::{Agent, Conversation, Line, Store};

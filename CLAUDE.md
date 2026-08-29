@@ -56,9 +56,44 @@ failure lives in the ordering of awaits and not in any function's output.
 engine has to start behind it. Use it. That is the switch that reproduced the
 empty-pickers bug in one load.
 
+**Run it in a window at least 700px wide.** A media query reads the viewport,
+not any element, so a harness run in a narrow pane measures a header that is
+wrapping exactly as it was told to and reports the app broken. The header check
+now refuses to judge below that width rather than pass or fail on a test it did
+not run. There is no way to widen the viewport from inside the page; widen the
+actual window.
+
 When something is found wrong in the window, **add a check for it** before
 fixing it. The list in `checks.js` should be a list of things that were once
 actually broken.
+
+### Two things that only using it will find
+
+Both of these passed every test and were wrong the moment they were on screen.
+
+**macOS rewrites what somebody types.** Two hyphens become a dash, straight
+quotes become curly ones. That is right for prose and wrong for every path and
+every address, and a watch on a folder whose name contained `--` failed to find
+a folder that was plainly there, with nothing on screen saying why. Anything
+that reads a path or a URL from a text field puts that punctuation back first;
+`watch::Watch::read` does.
+
+**An agent's name is not a name.** It is whatever its first message was, cut
+short, so it is usually a whole sentence. Dropping one into the middle of a
+sentence produced "wakes Write a file called hello.txt containing when what is
+there changes". `watch::reads_as_a_name` decides; anything that splices a name
+into prose should ask it first.
+
+### A description of something live has to be live
+
+A panel drawn once and never again goes on saying "it has not looked yet" while
+the thing it describes is being woken behind it. That is not a stale view, it
+is a false statement, and it is the same class of fault as a silent failure.
+While a panel that describes background work is on screen, it re-reads. Redraw
+the sentence always and the input boxes never, or a half-typed path gets taken
+back while somebody is typing it.
+
+Related: a watch that failed says so on the first failure, not after the fifth.
 
 ### Screenshots
 

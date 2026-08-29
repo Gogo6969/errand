@@ -96,6 +96,16 @@ export const FIXTURE = {
     plugins: ["marketing", "productivity"],
     commands: ["init", "review"],
   },
+  watches: {
+    watches: "~/Downloads every 10m",
+    what: "Sort these and tell me the total",
+    means: "This looks at ~/Downloads every 10 minutes and wakes Bitcoin Desk when what is there changes. It compares the names and sizes of the files one level down, ignoring part-downloaded ones. At most once every 15 minutes, and at most 24 times a day. It only looks while Errand is open, so something that changes overnight is something you hear about in the morning.",
+    looked_at: 1788000000000,
+    woke_at: null,
+    woke_today: 0,
+    misses: 0,
+    paused: null,
+  },
   outside: [
     { name: "peekaboo", from: "~/.claude.json", tools: ["see", "click", "type"], trouble: null },
     { name: "mempalace", from: "~/.claude.json", tools: [], trouble: "starting it: No such file or directory" },
@@ -139,6 +149,8 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.whats_running);
           case "brought":
             return Promise.resolve(fixture.brought);
+          case "watches":
+            return Promise.resolve(fixture.watches);
           case "allowances":
           case "routines":
           case "runs":

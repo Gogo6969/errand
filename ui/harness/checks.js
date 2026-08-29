@@ -1,7 +1,7 @@
 // What somebody looking at the window would check, written down so nobody has
 // to look. Each one names the thing that was actually found wrong.
 
-import { asked } from "./harness.js";
+import { asked, FIXTURE } from "./harness.js";
 
 const has = (id) => document.getElementById(id);
 const text = (id) => (has(id) ? has(id).textContent.trim() : "<missing>");
@@ -442,8 +442,94 @@ export async function dictation() {
   return found;
 }
 
+/**
+ * A conversation woken by something changing.
+ *
+ * The check that matters is the arithmetic sentence: the failure this feature
+ * can cause is somebody agreeing to a rate they never pictured, and the only
+ * defence is putting the real numbers in front of them before they agree.
+ */
+export async function watching() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const panel = document.getElementById("watching");
+
+  check("it starts closed", panel.hidden, `hidden=${panel.hidden}`);
+  document.getElementById("watch").click();
+  await new Promise((r) => setTimeout(r, 200));
+  check("the Watch button opens it", !panel.hidden, `hidden=${panel.hidden}`);
+
+  check(
+    "it shows what is watched and what it will say",
+    document.getElementById("watch-at").value.includes("~/Downloads") &&
+      document.getElementById("watch-what").value.length > 0,
+    document.getElementById("watch-at").value,
+  );
+
+  const says = document.getElementById("watch-says").textContent;
+  check(
+    "it says how often it will wake somebody, in numbers, before they agree to it",
+    says.includes("every 10 minutes") && says.includes("24 times a day"),
+    says.slice(0, 90),
+  );
+  check(
+    "it admits it only looks while the app is open",
+    says.includes("only looks while Errand is open"),
+    says.slice(-70),
+  );
+  check("it says when it last looked", says.includes("Last looked at"), says.slice(-70));
+  check(
+    "nothing offers to look again while nothing has stopped",
+    document.getElementById("watch-again").hidden,
+    String(document.getElementById("watch-again").hidden),
+  );
+
+  // Looking happens on a timer behind the panel, so a panel that draws once
+  // goes on saying "it has not looked yet" while the agent it describes is
+  // being woken. Seen on screen: the sentence was wrong the moment it fired.
+  FIXTURE.watches.woke_at = 1788000900000;
+  FIXTURE.watches.woke_today = 1;
+  await new Promise((r) => setTimeout(r, 5400));
+  check(
+    "it notices by itself that somebody has been woken",
+    document.getElementById("watch-says").textContent.includes("Last woke this at"),
+    document.getElementById("watch-says").textContent.slice(-70),
+  );
+
+  // A watch failing four times in silence before it admits anything is the
+  // quiet failure this whole app is written against.
+  FIXTURE.watches.misses = 2;
+  await new Promise((r) => setTimeout(r, 5400));
+  const failing = document.getElementById("watch-says").textContent;
+  check(
+    "a look that failed is said straight away, not after the fifth one",
+    failing.includes("The last 2 looks failed") && failing.includes("stops after five"),
+    failing.slice(0, 70),
+  );
+  FIXTURE.watches.misses = 0;
+
+  document.getElementById("watch").click();
+  check("clicking again closes it", panel.hidden, `hidden=${panel.hidden}`);
+  return found;
+}
+
 /** Everything in the header on one row, which is what a header is. */
+/** The width below which the header is meant to wrap, from app.css. */
+const WRAPS_BELOW = 700;
+
 export function headerFitsOnOneRow() {
+  // A media query reads the viewport, not the element, so this cannot be
+  // judged by widening anything on the page: run narrow, it measures a header
+  // that is wrapping exactly as it was told to, and reports the app broken.
+  // Rather than pass on a test it did not run, it says it could not run.
+  if (window.innerWidth <= WRAPS_BELOW) {
+    return {
+      rows: 0,
+      at: window.innerWidth,
+      tooNarrowToJudge: true,
+      toolsInside: document.getElementById("reach").getBoundingClientRect().width > 0,
+    };
+  }
   const title = document.getElementById("title");
   // Only what is on screen. A hidden child measures zero and would otherwise
   // count as a row of its own, which is a test failing at its own reflection.
@@ -453,6 +539,8 @@ export function headerFitsOnOneRow() {
   const bar = title.getBoundingClientRect();
   return {
     rows: tops.size,
+    // Said out loud, because "one row" is only a claim about a width.
+    at: Math.round(bar.width),
     toolsInside: tools.width > 0 && tools.right <= bar.right - 17,
   };
 }

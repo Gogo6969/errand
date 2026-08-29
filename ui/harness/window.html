@@ -78,7 +78,7 @@
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
 
-  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, whatItCanReach, dictation } =
+  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, whatItCanReach, dictation, watching } =
     await import("./checks.js");
   const found = checks().concat(
     carryingOn(),
@@ -87,11 +87,17 @@
     await running(),
     await whatItCanReach(),
     await dictation(),
+    await watching(),
     themes(),
   );
   const header = headerFitsOnOneRow();
-  found.push({ what: "everything in the header is on one row",
-               ok: header.rows === 1, saw: `${header.rows} row(s)` });
+  found.push({
+    what: "everything in the header is on one row",
+    ok: header.rows === 1,
+    saw: header.tooNarrowToJudge
+      ? `cannot be judged: this window is ${header.at}px, below the width where wrapping is meant to happen. Widen it and run again.`
+      : `${header.rows} row(s) at ${header.at}px`,
+  });
   found.push({ what: "Tools is inside the header rather than past its edge",
                ok: header.toolsInside, saw: String(header.toolsInside) });
 

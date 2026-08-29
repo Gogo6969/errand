@@ -29,6 +29,7 @@ use errand_core::routine::When;
 use errand_core::store::Allowance;
 use errand_core::store::{Settled, NOT_YET_NAMED};
 use errand_core::team;
+use errand_core::watch;
 use errand_core::{claude::Claude, Agent, Answer, Conversation, Engine, Event, Line, Store};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -80,6 +81,11 @@ struct Held {
     /// seven on an agent nobody is looking at is exactly the work worth being
     /// able to see, and it is the work the window cannot see at all.
     doing: Arc<Mutex<HashMap<String, String>>>,
+    /// Watches being looked at this moment, so one slow page cannot be looked
+    /// at twice at once. Held through a guard that removes it on the way out,
+    /// however that happens, because the alternative leaks on every early
+    /// return and a leaked entry is a watch that never looks again.
+    looking: Arc<Mutex<std::collections::HashSet<String>>>,
     /// The socket each Claude conversation can reach this app's own tools on.
     ///
     /// Held here because holding it is what keeps it open: dropping one stops
@@ -927,6 +933,228 @@ async fn use_engine(
         .map_err(|e| e.to_string())
 }
 
+/// One watch, held while it is being looked at.
+///
+/// A guard rather than an insert and a remove, because the looking has half a
+/// dozen ways to end early and every one of them would otherwise leave the
+/// entry behind. A left-behind entry is a watch that is never looked at again,
+/// silently, for the life of the process.
+struct Looking {
+    at: Arc<Mutex<std::collections::HashSet<String>>>,
+    id: String,
+}
+
+impl Drop for Looking {
+    fn drop(&mut self) {
+        self.at.lock().unwrap().remove(&self.id);
+    }
+}
+
+/// Look at everything that is due to be looked at.
+///
+/// Rides on the clock that already ticks rather than bringing a second way of
+/// being concurrent. Four at a time, because twenty watches coming due together
+/// must not open twenty sockets, and the rest are looked at on the next tick.
+async fn look_around(app: &AppHandle) -> Result<(), String> {
+    const AT_ONCE: usize = 4;
+    let now = chrono::Local::now();
+
+    let due: Vec<(String, watch::Watch)> = {
+        let held: State<Held> = app.state();
+        held.store
+            .watching()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter_map(|c| {
+                let watch = watch::Watch::read(c.watches.as_deref()?).ok()?;
+                // Never on top of a turn that is already going. A watch that
+                // said something into a conversation mid-answer would be two
+                // people talking at once.
+                let held: State<Held> = app.state();
+                let busy = held.running.lock().unwrap().contains(&c.id)
+                    || held.doing.lock().unwrap().contains_key(&c.id)
+                    || held.looking.lock().unwrap().contains(&c.id);
+                let due = match c.looked_at {
+                    None => true,
+                    Some(then) => now.timestamp_millis() - then >= watch.every * 60 * 1000,
+                };
+                (due && !busy).then_some((c.id.clone(), watch))
+            })
+            .take(AT_ONCE)
+            .collect()
+    };
+
+    for (conversation, watch) in due {
+        let held: State<Held> = app.state();
+        held.looking.lock().unwrap().insert(conversation.clone());
+        let _guard = Looking {
+            at: held.looking.clone(),
+            id: conversation.clone(),
+        };
+        if let Err(why) = look_once(app, &conversation, &watch, now).await {
+            eprintln!("looking at {conversation}: {why}");
+        }
+    }
+    Ok(())
+}
+
+/// The most times a watch may find something odd before it stops.
+///
+/// A watch that can never settle, or can never be reached, is worse than no
+/// watch: it looks for ever and says nothing. Roughly an hour at the page
+/// floor, which is long enough not to trip over one odd answer and short
+/// enough to say so the same morning.
+const ODD_LOOKS_BEFORE_STOPPING: i64 = 5;
+
+/// Look at one thing, and wake somebody if it has really changed.
+async fn look_once(
+    app: &AppHandle,
+    conversation: &str,
+    watch: &watch::Watch,
+    now: chrono::DateTime<chrono::Local>,
+) -> Result<(), String> {
+    let was = {
+        let held: State<Held> = app.state();
+        held.store
+            .conversation(conversation)
+            .map_err(|e| e.to_string())?
+            .ok_or("it went away while being looked at")?
+    };
+
+    let seen = match watch::look_again(&watch.look, was.saw.as_deref()).await {
+        Ok(seen) => seen,
+        Err(why) => {
+            // Counted rather than retried for ever. A watch on an address that
+            // has stopped answering must stop, not fail seven hundred times a
+            // day in silence.
+            let misses = was.misses + 1;
+            let held: State<Held> = app.state();
+            held.store
+                .looked(
+                    conversation,
+                    None,
+                    None,
+                    was.seeing.as_deref(),
+                    was.unsettled,
+                    misses,
+                )
+                .map_err(|e| e.to_string())?;
+            if misses >= ODD_LOOKS_BEFORE_STOPPING {
+                let reason = format!(
+                    "Stopped looking. {} could not be reached {misses} times running.                      The last thing it said was: {why}",
+                    watch.written()
+                );
+                held.store
+                    .pause_watch(conversation, &reason)
+                    .map_err(|e| e.to_string())?;
+                held.store
+                    .noted(conversation, &reason)
+                    .map_err(|e| e.to_string())?;
+            }
+            return Ok(());
+        }
+    };
+
+    match watch::compare(was.saw.as_deref(), was.seeing.as_deref(), &seen.mark) {
+        // Nothing was known. This is now what is known, and nobody is woken.
+        watch::Next::FirstSight => {
+            let held: State<Held> = app.state();
+            held.store
+                .looked(conversation, Some(&seen.mark), Some(&seen.note), None, 0, 0)
+                .map_err(|e| e.to_string())
+        }
+        watch::Next::Same => {
+            let held: State<Held> = app.state();
+            held.store
+                .looked(conversation, None, None, None, 0, 0)
+                .map_err(|e| e.to_string())
+        }
+        // Different, and not yet different the same way twice.
+        watch::Next::Settling => {
+            let unsettled = was.unsettled + 1;
+            let held: State<Held> = app.state();
+            held.store
+                .looked(conversation, None, None, Some(&seen.mark), unsettled, 0)
+                .map_err(|e| e.to_string())?;
+            if unsettled >= ODD_LOOKS_BEFORE_STOPPING {
+                let reason = format!(
+                    "Stopped looking. {} is different every time I look, so I cannot tell a                      real change from the parts that always change. Some pages put a new                      token in every answer. Try watching a feed or an API for the same thing                      if there is one.",
+                    watch.written()
+                );
+                held.store
+                    .pause_watch(conversation, &reason)
+                    .map_err(|e| e.to_string())?;
+                held.store
+                    .noted(conversation, &reason)
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+        watch::Next::Changed => {
+            // The brakes, and they are checked before anything is written.
+            // Nothing is lost by refusing here: the mark still equals what was
+            // being seen, so the same change is still a change on the next
+            // look, and it fires as soon as the brake lets go.
+            let today: i64 = now.format("%Y%m%d").to_string().parse().unwrap_or(0);
+            let too_soon = was.woke_at.is_some_and(|then| {
+                now.timestamp_millis() - then < watch::WAKE_NO_OFTENER_THAN * 60 * 1000
+            });
+            let enough_today = was.woke_on == Some(today) && was.woke_today >= watch::WAKES_A_DAY;
+            if too_soon || enough_today {
+                return Ok(());
+            }
+
+            let said = format!(
+                "{}
+
+{}",
+                was.watches_what.clone().unwrap_or_default(),
+                watch::what_to_say(
+                    watch,
+                    was.saw_note.as_deref(),
+                    &seen.note,
+                    was.woke_at
+                        .map(|then| {
+                            format!(
+                                "at {}",
+                                chrono::DateTime::from_timestamp_millis(then)
+                                    .map(|t| t
+                                        .with_timezone(&chrono::Local)
+                                        .format("%H:%M")
+                                        .to_string())
+                                    .unwrap_or_default()
+                            )
+                        })
+                        .as_deref(),
+                )
+            );
+
+            // Written down before anybody is woken, for the reason a routine's
+            // last run is: if starting fails it has still had its turn, rather
+            // than trying again every thirty seconds for the rest of the day.
+            {
+                let held: State<Held> = app.state();
+                held.store
+                    .woke(conversation, &seen.mark, &seen.note, today)
+                    .map_err(|e| e.to_string())?;
+                held.running
+                    .lock()
+                    .unwrap()
+                    .insert(conversation.to_string());
+            }
+            say(
+                app.clone(),
+                app.state(),
+                conversation.to_string(),
+                said,
+                None,
+            )
+            .await?;
+            Ok(())
+        }
+    }
+}
+
 /// What an agent is asked once it has done its first errand.
 ///
 /// After rather than before, and that is the whole design. Grok Bot asks a new
@@ -1377,6 +1605,9 @@ fn watch_the_clock(app: AppHandle) {
             if let Err(why) = run_what_is_due(&app).await {
                 eprintln!("the clock: {why}");
             }
+            if let Err(why) = look_around(&app).await {
+                eprintln!("the looking: {why}");
+            }
         }
     });
 }
@@ -1628,6 +1859,110 @@ async fn whats_running(held: State<'_, Held>) -> Result<Vec<Working>, String> {
     // finish on its own.
     going.sort_by_key(|w| (!w.waiting, w.who.clone()));
     Ok(going)
+}
+
+/// One watch, as the window shows it.
+#[derive(Clone, Serialize)]
+struct Watching {
+    watches: Option<String>,
+    what: Option<String>,
+    /// What it will do, in numbers, so nobody agrees to a rate they never
+    /// pictured.
+    means: String,
+    looked_at: Option<i64>,
+    woke_at: Option<i64>,
+    woke_today: i64,
+    /// How many looks in a row have failed, so that a watch quietly failing is
+    /// visible before it has failed enough times to stop.
+    misses: i64,
+    /// Why it stopped, if it has.
+    paused: Option<String>,
+}
+
+/// Set or clear what a conversation watches.
+///
+/// Read before it is stored, so something unreadable is refused at the
+/// keyboard rather than at ten past the hour by not happening.
+#[tauri::command]
+async fn watch_it(
+    held: State<'_, Held>,
+    id: String,
+    watches: Option<String>,
+    what: Option<String>,
+) -> Result<(), String> {
+    if let Some(said) = watches.as_deref() {
+        let watch = watch::Watch::read(said).map_err(|e| format!("{e:#}"))?;
+
+        // A watch on a folder the agent writes into is a loop that feeds
+        // itself, and it is the easiest mistake here to make. Refused in both
+        // directions rather than warned about.
+        if let watch::Look::Here(at) = &watch.look {
+            let home = held
+                .store
+                .conversation(&id)
+                .map_err(|e| e.to_string())?
+                .and_then(|c| held.store.agent(&c.agent).ok().flatten())
+                .map(|a| std::path::PathBuf::from(a.cwd));
+            if let Some(home) = home {
+                if at.starts_with(&home) || home.starts_with(at) {
+                    return Err(format!(
+                        "{} is where this agent works, so watching it would wake it up with                          its own work and never stop. Watch somewhere else.",
+                        at.display()
+                    ));
+                }
+            }
+        }
+
+        let already = held.store.watchers().map_err(|e| e.to_string())?;
+        if already.len() >= watch::AT_MOST_WATCHES && !already.iter().any(|c| c.id == id) {
+            return Err(format!(
+                "There are already {} watches, which is as many as this keeps track of.                  Stop one first.",
+                watch::AT_MOST_WATCHES
+            ));
+        }
+    }
+    held.store
+        .watch(&id, watches.as_deref(), what.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// What this conversation watches, if anything.
+#[tauri::command]
+async fn watches(held: State<'_, Held>, id: String) -> Result<Watching, String> {
+    let talk = held
+        .store
+        .conversation(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or("there is no such conversation")?;
+    let who = held
+        .store
+        .agent(&talk.agent)
+        .ok()
+        .flatten()
+        .map_or_else(|| "this agent".to_string(), |a| a.name);
+
+    Ok(Watching {
+        means: match talk.watches.as_deref().map(watch::Watch::read) {
+            Some(Ok(watch)) => watch.in_plain_words(&who),
+            // Stored and no longer readable, which is worth saying rather than
+            // showing an empty box that looks like no watch at all.
+            Some(Err(why)) => format!("This watch can no longer be read: {why:#}"),
+            None => String::new(),
+        },
+        watches: talk.watches,
+        what: talk.watches_what,
+        looked_at: talk.looked_at,
+        woke_at: talk.woke_at,
+        woke_today: talk.woke_today,
+        misses: talk.misses,
+        paused: talk.paused,
+    })
+}
+
+/// Start a stopped watch looking again.
+#[tauri::command]
+async fn look_again(held: State<'_, Held>, id: String) -> Result<(), String> {
+    held.store.look_again(&id).map_err(|e| e.to_string())
 }
 
 /// What is wrong with this setup, before it goes wrong in the middle of a job.
@@ -1882,6 +2217,7 @@ pub fn run() {
                 running: Arc::default(),
                 watching: Arc::default(),
                 doing: Arc::default(),
+                looking: Arc::default(),
                 doorways: Mutex::new(HashMap::new()),
                 store: Arc::new(store),
             });
@@ -1917,6 +2253,9 @@ pub fn run() {
             carry_on,
             checkup,
             whats_running,
+            watch_it,
+            watches,
+            look_again,
             brought,
             export_conversation,
             show_in_browser,

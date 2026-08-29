@@ -37,6 +37,7 @@
         <select id="talks" title="Which conversation"></select>
         <select id="engine" title="What answers this agent"></select>
         <button id="repeat" type="button" title="Make this run on a schedule">Repeat</button>
+        <button id="watch" type="button" title="Wake this when something changes">Watch</button>
         <button id="granted" type="button" title="What it may do without asking">Allowed</button>
         <button id="reach" type="button" title="What this thread can reach">Tools</button>
         <!-- Only while the network is being swept, which takes seconds. -->
@@ -62,6 +63,17 @@
         <button id="routine-save" type="button">Save</button>
         <button id="routine-stop" type="button">Stop repeating</button>
         <p id="routine-says"></p>
+      </aside>
+
+      <!-- A conversation woken by something changing. -->
+      <aside id="watching" hidden>
+        <label>Watch <input id="watch-at" type="text" placeholder="~/Downloads every 10m" autocomplete="off"
+                 autocorrect="off" autocapitalize="off" spellcheck="false" /></label>
+        <label>Then say <input id="watch-what" type="text" placeholder="What it should do when it changes" autocomplete="off" /></label>
+        <button id="watch-save" type="button">Save</button>
+        <button id="watch-stop" type="button">Stop watching</button>
+        <button id="watch-again" type="button" hidden>Look again</button>
+        <p id="watch-says"></p>
       </aside>
 
       <!-- What this agent may do, and how much it asks first. -->

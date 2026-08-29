@@ -93,6 +93,14 @@ const el = {
   checkup: document.getElementById("checkup"),
   working: document.getElementById("working"),
   speak: document.getElementById("speak"),
+  watch: document.getElementById("watch"),
+  watching: document.getElementById("watching"),
+  watchAt: document.getElementById("watch-at"),
+  watchWhat: document.getElementById("watch-what"),
+  watchSave: document.getElementById("watch-save"),
+  watchStop: document.getElementById("watch-stop"),
+  watchAgain: document.getElementById("watch-again"),
+  watchSays: document.getElementById("watch-says"),
   attached: document.getElementById("attached"),
   palette: document.getElementById("palette"),
   paletteWhat: document.getElementById("palette-what"),
@@ -396,6 +404,7 @@ async function show(id) {
   el.whois.hidden = true;
   el.routine.hidden = true;
   el.granting.hidden = true;
+  el.watching.hidden = true;
   if (a) {
     drawMark(a);
     drawPinned(a);
@@ -1991,3 +2000,131 @@ el.speak.addEventListener("click", () => {
 // Sending ends the dictation. Carrying on listening into the next errand is
 // how somebody ends up dictating a reply they meant to think about.
 el.form.addEventListener("submit", stopListening);
+
+
+/* -------------------------------------------------------------- watch -- */
+
+/**
+ * A conversation woken by something changing.
+ *
+ * The third way an errand can start, after somebody typing and the clock. It
+ * is the nearest thing to a connector that needs nobody to sign in to
+ * anything: a folder gets a file, a page changes its mind, and the agent is
+ * told what changed and gets on with it.
+ */
+el.watch.addEventListener("click", async () => {
+  if (!el.watching.hidden) {
+    el.watching.hidden = true;
+    clearInterval(watchTicking);
+    watchTicking = null;
+    return;
+  }
+  if (!showing) return;
+  el.watching.hidden = false;
+  await drawWatch();
+  keepWatchHonest();
+  el.watchAt.focus();
+});
+
+/**
+ * Looking happens on a timer in the background, so a panel drawn once says "it
+ * has not looked yet" long after it has, and goes on saying it while the agent
+ * it describes is being woken behind it. A description of something live has
+ * to be live, or it is not a description, it is a claim.
+ */
+let watchTicking = null;
+function keepWatchHonest() {
+  clearInterval(watchTicking);
+  watchTicking = setInterval(() => {
+    // Only while it is on screen, and only while the same conversation is.
+    if (el.watching.hidden || !showing) {
+      clearInterval(watchTicking);
+      watchTicking = null;
+      return;
+    }
+    drawWatch({ leaveTheFields: true });
+  }, 5000);
+}
+
+async function drawWatch({ leaveTheFields = false } = {}) {
+  if (!showing) return;
+  let now;
+  try {
+    now = await invoke("watches", { id: showing });
+  } catch (why) {
+    el.watchSays.textContent = String(why);
+    return;
+  }
+  // On a redraw the sentence is always refreshed and the boxes are not, so a
+  // half-typed path is never taken back while it is being typed. The field
+  // takes focus the moment the panel opens, so guarding the whole redraw on
+  // that silenced it altogether.
+  if (!leaveTheFields) {
+    el.watchAt.value = now.watches || "";
+    el.watchWhat.value = now.what || "";
+  }
+  el.watchAgain.hidden = !now.paused;
+  el.watchSays.dataset.paused = String(!!now.paused);
+
+  // Stopped is the thing to say first, because it is the only state somebody
+  // has to do something about.
+  if (now.paused) {
+    el.watchSays.textContent = now.paused;
+    return;
+  }
+  if (!now.watches) {
+    el.watchSays.textContent =
+      "Nothing is watched. Name a folder, a file or a page, and how often to look.";
+    return;
+  }
+  const when = (at) => (at ? new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : null);
+  const looked = when(now.looked_at);
+  const woke = when(now.woke_at);
+  // A look that failed is said now, not after the fifth one. Four silent
+  // failures before a watch admits anything is the shape of quiet failure this
+  // whole app is written against.
+  const failing =
+    now.misses > 0
+      ? `The last ${now.misses === 1 ? "look" : `${now.misses} looks`} failed. It stops after five.`
+      : null;
+  el.watchSays.dataset.paused = String(now.misses > 0);
+  el.watchSays.textContent = [
+    failing,
+    now.means,
+    looked ? `Last looked at ${looked}.` : "It has not looked yet.",
+    woke ? `Last woke this at ${woke}, ${now.woke_today} today.` : "It has not woken this yet.",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+el.watchSave.addEventListener("click", async () => {
+  if (!showing) return;
+  const watches = el.watchAt.value.trim();
+  const what = el.watchWhat.value.trim();
+  if (!watches || !what) {
+    el.watchSays.textContent = "It needs something to watch and something to say.";
+    return;
+  }
+  try {
+    await invoke("watch_it", { id: showing, watches, what });
+  } catch (why) {
+    // Straight from the command, because it is the command that knows why.
+    el.watchSays.dataset.paused = "true";
+    el.watchSays.textContent = String(why);
+    return;
+  }
+  await drawWatch();
+});
+
+el.watchStop.addEventListener("click", async () => {
+  if (!showing) return;
+  await invoke("watch_it", { id: showing, watches: null, what: null });
+  await drawWatch();
+});
+
+el.watchAgain.addEventListener("click", async () => {
+  if (!showing) return;
+  await invoke("look_again", { id: showing });
+  await drawWatch();
+});

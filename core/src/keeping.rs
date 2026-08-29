@@ -188,20 +188,15 @@ mod tests {
     }
 
     fn talk() -> Conversation {
+        // Only what these tests are about. Everything else is whatever a
+        // conversation is when nothing has been said about it, which is what
+        // stops a new column breaking every fixture in the file.
         Conversation {
             id: "c".into(),
             agent: "a".into(),
             name: "First".into(),
             opened: true,
-            started_at: 0,
-            spoke_at: 0,
-            runs_at: None,
-            runs_what: None,
-            ran_at: None,
-            asked_by: None,
-            came_from: None,
-            carries_on: false,
-            carries_on_at: None,
+            ..Default::default()
         }
     }
 
