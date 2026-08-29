@@ -18,6 +18,7 @@
 pub mod claude;
 pub mod doorway;
 pub mod engine;
+pub mod keeping;
 pub mod store;
 
 pub mod local;

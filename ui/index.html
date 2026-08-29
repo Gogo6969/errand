@@ -78,6 +78,19 @@
 
       <aside id="reachable" hidden></aside>
 
+      <!--
+        Everything you can do, in one place you can type at. The header can
+        hold about nine things before the last of them falls off the end, and
+        the app has more than nine things worth doing.
+      -->
+      <div id="palette" hidden>
+        <div id="palette-box" role="dialog" aria-label="What would you like to do">
+          <input id="palette-what" type="text" placeholder="What would you like to do?"
+                 autocomplete="off" spellcheck="false" />
+          <ol id="palette-list"></ol>
+        </div>
+      </div>
+
       <ol id="messages" aria-live="polite"></ol>
 
       <form id="composer">

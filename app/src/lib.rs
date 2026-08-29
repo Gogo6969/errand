@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use errand_core::doorway;
+use errand_core::keeping;
 use errand_core::local::{find, LlmSettings, Local};
 use errand_core::mcp;
 use errand_core::routine::When;
@@ -1233,6 +1234,45 @@ fn counting_from(
 /// Open a link somewhere that is not this window.
 ///
 /// A link followed inside the webview replaces the app with a web page and
+/// Write a conversation out as Markdown and show it in the Finder.
+///
+/// To the Desktop rather than to a folder chosen in a dialog. A file picker is
+/// four clicks and a decision about where things live, for a thing whose whole
+/// purpose is to end up somewhere you can see it. Revealing it afterwards means
+/// nobody has to be told where it went.
+///
+/// Markdown rather than the app's own shape, because the point of taking
+/// something out is that it can be read somewhere else. A file only this app
+/// can open is not an export, it is a second copy of the problem.
+#[tauri::command]
+async fn export_conversation(held: State<'_, Held>, id: String) -> Result<String, String> {
+    let talk = held
+        .store
+        .conversation(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or("there is no such conversation")?;
+    let agent = held
+        .store
+        .agent(&talk.agent)
+        .map_err(|e| e.to_string())?
+        .ok_or("that conversation has no agent")?;
+    let lines = held.store.lines(&id).map_err(|e| e.to_string())?;
+
+    let written = keeping::as_markdown(&agent, &talk, &lines);
+    let onto = std::path::PathBuf::from(std::env::var("HOME").map_err(|e| e.to_string())?)
+        .join("Desktop")
+        .join(keeping::as_filename(&agent.name, &talk.name));
+    std::fs::write(&onto, written).map_err(|e| e.to_string())?;
+
+    // Revealed rather than opened. Opening hands the conversation to whatever
+    // owns .md files on this machine, which may be something nobody wanted
+    // launched.
+    let _ = std::process::Command::new("open")
+        .args(["-R".as_ref(), onto.as_os_str()])
+        .spawn();
+    Ok(onto.to_string_lossy().to_string())
+}
+
 /// there is no way back to the thread, so every one is handed to the browser
 /// instead.
 ///
@@ -1450,6 +1490,7 @@ pub fn run() {
             revoke,
             asks,
             outside,
+            export_conversation,
             show_in_browser,
             rename,
             pin,

@@ -69,6 +69,63 @@ export function checks() {
   return found;
 }
 
+/** The palette, which is where everything the header cannot hold now lives. */
+export function palette() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const box = document.getElementById("palette");
+  const list = document.getElementById("palette-list");
+  const typing = document.getElementById("palette-what");
+
+  check("it starts closed", box.hidden, `hidden=${box.hidden}`);
+
+  // Command-K, the thing everybody tries first.
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  check("cmd-K opens it", !box.hidden, `hidden=${box.hidden}`);
+  check("it offers things to do", list.children.length > 0, `${list.children.length} rows`);
+  check(
+    "the first one is highlighted, so Enter does something predictable",
+    list.children[0]?.getAttribute("aria-selected") === "true",
+    list.children[0]?.getAttribute("aria-selected"),
+  );
+  check(
+    "exporting the conversation is one of them",
+    [...list.children].some((r) => r.textContent.includes("Export")),
+    [...list.children].map((r) => r.textContent).join(" | ").slice(0, 120),
+  );
+
+  // Typing narrows it, in any word order.
+  typing.value = "network models";
+  typing.dispatchEvent(new Event("input"));
+  check(
+    "typing words in any order finds the thing",
+    list.children.length === 1 && list.children[0].textContent.includes("network"),
+    `${list.children.length}: ${list.children[0]?.textContent}`,
+  );
+
+  typing.value = "zzzz nothing like this";
+  typing.dispatchEvent(new Event("input"));
+  check(
+    "something that matches nothing says so rather than showing an empty box",
+    list.textContent.toLowerCase().includes("nothing"),
+    list.textContent.slice(0, 60),
+  );
+
+  // Arrow keys move the highlight rather than the page.
+  typing.value = "";
+  typing.dispatchEvent(new Event("input"));
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  check(
+    "the arrow keys move the highlight",
+    list.children[1]?.getAttribute("aria-selected") === "true",
+    [...list.children].map((r) => r.getAttribute("aria-selected")).join(","),
+  );
+
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  check("escape closes it", box.hidden, `hidden=${box.hidden}`);
+  return found;
+}
+
 /** Everything in the header on one row, which is what a header is. */
 export function headerFitsOnOneRow() {
   const title = document.getElementById("title");

@@ -54,6 +54,9 @@ const el = {
   name: document.getElementById("thread-name"),
   engine: document.getElementById("engine"),
   sweeping: document.getElementById("sweeping"),
+  palette: document.getElementById("palette"),
+  paletteWhat: document.getElementById("palette-what"),
+  paletteList: document.getElementById("palette-list"),
   what: document.getElementById("what"),
   send: document.getElementById("send"),
   form: document.getElementById("composer"),
@@ -1288,3 +1291,147 @@ el.new.addEventListener("click", start);
 
 // What was here before, and something to type into if there was nothing.
 catchUp();
+
+
+/* ------------------------------------------------------------ palette -- */
+
+/**
+ * Everything the app can do, in one place you can type at.
+ *
+ * The header holds about nine controls before the last one falls off the end,
+ * and there are more than nine things worth doing. Rather than keep adding
+ * buttons until that happens again, everything else lives here and is found by
+ * typing a word of it.
+ *
+ * Built fresh each time it opens rather than kept in a list: half of these
+ * depend on what is open, and a menu offering to export a conversation when
+ * none is open is a menu that lies.
+ */
+function whatCouldBeDone() {
+  const a = whose();
+  const t = talking();
+  const could = [];
+  const add = (what, why, run, when = true) => {
+    if (when) could.push({ what, why, run });
+  };
+
+  add("Export this conversation", "to the Desktop", async () => {
+    const onto = await invoke("export_conversation", { id: showing });
+    complain(`Saved to ${onto}`);
+  }, !!showing);
+  add("New conversation with this agent", a?.name || "", () => alsoAsk(), !!a);
+  add("New agent", "", () => start());
+  add("Search everything", "", () => el.find.focus());
+  add(a?.pinned ? "Unpin this agent" : "Pin this agent", "", () => el.pin.click(), !!a);
+  add(a?.hidden ? "Show this agent" : "Hide this agent", "", () => el.hide.click(), !!a);
+  add("What it may do without asking", "", () => el.granted.click(), !!a);
+  add("What this thread can reach", "MCP servers", () => el.reach.click(), !!showing);
+  add("Make this run on a schedule", "", () => el.repeat.click(), !!showing);
+  add("Look for models on the network", "takes a moment", () => a && lookWider(a), !!a);
+  add("Stop what it is doing", "", () => invoke("stop", { id: showing }), !!t?.working);
+  return could;
+}
+
+let offered = [];
+let picked = 0;
+
+function openPalette() {
+  el.palette.hidden = false;
+  el.paletteWhat.value = "";
+  drawPalette();
+  el.paletteWhat.focus();
+}
+
+function closePalette() {
+  el.palette.hidden = true;
+  el.what.focus();
+}
+
+function drawPalette() {
+  const typed = el.paletteWhat.value.trim().toLowerCase();
+  // Every word has to appear somewhere, in any order, so "export conv" finds
+  // "Export this conversation" without anybody having to remember the wording.
+  offered = whatCouldBeDone().filter((one) =>
+    typed
+      .split(/\s+/)
+      .filter(Boolean)
+      .every((word) => `${one.what} ${one.why}`.toLowerCase().includes(word)),
+  );
+  picked = 0;
+
+  if (!offered.length) {
+    const none = document.createElement("li");
+    none.className = "none";
+    none.textContent = "Nothing here matches that.";
+    el.paletteList.replaceChildren(none);
+    return;
+  }
+
+  el.paletteList.replaceChildren(
+    ...offered.map((one, at) => {
+      const row = document.createElement("li");
+      row.setAttribute("aria-selected", String(at === picked));
+      const what = document.createElement("span");
+      what.className = "what";
+      what.textContent = one.what;
+      row.append(what);
+      if (one.why) {
+        const why = document.createElement("span");
+        why.className = "why";
+        why.textContent = one.why;
+        row.append(why);
+      }
+      row.onclick = () => run(at);
+      return row;
+    }),
+  );
+}
+
+function highlight() {
+  [...el.paletteList.children].forEach((row, at) =>
+    row.setAttribute("aria-selected", String(at === picked)),
+  );
+  el.paletteList.children[picked]?.scrollIntoView({ block: "nearest" });
+}
+
+async function run(at) {
+  const one = offered[at];
+  if (!one) return;
+  // Closed first. Half of these open a panel, and a palette still covering it
+  // would hide the thing somebody just asked for.
+  closePalette();
+  try {
+    await one.run();
+  } catch (why) {
+    complain(String(why));
+  }
+}
+
+el.paletteWhat.addEventListener("input", drawPalette);
+el.palette.addEventListener("mousedown", (e) => {
+  if (e.target === el.palette) closePalette();
+});
+
+window.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    el.palette.hidden ? openPalette() : closePalette();
+    return;
+  }
+  if (el.palette.hidden) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closePalette();
+  } else if (e.key === "ArrowDown") {
+    e.preventDefault();
+    picked = Math.min(picked + 1, offered.length - 1);
+    highlight();
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    picked = Math.max(picked - 1, 0);
+    highlight();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    run(picked);
+  }
+});

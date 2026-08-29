@@ -954,3 +954,62 @@ body.catching #what { border-color: var(--accent); }
   cursor: pointer;
 }
 #allowed button:hover { color: #f0857d; border-color: #f0857d; }
+
+/* ---------------------------------------------------------- palette -- */
+
+/* Everything the app can do, in one place, reached by typing.
+   The header ran out of room at nine controls and the app has more than nine
+   things worth doing. Rather than keep adding buttons until the last of them
+   falls off the end again, the rest live here. */
+#palette[hidden] { display: none; }
+#palette {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 9, 12, .55);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 14vh;
+  z-index: 100;
+}
+#palette-box {
+  width: min(560px, calc(100vw - 40px));
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .5);
+  overflow: hidden;
+}
+#palette-what {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 15px;
+  padding: 14px 16px;
+  outline: none;
+}
+#palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+#palette-list li {
+  padding: 9px 11px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+/* Highlighted by where the keyboard is, not by where the mouse happens to
+   rest: somebody typing must never lose their place because the pointer is
+   sitting over the list. */
+#palette-list li[aria-selected="true"] { background: var(--mine); }
+#palette-list .what { color: var(--ink); }
+#palette-list .why { color: var(--ink-soft); font-size: 12px; margin-left: auto; text-align: right; }
+#palette-list .none { color: var(--ink-soft); cursor: default; }
