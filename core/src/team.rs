@@ -76,9 +76,39 @@ pub fn declarations() -> Vec<Value> {
     ]
 }
 
-/// Is this one of the app's own tools?
-pub fn ours(tool: &str) -> bool {
-    matches!(tool, "ask" | "who_else")
+/// One of the app's own tools, once it is known to be one.
+///
+/// An enum rather than the plain name this used to hand back, and the reason is
+/// the one mistake nothing here could catch: a tool added to `declarations()`
+/// and to the name table but not to the app's dispatch is declared to both
+/// engines, offered over MCP, passes every test in this crate, and then errors
+/// identically on both engines for ever. It fails symmetrically, so it does not
+/// even look like the asymmetry this file exists to prevent. Matched
+/// exhaustively everywhere that has to know every tool, a missing arm stops the
+/// build instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ours {
+    Ask,
+    WhoElse,
+}
+
+impl Ours {
+    /// The one name it is written down under, whichever engine called it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Ours::Ask => "ask",
+            Ours::WhoElse => "who_else",
+        }
+    }
+}
+
+/// Is this one of the app's own tools, by its plain name?
+pub fn ours(tool: &str) -> Option<Ours> {
+    match tool {
+        "ask" => Some(Ours::Ask),
+        "who_else" => Some(Ours::WhoElse),
+        _ => None,
+    }
 }
 
 /// The name Claude Code has to reach these tools under.
@@ -103,36 +133,36 @@ pub const DOORWAY: &str = "errand";
 /// answer its tools with "there is nobody else here to ask" instead of calling
 /// them. Converting at the two edges where a prefixed name can appear is both
 /// smaller and safer than accepting it everywhere.
-pub fn which_of_ours(tool: &str) -> Option<&'static str> {
-    let plain = tool
-        .strip_prefix(&format!("mcp__{DOORWAY}__"))
-        .unwrap_or(tool);
-    match plain {
-        "ask" => Some("ask"),
-        "who_else" => Some("who_else"),
-        _ => None,
-    }
+pub fn which_of_ours(tool: &str) -> Option<Ours> {
+    ours(
+        tool.strip_prefix(&format!("mcp__{DOORWAY}__"))
+            .unwrap_or(tool),
+    )
 }
 
 /// What a step is doing, in words.
-pub fn in_plain_words(tool: &str, args: &Value) -> String {
+pub fn in_plain_words(tool: Ours, args: &Value) -> String {
     let get = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
     match tool {
-        "ask" => format!("Asking {}", get("agent")),
-        "who_else" => "Looking for somebody to hand this to".to_string(),
-        other => format!("Using {other}"),
+        Ours::Ask => match get("agent") {
+            "" => "Handing this to somebody else".to_string(),
+            who => format!("Asking {who}"),
+        },
+        Ours::WhoElse => "Looking for somebody to hand this to".to_string(),
     }
 }
 
 /// The thing itself, for a question that has to be judged.
-pub fn the_thing_itself(tool: &str, args: &Value) -> String {
+pub fn the_thing_itself(tool: Ours, args: &Value) -> String {
     match tool {
-        "ask" => format!(
+        Ours::Ask => format!(
             "{}: {}",
             args.get("agent").and_then(|v| v.as_str()).unwrap_or("?"),
             args.get("request").and_then(|v| v.as_str()).unwrap_or("")
         ),
-        _ => String::new(),
+        // Nothing, and deliberately: an empty rule in the allowlist means the
+        // whole tool, which for a tool that only looks is the right grant.
+        Ours::WhoElse => String::new(),
     }
 }
 
@@ -141,8 +171,26 @@ pub fn the_thing_itself(tool: &str, args: &Value) -> String {
 /// Handing work to another agent does, because it spends somebody's time and
 /// money and the other agent may do anything its own permissions allow. Looking
 /// at the list of who exists does not.
-pub fn asks_first(tool: &str) -> bool {
-    tool == "ask"
+pub fn asks_first(tool: Ours) -> bool {
+    match tool {
+        Ours::Ask => true,
+        // Nothing that only reads this app's own records stops to ask. See
+        // GRANTED in claude.rs, which has to agree with this and is checked
+        // against it by a test there.
+        Ours::WhoElse => false,
+    }
+}
+
+/// What one of the app's tools says when there is no app behind it.
+///
+/// The terminal harness runs an engine on its own, with nothing holding every
+/// agent, so these cannot be answered. Said as a sentence the model can act on
+/// rather than as an error, because an absent capability is something to work
+/// around and an error is something to give up on.
+pub fn without_the_app(tool: Ours) -> &'static str {
+    match tool {
+        Ours::Ask | Ours::WhoElse => "There is nobody else here to ask.",
+    }
 }
 
 #[cfg(test)]
@@ -153,16 +201,16 @@ mod tests {
     fn handing_work_to_somebody_asks_first_and_looking_at_the_list_does_not() {
         // Asking somebody spends their time and runs under their permissions,
         // which is a bigger thing than the sentence makes it look.
-        assert!(asks_first("ask"));
-        assert!(!asks_first("who_else"));
+        assert!(asks_first(Ours::Ask));
+        assert!(!asks_first(Ours::WhoElse));
     }
 
     #[test]
     fn a_question_about_delegation_shows_who_and_what_rather_than_just_the_tool() {
         let args = json!({ "agent": "Scribe", "request": "Draft a reply to Sarah." });
-        assert_eq!(in_plain_words("ask", &args), "Asking Scribe");
+        assert_eq!(in_plain_words(Ours::Ask, &args), "Asking Scribe");
         assert_eq!(
-            the_thing_itself("ask", &args),
+            the_thing_itself(Ours::Ask, &args),
             "Scribe: Draft a reply to Sarah.",
             "a card that hides who is being asked is not a question anybody can answer"
         );
@@ -172,10 +220,10 @@ mod tests {
     fn an_ask_is_the_same_tool_whether_or_not_claude_code_prefixed_it() {
         // The whole of why an "always" given under one engine still holds
         // under the other: both arrive at the allowlist as one name.
-        assert_eq!(which_of_ours("ask"), Some("ask"));
-        assert_eq!(which_of_ours("mcp__errand__ask"), Some("ask"));
-        assert_eq!(which_of_ours("who_else"), Some("who_else"));
-        assert_eq!(which_of_ours("mcp__errand__who_else"), Some("who_else"));
+        assert_eq!(which_of_ours("ask"), Some(Ours::Ask));
+        assert_eq!(which_of_ours("mcp__errand__ask"), Some(Ours::Ask));
+        assert_eq!(which_of_ours("who_else"), Some(Ours::WhoElse));
+        assert_eq!(which_of_ours("mcp__errand__who_else"), Some(Ours::WhoElse));
     }
 
     #[test]
@@ -197,6 +245,8 @@ mod tests {
             .collect();
         assert_eq!(named, ["ask", "who_else"]);
         assert!(declared.iter().all(|d| d["type"] == "function"));
-        assert!(ours("ask") && ours("who_else") && !ours("run_command"));
+        assert!(
+            ours("ask").is_some() && ours("who_else").is_some() && ours("run_command").is_none()
+        );
     }
 }

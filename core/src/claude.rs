@@ -537,7 +537,7 @@ pub fn read(line: &str) -> Vec<Event> {
                         .and_then(|t| t.as_str())
                         .unwrap_or("")
                         .to_string(),
-                    tool: plain.map_or(tool, str::to_string),
+                    tool: plain.map_or(tool, |mine| mine.name().to_string()),
                     call,
                 })]
             }
@@ -646,7 +646,7 @@ fn block(b: &serde_json::Value) -> Option<Event> {
                     ),
                     None => in_plain_words(&tool, b.get("input")),
                 },
-                tool: plain.map_or(tool, str::to_string),
+                tool: plain.map_or(tool, |mine| mine.name().to_string()),
                 // Every tool_use block carries one, and the tool_result that
                 // answers it carries the same string back as `tool_use_id`.
                 call: b.get("id")?.as_str()?.to_string(),

@@ -463,7 +463,7 @@ mod tests {
         // an "always allow" would stop meaning the same thing on both engines.
         for tool in offered() {
             let name = tool["name"].as_str().expect("a name");
-            assert_eq!(team::which_of_ours(name), Some(name));
+            assert_eq!(team::which_of_ours(name).map(team::Ours::name), Some(name));
         }
     }
 

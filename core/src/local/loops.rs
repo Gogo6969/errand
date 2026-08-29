@@ -438,21 +438,25 @@ async fn errand(
             // `auto` asks about nothing, `edits` lets a file be written, and
             // `ask` -- the default -- asks about everything that changes
             // anything.
+            // Resolved once. Everything below asks the same question of the
+            // same name, and doing it by string in three places is how a
+            // fourth place gets it slightly different.
+            let mine = team::ours(&name);
             let must_ask = match asks {
                 // `auto` first, or it would not mean never: handing work to
                 // another agent had its own default and quietly outranked the
                 // posture somebody had chosen for this agent.
                 "auto" => false,
-                _ if team::ours(&name) => team::asks_first(&name),
+                _ if mine.is_some() => mine.is_some_and(team::asks_first),
                 "edits" => tools::asks_first(&name) && name != "write_file",
                 _ => tools::asks_first(&name),
             };
             if must_ask && !allowed.contains(&name) {
                 let _ = out.send(Event::NeedsYou(NeedsYou {
                     asking: say_plainly(outside, &name, &args),
-                    detail: match team::ours(&name) {
-                        true => team::the_thing_itself(&name, &args),
-                        false => tools::the_thing_itself(&name, &args),
+                    detail: match mine {
+                        Some(mine) => team::the_thing_itself(mine, &args),
+                        None => tools::the_thing_itself(&name, &args),
                     },
                     tool: name.clone(),
                     // Both ids, and here they happen to be the same one: this
@@ -507,8 +511,8 @@ async fn errand(
                 "find_tools" => Ok(look_up(outside, loaded, &args)),
                 // Only the thing holding every agent can reach another one, so
                 // this goes up rather than being answered here.
-                _ if team::ours(&name) => match host {
-                    None => Ok("There is nobody else here to ask.".to_string()),
+                _ if mine.is_some() => match host {
+                    None => Ok(team::without_the_app(mine.expect("just matched")).to_string()),
                     Some((from, to)) => {
                         let (tell_me, answer) = tokio::sync::oneshot::channel();
                         let sent = to.send(team::Wants {
@@ -708,8 +712,8 @@ fn one_line(s: &str) -> String {
 /// the server wrote for the model to read, and it is the best sentence anybody
 /// has about it.
 fn say_plainly(outside: &mcp::Servers, name: &str, args: &serde_json::Value) -> String {
-    if team::ours(name) {
-        return team::in_plain_words(name, args);
+    if let Some(mine) = team::ours(name) {
+        return team::in_plain_words(mine, args);
     }
     match outside.knows(name) {
         None => tools::in_plain_words(name, args),

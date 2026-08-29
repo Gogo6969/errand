@@ -844,10 +844,16 @@ fn answer_what_engines_cannot(
             // started.
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
+                // Matched exhaustively on purpose. A tool declared to both
+                // engines and forgotten here would be offered, called, and
+                // answered with "there is no ... here" on both engines
+                // identically -- a symmetric failure, so it would not even look
+                // like the asymmetry this arrangement exists to prevent. The
+                // enum makes forgetting one a build error instead of a bug.
                 let said = match team::which_of_ours(&asked.tool) {
-                    Some("who_else") => who_else(&app, &asked.from),
-                    Some("ask") => ask_teammate(&app, &asked).await,
-                    _ => Err(anyhow::anyhow!("there is no {} here", asked.tool)),
+                    Some(team::Ours::WhoElse) => who_else(&app, &asked.from),
+                    Some(team::Ours::Ask) => ask_teammate(&app, &asked).await,
+                    None => Err(anyhow::anyhow!("there is no {} here", asked.tool)),
                 };
                 let _ = asked.answer.send(said);
             });

@@ -937,7 +937,12 @@ impl Store {
                FROM agents
               WHERE name LIKE ?1 ESCAPE '\\'
                  OR COALESCE(about, '') LIKE ?1 ESCAPE '\\'
-                 OR id IN (SELECT conversation FROM conversations
+                 -- An agent is found by what was said in any of its
+                 -- conversations. `agent`, not `conversation`: this asked
+                 -- `conversations` for a column it has never had, so every
+                 -- non-empty search errored, and a search that errors looks
+                 -- from the window exactly like a search that found nothing.
+                 OR id IN (SELECT agent FROM conversations
                             WHERE id IN (SELECT conversation FROM lines
                                           WHERE text LIKE ?1 ESCAPE '\\'))
               ORDER BY pinned DESC, spoke_at DESC",
@@ -1099,6 +1104,33 @@ mod tests {
         // treat what it found as something it did.
         s.bring_up_to_date()
             .expect("it blamed itself for damage that was already there");
+    }
+
+    #[test]
+    fn searching_for_something_that_was_said_finds_the_agent_that_said_it() {
+        // The whole point of the search box, and it errored outright on every
+        // non-empty search: the subquery asked `conversations` for a column
+        // called `conversation`, which that table has never had. Nothing tested
+        // it, and a search that returns an error looks from the window exactly
+        // like a search that found nothing.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.asked("a1", "the quarterly invoice for Acme").unwrap();
+        s.begin("a2", "Other", Path::new("/tmp/two")).unwrap();
+        s.begin_conversation("c2", "a2", "First").unwrap();
+        s.asked("c2", "something else entirely").unwrap();
+
+        let found = s
+            .matching("quarterly")
+            .expect("searching must not be an error");
+        assert_eq!(
+            found.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+            ["a1"],
+            "it did not find the agent whose conversation contains the word"
+        );
+
+        // And a word nobody said finds nobody, rather than everybody.
+        assert!(s.matching("pelican").unwrap().is_empty());
     }
 
     #[test]
