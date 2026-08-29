@@ -66,6 +66,17 @@ export function checks() {
     asked.map((a) => a.name).join(","),
   );
 
+  // The one that cost real money before it was noticed. Resuming a session
+  // does not only reload a transcript: a message an engine was sent and killed
+  // before finishing is queued inside its own session and runs again on the
+  // next resume. So merely opening the window ran an errand nobody had asked
+  // for that minute, and ran it again on every restart.
+  check(
+    "looking at a conversation does not start an engine",
+    !asked.some((a) => a.name === "open_thread"),
+    asked.map((a) => a.name).join(","),
+  );
+
   return found;
 }
 

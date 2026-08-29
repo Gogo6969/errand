@@ -315,7 +315,9 @@ async function start() {
   const id = uuid();
   agents.set(id, asAgent({ id, name: NOT_YET_NAMED }));
   talks.set(id, asTalk({ id, agent: id, name: "First" }, { loaded: true }));
-  await invoke("open_thread", { id });
+  // Not written down and nothing started until something is said to it. An
+  // agent somebody made and then thought better of should not survive as a row
+  // in a list, and it certainly should not have cost a process.
   await show(id);
   drawThreads();
   el.what.focus();
@@ -404,11 +406,16 @@ async function show(id) {
   drawThreads();
   drawMessages();
 
-  // Reopening is what makes it a conversation rather than a transcript: the
-  // engine is handed back its own memory of this one, not just our copy of it.
-  // Started after the drawing and not waited on, because nothing on screen
-  // depends on it -- but its failure is still somebody's to see.
-  invoke("open_thread", { id }).catch((why) => complain(String(why)));
+  // Nothing is started by looking. The engine is handed back its own memory of
+  // this conversation when there is something to say to it, which is the first
+  // moment it has anything to do.
+  //
+  // It used to start here, and that cost more than a process: resuming does
+  // not only reload a transcript. A message an engine was sent and killed
+  // before finishing is queued inside its own session and runs again on the
+  // next resume, so opening the window ran an errand nobody had asked for that
+  // minute, and ran it again on every restart until one was left alone long
+  // enough to finish.
 }
 
 /**
@@ -1061,7 +1068,8 @@ el.engine.addEventListener("change", async () => {
     // conversation's. Two ids, and passing either one to both is the mistake
     // this whole change exists to make impossible.
     await invoke("use_engine", { id: t.id, engine: choice.engine, settings: choice.settings });
-    if (talk) await invoke("open_thread", { id: talk.id });
+    // Whatever was answering has been stopped. The new one starts when there
+    // is something to say to it, which is the only moment it has any work.
     // Said in the conversation rather than in a toast that disappears.
     // Somebody scrolling back next week needs to see where it changed hands,
     // or the gap in what it remembers looks like a fault.

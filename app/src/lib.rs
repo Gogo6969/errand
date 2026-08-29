@@ -583,6 +583,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
 /// Say something. Safe while it is working: that is the point of the thing.
 #[tauri::command]
 async fn say(
+    app: AppHandle,
     held: State<'_, Held>,
     id: String,
     text: String,
@@ -609,6 +610,18 @@ async fn say(
         n => format!("{text}\n\n(with {n} pictures)"),
     };
     let written = held.store.asked(&id, &said).map_err(|e| e.to_string())?;
+
+    // Started here, because saying something is the first moment there is
+    // anything for an engine to do. Looking at a conversation used to start
+    // one, which cost a process and a resume for every glance, and resuming
+    // does not only reload a transcript: a message the engine was sent and
+    // killed before finishing is queued inside its own session and is run
+    // again on the next resume. So opening the window ran an errand nobody had
+    // asked for that minute, over and over, until one of them was left alone
+    // long enough to finish.
+    if !held.live.lock().unwrap().contains_key(&id) {
+        open_thread(app.clone(), held.clone(), id.clone()).await?;
+    }
 
     let mut live = held.live.lock().unwrap();
     let thread = live
@@ -1249,6 +1262,7 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
     }
 
     let said = match say(
+        app.clone(),
         app.state(),
         talk.clone(),
         format!("{asked_by} asks: {request}"),
@@ -1417,7 +1431,7 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
             ),
         };
         // A routine says what it was set to say, and nothing else.
-        say(app.state(), conversation, said, None).await?;
+        say(app.clone(), app.state(), conversation, said, None).await?;
     }
     Ok(())
 }
