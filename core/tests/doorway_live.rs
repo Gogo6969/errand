@@ -202,3 +202,144 @@ async fn claude_code_finds_both_tools_and_a_call_reaches_the_conversation_that_o
     assert!(!socket.exists());
     let _ = std::fs::remove_dir_all(&here);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "spends a Claude subscription; run with --ignored"]
+async fn claude_code_writes_down_what_it_is_told_without_being_asked_to() {
+    // The half of memory no assertion reaches. Everything else about it is
+    // testable without a model: the schema, the ranking, the handle rules, the
+    // budget. Whether either model actually reaches for the tool at the right
+    // moment is decided entirely by the wording of a description, and a tool
+    // nothing calls is a tool that does not exist. The local engine does this;
+    // this is the other one.
+    let here = std::env::temp_dir().join(format!("errand-remember-{}", std::process::id()));
+    std::fs::create_dir_all(&here).expect("somewhere to work");
+    let socket = here.join("door.sock");
+
+    let (wants, mut asked) = tokio::sync::mpsc::unbounded_channel();
+    let door = doorway::listen(socket.clone(), "the-conversation".into(), wants).expect("a door");
+
+    let heard = tokio::spawn(async move {
+        let mut seen = Vec::new();
+        while let Some(one) = asked.recv().await {
+            seen.push((one.tool.clone(), one.args.clone()));
+            let _ = one.answer.send(Ok("Written down.".to_string()));
+        }
+        seen
+    });
+
+    let config = doorway::config(&the_program(), door.at());
+    let mut child = Command::new("claude")
+        .args([
+            "--print",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--permission-mode",
+            "default",
+            "--permission-prompt-tool",
+            "stdio",
+            "--allowedTools",
+            "mcp__errand__remember",
+            "mcp__errand__recall",
+            "mcp__errand__who_else",
+            "--mcp-config",
+            &config,
+            // The real steering, so this tests what an agent is actually told
+            // rather than a prompt written for the test.
+            "--append-system-prompt",
+            errand_core::memory::HOW_TO_USE_IT,
+        ])
+        .current_dir(&here)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("starting claude");
+
+    let mut writing = child.stdin.take().expect("its stdin");
+    let reading = BufReader::new(child.stdout.take().expect("its stdout"));
+
+    let hello = json!({ "type": "control_request", "request_id": "hello",
+                        "request": { "subtype": "initialize" } });
+    writeln!(writing, "{hello}").expect("saying hello");
+    // Deliberately not "please use the remember tool". The question is whether
+    // it recognises something worth keeping, not whether it can follow an
+    // instruction to call a named function.
+    let say = json!({ "type": "user", "message": { "role": "user", "content": [
+        { "type": "text", "text":
+          "From now on the morning briefing goes to Telegram, not email. \
+           The client is Acme Holdings, never Acme Ltd." } ] } });
+    writeln!(writing, "{say}").expect("telling it");
+    writing.flush().ok();
+
+    let mut answer = String::new();
+    for line in reading.lines().map_while(Result::ok) {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match v.get("type").and_then(|t| t.as_str()).unwrap_or_default() {
+            "control_request" => {
+                let r = v.get("request").cloned().unwrap_or_default();
+                let allow = json!({ "type": "control_response", "response": {
+                    "subtype": "success", "request_id": v.get("request_id"),
+                    "response": { "behavior": "allow",
+                                  "updatedInput": r.get("input").cloned().unwrap_or(json!({})) } } });
+                writeln!(writing, "{allow}").ok();
+                writing.flush().ok();
+            }
+            "result" => {
+                answer = v
+                    .get("result")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                break;
+            }
+            _ => {}
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    drop(door);
+    let seen = tokio::time::timeout(std::time::Duration::from_secs(5), heard)
+        .await
+        .expect("the collector finished")
+        .expect("it did not panic");
+
+    let wrote: Vec<&Value> = seen
+        .iter()
+        .filter(|(tool, _)| tool == "remember")
+        .map(|(_, args)| args)
+        .collect();
+    println!(
+        "it reached for: {:?}",
+        seen.iter().map(|(t, _)| t).collect::<Vec<_>>()
+    );
+    for one in &wrote {
+        println!("  wrote: {one}");
+    }
+
+    assert!(
+        !wrote.is_empty(),
+        "it was told two things worth keeping and wrote neither down. The description \
+         is the whole interface, so this failing means the wording needs another pass \
+         rather than that the plumbing is broken. It said: {answer}"
+    );
+    assert!(
+        wrote.iter().all(|args| {
+            args.get("about")
+                .and_then(|v| v.as_str())
+                .is_some_and(|a| !a.is_empty())
+                && args
+                    .get("note")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|n| !n.is_empty())
+        }),
+        "it wrote a note with nothing to file it under: {wrote:?}"
+    );
+    let _ = std::fs::remove_dir_all(&here);
+}
