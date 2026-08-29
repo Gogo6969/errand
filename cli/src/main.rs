@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         // No app behind it, so no doorway and nobody to hand work to, which
         // matches what the local branch above says for the same reason.
-        let (it, events) = Claude::open(&thread, &here, false, "ask", None)?;
+        let (it, events) = Claude::open(&thread, &here, false, "ask", None, None)?;
         (Box::new(it), events)
     };
 

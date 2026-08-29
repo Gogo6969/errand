@@ -178,15 +178,43 @@ body { display: grid; grid-template-columns: 232px 1fr; }
 
 main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
 
+/* The row of everything you can do to the agent that is open.
+   It has to hold at the window's own width. It did not: the name and the two
+   pickers grew to whatever they contained, and the last button along -- Tools
+   -- was pushed off the edge, which reads as a feature that is not there
+   rather than as a row that is too long. So the things that can be any length
+   give way, the things that cannot are pinned, and if it still does not fit it
+   wraps rather than hiding anything. */
 #title {
   padding: 30px 18px 12px;
   border-bottom: 1px solid var(--rule);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 10px 8px;
 }
-#thread-name { font-weight: 600; }
-#engine { color: var(--ink-soft); font-size: 12px; }
+#title .tile,
+#pin,
+#hide,
+#repeat,
+#granted,
+#reach { flex: none; }
+
+/* The name gives way first, because it is the one thing here that is already
+   readable from the row it is selected in. */
+#thread-name {
+  font-weight: 600;
+  flex: 0 1 auto;
+  min-width: 3ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The pickers give way second. Their widths are set where they are styled,
+   further down: a second max-width here loses to that one and looks for all
+   the world like it is not applying. */
+#talks, #engine { flex: 0 1 auto; min-width: 0; }
 
 #messages {
   list-style: none;
@@ -375,7 +403,10 @@ main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
   padding: 3px 22px 3px 7px;
   border-radius: 7px;
   cursor: pointer;
-  max-width: 260px;
+  /* Sized so that everything in the header fits on one line at the window's
+     default width. It was 260, which together with the conversation picker
+     beside it pushed Tools off the end of the row. */
+  max-width: 150px;
   /* The chevron, drawn rather than fetched. */
   background-image: linear-gradient(45deg, transparent 50%, var(--ink-soft) 50%),
                     linear-gradient(135deg, var(--ink-soft) 50%, transparent 50%);
@@ -699,7 +730,7 @@ body.catching #what { border-color: var(--accent); }
   padding: 3px 22px 3px 7px;
   border-radius: 7px;
   cursor: pointer;
-  max-width: 200px;
+  max-width: 150px;
   background-image: linear-gradient(45deg, transparent 50%, var(--ink-soft) 50%),
                     linear-gradient(135deg, var(--ink-soft) 50%, transparent 50%);
   background-position: calc(100% - 12px) center, calc(100% - 8px) center;

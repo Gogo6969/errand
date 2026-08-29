@@ -289,6 +289,13 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // cannot clear the file, and starting as new against a session that
             // exists is a failure the agent never recovers from.
             let again = again || errand_core::claude::already_going(&id, &home);
+            // Which model, if this agent was put on one. Held in the same
+            // column a local engine keeps its whole settings blob in, because
+            // for Claude the entire setting is one word.
+            let model: Option<String> = known
+                .as_ref()
+                .and_then(|a| a.engine_settings.clone())
+                .filter(|m| !m.trim().is_empty());
             // A socket of this conversation's own, so that the two tools the
             // local engine gets in process are reachable by an engine that
             // runs outside it. Which conversation is asking is the socket,
@@ -306,8 +313,9 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             )
             .map_err(|e| e.to_string())?;
 
-            let (it, events) = Claude::open(&id, &home, again, asks, Some(door.at()))
-                .map_err(|e| e.to_string())?;
+            let (it, events) =
+                Claude::open(&id, &home, again, asks, Some(door.at()), model.as_deref())
+                    .map_err(|e| e.to_string())?;
             held.doorways.lock().unwrap().insert(id.clone(), door);
             (Box::new(it), events)
         }
@@ -541,11 +549,24 @@ struct Choice {
 /// somewhere less obvious.
 #[tauri::command]
 async fn engines(wider: Option<bool>) -> Result<Vec<Choice>, String> {
+    // Claude, and then Claude with a model named. The first is whatever this
+    // person's own Claude Code is set to, which stays the default because it
+    // is their CLI and their account. The rest exist because "Claude" on its
+    // own told nobody what was actually answering, and the difference between
+    // Opus and Haiku is the difference between an errand that works and one
+    // that is cheap.
     let mut all = vec![Choice {
         engine: "claude".into(),
-        name: "Claude".into(),
+        name: "Claude · your default".into(),
         settings: None,
     }];
+    for (alias, shown) in errand_core::claude::MODELS {
+        all.push(Choice {
+            engine: "claude".into(),
+            name: format!("Claude · {shown}"),
+            settings: Some((*alias).to_string()),
+        });
+    }
 
     // Two different questions, and only one of them is cheap. The usual ports
     // on this machine answer in under a second, so that is what opening the

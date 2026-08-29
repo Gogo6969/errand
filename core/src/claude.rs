@@ -160,6 +160,25 @@ enum Turn {
     Stop,
 }
 
+/// The models Claude Code will answer as, by alias and by the name to show.
+///
+/// Aliases rather than dated ids, and that is the whole reason this is a list
+/// here instead of whatever somebody types. A dated id retires, and the way
+/// that is discovered is a routine at seven in the morning failing on a name
+/// that worked yesterday. An alias is the CLI's standing promise to mean the
+/// latest of its kind.
+///
+/// Fixed rather than asked for, because there is nothing to ask: the CLI takes
+/// any string and accepts a misspelling without complaint, failing later and
+/// somewhere less obvious. A short list somebody chooses from cannot be
+/// misspelled.
+pub const MODELS: &[(&str, &str)] = &[
+    ("opus", "Opus"),
+    ("sonnet", "Sonnet"),
+    ("haiku", "Haiku"),
+    ("fable", "Fable"),
+];
+
 /// Has this conversation already got a session on disk?
 ///
 /// Asked rather than remembered, because the flag in the store and the file on
@@ -220,6 +239,7 @@ impl Claude {
         again: bool,
         asks: &str,
         doorway: Option<&std::path::Path>,
+        model: Option<&str>,
     ) -> Result<(Self, Receiver<Event>)> {
         let pick_up = if again { "--resume" } else { "--session-id" };
 
@@ -266,6 +286,13 @@ impl Claude {
             // theirs, the way anybody would expect.
             .args(match &reach_us {
                 Some(config) => vec!["--mcp-config", config.as_str()],
+                None => vec![],
+            })
+            // Nothing chosen means whatever this person's Claude Code is set
+            // to, which is the right default: it is their CLI and their
+            // account, and overruling it from here would be a surprise.
+            .args(match model {
+                Some(named) => vec!["--model", named],
                 None => vec![],
             })
             .current_dir(cwd)
@@ -865,6 +892,25 @@ mod tests {
             ask.can_remember,
             "it suggested a rule, so yes can be remembered"
         );
+    }
+
+    #[test]
+    fn every_model_offered_is_an_alias_rather_than_a_dated_name() {
+        // A dated id retires, and the way that is found out is a routine at
+        // seven in the morning dying on a name that worked yesterday. The
+        // aliases are the CLI's standing promise to mean the latest of a kind,
+        // so a list of them does not go stale.
+        assert!(!MODELS.is_empty());
+        for (alias, shown) in MODELS {
+            assert!(
+                !alias.contains(|c: char| c.is_ascii_digit()),
+                "`{alias}` looks like a dated name rather than an alias"
+            );
+            assert!(!alias.contains('-'), "`{alias}` is not a bare alias");
+            assert!(!shown.is_empty(), "`{alias}` has nothing to show a person");
+        }
+        // The one everybody will reach for first.
+        assert!(MODELS.iter().any(|(alias, _)| *alias == "opus"));
     }
 
     #[test]

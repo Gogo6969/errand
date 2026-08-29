@@ -131,6 +131,7 @@ const LOOK_WIDER = "__wider";
 /** Sweep the network for models, and put whatever answered into the picker. */
 async function lookWider(a) {
   const was = el.engine.value;
+  const hereBefore = (couldAnswer || []).filter((c) => c.engine === "local").length;
   el.engine.disabled = true;
   const saying = el.engine.options[el.engine.selectedIndex];
   if (saying) saying.textContent = "Looking on the network…";
@@ -145,14 +146,41 @@ async function lookWider(a) {
   }
 
   el.engine.disabled = false;
+  const found = couldAnswer.filter((c) => c.engine === "local").length - hereBefore;
   await drawEngines(a);
   // Nothing was chosen, only looked for, so the agent stays on what it was on.
   el.engine.value = was === LOOK_WIDER ? keyOf(a.on, a.onSettings) : was;
+
+  // Said where it was asked for. A sweep that finds nothing and a sweep that
+  // never ran look exactly alike from a dropdown that closes unchanged, and
+  // what anybody concludes from that is that the button is broken. So the last
+  // line of the picker reports, and keeps reporting until the picker is next
+  // drawn.
+  const last = el.engine.options[el.engine.options.length - 1];
+  if (last && last.value === LOOK_WIDER) {
+    last.textContent =
+      found > 0
+        ? `Found ${found} more on the network`
+        : "Nothing on the network answered · look again";
+    last.title =
+      found > 0
+        ? ""
+        : "A model listening only on 127.0.0.1 cannot be seen from another machine. " +
+          "The server has to be bound to its network address, for example " +
+          "OLLAMA_HOST=0.0.0.0 for Ollama.";
+  }
 }
 
 /** How one choice is recognised again, since a model id alone does not say where it lives. */
 function keyOf(engine, settings) {
-  if (engine !== "local" || !settings) return "claude";
+  if (engine !== "local") {
+    // Claude with a model named is not the same choice as Claude without one.
+    // Collapsing them all to "claude" meant the picker could show which engine
+    // was answering but never which model, so every one of them looked
+    // selected and choosing between them did nothing.
+    return settings ? `claude|${settings}` : "claude";
+  }
+  if (!settings) return "claude";
   try {
     const s = JSON.parse(settings);
     return `local|${s.base_url}|${s.model}`;

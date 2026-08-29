@@ -126,8 +126,10 @@ pub struct Agent {
     pub spoke_at: i64,
     /// `claude`, or `local`.
     pub engine: String,
-    /// Where a local model lives and which one, as JSON. Nothing for Claude,
-    /// which needs no telling.
+    /// What the chosen engine needs telling. For a local model that is where
+    /// it lives and which one, as JSON; for Claude it is one word, the alias of
+    /// the model to run as. Nothing means the engine's own default, which for
+    /// Claude is whatever that person's CLI is set to.
     pub engine_settings: Option<String>,
 }
 
