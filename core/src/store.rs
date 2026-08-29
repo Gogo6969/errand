@@ -48,6 +48,29 @@ pub struct Settled {
     pub hue: String,
 }
 
+/// One conversation with an agent.
+///
+/// The unit an engine session belongs to. Its id *is* the session id: Claude
+/// Code is started with it and resumed with it, and its transcript is filed
+/// under it. So a conversation id is never reused and never regenerated once
+/// anything has been said, or the conversation becomes unreachable while its
+/// transcript sits on disk under a name nothing will ask for again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Conversation {
+    pub id: String,
+    pub agent: String,
+    /// What this one is about, so several with the same agent can be told
+    /// apart.
+    pub name: String,
+    /// Whether the engine has ever run in this conversation, which decides how
+    /// the next process is started. A new session is `--session-id`; every
+    /// reopen after that is `--resume`, and the wrong one is a hard error with
+    /// nothing on stdout to explain it.
+    pub opened: bool,
+    pub started_at: i64,
+    pub spoke_at: i64,
+}
+
 /// One standing job, and whoever is doing it.
 ///
 /// Named after what it is for rather than after the first thing it was asked,
@@ -78,11 +101,6 @@ pub struct Agent {
     /// empty one under the same name. That is a lie a person would not catch.
     pub cwd: String,
     pub model: Option<String>,
-    /// Whether Claude has ever run in this thread, which decides how the next
-    /// process is spawned. A new session is `--session-id`; every reopen after
-    /// that is `--resume`, and getting it the wrong way round is a hard error
-    /// with nothing on stdout to explain it.
-    pub opened: bool,
     pub started_at: i64,
     pub spoke_at: i64,
     /// `claude`, or `local`.
@@ -190,6 +208,52 @@ const CHANGES: &[&str] = &[
      ALTER TABLE agents ADD COLUMN hue TEXT;
      ALTER TABLE agents ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE agents ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;",
+    // 4. An agent has many conversations.
+    //
+    // One long conversation is fine until you want to ask the same agent about
+    // something else, and then it is not: the whole context of this morning's
+    // briefing sits in front of an unrelated question. So the agent keeps its
+    // identity, its directory and its engine, and the conversation is what gets
+    // an engine session.
+    //
+    // The first conversation of every existing agent KEEPS THE AGENT'S ID, and
+    // that is not tidiness. A conversation id is the engine's session id:
+    // Claude Code is resumed with it, and its transcript is filed under it.
+    // Give these fresh ids and every conversation anybody has had becomes
+    // unresumable, silently, with the transcripts still on disk under names
+    // nothing will ever ask for again.
+    //
+    // `lines` is rebuilt rather than renamed because its foreign key has to
+    // point somewhere else, and SQLite cannot alter one in place. Foreign keys
+    // are off around every change and checked afterwards, which is what makes
+    // dropping a referenced table safe to do here.
+    "CREATE TABLE conversations (
+        id         TEXT PRIMARY KEY,
+        agent      TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        name       TEXT NOT NULL,
+        opened     INTEGER NOT NULL DEFAULT 0,
+        started_at INTEGER NOT NULL,
+        spoke_at   INTEGER NOT NULL
+     );
+     INSERT INTO conversations (id, agent, name, opened, started_at, spoke_at)
+          SELECT id, id, name, opened, started_at, spoke_at FROM agents;
+     CREATE TABLE lines_next (
+        conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        seq          INTEGER NOT NULL,
+        at           INTEGER NOT NULL,
+        kind         TEXT NOT NULL,
+        text         TEXT NOT NULL,
+        call         TEXT,
+        tool         TEXT,
+        outcome      TEXT,
+        PRIMARY KEY (conversation, seq)
+     );
+     INSERT INTO lines_next
+          SELECT agent, seq, at, kind, text, call, tool, outcome FROM lines;
+     DROP TABLE lines;
+     ALTER TABLE lines_next RENAME TO lines;
+     CREATE INDEX lines_by_call ON lines(conversation, call);
+     CREATE INDEX conversations_by_agent ON conversations(agent, spoke_at DESC);",
 ];
 
 impl Store {
@@ -225,13 +289,48 @@ impl Store {
         Ok(store)
     }
 
+    /// Apply whatever has not been applied, one change at a time, all or
+    /// nothing.
+    ///
+    /// Each change is wrapped in a transaction together with the version bump,
+    /// which they were not before. Without that a change that fails halfway
+    /// leaves the schema half-altered and the version unmoved, so the next
+    /// start applies it again from the top and fails somewhere different: a
+    /// store that gets worse every time it is opened.
+    ///
+    /// Foreign keys go off for the duration, and outside the transaction
+    /// because SQLite ignores the pragma inside one. That is not laziness
+    /// about correctness, it is what the documented procedure for rebuilding a
+    /// referenced table requires -- dropping one with references pointing at it
+    /// is exactly the operation -- and `foreign_key_check` afterwards is the
+    /// part that keeps it honest. A change that leaves a dangling reference is
+    /// rolled back rather than kept.
     fn bring_up_to_date(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let at: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+
         for (i, change) in CHANGES.iter().enumerate().skip(at as usize) {
-            conn.execute_batch(change)
-                .with_context(|| format!("applying change {}", i + 1))?;
-            conn.pragma_update(None, "user_version", (i + 1) as i64)?;
+            let version = i + 1;
+            conn.pragma_update(None, "foreign_keys", false)?;
+            let applied = conn
+                .execute_batch(&format!(
+                    "BEGIN;\n{change}\nPRAGMA user_version = {version};\nCOMMIT;"
+                ))
+                .with_context(|| format!("applying change {version}"));
+            if applied.is_err() {
+                let _ = conn.execute_batch("ROLLBACK;");
+            }
+            conn.pragma_update(None, "foreign_keys", true)?;
+            applied?;
+
+            let dangling: i64 =
+                conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                    r.get(0)
+                })?;
+            anyhow::ensure!(
+                dangling == 0,
+                "change {version} left {dangling} rows pointing at nothing"
+            );
         }
         Ok(())
     }
@@ -247,12 +346,58 @@ impl Store {
         Ok(())
     }
 
+    /// Start a conversation with an agent.
+    ///
+    /// The id is the caller's to choose and becomes the engine's session id, so
+    /// it must be a fresh one every time. Reusing one would resume a
+    /// conversation somebody meant to leave behind.
+    pub fn begin_conversation(&self, id: &str, agent: &str, name: &str) -> Result<()> {
+        let now = now();
+        self.conn.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO conversations (id, agent, name, opened, started_at, spoke_at)
+             VALUES (?, ?, ?, 0, ?, ?)",
+            params![id, agent, name, now, now],
+        )?;
+        Ok(())
+    }
+
+    /// One agent's conversations, most recently spoken to first.
+    pub fn conversations(&self, agent: &str) -> Result<Vec<Conversation>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT id, agent, name, opened, started_at, spoke_at
+               FROM conversations WHERE agent = ? ORDER BY spoke_at DESC",
+        )?;
+        let rows = q.query_map([agent], read_conversation)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// One conversation, wherever it belongs.
+    pub fn conversation(&self, id: &str) -> Result<Option<Conversation>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT id, agent, name, opened, started_at, spoke_at
+               FROM conversations WHERE id = ?",
+        )?;
+        let mut rows = q.query_map([id], read_conversation)?;
+        rows.next().transpose().map_err(Into::into)
+    }
+
+    /// Give a conversation the name it will be picked out by.
+    pub fn call_it(&self, conversation: &str, name: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE conversations SET name = ? WHERE id = ?",
+            params![name, conversation],
+        )?;
+        Ok(())
+    }
+
     /// Every thread, the one spoken to most recently first.
     pub fn agents(&self) -> Result<Vec<Agent>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
             "SELECT id, name, title, about, mark, hue, pinned, hidden,
-                    cwd, model, opened, started_at, spoke_at, engine, engine_settings
+                    cwd, model, started_at, spoke_at, engine, engine_settings
                FROM agents ORDER BY pinned DESC, spoke_at DESC",
         )?;
         let rows = q.query_map([], |r| {
@@ -267,11 +412,10 @@ impl Store {
                 hidden: r.get::<_, i64>(7)? != 0,
                 cwd: r.get(8)?,
                 model: r.get(9)?,
-                opened: r.get::<_, i64>(10)? != 0,
-                started_at: r.get(11)?,
-                spoke_at: r.get(12)?,
-                engine: r.get(13)?,
-                engine_settings: r.get(14)?,
+                started_at: r.get(10)?,
+                spoke_at: r.get(11)?,
+                engine: r.get(12)?,
+                engine_settings: r.get(13)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -282,13 +426,13 @@ impl Store {
     }
 
     /// Everything said in a thread, in the order it was said.
-    pub fn lines(&self, agent: &str) -> Result<Vec<Line>> {
+    pub fn lines(&self, conversation: &str) -> Result<Vec<Line>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
             "SELECT seq, at, kind, text, call, tool, outcome
-               FROM lines WHERE agent = ? ORDER BY seq",
+               FROM lines WHERE conversation = ? ORDER BY seq",
         )?;
-        let rows = q.query_map([agent], |r| {
+        let rows = q.query_map([conversation], |r| {
             Ok(Line {
                 seq: r.get(0)?,
                 at: r.get(1)?,
@@ -307,8 +451,8 @@ impl Store {
     /// Their half of the conversation does not come through the engine, so if
     /// it were not written here it would exist only on the screen -- which is
     /// exactly where it was before this file existed.
-    pub fn asked(&self, agent: &str, text: &str) -> Result<Line> {
-        self.append(agent, "mine", text, None, None)
+    pub fn asked(&self, conversation: &str, text: &str) -> Result<Line> {
+        self.append(conversation, "mine", text, None, None)
     }
 
     /// Write down what happened, if it is the sort of thing worth keeping.
@@ -318,23 +462,34 @@ impl Store {
     /// prefix of every sentence; the end of a turn carries the same words as the
     /// last thing said and would be kept twice; and the start of a thread is
     /// something about the thread rather than something said in it.
-    pub fn happened(&self, agent: &str, event: &Event) -> Result<Option<Line>> {
+    pub fn happened(&self, conversation: &str, event: &Event) -> Result<Option<Line>> {
         match event {
+            // `opened` is the conversation's, not the agent's, and that is the
+            // one flag in here that must be right: it decides whether the next
+            // process is started with `--session-id` or `--resume`, and the
+            // wrong one fails with an exit code and nothing on stdout at all.
+            // The model is the agent's, because it is a property of what is
+            // answering rather than of what is being talked about.
             Event::Started { model, .. } => {
                 let conn = self.conn.lock().unwrap();
                 conn.execute(
-                    "UPDATE agents SET model = ?, opened = 1, spoke_at = ? WHERE id = ?",
-                    params![model, now(), agent],
+                    "UPDATE conversations SET opened = 1, spoke_at = ? WHERE id = ?",
+                    params![now(), conversation],
+                )?;
+                conn.execute(
+                    "UPDATE agents SET model = ?, spoke_at = ?
+                      WHERE id = (SELECT agent FROM conversations WHERE id = ?)",
+                    params![model, now(), conversation],
                 )?;
                 Ok(None)
             }
-            Event::Said { text, settled } if *settled => {
-                self.append(agent, "said", text, None, None).map(Some)
-            }
+            Event::Said { text, settled } if *settled => self
+                .append(conversation, "said", text, None, None)
+                .map(Some),
             Event::Said { .. } => Ok(None),
             Event::Doing(step) => self
                 .append(
-                    agent,
+                    conversation,
                     "doing",
                     &step.what,
                     Some(&step.call),
@@ -347,9 +502,9 @@ impl Store {
             Event::Did { call, outcome } => {
                 let conn = self.conn.lock().unwrap();
                 conn.execute(
-                    "UPDATE lines SET outcome = ? WHERE agent = ? AND call = ?
+                    "UPDATE lines SET outcome = ? WHERE conversation = ? AND call = ?
                        AND kind IN ('doing', 'asking')",
-                    params![outcome, agent, call],
+                    params![outcome, conversation, call],
                 )?;
                 Ok(None)
             }
@@ -365,14 +520,14 @@ impl Store {
             Event::NeedsYou(ask) => {
                 let conn = self.conn.lock().unwrap();
                 let turned = conn.execute(
-                    "UPDATE lines SET kind = 'asking' WHERE agent = ? AND call = ? AND kind = 'doing'",
-                    params![agent, &ask.step],
+                    "UPDATE lines SET kind = 'asking' WHERE conversation = ? AND call = ? AND kind = 'doing'",
+                    params![conversation, &ask.step],
                 )?;
                 drop(conn);
                 match turned {
                     0 => self
                         .append(
-                            agent,
+                            conversation,
                             "asking",
                             &ask.asking,
                             Some(&ask.step),
@@ -383,22 +538,24 @@ impl Store {
                 }
             }
             Event::Done { .. } => Ok(None),
-            Event::Failed { why } => self.append(agent, "ended", why, None, None).map(Some),
+            Event::Failed { why } => self
+                .append(conversation, "ended", why, None, None)
+                .map(Some),
         }
     }
 
     /// Give a thread the name it will be remembered by.
-    /// Give an agent the identity it settled on.
+    /// Give an conversation the identity it settled on.
     ///
     /// All of it at once, because it is one decision made in one moment: an
-    /// agent that has worked out what it is for knows its name, its role and
+    /// conversation that has worked out what it is for knows its name, its role and
     /// what it looks like at the same time, and writing them separately would
     /// invite a half-named one.
     ///
     /// Only fills in what is still empty, so this can be called after every
     /// first errand without overwriting a name somebody has since changed by
     /// hand. The exception is the name itself when it is still the placeholder.
-    pub fn settled_on(&self, agent: &str, on: &Settled) -> Result<()> {
+    pub fn settled_on(&self, conversation: &str, on: &Settled) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE agents
@@ -409,7 +566,7 @@ impl Store {
                     hue   = COALESCE(hue,   ?7)
               WHERE id = ?1",
             params![
-                agent,
+                conversation,
                 NOT_YET_NAMED,
                 on.name,
                 on.title,
@@ -421,49 +578,49 @@ impl Store {
         Ok(())
     }
 
-    /// Change something about an agent by hand, whatever it settled on.
-    pub fn rename(&self, agent: &str, name: &str, title: &str, about: &str) -> Result<()> {
+    /// Change something about an conversation by hand, whatever it settled on.
+    pub fn rename(&self, conversation: &str, name: &str, title: &str, about: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE agents SET name = ?2, title = ?3, about = ?4 WHERE id = ?1",
-            params![agent, name, title, about],
+            params![conversation, name, title, about],
         )?;
         Ok(())
     }
 
     /// Keep it at the top of the list, or stop.
-    pub fn pin(&self, agent: &str, pinned: bool) -> Result<()> {
+    pub fn pin(&self, conversation: &str, pinned: bool) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE agents SET pinned = ? WHERE id = ?",
-            params![pinned as i64, agent],
+            params![pinned as i64, conversation],
         )?;
         Ok(())
     }
 
     /// Take it out of the list. It keeps working; it is only out of the way.
-    pub fn hide(&self, agent: &str, hidden: bool) -> Result<()> {
+    pub fn hide(&self, conversation: &str, hidden: bool) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE agents SET hidden = ? WHERE id = ?",
-            params![hidden as i64, agent],
+            params![hidden as i64, conversation],
         )?;
         Ok(())
     }
 
     /// Forget a thread and everything in it.
-    pub fn forget(&self, agent: &str) -> Result<()> {
+    pub fn forget(&self, conversation: &str) -> Result<()> {
         self.conn
             .lock()
             .unwrap()
-            .execute("DELETE FROM agents WHERE id = ?", [agent])?;
+            .execute("DELETE FROM agents WHERE id = ?", [conversation])?;
         Ok(())
     }
 
     /// The one place a line is written, so the one place a position is decided.
     fn append(
         &self,
-        agent: &str,
+        conversation: &str,
         kind: &str,
         text: &str,
         call: Option<&str>,
@@ -476,18 +633,25 @@ impl Store {
         // position, or the conversation that is read back is not the one that
         // happened.
         let seq: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM lines WHERE agent = ?",
-            [agent],
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM lines WHERE conversation = ?",
+            [conversation],
             |r| r.get(0),
         )?;
         conn.execute(
-            "INSERT INTO lines (agent, seq, at, kind, text, call, tool)
+            "INSERT INTO lines (conversation, seq, at, kind, text, call, tool)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![agent, seq, at, kind, text, call, tool],
+            params![conversation, seq, at, kind, text, call, tool],
+        )?;
+        // Both: the list of agents is ordered by when the agent last spoke,
+        // and an agent does not speak -- its conversations do.
+        conn.execute(
+            "UPDATE conversations SET spoke_at = ? WHERE id = ?",
+            params![at, conversation],
         )?;
         conn.execute(
-            "UPDATE agents SET spoke_at = ? WHERE id = ?",
-            params![at, agent],
+            "UPDATE agents SET spoke_at = ?
+              WHERE id = (SELECT agent FROM conversations WHERE id = ?)",
+            params![at, conversation],
         )?;
         Ok(Line {
             seq,
@@ -529,11 +693,13 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
             "SELECT id, name, title, about, mark, hue, pinned, hidden,
-                    cwd, model, opened, started_at, spoke_at, engine, engine_settings
+                    cwd, model, started_at, spoke_at, engine, engine_settings
                FROM agents
               WHERE name LIKE ?1 ESCAPE '\\'
                  OR COALESCE(about, '') LIKE ?1 ESCAPE '\\'
-                 OR id IN (SELECT agent FROM lines WHERE text LIKE ?1 ESCAPE '\\')
+                 OR id IN (SELECT conversation FROM conversations
+                            WHERE id IN (SELECT conversation FROM lines
+                                          WHERE text LIKE ?1 ESCAPE '\\'))
               ORDER BY pinned DESC, spoke_at DESC",
         )?;
         let rows = q.query_map([&like], |r| {
@@ -548,11 +714,10 @@ impl Store {
                 hidden: r.get::<_, i64>(7)? != 0,
                 cwd: r.get(8)?,
                 model: r.get(9)?,
-                opened: r.get::<_, i64>(10)? != 0,
-                started_at: r.get(11)?,
-                spoke_at: r.get(12)?,
-                engine: r.get(13)?,
-                engine_settings: r.get(14)?,
+                started_at: r.get(10)?,
+                spoke_at: r.get(11)?,
+                engine: r.get(12)?,
+                engine_settings: r.get(13)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -560,16 +725,26 @@ impl Store {
 
     /// Put this thread on a different engine.
     ///
-    /// `opened` goes back to false with it. It records whether *this* engine
-    /// has run here before, and the answer for one that has never run is no --
-    /// leaving it true would have Claude Code resume a session it never
-    /// started, which fails with nothing on stdout to say why.
+    /// Every conversation it has goes back to un-opened with it. That flag
+    /// records whether *this* engine has run there before, and the answer for
+    /// one that has never run is no -- leaving it true would have Claude Code
+    /// resume a session it never started, which fails with nothing on stdout to
+    /// say why.
     pub fn use_engine(&self, id: &str, engine: &str, settings: Option<&str>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE agents SET engine = ?, engine_settings = ?, opened = 0, model = NULL
-               WHERE id = ?",
+            "UPDATE agents SET engine = ?, engine_settings = ?, model = NULL WHERE id = ?",
             params![engine, settings, id],
+        )?;
+        // Every one of its conversations, not the agent: `opened` moved to the
+        // conversation when conversations arrived and this update did not
+        // follow it, which is the quiet kind of wrong. A conversation that has
+        // only ever run on a local model still said it had been opened, so the
+        // next start under Claude Code asked it to resume a session that never
+        // existed and the person was told their history was gone.
+        conn.execute(
+            "UPDATE conversations SET opened = 0 WHERE agent = ?",
+            params![id],
         )?;
         Ok(())
     }
@@ -580,11 +755,12 @@ impl Store {
     /// onto its step: a question and its answer are one thing that happened,
     /// and splitting them across two lines makes a reopened thread read as
     /// though it were asked twice.
-    pub fn answered(&self, agent: &str, step: &str, said: &str) -> Result<()> {
+    pub fn answered(&self, conversation: &str, step: &str, said: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE lines SET outcome = ? WHERE agent = ? AND call = ? AND kind = 'asking'",
-            params![said, agent, step],
+            "UPDATE lines SET outcome = ?
+              WHERE conversation = ? AND call = ? AND kind = 'asking'",
+            params![said, conversation, step],
         )?;
         Ok(())
     }
@@ -592,6 +768,18 @@ impl Store {
 
 pub fn beside(data_dir: &Path) -> PathBuf {
     data_dir.join("errand.db")
+}
+
+/// One conversation, from a row that selected its columns in order.
+fn read_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
+    Ok(Conversation {
+        id: r.get(0)?,
+        agent: r.get(1)?,
+        name: r.get(2)?,
+        opened: r.get::<_, i64>(3)? != 0,
+        started_at: r.get(4)?,
+        spoke_at: r.get(5)?,
+    })
 }
 
 fn now() -> i64 {
@@ -606,6 +794,16 @@ mod tests {
     use super::*;
     use crate::engine::Step;
 
+    /// An agent with one conversation, which is the ordinary case.
+    ///
+    /// Same id for both, as the migration does for every agent that existed
+    /// before conversations did: a conversation id is an engine session id, and
+    /// the first one has to keep the id the engine already knows.
+    fn one(s: &Store, id: &str, cwd: &str) {
+        s.begin(id, NOT_YET_NAMED, Path::new(cwd)).unwrap();
+        s.begin_conversation(id, id, "First").unwrap();
+    }
+
     fn step(call: &str, what: &str) -> Event {
         Event::Doing(Step {
             what: what.into(),
@@ -617,7 +815,7 @@ mod tests {
     #[test]
     fn a_thread_and_what_was_said_in_it_are_still_there_afterwards() {
         let s = Store::in_memory().unwrap();
-        s.begin("t1", "New errand", Path::new("/tmp/one")).unwrap();
+        one(&s, "t1", "/tmp/one");
         s.asked("t1", "Check my mail").unwrap();
         s.happened(
             "t1",
@@ -646,10 +844,13 @@ mod tests {
         assert_eq!(lines[0].seq, 1, "positions start at one and count up");
         assert_eq!(lines[1].seq, 2);
 
-        let t = s.agent("t1").unwrap().unwrap();
-        assert_eq!(t.model.as_deref(), Some("claude-opus-5"));
-        assert!(t.opened, "starting is what says a session now exists");
-        assert_eq!(t.cwd, "/tmp/one", "resume is scoped to it, so it is kept");
+        let a = s.agent("t1").unwrap().unwrap();
+        assert_eq!(a.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(a.cwd, "/tmp/one", "resume is scoped to it, so it is kept");
+
+        let c = s.conversation("t1").unwrap().unwrap();
+        assert!(c.opened, "starting is what says a session now exists");
+        assert_eq!(c.agent, "t1");
     }
 
     #[test]
@@ -658,7 +859,7 @@ mod tests {
         // outcome carried a call id, so the two could not be joined and a
         // reopened thread showed every step as though it had never answered.
         let s = Store::in_memory().unwrap();
-        s.begin("t1", "x", Path::new("/tmp")).unwrap();
+        one(&s, "t1", "/tmp");
         s.happened("t1", &step("toolu_01", "Reading the mail"))
             .unwrap();
         s.happened("t1", &step("toolu_02", "Writing a note"))
@@ -680,7 +881,7 @@ mod tests {
     #[test]
     fn what_is_shown_but_not_worth_keeping_is_not_kept() {
         let s = Store::in_memory().unwrap();
-        s.begin("t1", "x", Path::new("/tmp")).unwrap();
+        one(&s, "t1", "/tmp");
         // A sentence still being written: shown, so it reads as thinking; not
         // kept, or the history holds every prefix of every sentence.
         s.happened(
@@ -705,8 +906,8 @@ mod tests {
     #[test]
     fn threads_come_back_with_the_one_spoken_to_last_at_the_top() {
         let s = Store::in_memory().unwrap();
-        s.begin("old", "Older", Path::new("/tmp")).unwrap();
-        s.begin("new", "Newer", Path::new("/tmp")).unwrap();
+        one(&s, "old", "/tmp");
+        one(&s, "new", "/tmp");
         s.asked("old", "say something").unwrap();
 
         let order: Vec<String> = s.agents().unwrap().into_iter().map(|t| t.id).collect();
@@ -776,6 +977,82 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_can_hold_more_than_one_conversation_and_they_do_not_mix() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp");
+        s.begin_conversation("c2", "a1", "Something else").unwrap();
+
+        s.asked("a1", "the first thing").unwrap();
+        s.asked("c2", "the second thing").unwrap();
+
+        assert_eq!(s.lines("a1").unwrap().len(), 1);
+        assert_eq!(s.lines("c2").unwrap()[0].text, "the second thing");
+        assert_eq!(s.conversations("a1").unwrap().len(), 2);
+        // Both start at one. The position is per conversation, and sharing a
+        // counter would put the second conversation's first line second.
+        assert_eq!(s.lines("c2").unwrap()[0].seq, 1);
+    }
+
+    #[test]
+    fn an_agent_speaks_whenever_any_of_its_conversations_does() {
+        // The list is ordered by when an agent last spoke, and an agent does
+        // not speak: its conversations do. Without this an agent used daily
+        // through a second conversation sinks to the bottom of the list.
+        let s = Store::in_memory().unwrap();
+        one(&s, "quiet", "/tmp");
+        one(&s, "busy", "/tmp");
+        s.begin_conversation("later", "quiet", "A new one").unwrap();
+        s.asked("later", "something").unwrap();
+
+        let order: Vec<String> = s.agents().unwrap().into_iter().map(|a| a.id).collect();
+        assert_eq!(order.first().map(String::as_str), Some("quiet"));
+    }
+
+    #[test]
+    fn forgetting_an_agent_takes_its_conversations_and_everything_in_them() {
+        // Two cascades deep, which is the one the foreign keys have to be on
+        // for. Before conversations there was only one.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp");
+        s.begin_conversation("c2", "a1", "Another").unwrap();
+        s.asked("c2", "something").unwrap();
+
+        s.forget("a1").unwrap();
+        assert!(s.conversations("a1").unwrap().is_empty());
+        assert!(s.lines("c2").unwrap().is_empty(), "its lines outlived it");
+    }
+
+    #[test]
+    fn changing_engine_forgets_that_every_conversation_had_been_opened() {
+        // Not just the one on screen. `opened` decides whether the next start
+        // is `--session-id` or `--resume`, and an engine that has never run in
+        // a conversation has no session there to resume -- which fails by
+        // telling somebody their history is gone.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp");
+        s.begin_conversation("c2", "a1", "Another").unwrap();
+        for c in ["a1", "c2"] {
+            s.happened(
+                c,
+                &Event::Started {
+                    session: c.into(),
+                    model: "qwen".into(),
+                },
+            )
+            .unwrap();
+            assert!(s.conversation(c).unwrap().unwrap().opened);
+        }
+
+        s.use_engine("a1", "claude", None).unwrap();
+        for c in ["a1", "c2"] {
+            assert!(
+                !s.conversation(c).unwrap().unwrap().opened,
+                "{c} still claims an engine has run in it"
+            );
+        }
+    }
+
+    #[test]
     fn a_pinned_agent_comes_first_however_long_ago_it_spoke() {
         let store = Store::in_memory().unwrap();
         for id in ["old", "new"] {
@@ -789,7 +1066,7 @@ mod tests {
     #[test]
     fn forgetting_a_thread_takes_everything_said_in_it() {
         let s = Store::in_memory().unwrap();
-        s.begin("t1", "x", Path::new("/tmp")).unwrap();
+        one(&s, "t1", "/tmp");
         s.asked("t1", "hello").unwrap();
         s.forget("t1").unwrap();
         assert!(s.agents().unwrap().is_empty());
@@ -805,7 +1082,7 @@ mod tests {
         let at = beside(&dir);
         {
             let s = Store::open(&at).unwrap();
-            s.begin("t1", "Kept", Path::new("/tmp")).unwrap();
+            one(&s, "t1", "/tmp");
             s.asked("t1", "still here?").unwrap();
         }
         let s = Store::open(&at).unwrap();

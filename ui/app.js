@@ -24,7 +24,7 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 function complain(why) {
-  const t = showing && threads.get(showing);
+  const t = talking();
   if (!t) {
     document.getElementById("thread-name").textContent = why;
     return;
@@ -34,11 +34,19 @@ function complain(why) {
   drawMessages();
 }
 
-const threads = new Map(); // id → agent, as asAgent builds one
+// Two maps, because there are two things.
+//
+// An agent is who; a conversation is what was said. They were one record and
+// one `showing` id, which quietly answered two different questions -- whose
+// name is in the header, and whose messages are on screen -- and gave the same
+// answer to both. That is fine until an agent has a second conversation.
+const agents = new Map(); // agent id → identity, engine, pinned, hidden
+const talks = new Map(); // conversation id → { id, agent, name, messages, working, loaded }
 
 /// What an agent is called before it has settled on anything. Matches the store.
 const NOT_YET_NAMED = "New errand";
-let showing = null;
+let showingAgent = null;
+let showing = null; // the conversation on screen
 
 const el = {
   threads: document.getElementById("threads"),
@@ -52,6 +60,7 @@ const el = {
   mark: document.getElementById("mark"),
   find: document.getElementById("find"),
   reach: document.getElementById("reach"),
+  talks: document.getElementById("talks"),
   pin: document.getElementById("pin"),
   hide: document.getElementById("hide"),
   whois: document.getElementById("whois"),
@@ -70,18 +79,17 @@ const el = {
  * happened at all. Kept once worked out, so a row does not change its face
  * halfway through its own job.
  */
-function kindFor(t) {
+function kindFor(a) {
   // What it chose for itself, where it has chosen. The guess below is only for
   // an agent that has not been asked yet.
-  if (t.mark) return t.mark;
-  if (t.kind) return t.kind;
-  const asked = t.messages.find((m) => m.kind === "mine");
-  // The name is the first few words of the request, which is the only thing
-  // there is to go on for a thread that has been read back but not opened.
-  const words = asked ? asked.text : t.name === NOT_YET_NAMED ? "" : t.name;
+  if (a.mark) return a.mark;
+  if (a.kind) return a.kind;
+  // Its name is the only thing to go on before it has settled on anything, and
+  // for a brand new one there is not even that.
+  const words = a.name === NOT_YET_NAMED ? "" : a.name;
   if (!words) return "spark";
-  t.kind = kindOf(words);
-  return t.kind;
+  a.kind = kindOf(words);
+  return a.kind;
 }
 
 /**
@@ -110,12 +118,12 @@ function keyOf(engine, settings) {
   }
 }
 
-/** Fill the picker, and mark what this thread is on. */
-async function drawEngines(t) {
-  const mine = keyOf(t.on, t.onSettings);
+/** Fill the picker, and mark what this agent is on. */
+async function drawEngines(a) {
+  const mine = keyOf(a.on, a.onSettings);
   const choices = await whatCouldAnswer();
-  // The thread may have moved on while the probes were out.
-  if (showing !== t.id) return;
+  // The window may have moved on while the probes were out.
+  if (showingAgent !== a.id) return;
 
   el.engine.replaceChildren(
     ...choices.map((c) => {
@@ -132,7 +140,7 @@ async function drawEngines(t) {
   if (!choices.some((c) => keyOf(c.engine, c.settings) === mine)) {
     const gone = document.createElement("option");
     gone.value = mine;
-    gone.textContent = `${JSON.parse(t.onSettings || "{}").model || "?"} · not running`;
+    gone.textContent = `${JSON.parse(a.onSettings || "{}").model || "?"} · not running`;
     gone.selected = true;
     el.engine.prepend(gone);
   }
@@ -146,9 +154,21 @@ async function drawEngines(t) {
  * A person who switches and then says "carry on with that" deserves to know
  * that nobody knows what "that" is.
  */
-/** The open thread's own mark, which is the same mark as its row in the list. */
-function drawMark(t) {
-  el.mark.replaceChildren(tile(kindFor(t), t.working, t.hue));
+/** The open agent's own mark, which is the same mark as its row in the list. */
+function drawMark(a) {
+  el.mark.replaceChildren(tile(kindFor(a), busy(a.id), a.hue));
+}
+
+/** Is any of this agent's conversations working? */
+function busy(agent) {
+  return [...talks.values()].some((t) => t.agent === agent && t.working);
+}
+
+/** Is any of them waiting on somebody? */
+function waitingOn(agent) {
+  return [...talks.values()].some(
+    (t) => t.agent === agent && t.messages.some((m) => m.kind === "asking" && !m.answered),
+  );
 }
 
 // ------------------------------------------------------------- threads --
@@ -157,58 +177,125 @@ function uuid() {
   return crypto.randomUUID();
 }
 
+/**
+ * A new agent, with its first conversation.
+ *
+ * Both get the same id, which is what the store does for a first conversation
+ * and what the migration did for every agent that predates conversations. One
+ * rule rather than two, and the id is the engine's session id either way.
+ */
 async function start() {
   const id = uuid();
-  threads.set(id, {
-    id,
-    name: NOT_YET_NAMED,
-    title: "",
-    about: "",
-    mark: null,
-    hue: null,
-    pinned: false,
-    hidden: false,
-    messages: [],
-    working: false,
-    engine: "",
-    on: "claude",
-    onSettings: null,
-    loaded: true,
-  });
+  agents.set(id, asAgent({ id, name: NOT_YET_NAMED }));
+  talks.set(id, asTalk({ id, agent: id, name: "First" }, { loaded: true }));
   await invoke("open_thread", { id });
-  show(id);
+  await show(id);
   drawThreads();
+  el.what.focus();
+}
+
+/**
+ * Another conversation with the agent already open.
+ *
+ * The point of the whole change: asking this agent about something unrelated no
+ * longer means asking a stranger, and it no longer means dragging this
+ * morning's briefing along in front of the question.
+ */
+async function alsoAsk() {
+  const a = whose();
+  if (!a) return;
+  const id = uuid();
+  await invoke("start_conversation", { id, agent: a.id, name: "New conversation" });
+  talks.set(id, asTalk({ id, agent: a.id, name: "New conversation" }, { loaded: true }));
+  // `show` opens it. Doing it here as well was harmless and still wrong: the
+  // second call is a no-op only because the first one already succeeded.
+  await show(id);
   el.what.focus();
 }
 
 /**
  * What was here before.
  *
- * The window used to be the only place a conversation existed, so closing it
- * was the same as ending everything in it. Now the threads are read back at the
- * start and their messages when one is opened -- lazily, because a person with
- * forty threads should not wait for thirty-nine of them.
+ * The agents at the start, and a conversation's messages when it is opened --
+ * lazily, because somebody with forty agents should not wait for thirty-nine of
+ * them.
  */
 async function catchUp() {
   const known = await invoke("agents");
-  for (const a of known) threads.set(a.id, asAgent(a));
+  for (const a of known) agents.set(a.id, asAgent(a, agents.get(a.id)));
   drawThreads();
-  if (known.length) await open(known[0].id);
+  if (known.length) await openAgent(known[0].id);
   else await start();
 }
 
-/** Show a thread, fetching what was said in it the first time. */
-async function open(id) {
-  const t = threads.get(id);
+/** Open an agent, at whichever conversation it spoke in most recently. */
+async function openAgent(agent) {
+  const theirs = (await invoke("conversations", { agent })).map((c) =>
+    asTalk(c, talks.get(c.id)),
+  );
+  for (const t of theirs) talks.set(t.id, t);
+  // An agent with no conversation at all should not be possible, but a window
+  // that shows nothing and says nothing would be the worst way to find out.
+  if (!theirs.length) {
+    const id = uuid();
+    await invoke("start_conversation", { id, agent, name: "First" });
+    talks.set(id, asTalk({ id, agent, name: "First" }, { loaded: true }));
+    return show(id);
+  }
+  return show(theirs[0].id);
+}
+
+/** Show a conversation, fetching what was said in it the first time. */
+async function show(id) {
+  const t = talks.get(id);
+  if (!t) return;
+  showing = id;
+  showingAgent = t.agent;
+
   if (!t.loaded) {
     t.messages = (await invoke("lines", { id })).map(fromStore);
     t.loaded = true;
   }
   // Reopening is what makes it a conversation rather than a transcript: the
-  // agent is handed back its own memory of this thread, not just our copy of it.
+  // engine is handed back its own memory of this one, not just our copy of it.
   await invoke("open_thread", { id });
-  show(id);
-  el.what.focus();
+
+  const a = whose();
+  el.whois.hidden = true;
+  if (a) {
+    drawMark(a);
+    drawPinned(a);
+    el.name.textContent = a.name;
+    drawEngines(a);
+  }
+  drawTalks();
+  drawThreads();
+  drawMessages();
+}
+
+/**
+ * The agent's conversations, and a way to start another.
+ *
+ * A picker rather than a second list down the side, because most agents will
+ * have one and a list of one is furniture.
+ */
+function drawTalks() {
+  const a = whose();
+  const theirs = [...talks.values()].filter((t) => t.agent === showingAgent);
+  el.talks.replaceChildren(
+    ...theirs.map((t) => {
+      const option = document.createElement("option");
+      option.value = t.id;
+      option.textContent = t.name;
+      option.selected = t.id === showing;
+      return option;
+    }),
+  );
+  const another = document.createElement("option");
+  another.value = "+";
+  another.textContent = "New conversation…";
+  el.talks.append(another);
+  el.talks.hidden = !a;
 }
 
 /**
@@ -231,11 +318,30 @@ function asAgent(a, keeping) {
     engine: a.model || "",
     on: a.engine || "claude",
     onSettings: a.engine_settings || null,
+    kind: keeping?.kind,
+  };
+}
+
+/** One conversation, as the page holds it. */
+function asTalk(c, keeping) {
+  return {
+    id: c.id,
+    agent: c.agent,
+    name: c.name,
     messages: keeping?.messages ?? [],
     working: keeping?.working ?? false,
     loaded: keeping?.loaded ?? false,
-    kind: keeping?.kind,
   };
+}
+
+/** The agent whose conversation is on screen. */
+function whose() {
+  return agents.get(showingAgent);
+}
+
+/** The conversation on screen. */
+function talking() {
+  return talks.get(showing);
 }
 
 /** One stored line, as the page holds it. */
@@ -269,25 +375,11 @@ function fromStore(line) {
   }
 }
 
-function show(id) {
-  showing = id;
-  const t = threads.get(id);
-  el.whois.hidden = true;
-  drawMark(t);
-  drawPinned(t);
-  el.name.textContent = t.name;
-  drawEngines(t);
-  drawThreads();
-  drawMessages();
-}
-
 function drawThreads() {
-  // Not `showing`, which is the thread that is open. Shadowing that here would
-  // quietly stop every row knowing whether it is the current one.
   // Hidden ones are out of the way, not gone: a search still finds them,
   // because "where did that go" is exactly when somebody looks.
-  const listed = [...threads.values()].filter((t) =>
-    narrowedTo ? narrowedTo.has(t.id) : !t.hidden,
+  const listed = [...agents.values()].filter((a) =>
+    narrowedTo ? narrowedTo.has(a.id) : !a.hidden,
   );
   if (!listed.length) {
     const none = document.createElement("li");
@@ -297,39 +389,39 @@ function drawThreads() {
     return;
   }
   el.threads.replaceChildren(
-    ...listed.map((t) => {
+    ...listed.map((a) => {
       const li = document.createElement("li");
-      li.setAttribute("aria-current", String(t.id === showing));
-      li.onclick = () => open(t.id);
-      li.append(tile(kindFor(t), t.working, t.hue));
+      li.setAttribute("aria-current", String(a.id === showingAgent));
+      li.onclick = () => openAgent(a.id);
+      li.append(tile(kindFor(a), busy(a.id), a.hue));
+      if (a.pinned) li.classList.add("pinned");
 
       const words = document.createElement("span");
       words.className = "words";
+
       const name = document.createElement("span");
       name.className = "name";
-      name.textContent = t.name;
-      if (t.title) {
+      name.textContent = a.name;
+      if (a.title) {
         // The role, so a list of agents can be read at a glance rather than
         // deciphered from names somebody's agents chose for themselves.
         const role = document.createElement("span");
         role.className = "role";
-        role.textContent = t.title;
+        role.textContent = a.title;
         name.append(role);
       }
-      if (t.pinned) li.classList.add("pinned");
 
+      // What it is for, rather than the last thing said to it. An agent is a
+      // standing job, and the useful line under its name is the job -- the last
+      // message belongs to one of its conversations, not to it.
       const last = document.createElement("span");
       last.className = "last";
-      const said = [...t.messages].reverse().find((m) => m.kind === "said" || m.kind === "mine");
-      const waiting = t.messages.some((m) => m.kind === "asking" && !m.answered);
-      last.textContent = waiting
+      last.textContent = waitingOn(a.id)
         ? "Waiting on you"
-        : t.working
+        : busy(a.id)
           ? "Working…"
-          : said
-            ? said.text
-            : "Nothing said yet";
-      if (waiting) last.classList.add("waiting");
+          : a.about || "Nothing said yet";
+      if (waitingOn(a.id)) last.classList.add("waiting");
 
       words.append(name, last);
       li.append(words);
@@ -341,7 +433,7 @@ function drawThreads() {
 // ------------------------------------------------------------ messages --
 
 function drawMessages() {
-  const t = threads.get(showing);
+  const t = talking();
   if (!t) return;
   el.messages.replaceChildren(...t.messages.map(draw).filter(Boolean));
   if (t.working) el.messages.append(thinking());
@@ -449,7 +541,7 @@ function asks(m) {
 
 /** Say yes or no, and let the halted work go on or not. */
 async function answer(m, said, label) {
-  const t = threads.get(showing);
+  const t = talking();
   // Settled here as well as in the store, so the buttons stop being buttons
   // the moment they are pressed rather than when the answer comes back.
   m.answered = label === "Always" ? "You said yes, and to stop asking" : `You said ${label.toLowerCase()}`;
@@ -478,14 +570,14 @@ function thinking() {
 // is the intended effect: it is the moment it stops being "New errand".
 listen("settled", ({ payload }) => {
   const [id, on] = payload;
-  const t = threads.get(id);
+  const t = agents.get(id);
   if (!t) return;
   t.name = on.name;
   t.title = on.title;
   t.about = on.about;
   t.mark = on.mark;
   t.hue = on.hue;
-  if (id === showing) {
+  if (id === showingAgent) {
     el.name.textContent = t.name;
     drawMark(t);
   }
@@ -493,13 +585,17 @@ listen("settled", ({ payload }) => {
 });
 
 listen("happened", ({ payload }) => {
-  const t = threads.get(payload.thread);
+  const t = talks.get(payload.conversation);
   if (!t) return;
 
   switch (payload.kind) {
-    case "started":
-      t.engine = payload.model;
+    // What is answering is the agent's, not this conversation's: choosing an
+    // engine is a decision about the agent and every conversation it has.
+    case "started": {
+      const on = agents.get(t.agent);
+      if (on) on.engine = payload.model;
       break;
+    }
 
     // Only settled lines are kept. The partial ones exist so that a sentence
     // being written looks like a sentence being written, and keeping them all
@@ -560,12 +656,14 @@ listen("happened", ({ payload }) => {
       break;
   }
 
-  if (payload.thread === showing) {
-    drawMark(t);
-    el.name.textContent = t.name;
-    drawMessages();
+  // The agent's mark shows that one of its conversations is working, so it is
+  // redrawn whichever conversation the event belongs to.
+  const a = agents.get(t.agent);
+  if (a) {
+    if (payload.conversation === showing) drawMark(a);
+    drawThreads();
   }
-  drawThreads();
+  if (payload.conversation === showing) drawMessages();
 });
 
 /**
@@ -595,7 +693,7 @@ function doneWith(m) {
 
   // Offered on the last answer only. Asking again from halfway up the thread
   // would put the reply at the bottom, under everything that came after it.
-  const t = threads.get(showing);
+  const t = talking();
   const asked = t && [...t.messages].reverse().find((x) => x.kind === "mine");
   const isLast = t && [...t.messages].reverse().find((x) => x.kind === "said") === m;
   if (asked && isLast) {
@@ -622,8 +720,8 @@ el.form.addEventListener("submit", (e) => {
 
 /** Say something to the thread that is open, from wherever it was typed. */
 async function sayIt(text) {
-  if (!showing) return;
-  const t = threads.get(showing);
+  const t = talking();
+  if (!t) return;
   t.messages.push({ kind: "mine", text });
   // Working from the moment it is sent, not from the moment something comes
   // back: the gap between the two is exactly when a person wonders whether the
@@ -661,7 +759,7 @@ el.what.addEventListener("keydown", (e) => {
     walkedBack = null;
     return;
   }
-  const t = threads.get(showing);
+  const t = talking();
   if (!t) return;
   const asked = t.messages.filter((m) => m.kind === "mine").map((m) => m.text);
   if (!asked.length) return;
@@ -689,7 +787,7 @@ el.what.addEventListener("input", () => {
 });
 
 el.engine.addEventListener("change", async () => {
-  const t = threads.get(showing);
+  const t = whose();
   if (!t) return;
   const choice = (await whatCouldAnswer()).find(
     (c) => keyOf(c.engine, c.settings) === el.engine.value,
@@ -698,20 +796,25 @@ el.engine.addEventListener("change", async () => {
 
   t.on = choice.engine;
   t.onSettings = choice.settings;
-  t.working = false;
+
+  const talk = talking();
+  if (talk) talk.working = false;
   try {
+    // The choice is the agent's; the session that has to be restarted is this
+    // conversation's. Two ids, and passing either one to both is the mistake
+    // this whole change exists to make impossible.
     await invoke("use_engine", { id: t.id, engine: choice.engine, settings: choice.settings });
-    await invoke("open_thread", { id: t.id });
-    // Said in the thread rather than in a toast that disappears. Somebody
-    // scrolling back next week needs to see where the conversation changed
-    // hands, or the gap in what it remembers looks like a fault.
-    t.messages.push({
+    if (talk) await invoke("open_thread", { id: talk.id });
+    // Said in the conversation rather than in a toast that disappears.
+    // Somebody scrolling back next week needs to see where it changed hands,
+    // or the gap in what it remembers looks like a fault.
+    talk?.messages.push({
       kind: "ended",
       failed: false,
       text: `Now on ${choice.name}. It has not seen anything said before this line.`,
     });
   } catch (why) {
-    t.messages.push({ kind: "ended", failed: true, text: String(why) });
+    talk?.messages.push({ kind: "ended", failed: true, text: String(why) });
   }
   drawMessages();
   drawThreads();
@@ -762,7 +865,7 @@ async function look() {
   // search that finds one has to be able to show it.
   // An agent that has never been opened is not in the page's list yet, and a
   // search that finds one has to be able to show it.
-  for (const a of found) threads.set(a.id, asAgent(a, threads.get(a.id)));
+  for (const a of found) agents.set(a.id, asAgent(a, agents.get(a.id)));
   drawThreads();
 }
 
@@ -879,7 +982,7 @@ function saying(text) {
  * its own. Opened from its name, which is where anybody would look for this.
  */
 el.name.addEventListener("click", () => {
-  const t = threads.get(showing);
+  const t = whose();
   if (!t) return;
   if (!el.whois.hidden) {
     el.whois.hidden = true;
@@ -893,7 +996,7 @@ el.name.addEventListener("click", () => {
 });
 
 el.whoisSave.addEventListener("click", async () => {
-  const t = threads.get(showing);
+  const t = whose();
   if (!t) return;
   t.name = el.whoisName.value.trim() || NOT_YET_NAMED;
   t.title = el.whoisTitle.value.trim();
@@ -905,7 +1008,7 @@ el.whoisSave.addEventListener("click", async () => {
 });
 
 el.pin.addEventListener("click", async () => {
-  const t = threads.get(showing);
+  const t = whose();
   if (!t) return;
   t.pinned = !t.pinned;
   drawPinned(t);
@@ -914,7 +1017,7 @@ el.pin.addEventListener("click", async () => {
 });
 
 el.hide.addEventListener("click", async () => {
-  const t = threads.get(showing);
+  const t = whose();
   if (!t) return;
   t.hidden = !t.hidden;
   drawPinned(t);
@@ -929,6 +1032,11 @@ function drawPinned(t) {
   el.hide.textContent = t.hidden ? "Hidden" : "Hide";
   el.hide.setAttribute("aria-pressed", String(t.hidden));
 }
+
+el.talks.addEventListener("change", async () => {
+  if (el.talks.value === "+") return alsoAsk();
+  await show(el.talks.value);
+});
 
 el.new.addEventListener("click", start);
 

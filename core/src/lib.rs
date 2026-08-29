@@ -23,4 +23,4 @@ pub mod local;
 pub mod mcp;
 
 pub use engine::{Answer, Engine, Event, NeedsYou, Step};
-pub use store::{Agent, Line, Store};
+pub use store::{Agent, Conversation, Line, Store};

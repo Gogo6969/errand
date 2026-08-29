@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use errand_core::local::{find, LlmSettings, Local};
 use errand_core::mcp;
 use errand_core::store::{Settled, NOT_YET_NAMED};
-use errand_core::{claude::Claude, Agent, Answer, Engine, Event, Line, Store};
+use errand_core::{claude::Claude, Agent, Answer, Conversation, Engine, Event, Line, Store};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -37,7 +37,11 @@ mod onscreen;
 /// the transcript would be putting our own question there under the agent's
 /// name. So while an id is in here, everything it says is collected and
 /// nothing is written down or shown.
-type Settling = Arc<Mutex<HashMap<String, String>>>;
+///
+/// Keyed by the conversation whose engine is answering, holding the agent it is
+/// answering *about* and what it has said so far. Two ids, because the question
+/// goes down one conversation and the answer belongs to the agent that owns it.
+type Settling = Arc<Mutex<HashMap<String, (String, String)>>>;
 
 struct Held {
     /// Whatever is answering each open thread. Boxed rather than one concrete
@@ -51,12 +55,12 @@ struct Held {
 
 /// One event, and which conversation it belongs to.
 ///
-/// The thread's id travels with it because the window shows one thread at a
-/// time but keeps several alive: a person who starts something slow and goes to
-/// read another thread should come back to find it finished, not paused.
+/// The id travels with it because the window shows one conversation at a time
+/// and keeps several alive: somebody who starts something slow and goes to read
+/// another should come back to find it finished, not paused.
 #[derive(Clone, Serialize)]
 struct Happened {
-    thread: String,
+    conversation: String,
     #[serde(flatten)]
     event: Event,
 }
@@ -157,7 +161,35 @@ async fn lines(held: State<'_, Held>, id: String) -> Result<Vec<Line>, String> {
     held.store.lines(&id).map_err(|e| e.to_string())
 }
 
-/// Start a conversation, or pick up one from before.
+/// One agent's conversations, most recently spoken to first.
+#[tauri::command]
+async fn conversations(held: State<'_, Held>, agent: String) -> Result<Vec<Conversation>, String> {
+    held.store.conversations(&agent).map_err(|e| e.to_string())
+}
+
+/// Start another conversation with an agent it already has.
+///
+/// A fresh id every time, chosen by the window, because it becomes the engine's
+/// session id and reusing one would resume something somebody meant to leave.
+#[tauri::command]
+async fn start_conversation(
+    held: State<'_, Held>,
+    id: String,
+    agent: String,
+    name: String,
+) -> Result<(), String> {
+    held.store
+        .begin_conversation(&id, &agent, &name)
+        .map_err(|e| e.to_string())
+}
+
+/// Give a conversation the name it is picked out by.
+#[tauri::command]
+async fn call_it(held: State<'_, Held>, id: String, name: String) -> Result<(), String> {
+    held.store.call_it(&id, &name).map_err(|e| e.to_string())
+}
+
+/// Open a conversation, or pick up one from before.
 #[tauri::command]
 async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Result<(), String> {
     if held.live.lock().unwrap().contains_key(&id) {
@@ -169,13 +201,23 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
     // neither can be guessed at afterwards: resuming with the wrong flag is a
     // hard error, and resuming from the wrong directory quietly starts an empty
     // conversation wearing the same name.
-    let known = held.store.agent(&id).map_err(|e| e.to_string())?;
+    // Two lookups, because the two halves live in different places now: how to
+    // reach the engine belongs to the agent, and whether this particular
+    // conversation has run before belongs to the conversation.
+    let conversation = held.store.conversation(&id).map_err(|e| e.to_string())?;
+    let known = match &conversation {
+        Some(c) => held.store.agent(&c.agent).map_err(|e| e.to_string())?,
+        None => None,
+    };
     let on_engine = known
         .as_ref()
-        .map_or_else(|| "claude".to_string(), |t| t.engine.clone());
-    let settings = known.as_ref().and_then(|t| t.engine_settings.clone());
+        .map_or_else(|| "claude".to_string(), |a| a.engine.clone());
+    let settings = known.as_ref().and_then(|a| a.engine_settings.clone());
     let (home, again) = match &known {
-        Some(t) => (std::path::PathBuf::from(&t.cwd), t.opened),
+        Some(a) => (
+            std::path::PathBuf::from(&a.cwd),
+            conversation.as_ref().is_some_and(|c| c.opened),
+        ),
         None => {
             // Its own folder per thread, so one errand cannot tidy up after
             // another, and so "the files from that thing last Tuesday" are
@@ -187,7 +229,14 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // that fails on a machine with a symlink in it.
             let home = home.canonicalize().unwrap_or(home);
             held.store
-                .begin(&id, "New errand", &home)
+                .begin(&id, NOT_YET_NAMED, &home)
+                .map_err(|e| e.to_string())?;
+            // Its first conversation shares the agent's id, which is what the
+            // migration did for every agent that existed before conversations
+            // did. Keeping the two the same for a first conversation means
+            // there is one rule rather than two.
+            held.store
+                .begin_conversation(&id, &id, "First")
                 .map_err(|e| e.to_string())?;
             (home, false)
         }
@@ -230,18 +279,20 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                             .lock()
                             .unwrap()
                             .entry(id.clone())
-                            .and_modify(|so_far| {
+                            .and_modify(|(_, so_far)| {
                                 so_far.push_str(text);
                                 so_far.push('\n');
                             });
                     }
                     Event::Done { .. } | Event::Failed { .. } => {
-                        let said = settling.lock().unwrap().remove(&id).unwrap_or_default();
+                        let Some((agent, said)) = settling.lock().unwrap().remove(&id) else {
+                            continue;
+                        };
                         if let Some(on) = read_what_it_settled_on(&said) {
-                            if let Err(e) = store.settled_on(&id, &on) {
-                                eprintln!("could not write down who {id} is: {e}");
+                            if let Err(e) = store.settled_on(&agent, &on) {
+                                eprintln!("could not write down who {agent} is: {e}");
                             } else {
-                                let _ = app.emit("settled", (&id, &on));
+                                let _ = app.emit("settled", (&agent, &on));
                             }
                         }
                     }
@@ -252,14 +303,22 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
 
             // The first errand is finished and nobody has named this yet. Ask
             // it who it is, now that it knows what the job was.
-            if matches!(event, Event::Done { .. })
-                && store
-                    .agent(&id)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|a| a.name == NOT_YET_NAMED)
-            {
-                settling.lock().unwrap().insert(id.clone(), String::new());
+            // The agent that owns this conversation, if it still has not worked
+            // out who it is. Asked down whichever conversation just finished,
+            // because that is the one with an engine attached to it.
+            let unnamed = store
+                .conversation(&id)
+                .ok()
+                .flatten()
+                .and_then(|c| store.agent(&c.agent).ok().flatten())
+                .filter(|a| a.name == NOT_YET_NAMED)
+                .map(|a| a.id);
+
+            if let (true, Some(agent)) = (matches!(event, Event::Done { .. }), unnamed) {
+                settling
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), (agent, String::new()));
                 let asked = {
                     let held: State<Held> = app.state();
                     let mut live = held.live.lock().unwrap();
@@ -281,7 +340,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             let _ = app.emit(
                 "happened",
                 Happened {
-                    thread: id.clone(),
+                    conversation: id.clone(),
                     event,
                 },
             );
@@ -413,9 +472,27 @@ async fn use_engine(
     engine: String,
     settings: Option<String>,
 ) -> Result<(), String> {
-    if let Some(mut was) = held.live.lock().unwrap().remove(&id) {
-        let _ = was.stop();
+    // Every conversation this agent has, not one. The map is keyed by
+    // conversation and the id here is the agent's, so removing by it stopped
+    // nothing at all: the old engine kept running and kept writing, which is
+    // the two-engines-in-one-conversation the comment above forbids, spread
+    // across an agent instead.
+    let theirs: Vec<String> = held
+        .store
+        .conversations(&id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    {
+        let mut live = held.live.lock().unwrap();
+        for conversation in theirs {
+            if let Some(mut was) = live.remove(&conversation) {
+                let _ = was.stop();
+            }
+        }
     }
+
     held.store
         .use_engine(&id, &engine, settings.as_deref())
         .map_err(|e| e.to_string())
@@ -658,6 +735,9 @@ pub fn run() {
             matching,
             lines,
             open_thread,
+            conversations,
+            start_conversation,
+            call_it,
             say,
             answer,
             engines,
