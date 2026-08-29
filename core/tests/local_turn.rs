@@ -25,6 +25,7 @@ async fn one_turn_with_every_event_it_produces() {
         },
         home,
         "ask",
+        None,
     )
     .expect("opening");
 

@@ -34,6 +34,8 @@ async fn main() -> anyhow::Result<()> {
             here.clone(),
             // The harness always asks. It is here to watch a card appear.
             "ask",
+            // No app behind it, so nobody to hand work to.
+            None,
         )?;
         (Box::new(it), events)
     } else {

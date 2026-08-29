@@ -876,6 +876,7 @@ dependencies = [
 name = "errand-app"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "block2",
  "chrono",
  "errand-core",
@@ -887,6 +888,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -24,6 +24,7 @@ use errand_core::mcp;
 use errand_core::routine::When;
 use errand_core::store::Allowance;
 use errand_core::store::{Settled, NOT_YET_NAMED};
+use errand_core::team;
 use errand_core::{claude::Claude, Agent, Answer, Conversation, Engine, Event, Line, Store};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -52,6 +53,22 @@ struct Held {
     /// stops being true the moment this map knows.
     live: Mutex<HashMap<String, Box<dyn Engine + Send>>>,
     settling: Settling,
+    /// Where an engine posts the things only the app can do.
+    wants: tokio::sync::mpsc::UnboundedSender<team::Wants>,
+    /// Routines that are still running, so the clock does not start one twice.
+    ///
+    /// A routine that takes longer than its own interval is ordinary, and
+    /// starting it on top of itself puts two turns in one conversation racing
+    /// each other. Seen the first time one was tested.
+    running: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Conversations somebody is waiting on the end of, by id.
+    ///
+    /// One agent asking another has to wait for the answer, and the events it
+    /// is waiting for arrive on the other conversation's pump. Forwarding them
+    /// here is more direct than listening on the window's event bus and does
+    /// not depend on a window being open at all -- which matters, because a
+    /// routine at seven in the morning may delegate.
+    watching: Arc<Mutex<HashMap<String, std::sync::mpsc::Sender<Event>>>>,
     store: Arc<Store>,
 }
 
@@ -253,7 +270,9 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             let settings: LlmSettings = serde_json::from_str(&settings.unwrap_or_default())
                 .map_err(|_| "this thread has no model chosen".to_string())?;
             let asks = known.as_ref().map_or("ask", |a| a.asks.as_str());
-            let (it, events) = Local::open(settings, home, asks).map_err(|e| e.to_string())?;
+            let (it, events) =
+                Local::open(settings, home, asks, Some((id.clone(), held.wants.clone())))
+                    .map_err(|e| e.to_string())?;
             (Box::new(it), events)
         }
         _ => {
@@ -269,6 +288,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
     // just shown.
     let store = held.store.clone();
     let settling = held.settling.clone();
+    let watching = held.watching.clone();
     std::thread::spawn(move || {
         while let Ok(event) = events.recv() {
             // An agent in the middle of settling on a name is answering us, not
@@ -371,6 +391,18 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 // it must not pass in silence either.
                 eprintln!("could not write down what happened in {id}: {e}");
             }
+            // A routine's turn is over, so the clock may start it again.
+            if event.ends_the_turn() {
+                let held: State<Held> = app.state();
+                held.running.lock().unwrap().remove(&id);
+            }
+
+            // Anybody waiting on this conversation ending -- which is another
+            // agent, sitting in a tool call, expecting an answer.
+            if let Some(waiting) = watching.lock().unwrap().get(&id) {
+                let _ = waiting.send(event.clone());
+            }
+
             tell_them(&app, &store, &id, &event);
             let _ = app.emit(
                 "happened",
@@ -628,6 +660,176 @@ fn read_what_it_settled_on(said: &str) -> Option<Settled> {
     })
 }
 
+/// The receiving end, held between setup and Ready.
+struct Waiting(Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<team::Wants>>>);
+
+/// Do the things an engine cannot do for itself.
+///
+/// One at a time on purpose. Two agents delegating at once is a thing that will
+/// happen and a thing nobody has thought through: it means two conversations
+/// running, either of which may delegate again. Serialising it makes the first
+/// version something whose behaviour can be predicted, and the queue is where
+/// that decision is written down rather than assumed.
+fn answer_what_engines_cannot(
+    app: AppHandle,
+    mut wants: tokio::sync::mpsc::UnboundedReceiver<team::Wants>,
+) {
+    tauri::async_runtime::spawn(async move {
+        while let Some(asked) = wants.recv().await {
+            let said = match asked.tool.as_str() {
+                "who_else" => who_else(&app, &asked.from),
+                "ask" => ask_teammate(&app, &asked).await,
+                other => Err(anyhow::anyhow!("there is no {other} here")),
+            };
+            let _ = asked.answer.send(said);
+        }
+    });
+}
+
+/// Everybody else there is, and what each handles.
+fn who_else(app: &AppHandle, from: &str) -> anyhow::Result<String> {
+    let held: State<Held> = app.state();
+    let mine = held.store.conversation(from)?.map(|c| c.agent);
+    let others: Vec<String> = held
+        .store
+        .agents()?
+        .into_iter()
+        .filter(|a| Some(&a.id) != mine.as_ref() && a.name != NOT_YET_NAMED)
+        .map(|a| {
+            format!(
+                "  {} ({}) -- {}",
+                a.name,
+                a.title.unwrap_or_else(|| "no role".into()),
+                a.about
+                    .unwrap_or_else(|| "has not said what it handles".into())
+            )
+        })
+        .collect();
+
+    Ok(match others.is_empty() {
+        true => "There is nobody else yet.".to_string(),
+        false => format!("You can hand work to:\n{}", others.join("\n")),
+    })
+}
+
+/// Hand a request to another agent and wait for what it says.
+///
+/// In a conversation of its own, named after who asked, so the exchange is
+/// readable afterwards exactly like any other -- which is the whole of what
+/// makes this feel like a team rather than a function call.
+async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let named = asked
+        .args
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let request = asked
+        .args
+        .get("request")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    anyhow::ensure!(
+        !request.trim().is_empty(),
+        "there was no request to pass on"
+    );
+
+    let (them, mine) = {
+        let held: State<Held> = app.state();
+        let mine = held.store.conversation(&asked.from)?.map(|c| c.agent);
+        let them = held
+            .store
+            .agents()?
+            .into_iter()
+            .find(|a| a.name.eq_ignore_ascii_case(named.trim()))
+            .ok_or_else(|| anyhow::anyhow!("there is nobody here called {named}"))?;
+        (them, mine)
+    };
+    anyhow::ensure!(
+        Some(&them.id) != mine.as_ref(),
+        "that is you; ask somebody else or do it yourself"
+    );
+
+    // Its own conversation, so the delegated work does not land in the middle
+    // of whatever else that agent was doing.
+    let talk = uuid::Uuid::new_v4().to_string();
+    let asked_by = {
+        let held: State<Held> = app.state();
+        let who = mine
+            .as_deref()
+            .and_then(|a| held.store.agent(a).ok().flatten())
+            .map_or_else(|| "another agent".to_string(), |a| a.name);
+        held.store
+            .begin_conversation(&talk, &them.id, &format!("Asked by {who}"))?;
+        who
+    };
+
+    open_thread(app.clone(), app.state(), talk.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Registered before it is asked, or a fast answer arrives before anybody
+    // is waiting for it.
+    let (finished, done) = std::sync::mpsc::channel();
+    {
+        let held: State<Held> = app.state();
+        held.watching.lock().unwrap().insert(talk.clone(), finished);
+    }
+
+    let said = match say(
+        app.state(),
+        talk.clone(),
+        format!("{asked_by} asks: {request}"),
+    )
+    .await
+    {
+        Ok(()) => wait_for_the_answer(&done),
+        Err(why) => Err(anyhow::anyhow!("{why}")),
+    };
+
+    {
+        let held: State<Held> = app.state();
+        held.watching.lock().unwrap().remove(&talk);
+    }
+    said
+}
+
+/// Collect what the other agent said, until its turn ends.
+fn wait_for_the_answer(done: &std::sync::mpsc::Receiver<Event>) -> anyhow::Result<String> {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(600);
+    let mut said = String::new();
+
+    while Instant::now() < deadline {
+        let Ok(event) = done.recv_timeout(Duration::from_secs(5)) else {
+            continue;
+        };
+        match event {
+            Event::Said {
+                text,
+                settled: true,
+            } => {
+                said.push_str(&text);
+                said.push('\n');
+            }
+            // A question in a delegated conversation has nobody at the keyboard
+            // for it, and saying so beats waiting out the ten minutes.
+            Event::NeedsYou(ask) => {
+                return Ok(format!(
+                    "It stopped to ask permission to {} and there was nobody to answer, so it \
+                     did not finish. What it got to: {said}",
+                    ask.asking
+                ))
+            }
+            Event::Done { .. } => return Ok(said.trim().to_string()),
+            Event::Failed { why } => return Ok(format!("It could not: {why}")),
+            _ => {}
+        }
+    }
+    Ok(format!(
+        "It did not finish within ten minutes. What it got to: {said}"
+    ))
+}
+
 /// Watch the clock, and run what is due.
 ///
 /// In the app rather than in launchd, and the difference is worth being honest
@@ -676,7 +878,11 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
                 // the run announces itself as late.
                 let late = now.signed_duration_since(next).num_minutes() > 10;
                 let what = c.runs_what.clone()?;
-                (next <= now).then_some((c.id.clone(), what, late))
+                // Not if the last run is still going. A routine that takes
+                // longer than its own interval is ordinary, and starting it on
+                // top of itself puts two turns in one conversation racing.
+                let busy = held.running.lock().unwrap().contains(&c.id);
+                (next <= now && !busy).then_some((c.id.clone(), what, late))
             })
             .collect()
     };
@@ -692,6 +898,10 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
         }
 
+        {
+            let held: State<Held> = app.state();
+            held.running.lock().unwrap().insert(conversation.clone());
+        }
         open_thread(app.clone(), app.state(), conversation.clone()).await?;
         let said = match late {
             false => what,
@@ -947,11 +1157,20 @@ pub fn run() {
         .setup(|app| {
             let here = where_things_live(&app.handle().clone())?;
             let store = Store::open(&errand_core::store::beside(&here))?;
+            let (wants, asked) = tokio::sync::mpsc::unbounded_channel();
             app.manage(Held {
                 live: Mutex::new(HashMap::new()),
                 settling: Settling::default(),
+                wants,
+                running: Arc::default(),
+                watching: Arc::default(),
                 store: Arc::new(store),
             });
+            // The receiving end is parked here and started on Ready, for the
+            // same reason the clock is: setup runs while the app is still
+            // being built, and spawning work into it there is how the window
+            // stops appearing at all.
+            app.manage(Waiting(Mutex::new(Some(asked))));
 
             Ok(())
         })
@@ -996,9 +1215,18 @@ pub fn run() {
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Ready) {
                 onscreen::ask();
-                // Started here rather than in setup, so it never looks at the
-                // clock before the store it reads is in place.
+                // Started here rather than in setup, so neither looks at the
+                // store before it is in place, and neither is spawned into an
+                // app that is still being built.
                 watch_the_clock(app.clone());
+                let waiting = {
+                    let parked: State<Waiting> = app.state();
+                    let taken = parked.0.lock().unwrap().take();
+                    taken
+                };
+                if let Some(asked) = waiting {
+                    answer_what_engines_cannot(app.clone(), asked);
+                }
             }
         });
 }

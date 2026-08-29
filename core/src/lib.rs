@@ -22,6 +22,7 @@ pub mod store;
 pub mod local;
 pub mod mcp;
 pub mod routine;
+pub mod team;
 
 pub use engine::{Answer, Engine, Event, NeedsYou, Step};
 pub use store::{Agent, Conversation, Line, Store};

@@ -27,6 +27,7 @@ use super::tools;
 use super::{ChatMessage, LlmSettings, ToolCall, ToolDef};
 use crate::engine::{Answer, Engine, Event, NeedsYou, Step};
 use crate::mcp;
+use crate::team;
 
 /// How many times round the loop before something is wrong.
 ///
@@ -80,6 +81,10 @@ impl Local {
         settings: LlmSettings,
         home: PathBuf,
         asks: &str,
+        // Where to send the things only the app can do, and which conversation
+        // is asking. Nothing here means an engine on its own, which is what the
+        // terminal harness is.
+        host: Option<(String, tokio::sync::mpsc::UnboundedSender<team::Wants>)>,
     ) -> Result<(Self, Receiver<Event>)> {
         let (tx, rx) = channel();
         let (turns, asked) = tokio::sync::mpsc::unbounded_channel();
@@ -93,6 +98,7 @@ impl Local {
             LlmClient::new(settings),
             home,
             asks.to_string(),
+            host,
             asked,
             tx,
         ));
@@ -127,6 +133,7 @@ async fn conversation(
     client: LlmClient,
     home: PathBuf,
     asks: String,
+    host: Option<(String, tokio::sync::mpsc::UnboundedSender<team::Wants>)>,
     mut asked: UnboundedReceiver<Turn>,
     out: std::sync::mpsc::Sender<Event>,
 ) {
@@ -190,6 +197,7 @@ async fn conversation(
             &home,
             &outside,
             &asks,
+            host.as_ref(),
             &mut history,
             &mut allowed,
             &mut loaded,
@@ -225,6 +233,7 @@ async fn errand(
     home: &std::path::Path,
     outside: &mcp::Servers,
     asks: &str,
+    host: Option<&(String, tokio::sync::mpsc::UnboundedSender<team::Wants>)>,
     history: &mut Vec<ChatMessage>,
     allowed: &mut HashSet<String>,
     loaded: &mut HashSet<String>,
@@ -265,6 +274,20 @@ async fn errand(
                 .filter(|t| loaded.contains(&t.called))
                 .map(&with_schemas),
         );
+        // What only the app can do, offered when there is an app to do it.
+        if host.is_some() {
+            defs.extend(team::declarations().into_iter().map(|schema| {
+                ToolDef {
+                    name: schema
+                        .pointer("/function/name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    description: String::new(),
+                    schema,
+                }
+            }));
+        }
 
         // A turn's inputs are the one thing nothing else prints, and an answer
         // that comes back empty is almost always one of them. Off unless asked
@@ -416,14 +439,21 @@ async fn errand(
             // `ask` -- the default -- asks about everything that changes
             // anything.
             let must_ask = match asks {
+                // `auto` first, or it would not mean never: handing work to
+                // another agent had its own default and quietly outranked the
+                // posture somebody had chosen for this agent.
                 "auto" => false,
+                _ if team::ours(&name) => team::asks_first(&name),
                 "edits" => tools::asks_first(&name) && name != "write_file",
                 _ => tools::asks_first(&name),
             };
             if must_ask && !allowed.contains(&name) {
                 let _ = out.send(Event::NeedsYou(NeedsYou {
                     asking: say_plainly(outside, &name, &args),
-                    detail: tools::the_thing_itself(&name, &args),
+                    detail: match team::ours(&name) {
+                        true => team::the_thing_itself(&name, &args),
+                        false => tools::the_thing_itself(&name, &args),
+                    },
                     tool: name.clone(),
                     // Both ids, and here they happen to be the same one: this
                     // engine's questions are about the tool call directly,
@@ -475,6 +505,26 @@ async fn errand(
 
             let outcome = match match name.as_str() {
                 "find_tools" => Ok(look_up(outside, loaded, &args)),
+                // Only the thing holding every agent can reach another one, so
+                // this goes up rather than being answered here.
+                _ if team::ours(&name) => match host {
+                    None => Ok("There is nobody else here to ask.".to_string()),
+                    Some((from, to)) => {
+                        let (tell_me, answer) = tokio::sync::oneshot::channel();
+                        let sent = to.send(team::Wants {
+                            tool: name.clone(),
+                            args: args.clone(),
+                            from: from.clone(),
+                            answer: tell_me,
+                        });
+                        match sent {
+                            Err(_) => Ok("Nobody answered.".to_string()),
+                            Ok(()) => answer
+                                .await
+                                .unwrap_or_else(|_| Ok("Nobody answered.".to_string())),
+                        }
+                    }
+                },
                 _ if outside.knows(&name).is_some() => {
                     // A model can call something it has only seen the name of,
                     // and refusing on a technicality would be pedantry: it
@@ -658,6 +708,9 @@ fn one_line(s: &str) -> String {
 /// the server wrote for the model to read, and it is the best sentence anybody
 /// has about it.
 fn say_plainly(outside: &mcp::Servers, name: &str, args: &serde_json::Value) -> String {
+    if team::ours(name) {
+        return team::in_plain_words(name, args);
+    }
     match outside.knows(name) {
         None => tools::in_plain_words(name, args),
         Some(tool) => match tool.description.lines().next().map(str::trim) {
