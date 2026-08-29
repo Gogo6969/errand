@@ -34,7 +34,10 @@ function complain(why) {
   drawMessages();
 }
 
-const threads = new Map(); // id → { id, name, messages, working }
+const threads = new Map(); // id → agent, as asAgent builds one
+
+/// What an agent is called before it has settled on anything. Matches the store.
+const NOT_YET_NAMED = "New errand";
 let showing = null;
 
 const el = {
@@ -49,6 +52,13 @@ const el = {
   mark: document.getElementById("mark"),
   find: document.getElementById("find"),
   reach: document.getElementById("reach"),
+  pin: document.getElementById("pin"),
+  hide: document.getElementById("hide"),
+  whois: document.getElementById("whois"),
+  whoisName: document.getElementById("whois-name"),
+  whoisTitle: document.getElementById("whois-title"),
+  whoisAbout: document.getElementById("whois-about"),
+  whoisSave: document.getElementById("whois-save"),
   reachable: document.getElementById("reachable"),
 };
 
@@ -61,11 +71,14 @@ const el = {
  * halfway through its own job.
  */
 function kindFor(t) {
+  // What it chose for itself, where it has chosen. The guess below is only for
+  // an agent that has not been asked yet.
+  if (t.mark) return t.mark;
   if (t.kind) return t.kind;
   const asked = t.messages.find((m) => m.kind === "mine");
   // The name is the first few words of the request, which is the only thing
   // there is to go on for a thread that has been read back but not opened.
-  const words = asked ? asked.text : t.name === "New errand" ? "" : t.name;
+  const words = asked ? asked.text : t.name === NOT_YET_NAMED ? "" : t.name;
   if (!words) return "spark";
   t.kind = kindOf(words);
   return t.kind;
@@ -135,7 +148,7 @@ async function drawEngines(t) {
  */
 /** The open thread's own mark, which is the same mark as its row in the list. */
 function drawMark(t) {
-  el.mark.replaceChildren(tile(kindFor(t), t.working));
+  el.mark.replaceChildren(tile(kindFor(t), t.working, t.hue));
 }
 
 // ------------------------------------------------------------- threads --
@@ -148,7 +161,13 @@ async function start() {
   const id = uuid();
   threads.set(id, {
     id,
-    name: "New errand",
+    name: NOT_YET_NAMED,
+    title: "",
+    about: "",
+    mark: null,
+    hue: null,
+    pinned: false,
+    hidden: false,
     messages: [],
     working: false,
     engine: "",
@@ -171,19 +190,8 @@ async function start() {
  * forty threads should not wait for thirty-nine of them.
  */
 async function catchUp() {
-  const known = await invoke("threads");
-  for (const t of known) {
-    threads.set(t.id, {
-      id: t.id,
-      name: t.name,
-      messages: [],
-      working: false,
-      engine: t.model || "",
-      on: t.engine || "claude",
-      onSettings: t.engine_settings || null,
-      loaded: false,
-    });
-  }
+  const known = await invoke("agents");
+  for (const a of known) threads.set(a.id, asAgent(a));
   drawThreads();
   if (known.length) await open(known[0].id);
   else await start();
@@ -201,6 +209,33 @@ async function open(id) {
   await invoke("open_thread", { id });
   show(id);
   el.what.focus();
+}
+
+/**
+ * One agent, as the page holds it.
+ *
+ * The identity it settled on is kept apart from the guess: `mark` is what it
+ * chose and nothing means it has not been asked yet, which is when the guess
+ * from the words is the best there is.
+ */
+function asAgent(a, keeping) {
+  return {
+    id: a.id,
+    name: a.name,
+    title: a.title || "",
+    about: a.about || "",
+    mark: a.mark || null,
+    hue: a.hue || null,
+    pinned: !!a.pinned,
+    hidden: !!a.hidden,
+    engine: a.model || "",
+    on: a.engine || "claude",
+    onSettings: a.engine_settings || null,
+    messages: keeping?.messages ?? [],
+    working: keeping?.working ?? false,
+    loaded: keeping?.loaded ?? false,
+    kind: keeping?.kind,
+  };
 }
 
 /** One stored line, as the page holds it. */
@@ -237,7 +272,9 @@ function fromStore(line) {
 function show(id) {
   showing = id;
   const t = threads.get(id);
+  el.whois.hidden = true;
   drawMark(t);
+  drawPinned(t);
   el.name.textContent = t.name;
   drawEngines(t);
   drawThreads();
@@ -247,7 +284,11 @@ function show(id) {
 function drawThreads() {
   // Not `showing`, which is the thread that is open. Shadowing that here would
   // quietly stop every row knowing whether it is the current one.
-  const listed = [...threads.values()].filter((t) => !narrowedTo || narrowedTo.has(t.id));
+  // Hidden ones are out of the way, not gone: a search still finds them,
+  // because "where did that go" is exactly when somebody looks.
+  const listed = [...threads.values()].filter((t) =>
+    narrowedTo ? narrowedTo.has(t.id) : !t.hidden,
+  );
   if (!listed.length) {
     const none = document.createElement("li");
     none.className = "nothing";
@@ -260,13 +301,22 @@ function drawThreads() {
       const li = document.createElement("li");
       li.setAttribute("aria-current", String(t.id === showing));
       li.onclick = () => open(t.id);
-      li.append(tile(kindFor(t), t.working));
+      li.append(tile(kindFor(t), t.working, t.hue));
 
       const words = document.createElement("span");
       words.className = "words";
       const name = document.createElement("span");
       name.className = "name";
       name.textContent = t.name;
+      if (t.title) {
+        // The role, so a list of agents can be read at a glance rather than
+        // deciphered from names somebody's agents chose for themselves.
+        const role = document.createElement("span");
+        role.className = "role";
+        role.textContent = t.title;
+        name.append(role);
+      }
+      if (t.pinned) li.classList.add("pinned");
 
       const last = document.createElement("span");
       last.className = "last";
@@ -423,6 +473,25 @@ function thinking() {
 
 // ------------------------------------------------------- what happened --
 
+// An agent that has worked out what it is for. Arrives once, some seconds
+// after its first errand ends, and changes its name under the pointer -- which
+// is the intended effect: it is the moment it stops being "New errand".
+listen("settled", ({ payload }) => {
+  const [id, on] = payload;
+  const t = threads.get(id);
+  if (!t) return;
+  t.name = on.name;
+  t.title = on.title;
+  t.about = on.about;
+  t.mark = on.mark;
+  t.hue = on.hue;
+  if (id === showing) {
+    el.name.textContent = t.name;
+    drawMark(t);
+  }
+  drawThreads();
+});
+
 listen("happened", ({ payload }) => {
   const t = threads.get(payload.thread);
   if (!t) return;
@@ -482,10 +551,7 @@ listen("happened", ({ payload }) => {
 
     case "done":
       t.working = false;
-      if (t.name === "New errand") {
-        t.name = titleFrom(t);
-        invoke("call_it", { id: t.id, name: t.name });
-      }
+      // Naming is the agent's own job now, asked for after this by the app.
       break;
 
     case "failed":
@@ -542,13 +608,6 @@ function doneWith(m) {
   return row;
 }
 
-/** A thread is named after what was asked of it, since that is how it is remembered. */
-function titleFrom(t) {
-  const first = t.messages.find((m) => m.kind === "mine");
-  if (!first) return "New errand";
-  const words = first.text.trim().split(/\s+/).slice(0, 6).join(" ");
-  return words.length > 42 ? words.slice(0, 41) + "…" : words;
-}
 
 // -------------------------------------------------------------- saying --
 
@@ -701,20 +760,9 @@ async function look() {
   narrowedTo = new Set(found.map((t) => t.id));
   // A thread that has never been opened is not in the page's list yet, and a
   // search that finds one has to be able to show it.
-  for (const t of found) {
-    if (!threads.has(t.id)) {
-      threads.set(t.id, {
-        id: t.id,
-        name: t.name,
-        messages: [],
-        working: false,
-        engine: t.model || "",
-        on: t.engine || "claude",
-        onSettings: t.engine_settings || null,
-        loaded: false,
-      });
-    }
-  }
+  // An agent that has never been opened is not in the page's list yet, and a
+  // search that finds one has to be able to show it.
+  for (const a of found) threads.set(a.id, asAgent(a, threads.get(a.id)));
   drawThreads();
 }
 
@@ -822,6 +870,64 @@ function saying(text) {
   p.className = "server-what";
   p.textContent = text;
   return p;
+}
+
+/**
+ * Who this agent is, and a way to overrule it.
+ *
+ * It named itself, and it can be told otherwise: it is somebody's agent, not
+ * its own. Opened from its name, which is where anybody would look for this.
+ */
+el.name.addEventListener("click", () => {
+  const t = threads.get(showing);
+  if (!t) return;
+  if (!el.whois.hidden) {
+    el.whois.hidden = true;
+    return;
+  }
+  el.whoisName.value = t.name === NOT_YET_NAMED ? "" : t.name;
+  el.whoisTitle.value = t.title;
+  el.whoisAbout.value = t.about;
+  el.whois.hidden = false;
+  el.whoisName.focus();
+});
+
+el.whoisSave.addEventListener("click", async () => {
+  const t = threads.get(showing);
+  if (!t) return;
+  t.name = el.whoisName.value.trim() || NOT_YET_NAMED;
+  t.title = el.whoisTitle.value.trim();
+  t.about = el.whoisAbout.value.trim();
+  el.whois.hidden = true;
+  el.name.textContent = t.name;
+  drawThreads();
+  await invoke("rename", { id: t.id, name: t.name, title: t.title, about: t.about });
+});
+
+el.pin.addEventListener("click", async () => {
+  const t = threads.get(showing);
+  if (!t) return;
+  t.pinned = !t.pinned;
+  drawPinned(t);
+  drawThreads();
+  await invoke("pin", { id: t.id, pinned: t.pinned });
+});
+
+el.hide.addEventListener("click", async () => {
+  const t = threads.get(showing);
+  if (!t) return;
+  t.hidden = !t.hidden;
+  drawPinned(t);
+  drawThreads();
+  await invoke("hide", { id: t.id, hidden: t.hidden });
+});
+
+/** The two toggles, saying which way they are. */
+function drawPinned(t) {
+  el.pin.textContent = t.pinned ? "Pinned" : "Pin";
+  el.pin.setAttribute("aria-pressed", String(t.pinned));
+  el.hide.textContent = t.hidden ? "Hidden" : "Hide";
+  el.hide.setAttribute("aria-pressed", String(t.hidden));
 }
 
 el.new.addEventListener("click", start);

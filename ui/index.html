@@ -31,7 +31,9 @@
     <main>
       <header id="title">
         <span id="mark"></span>
-        <span id="thread-name">Nothing open</span>
+        <button id="thread-name" type="button" title="Who this is">Nothing open</button>
+        <button id="pin" type="button" title="Keep at the top">Pin</button>
+        <button id="hide" type="button" title="Out of the way, still running">Hide</button>
         <select id="engine" title="What answers this thread"></select>
         <button id="reach" type="button" title="What this thread can reach">Tools</button>
       </header>
@@ -40,6 +42,14 @@
         What the thread can reach, opened rather than always on screen: finding
         out means starting the servers to ask them, which takes seconds.
       -->
+      <!-- Who this agent is, and a way to overrule what it decided. -->
+      <aside id="whois" hidden>
+        <label>Name <input id="whois-name" type="text" autocomplete="off" /></label>
+        <label>Role <input id="whois-title" type="text" autocomplete="off" /></label>
+        <label>Handles <input id="whois-about" type="text" autocomplete="off" /></label>
+        <button id="whois-save" type="button">Save</button>
+      </aside>
+
       <aside id="reachable" hidden></aside>
 
       <ol id="messages" aria-live="polite"></ol>

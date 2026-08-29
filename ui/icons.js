@@ -83,13 +83,28 @@ export function icon(kind) {
  * mark that is already there is none. It is the same ring for every kind, so
  * "this one is busy" reads at a glance across the whole list.
  */
-export function tile(kind, working) {
+export function tile(kind, working, hue) {
   const box = document.createElement("span");
   box.className = `tile ${working ? "busy" : ""}`;
   box.dataset.kind = kind;
+  // The colour an agent chose for itself, where it chose one. Set inline
+  // because it beats the mark's own default, which is the whole point: two
+  // agents doing mail should be able to look different.
+  if (hue && HUES[hue]) box.style.setProperty("--hue", HUES[hue]);
   box.innerHTML = icon(kind);
   return box;
 }
+
+/// The colours an agent may pick from, by the names it is offered.
+const HUES = {
+  amber: "#e8a850",
+  blue: "#6fa8f5",
+  green: "#7fd07a",
+  purple: "#c4a2ef",
+  teal: "#63c7a6",
+  rose: "#e089b4",
+  gold: "#e8c250",
+};
 
 /**
  * The mark for one step, from the tool doing it.

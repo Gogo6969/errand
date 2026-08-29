@@ -593,3 +593,96 @@ body.catching #what { border-color: var(--accent); }
    the same as one that did, and the difference has to be visible. */
 .server.broken .server-name { color: #f0857d; }
 .server.broken .server-what { color: #c98079; }
+
+/* ------------------------------------------------------------- agents -- */
+
+/* The name is a control, because who an agent is can be changed. */
+#thread-name {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  padding: 3px 8px;
+  margin-left: -8px;
+  border-radius: 7px;
+  cursor: pointer;
+  max-width: 42ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#thread-name:hover { background: var(--card); border-color: var(--rule); }
+#thread-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+#pin, #hide {
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 11.5px;
+  padding: 3px 9px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+#pin:hover, #hide:hover { color: var(--ink); border-color: #4a5464; }
+#pin[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+#hide[aria-pressed="true"] { color: var(--ink); }
+#pin:focus-visible, #hide:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+#whois[hidden] { display: none; }
+#whois {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--side);
+}
+#whois label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  flex: 1 1 160px;
+}
+#whois label:nth-child(3) { flex: 3 1 320px; }
+#whois input {
+  padding: 6px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+#whois input:focus { outline: none; border-color: #38404d; }
+#whois-save {
+  padding: 7px 16px;
+  border-radius: 8px;
+  border: 0;
+  background: var(--accent);
+  color: #16181d;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+/* The role, beside the name, so a list of agents reads at a glance. */
+#threads .role {
+  margin-left: 6px;
+  font-weight: 400;
+  font-size: 11px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+/* Pinned ones are held at the top; the mark says so without a second icon. */
+#threads li.pinned .tile { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--hue) 55%, transparent); }

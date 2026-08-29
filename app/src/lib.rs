@@ -21,7 +21,8 @@ use std::sync::{Arc, Mutex};
 
 use errand_core::local::{find, LlmSettings, Local};
 use errand_core::mcp;
-use errand_core::{claude::Claude, Answer, Engine, Event, Line, Store, Thread};
+use errand_core::store::{Settled, NOT_YET_NAMED};
+use errand_core::{claude::Claude, Agent, Answer, Engine, Event, Line, Store};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -29,12 +30,22 @@ mod onscreen;
 
 /// Everything the window is holding: the conversations that are live, and the
 /// book they are all written into.
+/// An agent working out who it is, and what it has said while doing so.
+///
+/// Its words during this are not the person's business: they were asked for by
+/// the app, in the middle of somebody else's conversation, and putting them in
+/// the transcript would be putting our own question there under the agent's
+/// name. So while an id is in here, everything it says is collected and
+/// nothing is written down or shown.
+type Settling = Arc<Mutex<HashMap<String, String>>>;
+
 struct Held {
     /// Whatever is answering each open thread. Boxed rather than one concrete
     /// type because there are two engines now and the window is not told which
     /// it is talking to -- that is the whole point of the protocol, and it
     /// stops being true the moment this map knows.
     live: Mutex<HashMap<String, Box<dyn Engine + Send>>>,
+    settling: Settling,
     store: Arc<Store>,
 }
 
@@ -98,7 +109,7 @@ fn tell_them(app: &AppHandle, store: &Store, id: &str, event: &Event) {
 
 /// What a thread is called, or something honest if it is not called anything.
 fn called(store: &Store, id: &str) -> String {
-    match store.thread(id) {
+    match store.agent(id) {
         Ok(Some(t)) => t.name,
         _ => "Errand".to_string(),
     }
@@ -128,15 +139,15 @@ fn gist(said: &str) -> String {
     }
 }
 
-/// Every thread there has ever been, most recently spoken to first.
+/// Every agent there is: pinned first, then most recently spoken to.
 #[tauri::command]
-async fn threads(held: State<'_, Held>) -> Result<Vec<Thread>, String> {
-    held.store.threads().map_err(|e| e.to_string())
+async fn agents(held: State<'_, Held>) -> Result<Vec<Agent>, String> {
+    held.store.agents().map_err(|e| e.to_string())
 }
 
 /// The threads with something matching in them.
 #[tauri::command]
-async fn matching(held: State<'_, Held>, looking_for: String) -> Result<Vec<Thread>, String> {
+async fn matching(held: State<'_, Held>, looking_for: String) -> Result<Vec<Agent>, String> {
     held.store.matching(&looking_for).map_err(|e| e.to_string())
 }
 
@@ -158,7 +169,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
     // neither can be guessed at afterwards: resuming with the wrong flag is a
     // hard error, and resuming from the wrong directory quietly starts an empty
     // conversation wearing the same name.
-    let known = held.store.thread(&id).map_err(|e| e.to_string())?;
+    let known = held.store.agent(&id).map_err(|e| e.to_string())?;
     let on_engine = known
         .as_ref()
         .map_or_else(|| "claude".to_string(), |t| t.engine.clone());
@@ -204,8 +215,63 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
     // a window which reloads a moment later reads the same conversation it was
     // just shown.
     let store = held.store.clone();
+    let settling = held.settling.clone();
     std::thread::spawn(move || {
         while let Ok(event) = events.recv() {
+            // An agent in the middle of settling on a name is answering us, not
+            // whoever is at the window.
+            if settling.lock().unwrap().contains_key(&id) {
+                match &event {
+                    Event::Said {
+                        text,
+                        settled: true,
+                    } => {
+                        settling
+                            .lock()
+                            .unwrap()
+                            .entry(id.clone())
+                            .and_modify(|so_far| {
+                                so_far.push_str(text);
+                                so_far.push('\n');
+                            });
+                    }
+                    Event::Done { .. } | Event::Failed { .. } => {
+                        let said = settling.lock().unwrap().remove(&id).unwrap_or_default();
+                        if let Some(on) = read_what_it_settled_on(&said) {
+                            if let Err(e) = store.settled_on(&id, &on) {
+                                eprintln!("could not write down who {id} is: {e}");
+                            } else {
+                                let _ = app.emit("settled", (&id, &on));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            // The first errand is finished and nobody has named this yet. Ask
+            // it who it is, now that it knows what the job was.
+            if matches!(event, Event::Done { .. })
+                && store
+                    .agent(&id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|a| a.name == NOT_YET_NAMED)
+            {
+                settling.lock().unwrap().insert(id.clone(), String::new());
+                let asked = {
+                    let held: State<Held> = app.state();
+                    let mut live = held.live.lock().unwrap();
+                    live.get_mut(&id).map(|engine| engine.say(WHO_ARE_YOU))
+                };
+                // Nothing to ask, or it would not take the question. Either
+                // way it keeps the name it has and is asked again next time.
+                if !matches!(asked, Some(Ok(()))) {
+                    settling.lock().unwrap().remove(&id);
+                }
+            }
+
             if let Err(e) = store.happened(&id, &event) {
                 // Losing a line is not worth ending the conversation over, but
                 // it must not pass in silence either.
@@ -355,6 +421,82 @@ async fn use_engine(
         .map_err(|e| e.to_string())
 }
 
+/// What an agent is asked once it has done its first errand.
+///
+/// After rather than before, and that is the whole design. Grok Bot asks a new
+/// bot what it is for and it names itself from the answer; asking here before
+/// anything has happened would mean an interview standing between somebody and
+/// the thing they came to get done. So the first errand runs, and then it is
+/// asked to look at what it just did and say who it is.
+///
+/// One line, because parsing anything an agent writes is a fight, and a fight
+/// that is lost silently: a name that comes back wrapped in an apology becomes
+/// the agent's name. Five fields, fixed vocabularies for the two that the
+/// window has to draw, and a demand for nothing else.
+const WHO_ARE_YOU: &str = "\
+Before anything else: you are a standing agent, not a one-off. Somebody will \
+come back to you for this kind of job again. Settle on who you are, from the \
+errand you just did.\n\n\
+Reply with ONE line and nothing else, five fields separated by |\n\n\
+name | title | about | mark | hue\n\n\
+name: two or three words somebody would call you, like a colleague. Not a \
+sentence, not \"Errand\", not the request you were given.\n\
+title: one word for the role. Mail, Research, Files, Money, Code, Travel.\n\
+about: one sentence, what you handle, in your own words.\n\
+mark: exactly one of mail clock chart search folder image code globe bag pen \
+chat person list terminal helper bell spark\n\
+hue: exactly one of amber blue green purple teal rose gold\n\n\
+No preamble, no explanation, no quotes. Just the line.";
+
+/// Read back what it settled on, if it answered the way it was asked to.
+///
+/// Strict about the two fields the window draws and forgiving about the three
+/// it only shows: an unrecognised mark would be an agent with no face, while an
+/// over-long name is merely an agent with an over-long name.
+///
+/// Returns nothing at all rather than a half-filled identity. An agent that
+/// answered in prose keeps the name it had, and gets asked again next time,
+/// which is a better outcome than being called "Certainly! Here is".
+fn read_what_it_settled_on(said: &str) -> Option<Settled> {
+    const MARKS: &[&str] = &[
+        "mail", "clock", "chart", "search", "folder", "image", "code", "globe", "bag", "pen",
+        "chat", "person", "list", "terminal", "helper", "bell", "spark",
+    ];
+    const HUES: &[&str] = &["amber", "blue", "green", "purple", "teal", "rose", "gold"];
+
+    let line = said
+        .lines()
+        .map(str::trim)
+        .find(|l| l.matches('|').count() >= 4)?;
+    let mut fields = line.splitn(5, '|').map(str::trim);
+
+    let name = fields
+        .next()?
+        .trim_matches(['"', '*', '#', ' '])
+        .to_string();
+    let title = fields.next()?.to_string();
+    let about = fields.next()?.to_string();
+    let mark = fields.next()?.to_lowercase();
+    let hue = fields.next()?.to_lowercase();
+
+    if name.is_empty() || name.len() > 60 {
+        return None;
+    }
+    Some(Settled {
+        name,
+        title: title.chars().take(24).collect(),
+        about: about.chars().take(200).collect(),
+        // A mark it invented is not one the window can draw, so the guess from
+        // the words stands instead.
+        mark: MARKS.iter().find(|m| mark.contains(**m))?.to_string(),
+        hue: HUES
+            .iter()
+            .find(|h| hue.contains(**h))
+            .unwrap_or(&"amber")
+            .to_string(),
+    })
+}
+
 /// Open a link somewhere that is not this window.
 ///
 /// A link followed inside the webview replaces the app with a web page and
@@ -415,7 +557,7 @@ struct Outside {
 async fn outside(held: State<'_, Held>, id: String) -> Result<Vec<Outside>, String> {
     let home = held
         .store
-        .thread(&id)
+        .agent(&id)
         .map_err(|e| e.to_string())?
         .map(|t| std::path::PathBuf::from(t.cwd))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -446,10 +588,37 @@ async fn outside(held: State<'_, Held>, id: String) -> Result<Vec<Outside>, Stri
         .collect())
 }
 
-/// Give a thread the name it will be remembered by.
+/// Change an agent's identity by hand, whatever it settled on.
+///
+/// It named itself and it can be overruled: it is somebody's agent, not its
+/// own. Nothing here is required, and an empty field simply becomes empty.
 #[tauri::command]
-async fn call_it(held: State<'_, Held>, id: String, name: String) -> Result<(), String> {
-    held.store.call_it(&id, &name).map_err(|e| e.to_string())
+async fn rename(
+    held: State<'_, Held>,
+    id: String,
+    name: String,
+    title: String,
+    about: String,
+) -> Result<(), String> {
+    held.store
+        .rename(&id, &name, &title, &about)
+        .map_err(|e| e.to_string())
+}
+
+/// Keep an agent at the top of the list, or stop.
+#[tauri::command]
+async fn pin(held: State<'_, Held>, id: String, pinned: bool) -> Result<(), String> {
+    held.store.pin(&id, pinned).map_err(|e| e.to_string())
+}
+
+/// Take an agent out of the list without stopping it.
+///
+/// Different from forgetting one, and the difference matters: a hidden agent
+/// still holds its conversation and still runs whatever it runs. It is out of
+/// the way, not gone.
+#[tauri::command]
+async fn hide(held: State<'_, Held>, id: String, hidden: bool) -> Result<(), String> {
+    held.store.hide(&id, hidden).map_err(|e| e.to_string())
 }
 
 /// Stop it, whatever it is in the middle of. The thread itself is kept.
@@ -478,13 +647,14 @@ pub fn run() {
             let store = Store::open(&errand_core::store::beside(&here))?;
             app.manage(Held {
                 live: Mutex::new(HashMap::new()),
+                settling: Settling::default(),
                 store: Arc::new(store),
             });
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            threads,
+            agents,
             matching,
             lines,
             open_thread,
@@ -494,7 +664,9 @@ pub fn run() {
             use_engine,
             outside,
             show_in_browser,
-            call_it,
+            rename,
+            pin,
+            hide,
             stop,
             forget
         ])
@@ -521,6 +693,73 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_that_answered_the_way_it_was_asked_to_gets_the_identity_it_chose() {
+        let on = read_what_it_settled_on(
+            "Scribe | Mail | I read your inbox and draft the replies. | mail | blue",
+        )
+        .expect("a clean answer");
+        assert_eq!(on.name, "Scribe");
+        assert_eq!(on.title, "Mail");
+        assert_eq!(on.mark, "mail");
+        assert_eq!(on.hue, "blue");
+    }
+
+    #[test]
+    fn the_line_is_found_among_whatever_else_it_decided_to_say() {
+        // It was asked for one line and nothing else. It will not always
+        // comply, and the compliance is not the point: the line is.
+        let on = read_what_it_settled_on(
+            "Sure! Here is my identity:\n\n             Ledger | Money | I keep an eye on the accounts. | chart | green\n\n             Let me know if you would like anything changed.",
+        )
+        .expect("the line is in there");
+        assert_eq!(on.name, "Ledger");
+        assert_eq!(on.mark, "chart");
+    }
+
+    #[test]
+    fn an_agent_that_answered_in_prose_keeps_the_name_it_had() {
+        // Rather than being called "Certainly! I would be happy to". Nothing
+        // back means nothing written, and it is asked again next time.
+        assert!(read_what_it_settled_on("Certainly! I would be happy to help.").is_none());
+        assert!(read_what_it_settled_on("").is_none());
+        assert!(
+            read_what_it_settled_on("Scribe | Mail").is_none(),
+            "half an answer"
+        );
+    }
+
+    #[test]
+    fn a_mark_the_window_cannot_draw_is_refused_and_a_hue_it_cannot_is_not() {
+        // An unrecognised mark would leave an agent with no face, so the guess
+        // from the words stands instead. A colour is only a colour.
+        assert!(
+            read_what_it_settled_on("Atlas | Travel | Flights. | aeroplane | blue").is_none(),
+            "there is no aeroplane to draw"
+        );
+        let on = read_what_it_settled_on("Atlas | Travel | Flights. | bag | chartreuse")
+            .expect("the mark is fine");
+        assert_eq!(
+            on.hue, "amber",
+            "an unknown colour falls back rather than failing"
+        );
+    }
+
+    #[test]
+    fn a_name_wrapped_in_the_decoration_models_like_is_unwrapped() {
+        let on = read_what_it_settled_on("**Scribe** | Mail | Inbox. | mail | blue").expect("fine");
+        assert_eq!(on.name, "Scribe");
+        let quoted =
+            read_what_it_settled_on("\"Scribe\" | Mail | Inbox. | mail | blue").expect("fine");
+        assert_eq!(quoted.name, "Scribe");
+    }
+
+    #[test]
+    fn a_name_long_enough_to_be_a_sentence_is_not_a_name() {
+        let rambling = format!("{} | Mail | Inbox. | mail | blue", "word ".repeat(30));
+        assert!(read_what_it_settled_on(&rambling).is_none());
+    }
 
     #[test]
     fn an_ordinary_link_is_handed_to_the_browser() {
