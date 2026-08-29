@@ -40,6 +40,42 @@ function complain(why) {
 // one `showing` id, which quietly answered two different questions -- whose
 // name is in the header, and whose messages are on screen -- and gave the same
 // answer to both. That is fine until an agent has a second conversation.
+/**
+ * Light, dark, or whatever the Mac is set to.
+ *
+ * Kept in the window's own storage rather than the store, because it is a fact
+ * about this screen and not about the work: two people on two machines looking
+ * at the same agents should not have to agree about it. Applied before the
+ * first draw, so nothing ever flashes the wrong theme on the way in.
+ *
+ * "System" is the default and stamps nothing, so the palette in the stylesheet
+ * follows `prefers-color-scheme` on its own.
+ */
+const LOOKS = ["system", "dark", "light"];
+
+function looksLike() {
+  try {
+    const kept = localStorage.getItem("looks");
+    return LOOKS.includes(kept) ? kept : "system";
+  } catch {
+    // A window with no storage still has to draw.
+    return "system";
+  }
+}
+
+function lookLike(how) {
+  const root = document.documentElement;
+  if (how === "system") root.removeAttribute("data-theme");
+  else root.setAttribute("data-theme", how);
+  try {
+    localStorage.setItem("looks", how);
+  } catch {
+    // Not worth failing over. It will be right until the window closes.
+  }
+}
+
+lookLike(looksLike());
+
 const agents = new Map(); // agent id → identity, engine, pinned, hidden
 const talks = new Map(); // conversation id → { id, agent, name, messages, working, loaded }
 
@@ -1330,6 +1366,14 @@ function whatCouldBeDone() {
   add("Make this run on a schedule", "", () => el.repeat.click(), !!showing);
   add("Look for models on the network", "takes a moment", () => a && lookWider(a), !!a);
   add("Check this setup", "what is wrong, and what to do", () => checkup());
+  for (const how of LOOKS) {
+    add(
+      `Look ${how === "system" ? "however the Mac does" : how}`,
+      looksLike() === how ? "in use" : "",
+      () => lookLike(how),
+      looksLike() !== how,
+    );
+  }
   add("Stop what it is doing", "", () => invoke("stop", { id: showing }), !!t?.working);
   return could;
 }

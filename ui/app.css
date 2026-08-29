@@ -4,16 +4,118 @@
   answer in always in the same place at the bottom.
 */
 
+/*
+  Two palettes and nothing else. Every colour in this file comes from a token
+  below, so a second theme is a second block rather than a second stylesheet
+  that drifts. The rule that keeps it true: no colour is written anywhere but
+  here, because the moment one is, it is right in one theme and wrong in the
+  other and nobody finds out until somebody switches.
+
+  The light values are named once and then pointed at from the two places that
+  need them, rather than written out twice. Two copies of a palette is two
+  palettes eventually, and the second one is always the one nobody looks at.
+*/
 :root {
+  /* Light, named but not in use unless one of the two blocks below says so.
+     Not an inversion of the dark set: the greys are warmed the way the dark
+     ones are cooled, and the accent is darkened, because #e8a850 on white is
+     a colour you cannot read. */
+  --l-bg: #fbfaf8;
+  --l-side: #f2f0ec;
+  --l-card: #ffffff;
+  --l-mine: #e6e9ef;
+  --l-ink: #1b1e24;
+  --l-ink-soft: #5f6672;
+  --l-faint: #8a909c;
+  --l-rule: #e2ded6;
+  --l-hover: #eae7e1;
+  --l-edge: #c3c8d2;
+  --l-accent: #a8690f;
+  --l-accent-lit: #8f580a;
+  --l-on-accent: #ffffff;
+  --l-wrong: #b3352c;
+  --l-wrong-soft: #8f4a44;
+  --l-good: #2f7a35;
+  --l-behind: rgba(40, 36, 30, .28);
+  --l-cast: 0 20px 50px rgba(60, 52, 40, .22);
+
+  /* Dark, and in use by default. The plain block, because that is what this
+     app was, and a window must not change under somebody who never asked for
+     a theme. */
   --bg: #16181d;
   --side: #101216;
   --card: #1e222a;
   --mine: #2c333f;
   --ink: #e6e8ec;
   --ink-soft: #9aa2b1;
+  --faint: #6f7686;
   --rule: #262b34;
+  --hover: #171a20;
+  --edge: #38404d;
   --accent: #e8a850;
+  --accent-lit: #f0b45e;
+  /* Text on top of the accent, the one colour that has to invert with the
+     theme rather than stay put. */
+  --on-accent: #16181d;
+  --wrong: #f0857d;
+  --wrong-soft: #c98079;
+  --good: #7fd07a;
+  /* Behind the palette, and the shadow it casts. */
+  --behind: rgba(8, 9, 12, .55);
+  --cast: 0 24px 60px rgba(0, 0, 0, .5);
   color-scheme: dark;
+}
+
+/*
+  The one assignment block, reached two ways: by a Mac set to light where
+  nobody has chosen otherwise, and by somebody choosing light outright. Three
+  states rather than two, and the middle one is the default: choosing nothing
+  stamps nothing, so the Mac decides.
+*/
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: var(--l-bg);
+    --side: var(--l-side);
+    --card: var(--l-card);
+    --mine: var(--l-mine);
+    --ink: var(--l-ink);
+    --ink-soft: var(--l-ink-soft);
+    --faint: var(--l-faint);
+    --rule: var(--l-rule);
+    --hover: var(--l-hover);
+    --edge: var(--l-edge);
+    --accent: var(--l-accent);
+    --accent-lit: var(--l-accent-lit);
+    --on-accent: var(--l-on-accent);
+    --wrong: var(--l-wrong);
+    --wrong-soft: var(--l-wrong-soft);
+    --good: var(--l-good);
+    --behind: var(--l-behind);
+    --cast: var(--l-cast);
+    color-scheme: light;
+  }
+}
+
+:root[data-theme="light"] {
+  --bg: var(--l-bg);
+  --side: var(--l-side);
+  --card: var(--l-card);
+  --mine: var(--l-mine);
+  --ink: var(--l-ink);
+  --ink-soft: var(--l-ink-soft);
+  --faint: var(--l-faint);
+  --rule: var(--l-rule);
+  --hover: var(--l-hover);
+  --edge: var(--l-edge);
+  --accent: var(--l-accent);
+  --accent-lit: var(--l-accent-lit);
+  --on-accent: var(--l-on-accent);
+  --wrong: var(--l-wrong);
+  --wrong-soft: var(--l-wrong-soft);
+  --good: var(--l-good);
+  --behind: var(--l-behind);
+  --cast: var(--l-cast);
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }
@@ -71,7 +173,7 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   align-items: center;
 }
 #threads .words { min-width: 0; }
-#threads li:hover { background: #171a20; }
+#threads li:hover { background: var(--hover); }
 #threads li[aria-current="true"] { background: var(--card); }
 
 #threads .name {
@@ -319,13 +421,13 @@ main > aside, main > #title, main > #composer { flex: none; }
 /* A step that has not answered yet has not finished, and reads as still going. */
 .doing.running .what { color: var(--ink); }
 .doing .outcome {
-  color: #6f7686;
+  color: var(--faint);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
 }
 
 .ended { color: var(--ink-soft); font-size: 12.5px; padding-left: 4px; }
-.failed { color: #f0857d; }
+.failed { color: var(--wrong); }
 
 /* Working, so that a pause reads as thought rather than as a hang. */
 .thinking { display: flex; gap: 5px; padding: 6px 4px; }
@@ -360,7 +462,7 @@ main > aside, main > #title, main > #composer { flex: none; }
   color: var(--ink);
   font: inherit;
 }
-#what:focus { outline: none; border-color: #38404d; }
+#what:focus { outline: none; border-color: var(--edge); }
 
 #send {
   width: 36px;
@@ -368,7 +470,7 @@ main > aside, main > #title, main > #composer { flex: none; }
   border-radius: 10px;
   border: 0;
   background: var(--accent);
-  color: #16181d;
+  color: var(--on-accent);
   font-size: 16px;
   cursor: pointer;
 }
@@ -426,16 +528,16 @@ main > aside, main > #title, main > #composer { flex: none; }
   font-size: 13px;
   cursor: pointer;
 }
-.choices button:hover { border-color: #4a5464; }
+.choices button:hover { border-color: var(--edge); }
 .choices button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .choices .yes {
   background: var(--accent);
   border-color: var(--accent);
-  color: #16181d;
+  color: var(--on-accent);
   font-weight: 500;
 }
-.choices .yes:hover { background: #f0b45e; border-color: #f0b45e; }
+.choices .yes:hover { background: var(--accent-lit); border-color: var(--accent-lit); }
 .choices .no { color: var(--ink-soft); }
 
 /* Answered, and kept. What you allowed is worth being able to look back at. */
@@ -591,7 +693,7 @@ main > aside, main > #title, main > #composer { flex: none; }
   font-size: 12.5px;
 }
 #find::placeholder { color: var(--faint, var(--ink-soft)); opacity: .7; }
-#find:focus { outline: none; border-color: #38404d; }
+#find:focus { outline: none; border-color: var(--edge); }
 #find::-webkit-search-cancel-button { filter: grayscale(1) opacity(.5); }
 
 /* Said rather than shown as an empty list, which reads as a broken sidebar. */
@@ -627,7 +729,7 @@ main > aside, main > #title, main > #composer { flex: none; }
   border-radius: 6px;
   cursor: pointer;
 }
-.did-with button:hover { color: var(--ink); border-color: #4a5464; }
+.did-with button:hover { color: var(--ink); border-color: var(--edge); }
 .did-with button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 @media (prefers-reduced-motion: reduce) { .did-with { transition: none; } }
@@ -649,7 +751,7 @@ body.catching #what { border-color: var(--accent); }
   border-radius: 7px;
   cursor: pointer;
 }
-#reach:hover { color: var(--ink); border-color: #4a5464; }
+#reach:hover { color: var(--ink); border-color: var(--edge); }
 #reach:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* `display` beats `hidden`, so the attribute has to be honoured explicitly or
@@ -684,8 +786,8 @@ body.catching #what { border-color: var(--accent); }
 }
 /* A server that did not start is not an error to apologise for, but it is not
    the same as one that did, and the difference has to be visible. */
-.server.broken .server-name { color: #f0857d; }
-.server.broken .server-what { color: #c98079; }
+.server.broken .server-name { color: var(--wrong); }
+.server.broken .server-what { color: var(--wrong-soft); }
 
 /* ------------------------------------------------------------- agents -- */
 
@@ -718,7 +820,7 @@ body.catching #what { border-color: var(--accent); }
   border-radius: 7px;
   cursor: pointer;
 }
-#pin:hover, #hide:hover { color: var(--ink); border-color: #4a5464; }
+#pin:hover, #hide:hover { color: var(--ink); border-color: var(--edge); }
 #pin[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 #hide[aria-pressed="true"] { color: var(--ink); }
 #pin:focus-visible, #hide:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -755,13 +857,13 @@ body.catching #what { border-color: var(--accent); }
   text-transform: none;
   letter-spacing: 0;
 }
-#whois input:focus { outline: none; border-color: #38404d; }
+#whois input:focus { outline: none; border-color: var(--edge); }
 #whois-save {
   padding: 7px 16px;
   border-radius: 8px;
   border: 0;
   background: var(--accent);
-  color: #16181d;
+  color: var(--on-accent);
   font: inherit;
   font-size: 13px;
   font-weight: 500;
@@ -815,7 +917,7 @@ body.catching #what { border-color: var(--accent); }
   border-radius: 7px;
   cursor: pointer;
 }
-#repeat:hover { color: var(--ink); border-color: #4a5464; }
+#repeat:hover { color: var(--ink); border-color: var(--edge); }
 #repeat:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 #routine[hidden] { display: none; }
@@ -850,13 +952,13 @@ body.catching #what { border-color: var(--accent); }
   text-transform: none;
   letter-spacing: 0;
 }
-#routine input:focus { outline: none; border-color: #38404d; }
+#routine input:focus { outline: none; border-color: var(--edge); }
 #routine-save {
   padding: 7px 16px;
   border-radius: 8px;
   border: 0;
   background: var(--accent);
-  color: #16181d;
+  color: var(--on-accent);
   font: inherit;
   font-size: 13px;
   font-weight: 500;
@@ -872,7 +974,7 @@ body.catching #what { border-color: var(--accent); }
   font-size: 13px;
   cursor: pointer;
 }
-#routine-stop:hover { color: var(--ink); border-color: #4a5464; }
+#routine-stop:hover { color: var(--ink); border-color: var(--edge); }
 /* What it says back: when it next runs, or why what was typed is not a time. */
 #routine-says {
   flex: 1 0 100%;
@@ -893,7 +995,7 @@ body.catching #what { border-color: var(--accent); }
   border-radius: 7px;
   cursor: pointer;
 }
-#granted:hover { color: var(--ink); border-color: #4a5464; }
+#granted:hover { color: var(--ink); border-color: var(--edge); }
 #granted:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 #granting[hidden] { display: none; }
@@ -953,7 +1055,7 @@ body.catching #what { border-color: var(--accent); }
   border-radius: 6px;
   cursor: pointer;
 }
-#allowed button:hover { color: #f0857d; border-color: #f0857d; }
+#allowed button:hover { color: var(--wrong); border-color: var(--wrong); }
 
 /* ---------------------------------------------------------- palette -- */
 
@@ -965,7 +1067,7 @@ body.catching #what { border-color: var(--accent); }
 #palette {
   position: fixed;
   inset: 0;
-  background: rgba(8, 9, 12, .55);
+  background: var(--behind);
   display: flex;
   justify-content: center;
   align-items: flex-start;
@@ -977,7 +1079,7 @@ body.catching #what { border-color: var(--accent); }
   background: var(--card);
   border: 1px solid var(--rule);
   border-radius: 14px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, .5);
+  box-shadow: var(--cast);
   overflow: hidden;
 }
 #palette-what {
@@ -1035,5 +1137,5 @@ body.catching #what { border-color: var(--accent); }
 /* What to do about it, which is the half that makes a diagnostic useful. */
 .finding-fix { margin: 3px 0 0; font-size: 12.5px; color: var(--ink-soft); border-left: 2px solid var(--rule); padding-left: 9px; overflow-wrap: anywhere; }
 .finding[data-how="odd"] .finding-what { color: var(--accent); }
-.finding[data-how="broken"] .finding-what { color: #f0857d; }
-.finding[data-how="broken"] .finding-fix { border-left-color: #f0857d; }
+.finding[data-how="broken"] .finding-what { color: var(--wrong); }
+.finding[data-how="broken"] .finding-fix { border-left-color: var(--wrong); }

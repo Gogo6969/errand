@@ -171,6 +171,91 @@ export async function setupCheck() {
   return found;
 }
 
+/**
+ * Both themes, and the thing that goes wrong with a second one.
+ *
+ * The failure this guards is not "light looks bad", it is a colour written
+ * somewhere other than the token block: right in one theme, invisible in the
+ * other, and nobody finds out until somebody switches.
+ */
+export function themes() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const root = document.documentElement;
+  const was = root.getAttribute("data-theme");
+
+  const paint = () => {
+    const on = getComputedStyle(document.body);
+    return { bg: on.backgroundColor, ink: on.color };
+  };
+
+  root.setAttribute("data-theme", "dark");
+  const dark = paint();
+  root.setAttribute("data-theme", "light");
+  const light = paint();
+
+  check(
+    "the two themes are actually different",
+    dark.bg !== light.bg && dark.ink !== light.ink,
+    `${dark.bg} vs ${light.bg}`,
+  );
+
+  // The one that matters: readable text in both. A token defined only in the
+  // dark block leaves light-on-light or dark-on-dark, which is what an
+  // unreadable window is made of.
+  const brightness = (rgb) => {
+    const [r, g, b] = (rgb.match(/\d+/g) || [0, 0, 0]).map(Number);
+    return (r * 299 + g * 587 + b * 114) / 1000;
+  };
+  for (const [name, seen] of [["dark", dark], ["light", light]]) {
+    check(
+      `text is readable against the page in ${name}`,
+      Math.abs(brightness(seen.ink) - brightness(seen.bg)) > 90,
+      `ink ${seen.ink} on ${seen.bg}`,
+    );
+  }
+  check(
+    "light is actually light and dark is actually dark",
+    brightness(light.bg) > 150 && brightness(dark.bg) < 90,
+    `light ${Math.round(brightness(light.bg))}, dark ${Math.round(brightness(dark.bg))}`,
+  );
+
+  // Nothing may name a colour outside the token block, in any rule.
+  let written = [];
+  for (const sheet of document.styleSheets) {
+    let rules;
+    try {
+      rules = sheet.cssRules;
+    } catch {
+      continue;
+    }
+    const walk = (list) => {
+      for (const rule of list) {
+        if (rule.cssRules) {
+          walk(rule.cssRules);
+          continue;
+        }
+        const where = rule.selectorText || "";
+        if (/^:root/.test(where) || where.includes("data-kind")) continue;
+        const text = rule.style?.cssText || "";
+        // Masks are drawn with a colour that is never seen.
+        const found = text.replace(/mask[^;]*/g, "").match(/#[0-9a-fA-F]{3,8}\b|\brgba?\(/g);
+        if (found) written.push(`${where}: ${found.join(" ")}`);
+      }
+    };
+    walk(rules);
+  }
+  check(
+    "no colour is written outside the token block",
+    written.length === 0,
+    written.slice(0, 3).join(" | ") || "none",
+  );
+
+  if (was) root.setAttribute("data-theme", was);
+  else root.removeAttribute("data-theme");
+  return found;
+}
+
 /** Everything in the header on one row, which is what a header is. */
 export function headerFitsOnOneRow() {
   const title = document.getElementById("title");
