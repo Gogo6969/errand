@@ -332,6 +332,13 @@ impl Claude {
                 match asks {
                     "auto" => "bypassPermissions",
                     "edits" => "acceptEdits",
+                    // Work the job out and come back with the plan, having
+                    // changed nothing. The posture somebody wants for an errand
+                    // whose shape they are not sure of yet: it reads, it looks
+                    // things up, and then it says what it would do, which is a
+                    // thing you can argue with before it happens rather than
+                    // after.
+                    "plan" => "plan",
                     _ => "default",
                 },
                 "--allowedTools",
@@ -573,6 +580,48 @@ pub fn read(line: &str) -> Vec<Event> {
     let at = |k: &str| v.get(k).and_then(|s| s.as_str()).unwrap_or("").to_string();
 
     match at("type").as_str() {
+        // Claude Code has made room for itself, which it does on its own and
+        // said nothing about until now.
+        //
+        // Worth showing for the same reason the local engine's version is: an
+        // agent that has quietly summarised away the first half of a
+        // conversation is indistinguishable from one that read it and ignored
+        // it, and the person is left re-explaining something they are certain
+        // they said. `trigger` tells apart the one it decided on from one
+        // somebody asked for, and only the first is a surprise.
+        "system" if at("subtype") == "compact_boundary" => {
+            let how = v
+                .pointer("/compact_metadata/trigger")
+                .and_then(|t| t.as_str())
+                .unwrap_or("auto");
+            let before = v
+                .pointer("/compact_metadata/pre_tokens")
+                .and_then(serde_json::Value::as_u64);
+            let call = format!("room-{}", before.unwrap_or_default());
+            vec![
+                Event::Doing(Step {
+                    what: match how {
+                        "manual" => "Making room, as asked".to_string(),
+                        _ => "Making room: this conversation had filled up what it can hold"
+                            .to_string(),
+                    },
+                    tool: "context".into(),
+                    call: call.clone(),
+                }),
+                Event::Did {
+                    call,
+                    outcome: match before {
+                        Some(n) => format!(
+                            "It kept a summary of the first {n} tokens instead of the words. \
+                             All of it is still written down here, and still in the export."
+                        ),
+                        None => "It kept a summary instead of the words. All of it is still \
+                                 written down here, and still in the export."
+                            .to_string(),
+                    },
+                },
+            ]
+        }
         // A step that has stopped and is waiting to be allowed.
         "control_request" => match a_question(line) {
             Some((call, request)) => {
@@ -712,6 +761,22 @@ fn block(b: &serde_json::Value) -> Option<Event> {
                 settled: true,
             })
         }
+        // A plan is an answer, not a step. It is the thing the errand was for,
+        // and Claude Code otherwise files it under ~/.claude/plans where the
+        // person who asked for it will never look.
+        "tool_use" if b.get("name")?.as_str()? == "ExitPlanMode" => {
+            let plan = b
+                .pointer("/input/plan")
+                .and_then(|p| p.as_str())
+                .unwrap_or_default();
+            match plan.trim().is_empty() {
+                true => None,
+                false => Some(Event::Said {
+                    text: plan.to_string(),
+                    settled: true,
+                }),
+            }
+        }
         "tool_use" => {
             let tool = b.get("name")?.as_str()?.to_string();
             // Converted here for the same reason it is converted for a
@@ -775,6 +840,10 @@ fn in_plain_words(tool: &str, input: Option<&serde_json::Value>) -> String {
         },
         "WebFetch" | "WebSearch" => "Looking something up on the web".into(),
         "Task" => "Handing part of this to a helper".into(),
+        // The end of a plan, and the moment somebody is asked whether to
+        // start. Named for what it is rather than for the function, because
+        // "Using ExitPlanMode" is the machinery and the plan is the point.
+        "ExitPlanMode" => "Here is the plan".into(),
         other => format!("Using {other}"),
     }
 }
@@ -799,6 +868,10 @@ fn the_thing_itself(tool: &str, input: Option<&serde_json::Value>) -> String {
         "Read" | "Write" | "Edit" | "NotebookEdit" => field("file_path"),
         "WebFetch" => field("url"),
         "WebSearch" => field("query"),
+        // The plan itself, which is the whole of what is being agreed to.
+        // Without this the card shows the raw arguments, and somebody is asked
+        // to approve a plan by reading it as JSON.
+        "ExitPlanMode" => field("plan"),
         _ => None,
     }
     .unwrap_or_else(|| {
@@ -1025,6 +1098,87 @@ mod tests {
         assert!(
             found,
             "the transcript was on disk and it still wanted to start as new"
+        );
+    }
+
+    #[test]
+    fn a_plan_arrives_in_the_conversation_rather_than_in_a_file_nobody_opens() {
+        // Claude Code files a plan under ~/.claude/plans and ends the turn.
+        // Watched once, that reads as an errand that did nothing at all: no
+        // files changed, which is right, and nothing said, which is not.
+        const PLANNED: &str = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_9","name":"ExitPlanMode","input":{"plan":"1. Read the folder\n2. Write the three files"}}]}}"#;
+        let said = read(PLANNED);
+        let Some(Event::Said { text, settled }) = said.first() else {
+            panic!("the plan was not said: {said:?}");
+        };
+        assert!(
+            *settled,
+            "a plan arriving a word at a time is not an answer"
+        );
+        assert!(text.contains("1. Read the folder"), "{text}");
+    }
+
+    #[test]
+    fn being_asked_to_start_shows_the_plan_and_not_its_arguments() {
+        // Somebody agreeing to a plan has to be able to read it. The default
+        // arm renders the raw arguments, which is JSON.
+        const ASKED: &str = r#"{"type":"control_request","request_id":"p1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"Write three files, then check them."},"tool_use_id":"toolu_9"}}"#;
+        let Event::NeedsYou(ask) = &read(ASKED)[0] else {
+            panic!("it was not a question");
+        };
+        assert_eq!(ask.asking, "Here is the plan");
+        assert_eq!(ask.detail, "Write three files, then check them.");
+    }
+
+    #[test]
+    fn making_room_is_shown_rather_than_done_in_silence() {
+        // The failure this prevents: an agent that has summarised away the
+        // first half of a conversation looks exactly like one that read it and
+        // ignored it, and the person re-explains something they know they said.
+        const MADE_ROOM: &str = r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":142000,"post_tokens":18000}}"#;
+        let said = read(MADE_ROOM);
+        assert_eq!(
+            said.len(),
+            2,
+            "a step with no outcome reads as a step that hung"
+        );
+
+        let Event::Doing(step) = &said[0] else {
+            panic!("it was not shown as something being done");
+        };
+        assert!(step.what.contains("Making room"), "{}", step.what);
+        assert_eq!(step.tool, "context");
+
+        let Event::Did { outcome, call } = &said[1] else {
+            panic!("it did not say what came of it");
+        };
+        assert_eq!(*call, step.call, "the outcome does not belong to the step");
+        assert!(outcome.contains("142000"));
+        assert!(
+            outcome.contains("still written down"),
+            "it did not say the conversation itself is intact: {outcome}"
+        );
+    }
+
+    #[test]
+    fn room_made_because_somebody_asked_does_not_read_as_a_surprise() {
+        const ASKED: &str = r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual","pre_tokens":9000}}"#;
+        let Event::Doing(step) = &read(ASKED)[0] else {
+            panic!("it was not shown");
+        };
+        assert!(step.what.contains("as asked"), "{}", step.what);
+    }
+
+    #[test]
+    fn making_room_does_not_get_in_the_way_of_the_other_system_line() {
+        // `system` carries both the opening of a thread and the making of
+        // room, and the new arm sits in front of the old one. A guard that
+        // matched too widely would swallow the event that says what is
+        // answering, and the window would never learn which model it has.
+        let opening = r#"{"type":"system","subtype":"init","session_id":"x","model":"claude-opus-5","tools":[]}"#;
+        assert!(
+            matches!(read(opening).first(), Some(Event::Started { .. })),
+            "the opening of a thread stopped arriving"
         );
     }
 

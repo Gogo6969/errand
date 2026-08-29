@@ -36,7 +36,7 @@ pub use loops::Local;
 /// A turn has one input nothing prints, and an answer that comes back empty is
 /// usually that input being wrong. This is here so it can be read.
 pub fn instructions_for(home: &std::path::Path) -> String {
-    loops::opening_instructions(home, &crate::mcp::Servers::default(), "")
+    loops::opening_instructions(home, &crate::mcp::Servers::default(), "", "ask")
 }
 
 use serde::{Deserialize, Serialize};

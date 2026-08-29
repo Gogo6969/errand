@@ -161,7 +161,7 @@ async fn conversation(
     let outside = mcp::Servers::open(&home).await;
 
     let mut history = vec![ChatMessage::System {
-        content: opening_instructions(&home, &outside, &remembers),
+        content: opening_instructions(&home, &outside, &remembers, &asks),
     }];
     // Tools somebody has said yes to for good, this conversation. Deliberately
     // not saved anywhere: a permission that outlives the thread it was granted
@@ -172,6 +172,9 @@ async fn conversation(
     // screenshot once will very likely need to again, and paying twice for the
     // same discovery is the thing this whole mechanism exists to avoid.
     let mut loaded: HashSet<String> = HashSet::new();
+    // How much of this conversation the model can no longer see. Kept so that
+    // it is mentioned when it changes rather than on every turn after.
+    let mut forgotten: usize = 0;
 
     while let Some(turn) = asked.recv().await {
         let (said, pictures) = match turn {
@@ -213,6 +216,7 @@ async fn conversation(
             &mut history,
             &mut allowed,
             &mut loaded,
+            &mut forgotten,
             &mut asked,
             &out,
         )
@@ -249,6 +253,10 @@ async fn errand(
     history: &mut Vec<ChatMessage>,
     allowed: &mut HashSet<String>,
     loaded: &mut HashSet<String>,
+    // How much of this conversation the model can no longer see. Belongs to
+    // the conversation and not to one turn, so that falling out of the window
+    // is mentioned when it changes rather than on every turn from then on.
+    forgotten: &mut usize,
     asked: &mut UnboundedReceiver<Turn>,
     out: &std::sync::mpsc::Sender<Event>,
 ) -> Result<Done> {
@@ -328,6 +336,7 @@ async fn errand(
         // A copy because `history` is the conversation, and dropping a turn to
         // make one request fit is not a reason to forget it happened.
         let mut asking = history.clone();
+        let held_before = asking.len();
         tokens::trim_to_fit(
             &mut asking,
             client
@@ -336,6 +345,43 @@ async fn errand(
                 .saturating_sub(client.settings.max_tokens)
                 .saturating_sub(tokens_in(&defs)),
         );
+
+        // Said out loud when it happens, and only when the amount changes.
+        //
+        // Dropping the oldest turns is the right thing to do and was already
+        // being done; doing it in silence is what made it a problem. An agent
+        // that has quietly forgotten the first half of a conversation is
+        // indistinguishable from one that read it and ignored it, and the
+        // person is left re-explaining something they are sure they said.
+        //
+        // Once per change rather than once per request, because it happens on
+        // every turn from then on and a line about it every time would bury
+        // the conversation it is about.
+        let dropped = held_before - asking.len();
+        if dropped > *forgotten {
+            *forgotten = dropped;
+            let _ = out.send(Event::Doing(Step {
+                what: format!(
+                    "Making room: the earliest {} of this conversation {} out of what it can hold",
+                    match dropped {
+                        1 => "turn".to_string(),
+                        n => format!("{n} turns"),
+                    },
+                    match dropped {
+                        1 => "has fallen",
+                        _ => "have fallen",
+                    }
+                ),
+                tool: "context".into(),
+                call: format!("room-{dropped}"),
+            }));
+            let _ = out.send(Event::Did {
+                call: format!("room-{dropped}"),
+                outcome: "It is still written down here, and still in the export. \
+                          The model just cannot see that far back any more."
+                    .into(),
+            });
+        }
 
         let cancel = CancellationToken::new();
         let mut stream = client.stream(&asking, &defs, None, cancel).await?;
@@ -459,6 +505,12 @@ async fn errand(
                 // another agent had its own default and quietly outranked the
                 // posture somebody had chosen for this agent.
                 "auto" => false,
+                // Nothing that changes anything, because nothing is meant to
+                // be changed yet. Claude Code has a posture for this; a local
+                // model has only what it is told, so the wall is put here
+                // rather than trusted to the instructions, which a small model
+                // will talk itself past.
+                "plan" => tools::asks_first(&name) || name == "run_command",
                 _ if mine.is_some() => mine.is_some_and(team::asks_first),
                 "edits" => tools::asks_first(&name) && name != "write_file",
                 _ => tools::asks_first(&name),
@@ -741,6 +793,7 @@ pub(crate) fn opening_instructions(
     home: &std::path::Path,
     outside: &mcp::Servers,
     remembers: &str,
+    asks: &str,
 ) -> String {
     // How much is out there, and never what any of it is called. See
     // `Servers::what_else`: listing the names made a 7B model answer with
@@ -750,6 +803,20 @@ pub(crate) fn opening_instructions(
     let notes = match remembers.trim().is_empty() {
         true => format!("\n\n{}", crate::memory::HOW_TO_USE_IT),
         false => format!("\n\n{}\n\n{remembers}", crate::memory::HOW_TO_USE_IT),
+    };
+    // Told as well as enforced. The wall in `must_ask` is what actually stops
+    // it, but a model that does not know why its tools are refusing it will
+    // spend the turn trying them again in different words.
+    let plan = match asks == "plan" {
+        false => String::new(),
+        true => "\n\nTHIS ERRAND IS A PLAN, NOT THE WORK.\n\n\
+                 Find out what you need to. Read, search, look things up. Then \
+                 come back with what you would do, in order, and what you would \
+                 need. Change nothing: no files written, no commands run, nothing \
+                 sent. Somebody wants to read the plan before it happens rather \
+                 than after. If you cannot work it out without changing something, \
+                 say which step needs it and why, and stop there."
+            .to_string(),
     };
     let more = match outside.tools().is_empty() {
         true => String::new(),
@@ -777,7 +844,7 @@ pub(crate) fn opening_instructions(
          asking again.\n\n\
          Your working directory is {}. Paths are relative to it and it is the only \
          place you write.\n\n\
-         Finish on the result. Do not append an offer of further work.{more}{notes}",
+         Finish on the result. Do not append an offer of further work.{more}{notes}{plan}",
         home.display()
     )
 }
@@ -798,6 +865,24 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plan_says_it_is_a_plan_and_an_ordinary_errand_says_nothing_about_one() {
+        // Told as well as enforced. The wall in `must_ask` is what actually
+        // stops it, but a model that does not know why its tools are refusing
+        // will spend the turn trying them again in different words.
+        let nothing = mcp::Servers::default();
+        let here = std::path::Path::new("/tmp/x");
+        let planning = opening_instructions(here, &nothing, "", "plan");
+        assert!(planning.contains("PLAN, NOT THE WORK"), "{planning}");
+        assert!(planning.contains("Change nothing"));
+
+        let ordinary = opening_instructions(here, &nothing, "", "ask");
+        assert!(
+            !ordinary.contains("PLAN, NOT THE WORK"),
+            "an ordinary errand was told it was a plan"
+        );
+    }
 
     /// A server offering tools whose schemas cost roughly `each` tokens.
     fn offering(count: usize, each: usize) -> mcp::Servers {
@@ -934,7 +1019,7 @@ mod tests {
     #[test]
     fn the_model_is_told_the_names_of_everything_it_could_reach_but_not_the_schemas() {
         let nothing = mcp::Servers::default();
-        let bare = opening_instructions(std::path::Path::new("/tmp/x"), &nothing, "");
+        let bare = opening_instructions(std::path::Path::new("/tmp/x"), &nothing, "", "ask");
         assert!(
             !bare.contains("find_tools"),
             "with no servers there is nothing to look up, and saying so invites a wild goose chase"
