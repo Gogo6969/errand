@@ -660,6 +660,48 @@ export async function whichModels() {
     document.getElementById("found").textContent.slice(0, 110),
   );
 
+  // Changing one that is already kept, rather than forgetting it and starting
+  // again -- which is what rotating a key would otherwise mean, and it would
+  // take every model chosen from it along with it.
+  // The one that speaks the other protocol, so the check covers carrying that
+  // back into the form as well as the address.
+  const deepseek = [...document.querySelectorAll("#found li")].find((r) =>
+    r.textContent.includes("DeepSeek"),
+  );
+  const change = [...(deepseek?.querySelectorAll("button") || [])].find(
+    (b) => b.textContent === "Change",
+  );
+  check("a kept one can be changed", change, change ? "there is a way" : "no way to change one");
+  change?.click();
+  await new Promise((r) => setTimeout(r, 150));
+  check(
+    "changing one fills the form with what it already is",
+    document.getElementById("hand-url").value === FIXTURE.backends[1].base_url &&
+      document.getElementById("hand-wire").value === FIXTURE.backends[1].wire,
+    `${document.getElementById("hand-url").value} as ${document.getElementById("hand-wire").value}`,
+  );
+  check(
+    "and says it is changing rather than adding",
+    document.getElementById("hand-save").textContent === "Save",
+    document.getElementById("hand-save").textContent,
+  );
+
+  const beforeChange = asked.length;
+  document.getElementById("by-hand").dispatchEvent(new Event("submit", { cancelable: true }));
+  await new Promise((r) => setTimeout(r, 300));
+  const changed = asked.slice(beforeChange).find((a) => a.name === "remember_backend");
+  check(
+    "saving a change names the one being changed, rather than making a second",
+    changed?.args?.id === FIXTURE.backends[1].id,
+    JSON.stringify(changed?.args?.id) || "no id was sent",
+  );
+  check(
+    "and afterwards the form is back to adding",
+    document.getElementById("hand-save").textContent === "Add",
+    document.getElementById("hand-save").textContent,
+  );
+
+
   // Looking is a thing you ask for, here, and it says what it found.
   const wasAsked = asked.length;
   document.getElementById("look-here").click();
@@ -708,6 +750,7 @@ export async function whichModels() {
     document.getElementById("hand-wire").value,
   );
 
+  document.querySelectorAll("#presets button")[0]?.click();
   document.getElementById("hand-key").value = "sk-not-a-real-key";
   const beforeAdd = asked.length;
   document.getElementById("by-hand").dispatchEvent(new Event("submit", { cancelable: true }));

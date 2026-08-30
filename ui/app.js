@@ -103,6 +103,7 @@ const el = {
   handUrl: document.getElementById("hand-url"),
   handKey: document.getElementById("hand-key"),
   handWire: document.getElementById("hand-wire"),
+  handSave: document.getElementById("hand-save"),
   handSays: document.getElementById("hand-says"),
   chosen: document.getElementById("chosen"),
   checkup: document.getElementById("checkup"),
@@ -2388,6 +2389,8 @@ async function showModels() {
       b.title = `${place.url} — ${place.why}`;
       if (!place.sure) b.dataset.unsure = "true";
       b.onclick = () => {
+        editing = null;
+        el.handSave.textContent = "Add";
         el.handLabel.value = place.name;
         el.handUrl.value = place.url;
         // Set with the address, because the two go together: the same host
@@ -2584,6 +2587,29 @@ function drawPlaces(places, { kept = false } = {}) {
       head.append(look);
 
       if (kept) {
+        // Changing one rather than forgetting it and starting again, which is
+        // what somebody rotating a key would otherwise have to do -- and it
+        // would take every model they had chosen from it with it.
+        const change = document.createElement("button");
+        change.type = "button";
+        change.textContent = "Change";
+        change.title = "Change its name, address or key.";
+        change.onclick = () => {
+          editing = place.id;
+          el.handLabel.value = place.label;
+          el.handUrl.value = place.base_url;
+          el.handWire.value = place.wire || "openai";
+          el.handKey.value = "";
+          el.handSave.textContent = "Save";
+          el.handSays.dataset.wrong = "false";
+          el.handSays.textContent = place.has_key
+            ? "Changing this one. Leave the key empty to keep the one it already has."
+            : "Changing this one.";
+          el.handUrl.scrollIntoView({ block: "center" });
+          el.handLabel.focus();
+        };
+        head.append(change);
+
         const drop = document.createElement("button");
         drop.type = "button";
         drop.textContent = "Forget";
@@ -2663,6 +2689,24 @@ function drawPlaces(places, { kept = false } = {}) {
   );
 }
 
+/**
+ * Which backend the form is editing, if it is editing one.
+ *
+ * Nothing means it is adding. The difference matters: without it, changing the
+ * address of something already kept quietly makes a second one beside it.
+ */
+let editing = null;
+
+/** Put the form back to adding rather than changing. */
+function backToAdding() {
+  editing = null;
+  el.handSave.textContent = "Add";
+  el.handLabel.value = "";
+  el.handUrl.value = "";
+  el.handKey.value = "";
+  el.handWire.value = "openai";
+}
+
 /** Look, here or wider. */
 async function goLooking(wider) {
   el.lookHere.disabled = true;
@@ -2708,6 +2752,9 @@ el.byHand.addEventListener("submit", async (e) => {
   el.handSays.textContent = "Asking it where it answers…";
   try {
     const kept = await invoke("remember_backend", {
+      // The one being changed, where one is. Without this, changing an address
+      // adds a second backend beside the first rather than changing it.
+      id: editing,
       label: el.handLabel.value.trim(),
       provider: "openai-compat",
       baseUrl,
@@ -2734,5 +2781,6 @@ el.byHand.addEventListener("submit", async (e) => {
   }
   // The key is not kept in the page for a moment longer than it takes to send.
   el.handKey.value = "";
+  backToAdding();
   await drawKept();
 });
