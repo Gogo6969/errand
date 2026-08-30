@@ -128,14 +128,22 @@ struct Happened {
 /// thread is not a small thing, because each one is a working directory and
 /// the agent's memory of that conversation is filed under exactly that path.
 /// A name does not change when an identifier does.
-fn where_things_live(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    let here = app
-        .path()
-        .data_dir()
-        .map_err(|e| e.to_string())?
-        .join("Errand");
+fn where_things_live(_app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let here = beside_everything_else().ok_or("there is no home directory to keep things in")?;
     std::fs::create_dir_all(&here).map_err(|e| e.to_string())?;
     Ok(here)
+}
+
+/// The same place, worked out without an app to ask.
+///
+/// One definition rather than two, and the reason is the whole session's worth
+/// of the same bug: something computed in two places drifts, and the day it
+/// does the app and the thing talking to it disagree about where the door is,
+/// which reads as "Errand is not running" while it plainly is. This is what
+/// Tauri's own resolver returns on a Mac, and this app is a Mac app.
+fn beside_everything_else() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join("Library/Application Support/Errand"))
 }
 
 /// Say on screen that an errand has ended, if nobody was there to see it end.
@@ -1701,14 +1709,17 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
         let who = mine
             .as_deref()
             .and_then(|a| held.store.agent(a).ok().flatten())
-            .map_or_else(|| "another agent".to_string(), |a| a.name);
+            .map_or_else(|| "something outside".to_string(), |a| a.name);
         held.store.begin_conversation_for(
             &talk,
             &them.id,
             &format!("Asked by {who}"),
             // The conversation that asked, so the next hand-off can be
-            // followed back past this one.
-            Some(&asked.from),
+            // followed back past this one. Nothing when the request came from
+            // outside the app: there is no conversation to point at, and
+            // pointing at one that does not exist is the thing the store checks
+            // for on every change to its shape.
+            Some(asked.from.as_str()).filter(|from| !from.is_empty()),
         )?;
         who
     };
@@ -2466,6 +2477,58 @@ async fn forget(held: State<'_, Held>, id: String) -> Result<(), String> {
     held.store.forget(&id).map_err(|e| e.to_string())
 }
 
+/// How to reach a running Errand from a script or a terminal.
+const FROM_OUTSIDE: &str = "ask";
+
+/// What to say when somebody runs this with nothing it understands.
+const HOW_TO_ASK: &str = "\
+Usage: Errand ask <agent> <request>
+       Errand ask --who
+
+Hands a job to one of your agents in the running app and prints what it says.
+Errand has to be open: this talks to it, it does not start it.";
+
+/// Ask a running Errand something from a terminal.
+///
+/// Everything here is deliberately plain: one request, one answer, an exit code
+/// that means what exit codes mean. The thing on the other end of this is a
+/// shell script or a person, and neither wants a protocol.
+fn from_a_terminal(args: Vec<String>) -> i32 {
+    let Some(here) = beside_everything_else() else {
+        eprintln!("could not work out where Errand keeps things");
+        return 2;
+    };
+    let door = doorway::front_door(&here);
+
+    let (tool, args) = match args.split_first() {
+        Some((one, rest)) if one == "--who" && rest.is_empty() => {
+            ("mcp__errand__who_else", serde_json::json!({}))
+        }
+        Some((agent, rest)) if !rest.is_empty() => (
+            "mcp__errand__ask",
+            serde_json::json!({ "agent": agent, "request": rest.join(" ") }),
+        ),
+        _ => {
+            eprintln!("{HOW_TO_ASK}");
+            return 2;
+        }
+    };
+
+    match doorway::ask_from_outside(&door, tool, args) {
+        Ok(said) => {
+            println!("{said}");
+            0
+        }
+        // On stderr and non-zero, so a script can tell the difference between
+        // an agent that answered and an agent that could not be reached. That
+        // difference is the whole reason this is worth having a protocol for.
+        Err(why) => {
+            eprintln!("{why:#}");
+            1
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Before anything Tauri touches. Claude Code starts this same binary to
@@ -2478,7 +2541,8 @@ pub fn run() {
     // and a second executable would have to be built, copied, signed and kept
     // in step for no gain.
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some(doorway::IN_ARGV) {
+    let first = args.next();
+    if first.as_deref() == Some(doorway::IN_ARGV) {
         match args.next() {
             Some(socket) => doorway::serve_blocking(std::path::Path::new(&socket)),
             // Nothing to serve. Said on stderr, which is the only pipe here
@@ -2488,6 +2552,13 @@ pub fn run() {
                 std::process::exit(2)
             }
         }
+    }
+
+    // Driving Errand from outside it, which until now only its own engines
+    // could do. Same binary again, for the same reason: a second one would have
+    // to be built, copied, signed and kept in step for no gain.
+    if first.as_deref() == Some(FROM_OUTSIDE) {
+        std::process::exit(from_a_terminal(args.collect()));
     }
 
     tauri::Builder::default()
@@ -2591,6 +2662,41 @@ pub fn run() {
                 };
                 if let Some(ended) = endings {
                     carry_on_goals(app.clone(), ended);
+                }
+                // The front door. One socket, no conversation behind it, open
+                // for as long as the app is, so something outside can hand an
+                // agent a job the way another agent does. Opened here rather
+                // than in setup for the same reason as everything else here:
+                // there is no runtime yet in setup.
+                if let Ok(here) = where_things_live(app) {
+                    let wants = {
+                        let held: State<Held> = app.state();
+                        held.wants.clone()
+                    };
+                    let opening = app.clone();
+                    // Opened from inside a runtime, not from here. Binding a
+                    // socket registers it with the reactor, and this callback
+                    // is Tauri's event loop, which is not one. What that looked
+                    // like was not an error: the file appeared, because the
+                    // system call that makes it succeeds before the
+                    // registration that fails, and then nothing was listening
+                    // on a door that was plainly there. Third time this shape
+                    // has come up in this app and the first time it was not an
+                    // outright crash.
+                    tauri::async_runtime::spawn(async move {
+                        match doorway::listen(doorway::front_door(&here), String::new(), wants) {
+                            // Kept in the app's own state so it lives as long
+                            // as the app and is unlinked when it goes.
+                            Ok(door) => {
+                                let held: State<Held> = opening.state();
+                                held.doorways.lock().unwrap().insert(String::new(), door);
+                            }
+                            // Said rather than swallowed. Everything else works
+                            // without it, and somebody whose script cannot
+                            // connect deserves to find the reason somewhere.
+                            Err(why) => eprintln!("the front door did not open: {why:#}"),
+                        }
+                    });
                 }
             }
             // A command left running outlives the errand that started it, and

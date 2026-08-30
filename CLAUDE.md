@@ -106,6 +106,19 @@ nothing there to stop; and a helper that builds a walled command sets the
 working directory itself, or the wall is around somewhere the command is not
 standing.
 
+### Binding a socket needs a runtime
+
+`tauri::async_runtime::spawn`, never `tokio::spawn`, is written down twice
+already. This is the same rule from the other end: `UnixListener::bind`
+registers with the reactor, so it too has to be called from inside a runtime,
+and Tauri's `Ready` callback is not one.
+
+It does not fail loudly. The socket file appears, because the system call that
+creates it succeeds before the registration that does not, and what is left is
+a door that is plainly there with nobody behind it. Two clues that it was this:
+the file is mode 0755 rather than 0600, because the chmod after the bind never
+ran, and `lsof -U` shows nothing holding it.
+
 ### Asking and the wall are the same job done two ways
 
 `wall` builds one sandbox profile for both engines. A local model always gets

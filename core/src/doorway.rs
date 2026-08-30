@@ -271,7 +271,13 @@ impl Doorway {
 
 /// Answer for one conversation, on a socket of its own.
 ///
-/// Must be called from inside a runtime, which the one caller is.
+/// `from` empty means nobody in particular is asking, which is the front door:
+/// the same socket, the same protocol, open for as long as the app is, so that
+/// something outside can hand an agent a job the way another agent does.
+/// Everything that needs to know who is asking already refuses politely when
+/// nobody is, and everything that does not already works.
+///
+/// Must be called from inside a runtime, which both callers are.
 pub fn listen(
     at: PathBuf,
     from: String,
@@ -389,6 +395,47 @@ async fn answer_one(
 /// behind a search. Without it every MCP tool is deferred, and an agent that
 /// has to think to go looking for the ability to delegate is an agent that
 /// mostly will not.
+/// Where the front door is, given where things are kept.
+///
+/// A fixed name, because the whole point is that something else can find it
+/// without being told. The per-conversation doorways are named after their
+/// conversation and are nobody's business but the engine's.
+pub fn front_door(here: &Path) -> PathBuf {
+    here.join("mcp").join("front.sock")
+}
+
+/// Ask the running app something, from outside it.
+///
+/// The other side of `listen`, for a program that is not an engine: connect,
+/// say one thing, read the answer, done. Blocking and synchronous on purpose,
+/// because the thing that wants this is a shell script or a person at a
+/// terminal, and neither has a runtime.
+pub fn ask_from_outside(at: &Path, tool: &str, args: Value) -> Result<String> {
+    use std::io::{BufRead, BufReader, Write};
+
+    let mut socket = std::os::unix::net::UnixStream::connect(at)
+        .with_context(|| format!("no Errand is answering at {}. Is it running?", at.display()))?;
+    let said = serde_json::to_string(&Passed {
+        tool: tool.to_string(),
+        args,
+    })?;
+    socket.write_all(said.as_bytes())?;
+    socket.write_all(b"\n")?;
+    socket.flush()?;
+    // Shut down this side so the far end sees the end of the line even if it
+    // is reading to it rather than by length.
+    let _ = socket.shutdown(std::net::Shutdown::Write);
+
+    let mut back = String::new();
+    BufReader::new(&socket).read_line(&mut back)?;
+    let came: Came = serde_json::from_str(back.trim())
+        .with_context(|| format!("Errand said something unexpected: {back}"))?;
+    match came.went_wrong {
+        true => Err(anyhow::anyhow!("{}", came.said)),
+        false => Ok(came.said),
+    }
+}
+
 pub fn config(program: &Path, socket: &Path) -> String {
     let mut server = Map::new();
     server.insert("command".into(), json!(program.to_string_lossy()));
@@ -412,6 +459,59 @@ fn permit(what: &Path, mode: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn something_outside_the_app_can_ask_it_something_and_get_an_answer() {
+        // Both halves against each other, because they are two programs and the
+        // only thing that matters is that they agree. The first version of the
+        // asking half wrote no newline, which a reader waiting for a line waits
+        // for forever.
+        let at = std::env::temp_dir().join("errand-front-door-test.sock");
+        let (wants, mut asked) = tokio::sync::mpsc::unbounded_channel::<team::Wants>();
+
+        // Stand in for the app: answer whatever is asked.
+        tokio::spawn(async move {
+            while let Some(want) = asked.recv().await {
+                let said = match want.tool.contains("who_else") {
+                    true => Ok(format!("nobody asked, from={:?}", want.from)),
+                    false => Err(anyhow::anyhow!("there is nobody here called Nobody")),
+                };
+                let _ = want.answer.send(said);
+            }
+        });
+
+        let door = listen(at.clone(), String::new(), wants).expect("the door opens");
+
+        // Blocking, because the thing that calls it is a terminal.
+        let answered =
+            tokio::task::spawn_blocking(move || ask_from_outside(&at, "who_else", json!({})))
+                .await
+                .expect("it ran");
+        let said = answered.expect("an answer");
+        assert!(
+            said.contains("from=\"\""),
+            "who was asking got lost: {said}"
+        );
+
+        // And a refusal comes back as one rather than as an answer that happens
+        // to read badly, since a script has to be able to tell them apart.
+        let at = door.at().to_path_buf();
+        let refused = tokio::task::spawn_blocking(move || {
+            ask_from_outside(&at, "ask", json!({ "agent": "Nobody" }))
+        })
+        .await
+        .expect("it ran");
+        let why = refused.expect_err("that should have been refused");
+        assert!(format!("{why:#}").contains("Nobody"), "{why:#}");
+    }
+
+    #[test]
+    fn the_front_door_has_a_name_something_else_can_find_without_being_told() {
+        // The whole point of it: a per-conversation doorway is named after its
+        // conversation and is nobody's business, and this one is not.
+        let here = Path::new("/tmp/errand");
+        assert_eq!(front_door(here), here.join("mcp").join("front.sock"));
+    }
 
     fn ask(line: &str) -> Value {
         serde_json::from_str(line).expect("a message")

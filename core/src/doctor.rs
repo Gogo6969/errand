@@ -250,6 +250,23 @@ pub fn somewhere_to_work(here: &Path) -> Finding {
     }
 }
 
+/// Which Errand this is.
+///
+/// Every version so far has been installed by hand, over the top of the last
+/// one, sometimes three times in an evening. "Which one am I running" is then a
+/// real question with no way to answer it, and the answer decides whether a
+/// bug report is about something already fixed.
+pub fn this_errand() -> Finding {
+    Finding::fine(
+        "This Errand",
+        format!(
+            "version {}, installed by hand: there is no updater yet, and nowhere \
+             to update from",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+}
+
 /// Whether an agent that never asks can be walled in.
 ///
 /// Worth saying out loud rather than assuming, because the answer decides what
@@ -273,6 +290,7 @@ pub fn the_wall() -> Finding {
 /// Everything, at once.
 pub async fn everything(store: &crate::Store, here: &Path, cwd: &Path) -> Vec<Finding> {
     let mut all = vec![
+        this_errand(),
         claude_code(),
         somewhere_to_work(here),
         the_store(store),
