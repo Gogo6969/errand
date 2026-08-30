@@ -1085,6 +1085,20 @@ async fn stop_offering(held: State<'_, Held>, id: String) -> Result<(), String> 
     held.store.stop_offering(&id).map_err(|e| e.to_string())
 }
 
+/// Whether this conversation is live, and whether it is stopped for somebody.
+///
+/// The window cannot tell from the store: a question with no answer written
+/// against it is either one nobody will ever answer, because the process that
+/// asked it is gone, or one that is being waited on right now. Those look
+/// identical on disk and want opposite things done about them, and drawing the
+/// second as the first is how an errand started from outside became
+/// unanswerable -- the card said the question had expired while the engine sat
+/// there waiting for it.
+#[tauri::command]
+async fn still_going(held: State<'_, Held>, id: String) -> Result<bool, String> {
+    Ok(held.live.lock().unwrap().contains_key(&id))
+}
+
 /// Everything the settings screen lists, which is the picker itself.
 #[tauri::command]
 async fn whats_offered(held: State<'_, Held>) -> Result<Vec<errand_core::store::Offered>, String> {
@@ -1959,7 +1973,7 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
     .await
     {
         // Where it landed is of no interest to a delegated errand.
-        Ok(_) => wait_for_the_answer(done).await,
+        Ok(_) => wait_for_the_answer(done, asked.along_the_way.clone()).await,
         Err(why) => Err(anyhow::anyhow!("{why}")),
     };
 
@@ -1980,6 +1994,10 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
 /// like an agent with nothing to say.
 async fn wait_for_the_answer(
     mut done: tokio::sync::mpsc::UnboundedReceiver<Event>,
+    // Where to say what is happening, for a caller watching rather than
+    // waiting. Nothing for an engine: a model handed a commentary on somebody
+    // else's work puts all of it in its context and none of it is the answer.
+    along_the_way: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> anyhow::Result<String> {
     use std::time::Duration;
     // Shared with the collecting task, so that giving up still reports what was
@@ -1998,6 +2016,24 @@ async fn wait_for_the_answer(
         let so_far = || filling.lock().unwrap().clone();
 
         while let Some(event) = done.recv().await {
+            // Said as it happens, in the same words the window uses. What a
+            // step is called is already written for a person to read, so there
+            // is nothing to invent here.
+            if let Some(telling) = &along_the_way {
+                let _ = match &event {
+                    Event::Doing(step) => telling.send(step.what.clone()),
+                    // Where to answer it, because the answer is not here. The
+                    // question is a card in the window, and somebody not told
+                    // that waits at a terminal for something that will never
+                    // arrive there.
+                    Event::NeedsYou(ask) => telling.send(format!(
+                        "Waiting on you: {} \u{2014} answer it in the Errand window",
+                        ask.asking
+                    )),
+                    Event::Failed { why } => telling.send(format!("It could not: {why}")),
+                    _ => Ok(()),
+                };
+            }
             match event {
                 Event::Said {
                     text,
@@ -2006,7 +2042,13 @@ async fn wait_for_the_answer(
                 // A question in a delegated conversation has nobody at the
                 // keyboard for it, and saying so beats waiting out the ten
                 // minutes.
-                Event::NeedsYou(ask) => {
+                //
+                // Unless somebody is watching, which is the whole difference
+                // between an engine asking and a person asking from a terminal.
+                // The question is a card in the window either way; giving up on
+                // it while somebody is sitting there throws the errand away and
+                // tells them nobody could answer, which is not true.
+                Event::NeedsYou(ask) if along_the_way.is_none() => {
                     return format!(
                         "It stopped to ask permission to {} and there was nobody to answer, so \
                          it did not finish. What it got to: {}",
@@ -2698,7 +2740,10 @@ Usage: Errand ask <agent> <request>
        Errand ask --who
 
 Hands a job to one of your agents in the running app and prints what it says.
-Errand has to be open: this talks to it, it does not start it.";
+Errand has to be open: this talks to it, it does not start it.
+
+What it is doing goes to stderr as it happens, so the answer on stdout is
+still just the answer. Set ERRAND_QUIET to leave that out.";
 
 /// Ask a running Errand something from a terminal.
 ///
@@ -2726,7 +2771,17 @@ fn from_a_terminal(args: Vec<String>) -> i32 {
         }
     };
 
-    match doorway::ask_from_outside(&door, tool, args) {
+    // Said as it happens, on stderr, so that piping the answer somewhere still
+    // gets the answer and nothing else. An errand takes minutes, and minutes of
+    // silence is indistinguishable from a crash.
+    let mut telling = |step: &str| eprintln!("· {step}");
+    let watching = std::env::var("ERRAND_QUIET").is_err();
+    match doorway::ask_from_outside(
+        &door,
+        tool,
+        args,
+        watching.then_some(&mut telling as &mut dyn FnMut(&str)),
+    ) {
         Ok(said) => {
             println!("{said}");
             0
@@ -2835,6 +2890,7 @@ pub fn run() {
             call_it_something,
             move_it,
             whats_offered,
+            still_going,
             watch_it,
             watches,
             aim_at,

@@ -33,6 +33,14 @@ pub struct Wants {
     /// The conversation asking, so the app can refuse an agent asking itself.
     pub from: String,
     pub answer: oneshot::Sender<anyhow::Result<String>>,
+    /// Somewhere to say what is happening while it happens, for a caller that
+    /// wants to watch rather than wait.
+    ///
+    /// Nothing for an engine asking another agent: a model handed a running
+    /// commentary on somebody else's work would put all of it in its context
+    /// and none of it is the answer. Something for a person at a terminal,
+    /// where minutes of silence and a crash look identical.
+    pub along_the_way: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 /// The tools the app provides, as an engine has to declare them.

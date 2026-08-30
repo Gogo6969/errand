@@ -67,9 +67,20 @@ export const FIXTURE = {
       { seq: 1, at: 1, kind: "mine", text: "Show me the latest Bitcoin news", call: null, tool: null, outcome: null },
       { seq: 2, at: 2, kind: "said", text: "**BTC** is around $77,700.", call: null, tool: null, outcome: null },
     ],
-    "talk-2": [],
-    "talk-3": [],
+    // A question with nothing written against it, in a conversation whose
+    // engine is gone. Nobody will ever answer this one.
+    "talk-2": [
+      { seq: 1, at: 1, kind: "asking", text: "Delete the old backups", call: "c1", tool: "Bash", outcome: null },
+    ],
+    // The same row, in a conversation that is still live. This one is being
+    // waited on this second, and it is the case that made an errand started
+    // from outside impossible to answer.
+    "talk-3": [
+      { seq: 1, at: 1, kind: "asking", text: "Fetch BTC spot price", call: "c2", tool: "Bash", outcome: null },
+    ],
   },
+  /** Which conversation still has an engine behind it. */
+  liveConversation: "talk-3",
   engines: [
     { engine: "claude", name: "Claude · your default", settings: null },
     { engine: "claude", name: "Claude · Opus", settings: "opus" },
@@ -202,6 +213,10 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.brought);
           case "watches":
             return Promise.resolve(fixture.watches);
+          // The conversation with the live question in it is live; the rest
+          // are history. Which is the whole distinction being tested.
+          case "still_going":
+            return Promise.resolve(args.id === fixture.liveConversation);
           case "whats_offered":
             return Promise.resolve(fixture.offered);
           case "backends":

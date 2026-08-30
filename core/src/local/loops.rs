@@ -593,6 +593,10 @@ async fn errand(
                     Some((from, to)) => {
                         let (tell_me, answer) = tokio::sync::oneshot::channel();
                         let sent = to.send(team::Wants {
+                            // A model does not want a commentary on somebody
+                            // else's work: none of it is the answer and all of
+                            // it would be in its context.
+                            along_the_way: None,
                             tool: name.clone(),
                             args: args.clone(),
                             from: from.clone(),

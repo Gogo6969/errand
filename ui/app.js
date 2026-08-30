@@ -369,7 +369,17 @@ async function show(id) {
   showingAgent = t.agent;
 
   if (!t.loaded) {
-    t.messages = (await invoke("lines", { id })).map(fromStore);
+    // Whether the engine behind this is still there, which the stored lines
+    // cannot say. A question with nothing written against it is either one
+    // nobody will ever answer or one being waited on this second, and those are
+    // the same row on disk. An errand started from outside stops at its first
+    // question, and drawing that as expired made it unanswerable while the
+    // engine sat there waiting.
+    const [lines, live] = await Promise.all([
+      invoke("lines", { id }),
+      invoke("still_going", { id }).catch(() => false),
+    ]);
+    t.messages = lines.map((line) => fromStore(line, live));
     t.loaded = true;
   }
 
@@ -482,24 +492,31 @@ function talking() {
   return talks.get(showing);
 }
 
-/** One stored line, as the page holds it. */
-function fromStore(line) {
+/**
+ * One stored line, as the page holds it.
+ *
+ * `live` says whether the engine behind this conversation is still there, which
+ * decides what an unanswered question means.
+ */
+function fromStore(line, live = false) {
   switch (line.kind) {
     case "mine":
     case "said":
       return { kind: line.kind, text: line.text, seq: line.seq };
     case "asking":
-      // A question that was answered is settled history; one that was not is
-      // a question nobody will ever answer now, because the process that asked
-      // it is gone. Both are drawn as answered, and only a live one gets
-      // buttons.
+      // A question that was answered is settled history. One that was not is
+      // either still being waited on, or one nobody will ever answer because
+      // the process that asked it is gone -- the same row on disk, and only
+      // whether the engine is still there tells them apart.
       return {
         kind: "asking",
         seq: line.seq,
         text: line.text,
         tool: line.tool,
         step: line.call,
-        answered: line.outcome || "That question expired when the thread closed.",
+        answered:
+          line.outcome ||
+          (live ? "" : "That question expired when the thread closed."),
       };
     case "doing":
       return {

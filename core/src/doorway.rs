@@ -63,6 +63,12 @@ const TO_ANSWER: Duration = Duration::from_secs(660);
 struct Passed {
     tool: String,
     args: Value,
+    /// Whether the caller wants to be told what is happening while it happens.
+    ///
+    /// Absent for an engine, which asks and waits. Set by a person at a
+    /// terminal, where several minutes of silence and a crash look the same.
+    #[serde(default)]
+    watching: bool,
 }
 
 /// What came back, and whether it is an answer or a difficulty.
@@ -70,6 +76,17 @@ struct Passed {
 struct Came {
     said: String,
     went_wrong: bool,
+}
+
+/// Something that happened on the way to the answer.
+///
+/// A separate shape rather than a field on `Came`, so that the thing reading
+/// this can tell an answer from a step by whether it parses, and so that an
+/// engine -- which never asks to watch and never sees one of these -- is
+/// entirely unaffected.
+#[derive(Debug, Serialize, Deserialize)]
+struct Along {
+    doing: String,
 }
 
 // ------------------------------------------------------------ the server --
@@ -199,6 +216,7 @@ fn called(socket: &Path, params: &Value) -> Value {
     let came = carry(
         socket,
         &Passed {
+            watching: false,
             tool: tool.to_string(),
             args,
         },
@@ -338,7 +356,7 @@ async fn answer_one(
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-    let (reading, mut writing) = stream.into_split();
+    let (reading, writing) = stream.into_split();
     let mut line = String::new();
     if tokio::io::BufReader::new(reading)
         .read_line(&mut line)
@@ -351,18 +369,57 @@ async fn answer_one(
         return;
     };
 
+    // One writer, shared, because two things now write to this socket: the
+    // steps as they happen and the answer at the end. Held rather than split so
+    // a step being written can never land in the middle of the answer.
+    let writing = std::sync::Arc::new(tokio::sync::Mutex::new(writing));
+
+    // Said as it happens, where the caller asked to watch. On a task of its
+    // own, so a step that takes a minute is a minute of things to read rather
+    // than a minute of nothing at all.
+    let (along, mut steps) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let watching = passed.watching;
+    let telling = watching.then(|| {
+        let mine = writing.clone();
+        tokio::spawn(async move {
+            while let Some(step) = steps.recv().await {
+                let Ok(line) = serde_json::to_string(&Along { doing: step }) else {
+                    continue;
+                };
+                let mut out = mine.lock().await;
+                // Whoever was reading has gone. Nothing to be done about it and
+                // nothing worth saying: the answer will fail for the same
+                // reason a moment later.
+                if out.write_all(line.as_bytes()).await.is_err()
+                    || out.write_all(b"\n").await.is_err()
+                    || out.flush().await.is_err()
+                {
+                    return;
+                }
+            }
+        })
+    });
+
     let (tell_me, answer) = tokio::sync::oneshot::channel();
     let said = match wants.send(team::Wants {
         tool: passed.tool,
         args: passed.args,
         from,
         answer: tell_me,
+        along_the_way: watching.then_some(along),
     }) {
         Err(_) => Err(anyhow::anyhow!("Errand is no longer answering.")),
         Ok(()) => answer
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("Nobody answered."))),
     };
+
+    // Every step written before the answer is. The sender is dropped with the
+    // request above, so this ends on its own; without waiting for it, the last
+    // step and the answer race and the answer usually wins.
+    if let Some(telling) = telling {
+        let _ = telling.await;
+    }
 
     let came = match said {
         Ok(said) => Came {
@@ -378,8 +435,10 @@ async fn answer_one(
         },
     };
     if let Ok(back) = serde_json::to_string(&came) {
-        let _ = writing.write_all(back.as_bytes()).await;
-        let _ = writing.flush().await;
+        let mut out = writing.lock().await;
+        let _ = out.write_all(back.as_bytes()).await;
+        let _ = out.write_all(b"\n").await;
+        let _ = out.flush().await;
     }
 }
 
@@ -410,7 +469,14 @@ pub fn front_door(here: &Path) -> PathBuf {
 /// say one thing, read the answer, done. Blocking and synchronous on purpose,
 /// because the thing that wants this is a shell script or a person at a
 /// terminal, and neither has a runtime.
-pub fn ask_from_outside(at: &Path, tool: &str, args: Value) -> Result<String> {
+pub fn ask_from_outside(
+    at: &Path,
+    tool: &str,
+    args: Value,
+    // Called for each step, where the caller wants to watch. An errand takes
+    // minutes, and minutes of silence is indistinguishable from a crash.
+    mut along_the_way: Option<&mut dyn FnMut(&str)>,
+) -> Result<String> {
     use std::io::{BufRead, BufReader, Write};
 
     let mut socket = std::os::unix::net::UnixStream::connect(at)
@@ -418,6 +484,7 @@ pub fn ask_from_outside(at: &Path, tool: &str, args: Value) -> Result<String> {
     let said = serde_json::to_string(&Passed {
         tool: tool.to_string(),
         args,
+        watching: along_the_way.is_some(),
     })?;
     socket.write_all(said.as_bytes())?;
     socket.write_all(b"\n")?;
@@ -426,14 +493,32 @@ pub fn ask_from_outside(at: &Path, tool: &str, args: Value) -> Result<String> {
     // is reading to it rather than by length.
     let _ = socket.shutdown(std::net::Shutdown::Write);
 
-    let mut back = String::new();
-    BufReader::new(&socket).read_line(&mut back)?;
-    let came: Came = serde_json::from_str(back.trim())
-        .with_context(|| format!("Errand said something unexpected: {back}"))?;
-    match came.went_wrong {
-        true => Err(anyhow::anyhow!("{}", came.said)),
-        false => Ok(came.said),
+    // Lines until one of them is the answer. A step and an answer are told
+    // apart by which one parses: an answer has both of its fields and a step
+    // has neither, so neither can be mistaken for the other.
+    for line in BufReader::new(&socket).lines() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(came) = serde_json::from_str::<Came>(line) {
+            return match came.went_wrong {
+                true => Err(anyhow::anyhow!("{}", came.said)),
+                false => Ok(came.said),
+            };
+        }
+        match (serde_json::from_str::<Along>(line), &mut along_the_way) {
+            (Ok(step), Some(tell)) => tell(&step.doing),
+            // A shape from a newer Errand than this one. Skipped rather than
+            // treated as an error: a step nobody understands is not a reason to
+            // throw away the answer that follows it.
+            _ => continue,
+        }
     }
+    Err(anyhow::anyhow!(
+        "Errand closed the connection without answering"
+    ))
 }
 
 pub fn config(program: &Path, socket: &Path) -> String {
@@ -461,6 +546,86 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_caller_that_wants_to_watch_is_told_what_is_happening_before_the_answer() {
+        // An errand takes minutes. Waiting in silence for one is
+        // indistinguishable from waiting for something that has crashed, and
+        // the steps are already written in words a person reads.
+        let at = std::env::temp_dir().join("errand-front-door-watching.sock");
+        let (wants, mut asked) = tokio::sync::mpsc::unbounded_channel::<team::Wants>();
+
+        tokio::spawn(async move {
+            while let Some(want) = asked.recv().await {
+                if let Some(telling) = &want.along_the_way {
+                    let _ = telling.send("Looking something up on the web".to_string());
+                    let _ = telling.send("Reading notes.txt".to_string());
+                }
+                let _ = want.answer.send(Ok("Four.".to_string()));
+            }
+        });
+
+        let door = listen(at.clone(), String::new(), wants).expect("the door opens");
+        let where_it_is = door.at().to_path_buf();
+
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let keeping = seen.clone();
+        let said = tokio::task::spawn_blocking(move || {
+            let mut note = |step: &str| keeping.lock().unwrap().push(step.to_string());
+            ask_from_outside(
+                &where_it_is,
+                "ask",
+                json!({}),
+                Some(&mut note as &mut dyn FnMut(&str)),
+            )
+        })
+        .await
+        .expect("it ran")
+        .expect("an answer");
+
+        assert_eq!(said, "Four.");
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            vec![
+                "Looking something up on the web".to_string(),
+                "Reading notes.txt".to_string()
+            ],
+            "the steps did not arrive, or did not arrive in order"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_caller_that_only_wants_the_answer_is_not_sent_a_commentary() {
+        // What an engine asks for. A model handed a running commentary on
+        // somebody else's work puts all of it in its context and none of it is
+        // the answer.
+        let at = std::env::temp_dir().join("errand-front-door-quiet.sock");
+        let (wants, mut asked) = tokio::sync::mpsc::unbounded_channel::<team::Wants>();
+
+        let told: std::sync::Arc<std::sync::Mutex<bool>> = Default::default();
+        let noticing = told.clone();
+        tokio::spawn(async move {
+            while let Some(want) = asked.recv().await {
+                *noticing.lock().unwrap() = want.along_the_way.is_some();
+                let _ = want.answer.send(Ok("Four.".to_string()));
+            }
+        });
+
+        let door = listen(at.clone(), String::new(), wants).expect("the door opens");
+        let where_it_is = door.at().to_path_buf();
+        let said = tokio::task::spawn_blocking(move || {
+            ask_from_outside(&where_it_is, "ask", json!({}), None)
+        })
+        .await
+        .expect("it ran")
+        .expect("an answer");
+
+        assert_eq!(said, "Four.");
+        assert!(
+            !*told.lock().unwrap(),
+            "somewhere to send steps was handed out to a caller that did not ask to watch"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn something_outside_the_app_can_ask_it_something_and_get_an_answer() {
         // Both halves against each other, because they are two programs and the
         // only thing that matters is that they agree. The first version of the
@@ -484,7 +649,7 @@ mod tests {
 
         // Blocking, because the thing that calls it is a terminal.
         let answered =
-            tokio::task::spawn_blocking(move || ask_from_outside(&at, "who_else", json!({})))
+            tokio::task::spawn_blocking(move || ask_from_outside(&at, "who_else", json!({}), None))
                 .await
                 .expect("it ran");
         let said = answered.expect("an answer");
@@ -497,7 +662,7 @@ mod tests {
         // to read badly, since a script has to be able to tell them apart.
         let at = door.at().to_path_buf();
         let refused = tokio::task::spawn_blocking(move || {
-            ask_from_outside(&at, "ask", json!({ "agent": "Nobody" }))
+            ask_from_outside(&at, "ask", json!({ "agent": "Nobody" }), None)
         })
         .await
         .expect("it ran");

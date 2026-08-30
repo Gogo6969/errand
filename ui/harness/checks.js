@@ -803,6 +803,54 @@ export async function whichModels() {
   return found;
 }
 
+/**
+ * A question that can still be answered, and one that cannot.
+ *
+ * On disk they are the same row: a question with nothing written against it.
+ * Only whether the engine is still there tells them apart, and drawing the live
+ * one as expired made an errand started from outside impossible to answer --
+ * the card said the question had gone while the engine sat waiting for it.
+ */
+export async function questionsStillOpen() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  // The agent that owns it first: the conversation picker only ever lists the
+  // conversations of whoever is open, so setting it to somebody else's does
+  // nothing at all and quietly leaves the wrong thread on screen.
+  const openTalk = async (id) => {
+    const owner = Object.entries(FIXTURE.conversations).find(([, talks]) =>
+      talks.some((t) => t.id === id),
+    )?.[0];
+    const rows = [...document.querySelectorAll("#threads li")];
+    const at = FIXTURE.agents.findIndex((a) => a.id === owner);
+    rows[at]?.click();
+    await new Promise((r) => setTimeout(r, 300));
+
+    const picker = document.getElementById("talks");
+    picker.value = id;
+    picker.dispatchEvent(new Event("change"));
+    await new Promise((r) => setTimeout(r, 400));
+  };
+
+  await openTalk("talk-3");
+  const live = document.getElementById("messages").textContent;
+  check(
+    "a question whose engine is still there can still be answered",
+    live.includes("Fetch BTC spot price") && !live.includes("expired"),
+    live.includes("expired") ? "it says the question expired" : live.slice(0, 70),
+  );
+
+  await openTalk("talk-2");
+  const gone = document.getElementById("messages").textContent;
+  check(
+    "and one whose engine has gone says so, rather than offering a button that does nothing",
+    gone.includes("Delete the old backups") && gone.includes("expired"),
+    gone.slice(0, 90),
+  );
+  return found;
+}
+
 export async function running() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
