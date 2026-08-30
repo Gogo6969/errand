@@ -19,6 +19,7 @@ window.addEventListener("unhandledrejection", (e) => complain(String(e.reason)))
 
 import { tile, forTool, kindOf } from "./icons.js";
 import { render } from "./markdown.js";
+import { toSay } from "./speech.js";
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -111,6 +112,7 @@ const el = {
   working: document.getElementById("working"),
   costing: document.getElementById("costing"),
   speak: document.getElementById("speak"),
+  call: document.getElementById("call"),
   watch: document.getElementById("watch"),
   watching: document.getElementById("watching"),
   goal: document.getElementById("goal"),
@@ -849,6 +851,10 @@ listen("happened", ({ payload }) => {
       if (payload.settled) {
         t.writing = "";
         t.messages.push({ kind: "said", text: payload.text, seq: payload.seq });
+        // In a call it is also read out, as each line settles rather than all
+        // at once at the end: the first paragraph is spoken while the second
+        // is still being written.
+        if (inACall && payload.conversation === showing) sayOutLoud(payload.text);
       } else {
         t.writing = (t.writing || "") + payload.text;
       }
@@ -912,12 +918,19 @@ listen("happened", ({ payload }) => {
       // Half a sentence must not outlive the turn writing it. Normally the
       // settled line has already cleared this; a turn stopped mid-word has not.
       t.writing = "";
+      // Either end of the turn can finish last: a short answer is read out
+      // before the turn ends and a long one is still being read after it.
+      if (inACall && payload.conversation === showing) listenAgain();
       // Naming is the agent's own job now, asked for after this by the app.
       break;
 
     case "failed":
       t.working = false;
       t.writing = "";
+      // A call that goes quiet after a failure sounds like one that hung up.
+      if (inACall && payload.conversation === showing) {
+        sayOutLoud(payload.why || "It could not finish.");
+      }
       t.messages.push({ kind: "ended", failed: true, text: payload.why || "It could not finish." });
       break;
   }
@@ -2128,12 +2141,15 @@ function stopListening() {
   }
 }
 
-el.speak.addEventListener("click", () => {
-  if (ears) {
-    stopListening();
-    el.what.focus();
-    return;
-  }
+/**
+ * Start listening, and say where what is heard should go.
+ *
+ * One set of ears for both things that want them. Dictation puts words in the
+ * box and stops there; a call does the same and then sends on a pause, which
+ * is the only difference between the two and is worth it being the only one.
+ */
+function startListening({ sendOnPause = false } = {}) {
+  if (ears) return true;
 
   const hearing = new Listening();
   hearing.continuous = true;
@@ -2150,21 +2166,47 @@ el.speak.addEventListener("click", () => {
 
   hearing.onresult = (e) => {
     let saying = "";
+    let finished = false;
     for (let i = e.resultIndex; i < e.results.length; i += 1) {
       const heard = e.results[i][0].transcript;
-      if (e.results[i].isFinal) settled += heard;
-      else saying += heard;
+      if (e.results[i].isFinal) {
+        settled += heard;
+        finished = true;
+      } else saying += heard;
     }
     // The unsettled part is shown too, so a long sentence looks like it is
     // being heard rather than like nothing is happening.
     const joined = [already.trim(), (settled + saying).trim()].filter(Boolean).join(" ");
     el.what.value = joined;
     el.what.dispatchEvent(new Event("input"));
+
+    // In a call, a pause is how somebody finishes talking. Restarted on every
+    // result rather than set once, because a sentence with a breath in the
+    // middle of it is one sentence and sending half of it is worse than
+    // waiting.
+    if (!sendOnPause) return;
+    clearTimeout(waitingForAPause);
+    if (!finished) return;
+    waitingForAPause = setTimeout(() => {
+      if (inACall && el.what.value.trim()) el.form.requestSubmit();
+    }, ENOUGH_OF_A_PAUSE);
   };
 
   // Any of these means it has stopped, whether or not anybody asked it to.
-  hearing.onend = stopListening;
+  //
+  // Recognition gives up on its own after a stretch of quiet, which in
+  // dictation is fine and in a call is the call dying while somebody is still
+  // thinking about what to ask. So in a call it starts again, and only while
+  // the call is actually waiting to hear something: restarting while the
+  // answer is being spoken is how it transcribes its own voice.
+  hearing.onend = () => {
+    stopListening();
+    if (inACall && itsYourTurn === "listening") startListening({ sendOnPause: true });
+  };
   hearing.onerror = (e) => {
+    // Whatever went wrong, it went wrong with the ears, and a call with no
+    // ears is somebody talking to a window that cannot hear them.
+    if (inACall) endTheCall();
     stopListening();
     // The one worth saying out loud: a refusal is permanent until somebody
     // changes it in System Settings, and it looks exactly like a broken button.
@@ -2180,14 +2222,144 @@ el.speak.addEventListener("click", () => {
     hearing.start();
     ears = hearing;
     el.speak.setAttribute("aria-pressed", "true");
+    return true;
   } catch (why) {
     complain(String(why));
+    return false;
   }
+}
+
+el.speak.addEventListener("click", () => {
+  if (ears) {
+    stopListening();
+    el.what.focus();
+    return;
+  }
+  startListening();
 });
 
 // Sending ends the dictation. Carrying on listening into the next errand is
 // how somebody ends up dictating a reply they meant to think about.
-el.form.addEventListener("submit", stopListening);
+//
+// In a call it also stops, and starts again when the answer has been spoken.
+// Listening through the answer means hearing its own voice and sending that
+// back as the next thing said.
+el.form.addEventListener("submit", () => {
+  clearTimeout(waitingForAPause);
+  if (inACall) itsYourTurn = "working";
+  stopListening();
+});
+
+
+/* --------------------------------------------------------------- call --- */
+
+/**
+ * Talking to it with your hands somewhere else.
+ *
+ * Dictation is still typing: it puts words in the box and waits to be sent.
+ * A call is the thing somebody actually wants while cooking or driving, and
+ * it is three differences from dictation, not thirty. It sends when you stop
+ * talking, it reads the answer out, and then it listens again.
+ *
+ * The transcript is the conversation itself. Nothing separate is drawn for it,
+ * because a second copy of what was said that scrolls on its own is one more
+ * thing to look at in the one situation where somebody is not looking.
+ *
+ * Every part of this needs both halves. A window that can hear but not speak
+ * cannot hold a call, so the button is not there at all rather than being
+ * there and doing half of it.
+ */
+const Speaking = window.speechSynthesis;
+
+/** How long a silence means somebody has finished a sentence. */
+const ENOUGH_OF_A_PAUSE = 1400;
+
+let inACall = false;
+/** What the call is doing: listening, working, or speaking. */
+let itsYourTurn = "listening";
+let waitingForAPause = null;
+
+if (Listening && Speaking) {
+  el.call.hidden = false;
+  el.call.setAttribute("aria-pressed", "false");
+}
+
+function endTheCall() {
+  inACall = false;
+  itsYourTurn = "listening";
+  clearTimeout(waitingForAPause);
+  // Mid-sentence if it is talking. Somebody ending a call wants it to stop
+  // now, not at the end of the paragraph it is reading.
+  try {
+    Speaking.cancel();
+  } catch {
+    // Nothing to cancel, which is the thing we wanted.
+  }
+  el.call.setAttribute("aria-pressed", "false");
+  document.body.classList.remove("in-a-call");
+  el.what.placeholder = "What would you like done?";
+  stopListening();
+}
+
+el.call.addEventListener("click", () => {
+  if (inACall) {
+    endTheCall();
+    return;
+  }
+  inACall = true;
+  itsYourTurn = "listening";
+  el.call.setAttribute("aria-pressed", "true");
+  document.body.classList.add("in-a-call");
+  // What the box says while it is on, because sending on a pause is the one
+  // thing in this window that acts without being told to.
+  el.what.placeholder = "Talk. It sends when you stop.";
+  if (!startListening({ sendOnPause: true })) endTheCall();
+});
+
+// The way out that somebody reaches for without thinking. A call is the one
+// state in this window where the keyboard is not where their hands are, and
+// the one they most want to be able to leave quickly.
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && inACall) endTheCall();
+});
+
+/**
+ * Read a line of the answer out, and listen again when there is nothing left.
+ *
+ * Said line by line as they settle rather than all at once at the end, so the
+ * first paragraph is being read while the second is still being written. The
+ * browser queues them in order, which is the whole of the ordering logic here.
+ */
+function sayOutLoud(text) {
+  const saying = toSay(text);
+  if (!saying) return;
+  itsYourTurn = "speaking";
+  stopListening();
+
+  const utterance = new SpeechSynthesisUtterance(saying);
+  utterance.lang = navigator.language || "en-US";
+  utterance.onend = listenAgain;
+  // A voice that fails silently leaves a call that never listens again, which
+  // looks exactly like a call that hung up.
+  utterance.onerror = listenAgain;
+  Speaking.speak(utterance);
+}
+
+/**
+ * Back to listening, once there is nothing left to say and nothing left to do.
+ *
+ * Called from both ends of the turn, because either can finish last: a short
+ * answer is read out before the turn ends, and a long one is still being read
+ * after it.
+ */
+function listenAgain() {
+  if (!inACall) return;
+  if (Speaking.speaking || Speaking.pending) return;
+  const t = talking();
+  if (t && t.working) return;
+  itsYourTurn = "listening";
+  startListening({ sendOnPause: true });
+}
 
 
 /* -------------------------------------------------------------- watch -- */

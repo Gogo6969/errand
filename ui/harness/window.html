@@ -92,6 +92,39 @@
     }
   };
 
+  // A stand-in for the voice, for the same reason as the ears: what is being
+  // tested is what this page decides to say, not whether a Mac can say it.
+  // Recorded rather than spoken, so a harness run in a room with people in it
+  // stays silent.
+  window.__SAID__ = [];
+  const voice = {
+    speaking: false,
+    pending: false,
+    speak(utterance) {
+      window.__SAID__.push(utterance.text);
+      voice.speaking = true;
+      setTimeout(() => {
+        voice.speaking = false;
+        utterance.onend?.();
+      }, 20);
+    },
+    cancel() {
+      voice.speaking = false;
+      voice.pending = false;
+      window.__SAID__.push("<cut off>");
+    },
+  };
+  // Defined rather than assigned: on the real thing this is a getter, and an
+  // assignment to it does nothing at all and says nothing about having done
+  // nothing, which would leave the harness talking out loud.
+  Object.defineProperty(window, "speechSynthesis", { value: voice, configurable: true });
+  window.SpeechSynthesisUtterance = class {
+    constructor(text) {
+      this.text = text;
+      this.lang = "";
+    }
+  };
+
   const { standIn } = await import(`./harness.js${fresh}`);
   // `?slow` makes opening a conversation take as long as it really does when
   // an engine has to start behind it. That switch is what reproduced a window
@@ -103,7 +136,7 @@
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
 
-  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut } =
+  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut, aCall } =
     await import(`./checks.js${fresh}`);
   const found = checks().concat(
     carryingOn(),
@@ -116,6 +149,7 @@
     await dictation(),
     await watching(),
     await writingItOut(),
+    await aCall(),
     await aiming(),
     await whichModels(),
     await questionsStillOpen(),

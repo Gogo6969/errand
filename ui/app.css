@@ -1584,6 +1584,42 @@ body.catching #what { border-color: var(--accent); }
   #speak[aria-pressed="true"] { animation: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 34%, transparent); }
 }
 
+/* The same button, doing the same job for the same reason: what it looks like
+   is the only way anybody knows a microphone is on. */
+#call[hidden] { display: none; }
+#call {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  align-self: flex-end;
+  margin-bottom: 3px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--rule);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+#call:hover { color: var(--ink); border-color: var(--edge); }
+#call[aria-pressed="true"] {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+  animation: listening 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  #call[aria-pressed="true"] { animation: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 34%, transparent); }
+}
+
+/* In a call, the box says what will happen to what it hears. Sending on a
+   pause is the one thing here that acts without being told to, and somebody
+   who does not know that is somebody about to send half a thought. */
+body.in-a-call #what::placeholder { color: var(--accent); }
+body.in-a-call #what {
+  border-color: var(--accent);
+}
+
 /* A watch that has stopped is not a note, it is something to act on. */
 #watch-says[data-paused="true"] { color: var(--wrong); }
 

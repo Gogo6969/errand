@@ -1398,6 +1398,130 @@ export async function writingItOut() {
   return found;
 }
 
+/**
+ * A whole call: it hears, it sends, it reads the answer out, it listens again.
+ *
+ * Dictation is still typing. What somebody wants while cooking or driving is
+ * the loop, and every join in that loop is a place it can quietly stop being a
+ * call: sending that never happens, an answer read out as "star star Done star
+ * star", ears that never come back after the answer, or worst, ears that come
+ * back while it is still speaking and send it its own voice.
+ */
+export async function aCall() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const call = document.getElementById("call");
+  const speak = document.getElementById("speak");
+  const box = document.getElementById("what");
+  const where = document.getElementById("talks").value;
+
+  check("there is a way to talk to it hands free", !call.hidden, `hidden=${call.hidden}`);
+  check(
+    "it does not look like it is listening before it is",
+    call.getAttribute("aria-pressed") === "false",
+    call.getAttribute("aria-pressed"),
+  );
+
+  window.__HEARD__.length = 0;
+  window.__SAID__.length = 0;
+  box.value = "";
+  call.click();
+  check("starting a call starts listening", window.__HEARD__.includes("start"), window.__HEARD__.join(","));
+  check(
+    "it looks unmistakably like it is listening",
+    call.getAttribute("aria-pressed") === "true",
+    call.getAttribute("aria-pressed"),
+  );
+  // Sending on a pause is the one thing in this window that acts without being
+  // told to, and somebody who does not know that is about to send half a
+  // thought.
+  check(
+    "the box says what is about to happen to what it hears",
+    /sends/i.test(box.placeholder),
+    box.placeholder,
+  );
+
+  // Heard, then a pause. The pause is the whole mechanism: it is what a person
+  // finishing a sentence looks like from here.
+  await new Promise((r) => setTimeout(r, 2000));
+  check(
+    "stopping talking sends it, without anybody pressing anything",
+    document.getElementById("messages").textContent.includes("check the invoices"),
+    box.value ? `still in the box: ${box.value}` : "sent",
+  );
+  check(
+    "the ears stop while the answer is being worked on",
+    window.__HEARD__.includes("stop"),
+    window.__HEARD__.join(","),
+  );
+
+  // The answer, in the notation an agent actually writes in.
+  window.__SAID__.length = 0;
+  tell("happened", {
+    conversation: where,
+    seq: 9100,
+    kind: "said",
+    text: "**Done.** Three of them are in `notes.txt`. See [the list](https://example.com/x?y=1).",
+    settled: true,
+  });
+  await new Promise((r) => setTimeout(r, 120));
+  const aloud = window.__SAID__.join(" ");
+  check("the answer is read out", aloud.length > 0, JSON.stringify(aloud));
+  check(
+    "the marks that make it look right are not read out as words",
+    !aloud.includes("**") && !aloud.includes("`") && !aloud.includes("https://"),
+    JSON.stringify(aloud),
+  );
+  check(
+    "and what it actually said survives that",
+    aloud.includes("Done.") && aloud.includes("notes.txt") && aloud.includes("the list"),
+    JSON.stringify(aloud),
+  );
+
+  // While it is talking it must not be listening, or it hears itself and sends
+  // its own answer back as the next thing said.
+  const heardWhileSpeaking = window.__HEARD__.slice(window.__HEARD__.lastIndexOf("stop"));
+  check(
+    "it is not listening while it is speaking",
+    !heardWhileSpeaking.includes("start"),
+    heardWhileSpeaking.join(","),
+  );
+
+  // Then the turn ends, and the call has to pick the conversation back up.
+  tell("happened", { conversation: where, seq: 9101, kind: "done" });
+  await new Promise((r) => setTimeout(r, 300));
+  check(
+    "when it has finished speaking it listens again",
+    window.__HEARD__.lastIndexOf("start") > window.__HEARD__.lastIndexOf("stop"),
+    window.__HEARD__.join(","),
+  );
+
+  // The way out somebody reaches for without looking, in the one state where
+  // their hands are not on the keyboard.
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await new Promise((r) => setTimeout(r, 60));
+  check(
+    "pressing escape ends the call",
+    call.getAttribute("aria-pressed") === "false",
+    call.getAttribute("aria-pressed"),
+  );
+  check(
+    "and the microphone is off, not merely unpressed",
+    window.__HEARD__[window.__HEARD__.length - 1] === "stop",
+    window.__HEARD__.slice(-3).join(","),
+  );
+  // Dictation is untouched by any of this: one set of ears, two things that
+  // want them, and only one of them sends.
+  check(
+    "the dictate button is left as it was",
+    speak.getAttribute("aria-pressed") === "false",
+    speak.getAttribute("aria-pressed"),
+  );
+
+  box.value = "";
+  return found;
+}
+
 export function headerFitsOnOneRow() {
   // A media query reads the viewport, not the element, so this cannot be
   // judged by widening anything on the page: run narrow, it measures a header

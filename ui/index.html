@@ -233,6 +233,19 @@
                   stroke-linecap="round"/>
           </svg>
         </button>
+        <!--
+          Hidden for the same reason as the mic beside it, and for one more:
+          a call needs a voice as well as ears, and a window with only one of
+          them can dictate but cannot hold a conversation.
+        -->
+        <button id="call" type="button" hidden title="Talk to it, hands free"
+                aria-label="Talk to it, hands free">
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+            <path d="M5.2 2.2 6.6 5 5.3 6.4a8 8 0 0 0 4.3 4.3L11 9.4l2.8 1.4v2.4
+                     a1 1 0 0 1-1.1 1A11.4 11.4 0 0 1 2.2 3.3a1 1 0 0 1 1-1.1Z"
+                  fill="currentColor"/>
+          </svg>
+        </button>
         <button id="send" type="submit" title="Send">↑</button>
       </form>
     </main>
