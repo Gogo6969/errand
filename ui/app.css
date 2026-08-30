@@ -655,12 +655,16 @@ main > aside, main > #title, main > #composer { flex: none; }
 
 /* What it is doing, in a quieter voice than what it is saying. A step is not
    an utterance and should not compete with one. */
+/* Its parts sit beside each other and never on top of each other. A step name
+   is one long unbroken word often enough -- a hook is called
+   `SessionStart:startup` -- and with nothing said about wrapping it ran
+   straight through the outcome text next to it and both were unreadable. */
 .doing {
   color: var(--ink-soft);
   font-size: 13px;
   display: flex;
   gap: 9px;
-  align-items: center;
+  align-items: flex-start;
 }
 .doing .tile {
   width: 22px;
@@ -669,10 +673,18 @@ main > aside, main > #title, main > #composer { flex: none; }
   background: color-mix(in srgb, var(--hue) 12%, transparent);
 }
 .doing .tile svg { width: 14px; height: 14px; }
-.doing .what { min-width: 0; }
+/* Whole and wrapped, never cut and never overflowing: the end of a step's name
+   is usually the part that says which step it was.
+   The floor is what stops a long name being squeezed into a column four
+   characters wide and broken mid-word while there is room beside it. Breaking
+   a word anywhere is the last resort, not the first. */
+.doing .what { flex: 0 1 auto; min-width: min(26ch, 45%); overflow-wrap: anywhere; }
 /* A step that has not answered yet has not finished, and reads as still going. */
 .doing.running .what { color: var(--ink); }
 .doing .outcome {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--faint);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;

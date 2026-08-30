@@ -1522,6 +1522,94 @@ export async function aCall() {
   return found;
 }
 
+/**
+ * Nothing in a step sits on top of anything else in it.
+ *
+ * Measured rather than looked at. A hook is called `SessionStart:startup`, which
+ * is one unbreakable word, and with nothing said about wrapping it ran straight
+ * through the outcome text beside it: two pieces of writing in the same place,
+ * both unreadable, and it looked fine in every screenshot where the names
+ * happened to be short.
+ */
+export async function stepsDoNotOverlap() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const where = document.getElementById("talks").value;
+
+  // The real shape: a long unbroken name, and an outcome long enough to fill
+  // the rest of the row.
+  tell("happened", {
+    conversation: where,
+    seq: 9300,
+    kind: "doing",
+    // `what`, which is the field the app actually sends. Sending `text` here
+    // drew an empty name, and every measurement below then compared an empty
+    // box against a full one and called it a pass.
+    what: "A hook of yours ran: SessionStart:startup",
+    tool: "Bash",
+    call: "hook-1",
+    step: "hook-1",
+  });
+  tell("happened", {
+    conversation: where,
+    seq: 9301,
+    kind: "did",
+    call: "hook-1",
+    outcome:
+      "/last30days: Ready to use. Run /last30days to get started. Reddit, Hacker News " +
+      "and Polymarket work out of the box. The setup wizard can unlock more.",
+  });
+  await new Promise((r) => setTimeout(r, 150));
+
+  const row = [...document.querySelectorAll("#messages .doing")].pop();
+  const name = row?.querySelector(".what");
+  const outcome = row?.querySelector(".outcome");
+  check(
+    "a step and what it produced are both drawn, with words in them",
+    name && outcome && name.textContent.includes("SessionStart") && outcome.textContent.length > 40,
+    row ? `${JSON.stringify(name?.textContent)} / ${outcome?.textContent?.length} characters` : "no row",
+  );
+
+  if (name && outcome) {
+    const a = name.getBoundingClientRect();
+    const b = outcome.getBoundingClientRect();
+    const overlapping = a.right > b.left + 1 && a.left < b.right - 1 && a.bottom > b.top + 1 && a.top < b.bottom - 1;
+    check(
+      "the step's name does not run through the text beside it",
+      !overlapping,
+      `name ${Math.round(a.left)}-${Math.round(a.right)} x ${Math.round(a.top)}-${Math.round(a.bottom)}, ` +
+        `outcome ${Math.round(b.left)}-${Math.round(b.right)} x ${Math.round(b.top)}-${Math.round(b.bottom)}`,
+    );
+    // Overflowing its own box is what caused that, and it is invisible until
+    // some name happens to be long enough.
+    check(
+      "and stays inside its own box",
+      name.scrollWidth <= name.clientWidth + 1,
+      `${name.scrollWidth} wide in ${name.clientWidth}`,
+    );
+    check(
+      "so does the text beside it",
+      outcome.scrollWidth <= outcome.clientWidth + 1,
+      `${outcome.scrollWidth} wide in ${outcome.clientWidth}`,
+    );
+    // A name with room beside it is not broken mid-word. Breaking anywhere is
+    // the last resort that stops the overlap, not the first thing to reach for.
+    check(
+      "a step's name gets room before it is broken up",
+      a.width >= 150,
+      `${Math.round(a.width)}px wide`,
+    );
+    // The row is one line of writing across, whatever wraps inside it.
+    const parent = row.getBoundingClientRect();
+    check(
+      "the whole step stays inside the conversation",
+      a.right <= parent.right + 1 && b.right <= parent.right + 1,
+      `row ends ${Math.round(parent.right)}, name ${Math.round(a.right)}, outcome ${Math.round(b.right)}`,
+    );
+  }
+  return found;
+}
+
 export function headerFitsOnOneRow() {
   // A media query reads the viewport, not the element, so this cannot be
   // judged by widening anything on the page: run narrow, it measures a header
