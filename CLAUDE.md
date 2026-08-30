@@ -84,6 +84,40 @@ sentence produced "wakes Write a file called hello.txt containing when what is
 there changes". `watch::reads_as_a_name` decides; anything that splices a name
 into prose should ask it first.
 
+### Where new work goes
+
+There are four ways an errand can start, and each has a module holding the
+judgement and an app-side part holding the plumbing:
+
+- somebody types it
+- the clock comes round (`routine`)
+- something out in the world changes (`watch`)
+- a goal is not finished yet (`goal`)
+
+Each one says, in numbers and before anybody agrees to it, how often it can
+possibly cost something. That is not decoration. It is the only reason any of
+them is safe to leave switched on.
+
+### Work that outlives the turn
+
+`jobs` holds commands started rather than run. Two rules that took a test to
+find: whatever waits on the child must not *own* it, or stopping a job finds
+nothing there to stop; and a helper that builds a walled command sets the
+working directory itself, or the wall is around somewhere the command is not
+standing.
+
+### Asking and the wall are the same job done two ways
+
+`wall` builds one sandbox profile for both engines. A local model always gets
+it, because it has no asking of its own. Claude Code gets it exactly when the
+asking is switched off, and never otherwise, because asking is the better
+mechanism while it is on: it explains itself and a wall does not.
+
+Every allowance in that profile is load-bearing. Without `~/.npm`, `npx` fails
+with npm's own advice to `sudo chown` a directory that is fine, so a wall with
+a gap in it does not merely block something, it sends somebody to break their
+own machine. Anything added there needs a test naming what stopped working.
+
 ### A description of something live has to be live
 
 A panel drawn once and never again goes on saying "it has not looked yet" while
@@ -94,6 +128,11 @@ the sentence always and the input boxes never, or a half-typed path gets taken
 back while somebody is typing it.
 
 Related: a watch that failed says so on the first failure, not after the fifth.
+
+The harness can deliver an event (`tell` in `harness.js`). Before that its
+`listen` returned a shrug, so everything the window only ever learns from an
+event had no test at all, and a line pushed in with the wrong shape drew as
+nothing live and drew fine after a reload -- invisible exactly when it mattered.
 
 ### Screenshots
 
