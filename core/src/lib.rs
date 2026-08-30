@@ -15,6 +15,7 @@
 //! which: Claude Code, driven as a process on a pipe, and a local model driven
 //! by a loop of our own. See `engine` for the protocol they both speak.
 
+pub mod allowing;
 pub mod claude;
 pub mod doctor;
 pub mod doorway;

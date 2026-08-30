@@ -60,12 +60,21 @@ export const FIXTURE = {
     "agent-bitcoin": [
       { id: "talk-2", agent: "agent-bitcoin", name: "First", opened: true },
       { id: "talk-3", agent: "agent-bitcoin", name: "Asked by Day Check", opened: true },
+      { id: "talk-4", agent: "agent-bitcoin", name: "Answered a few", opened: true },
     ],
   },
   lines: {
     "talk-1": [
       { seq: 1, at: 1, kind: "mine", text: "Show me the latest Bitcoin news", call: null, tool: null, outcome: null },
       { seq: 2, at: 2, kind: "said", text: "**BTC** is around $77,700.", call: null, tool: null, outcome: null },
+    ],
+    // Three answered questions and a fourth still open, which is the shape that
+    // makes the way out of being asked worth offering: somebody on their fourth
+    // question is clicking through them, not weighing each one.
+    "talk-4": [
+      { seq: 1, at: 1, kind: "asking", text: "Read the notes", call: "a1", tool: "Bash", outcome: "yes" },
+      { seq: 2, at: 2, kind: "asking", text: "Check memory", call: "a2", tool: "Bash", outcome: "yes" },
+      { seq: 3, at: 3, kind: "asking", text: "List processes", call: "a3", tool: "Bash", outcome: "yes" },
     ],
     // A question with nothing written against it, in a conversation whose
     // engine is gone. Nobody will ever answer this one.
@@ -157,6 +166,12 @@ export const FIXTURE = {
     found: false, trouble: null,
     models: [{ model: "deepseek-v4-flash", loaded: true }],
   },
+  // Two granted rules that look alike and are not: one covers every use of a
+  // program, the other covers one command line and nothing else.
+  allowances: [
+    { id: "al-1", tool: "Bash", rule: "top", covers: "any top command" },
+    { id: "al-2", tool: "Bash", rule: "printf a > f; ls", covers: "only this exact command" },
+  ],
   outside: [
     { name: "peekaboo", from: "~/.claude.json", tools: ["see", "click", "type"], trouble: null },
     { name: "mempalace", from: "~/.claude.json", tools: [], trouble: "starting it: No such file or directory" },
@@ -230,6 +245,8 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           case "goal_of":
             return Promise.resolve(fixture.goal_of);
           case "allowances":
+            return Promise.resolve(fixture.allowances);
+          case "__never":
           case "routines":
           case "runs":
             return Promise.resolve([]);

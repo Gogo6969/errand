@@ -548,6 +548,10 @@ async fn errand(
                     // grant twice, and allowing a prefix of one is a rule this
                     // side has no basis for inventing.
                     rule: String::new(),
+                    // The whole tool, and said so: an empty rule allows every
+                    // use of it, and that is a bigger thing to agree to than
+                    // the button used to admit.
+                    allows: crate::allowing::the_whole_tool(&name).in_words,
                 }));
 
                 let (said, meanwhile) = match wait_for_an_answer(asked, &call.id).await {

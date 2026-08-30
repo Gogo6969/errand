@@ -1434,7 +1434,7 @@ impl Store {
         Ok(self
             .allowances(agent)?
             .into_iter()
-            .any(|a| a.tool == tool && (a.rule.is_empty() || doing.starts_with(&a.rule))))
+            .any(|a| a.tool == tool && crate::allowing::covers(&a.rule, doing)))
     }
 
     /// Give a conversation a schedule, or take one away.

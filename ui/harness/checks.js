@@ -443,6 +443,16 @@ export async function postures() {
     said.auto.includes("walled") && said.auto.includes("own folder"),
     said.auto.slice(0, 90),
   );
+  // What each granted rule covers, in words. Two rules that look alike on the
+  // page are not alike at all: one covers every use of a program and the other
+  // covers a single command line, and the rule text alone does not say which.
+  const listed = document.getElementById("allowed").textContent;
+  check(
+    "what is already allowed says how much it covers",
+    listed.includes("any top command") && listed.includes("only this exact command"),
+    listed.slice(0, 110),
+  );
+
   check(
     "and the postures that do ask do not claim to be walled",
     !said.ask.includes("walled") && !said.edits.includes("walled"),
@@ -848,6 +858,43 @@ export async function questionsStillOpen() {
     gone.includes("Delete the old backups") && gone.includes("expired"),
     gone.slice(0, 90),
   );
+  // Where the way out of being asked belongs: in front of somebody who has
+  // just answered three questions, not behind a button called Allowed that
+  // nobody looks at while being interrupted.
+  await openTalk("talk-4");
+  // The shape the app actually sends: the event flattened onto the message,
+  // with `kind` naming which one it is.
+  tell("happened", {
+    conversation: "talk-4",
+    seq: 4,
+    kind: "needs_you",
+    asking: "Fetch the price",
+    detail: "curl -s https://example.com/price",
+    tool: "Bash",
+    call: "a4",
+    step: "a4",
+    can_remember: true,
+    rule: "curl",
+    allows: "any curl command",
+  });
+  await new Promise((r) => setTimeout(r, 300));
+
+  const card = document.querySelector("#messages .asking .choices");
+  check("a live question offers a way to answer it", card, card ? "buttons" : "no buttons");
+  const always = [...(card?.querySelectorAll("button") || [])].find((b) =>
+    b.textContent.startsWith("Always"),
+  );
+  check(
+    "and Always says how wide it is before it is pressed",
+    always?.textContent === "Always · any curl command",
+    always?.textContent || "no Always button",
+  );
+  check(
+    "and after three of these there is a way to stop being asked at all",
+    [...(card?.querySelectorAll("button") || [])].some((b) => b.textContent === "Stop asking me"),
+    [...(card?.querySelectorAll("button") || [])].map((b) => b.textContent).join(" / "),
+  );
+
   return found;
 }
 

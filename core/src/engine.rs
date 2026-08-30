@@ -80,6 +80,15 @@ pub struct NeedsYou {
     /// site and does not cover `curl`, and that distinction has to survive the
     /// trip from the engine to the list somebody can read.
     pub rule: String,
+    /// What saying always would actually allow, in words, so the button can say
+    /// it before it is pressed.
+    ///
+    /// Empty where there is nothing to remember. A rule for a shell command is
+    /// narrowed to the program it runs, which is a real widening of what was
+    /// agreed to and is the whole reason this field exists: "Always" on its own
+    /// is not a choice anybody can make.
+    #[serde(default)]
+    pub allows: String,
 }
 
 /// What a person says back.

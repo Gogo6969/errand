@@ -28,7 +28,6 @@ use errand_core::local::{find, LlmSettings, Local};
 use errand_core::mcp;
 use errand_core::memory;
 use errand_core::routine::When;
-use errand_core::store::Allowance;
 use errand_core::store::{Settled, NOT_YET_NAMED};
 use errand_core::team;
 use errand_core::watch;
@@ -2171,8 +2170,32 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
 
 /// Everything an agent may do without being asked again.
 #[tauri::command]
-async fn allowances(held: State<'_, Held>, agent: String) -> Result<Vec<Allowance>, String> {
-    held.store.allowances(&agent).map_err(|e| e.to_string())
+async fn allowances(held: State<'_, Held>, agent: String) -> Result<Vec<Allowed>, String> {
+    Ok(held
+        .store
+        .allowances(&agent)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|one| Allowed {
+            covers: errand_core::allowing::in_words(&one.tool, &one.rule),
+            id: one.id,
+            tool: one.tool,
+            rule: one.rule,
+        })
+        .collect())
+}
+
+/// One thing this agent may do without being asked, and how much that is.
+///
+/// The words matter more than the rule. A rule stored as a whole command line
+/// covers that line and nothing else, which looks like a permission and behaves
+/// like a one-off, and nothing about the line itself says which it is.
+#[derive(Serialize)]
+struct Allowed {
+    id: String,
+    tool: String,
+    rule: String,
+    covers: String,
 }
 
 /// Stop a command that was left running.

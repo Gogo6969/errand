@@ -695,7 +695,42 @@ function asks(m) {
       return b;
     };
     choices.append(say("Yes", "yes", "yes"));
-    if (m.can_remember) choices.append(say("Always", "always", "always"));
+    if (m.can_remember) {
+      // What it will allow, on the button. "Always" on its own is not a choice
+      // anybody can make: for a shell command it now allows every use of that
+      // program, which is a real widening and has to be visible before it is
+      // pressed rather than discoverable afterwards in a list.
+      const always = say(m.allows ? `Always · ${m.allows}` : "Always", "always", "always");
+      always.title = m.allows
+        ? `From now on this agent may do ${m.allows} without asking. You can take it back under Allowed.`
+        : "";
+      choices.append(always);
+    }
+
+    // Where the friction actually is. Somebody who has answered this three
+    // times is not weighing each question, they are clicking through them, and
+    // an app that watches that happen and says nothing has decided the setting
+    // it has is somebody else's problem to find. It is behind a button called
+    // Allowed, which is not where anybody looks while being interrupted.
+    const answeredAlready = (talking()?.messages || []).filter(
+      (one) => one.kind === "asking" && one.answered,
+    ).length;
+    if (answeredAlready >= 3) {
+      const enough = document.createElement("button");
+      enough.type = "button";
+      enough.className = "enough";
+      enough.textContent = "Stop asking me";
+      enough.title =
+        "Set this agent to get on with it without asking. It is walled into its " +
+        "own folder when you do, so it can write there and in the usual temporary " +
+        "places and nowhere else.";
+      enough.onclick = () => {
+        el.granting.hidden = false;
+        drawGranted();
+        el.asks.focus();
+      };
+      choices.append(enough);
+    }
     choices.append(say("No", "no", "no"));
     body.append(choices);
   }
@@ -709,7 +744,9 @@ async function answer(m, said, label) {
   const t = talking();
   // Settled here as well as in the store, so the buttons stop being buttons
   // the moment they are pressed rather than when the answer comes back.
-  m.answered = label === "Always" ? "You said yes, and to stop asking" : `You said ${label.toLowerCase()}`;
+  m.answered = said === "always"
+    ? `You said yes, and to allow ${m.allows || "this"} from now on`
+    : `You said ${label.toLowerCase()}`;
   t.working = said !== "no";
   drawMessages();
   drawThreads();
@@ -836,6 +873,9 @@ listen("happened", ({ payload }) => {
         // What "always" would actually allow, so the app can store it and show
         // it back. Empty means any use of the tool.
         rule: payload.rule || "",
+        // What that would cover, in words, so the button can say it rather than
+        // leaving somebody to guess how wide "always" is.
+        allows: payload.allows || "",
         answered: null,
       };
       // The step it halted is already on screen. Turn that line into the
@@ -1498,10 +1538,12 @@ async function drawGranted() {
       ? allowed.map((one) => {
           const row = document.createElement("li");
           const what = document.createElement("span");
-          // A rule is the beginning of what is allowed; nothing means the whole
-          // tool, and saying which is the difference between a boundary and a
-          // blank cheque.
-          what.textContent = one.rule ? `${one.tool} · ${one.rule}` : `${one.tool} · anything`;
+          // What it covers, in words, rather than the rule it is stored as. A
+          // rule that is a whole command line covers that line and nothing
+          // else, which reads like a permission and behaves like a one-off, and
+          // nothing about the line says which of the two it is.
+          what.textContent = `${one.tool} · ${one.covers}`;
+          if (one.rule) what.title = one.rule;
           const take = document.createElement("button");
           take.type = "button";
           take.textContent = "Take back";

@@ -770,6 +770,30 @@ pub fn read(line: &str) -> Vec<Event> {
                 // be called "description".
                 let plain = team::which_of_ours(&tool);
                 let ours = input.cloned().unwrap_or(serde_json::Value::Null);
+                // What "always" would allow, worked out once, so the rule that
+                // gets stored and the words on the button cannot disagree.
+                // The plain name, worked out once. The card, the allowlist and
+                // the words on the button all have to be about the same tool,
+                // and this is the one place that decides which name that is.
+                let named = plain.map_or_else(|| tool.clone(), |mine| mine.name().to_string());
+                let narrowed = crate::allowing::what_always_means(
+                    &named,
+                    // Nothing when the engine offered nothing to remember, and
+                    // an empty string when it offered the whole tool. Two
+                    // different answers: collapsing them takes the button off
+                    // every question about a tool with no finer rule than
+                    // itself, delegation among them.
+                    request
+                        .get("permission_suggestions")
+                        .and_then(|s| s.as_array())
+                        .filter(|s| !s.is_empty())
+                        .map(|_| {
+                            request
+                                .pointer("/permission_suggestions/0/rules/0/ruleContent")
+                                .and_then(|r| r.as_str())
+                                .unwrap_or("")
+                        }),
+                );
                 vec![Event::NeedsYou(NeedsYou {
                     asking: match plain {
                         Some(name) => team::in_plain_words(name, &ours),
@@ -783,21 +807,23 @@ pub fn read(line: &str) -> Vec<Event> {
                     // cover it. Without one there is nothing to remember, and
                     // a button that quietly does nothing is worse than no
                     // button.
-                    can_remember: request
-                        .get("permission_suggestions")
-                        .and_then(|s| s.as_array())
-                        .is_some_and(|s| !s.is_empty()),
-                    rule: request
-                        .pointer("/permission_suggestions/0/rules/0/ruleContent")
-                        .and_then(|r| r.as_str())
-                        .unwrap_or("")
-                        .to_string(),
+                    can_remember: narrowed.is_some(),
+                    // Narrowed to something reusable where it can be, and
+                    // said in words either way. What the engine suggests for a
+                    // shell command is the whole command line, so "always" used
+                    // to mean "always, for this exact line" -- which is almost
+                    // never the same line twice, and is why somebody could
+                    // press it six times and be asked a seventh.
+                    rule: narrowed.as_ref().map_or(String::new(), |a| a.rule.clone()),
+                    allows: narrowed
+                        .as_ref()
+                        .map_or(String::new(), |a| a.in_words.clone()),
                     step: request
                         .get("tool_use_id")
                         .and_then(|t| t.as_str())
                         .unwrap_or("")
                         .to_string(),
-                    tool: plain.map_or(tool, |mine| mine.name().to_string()),
+                    tool: named,
                     call,
                 })]
             }
@@ -1495,6 +1521,34 @@ mod tests {
         // which is what makes one row serve both.
         assert_eq!(ask.rule, "");
         assert!(ask.can_remember);
+        // And the button says how wide that is, because an empty rule allows
+        // every use of the tool and the word "always" hides that entirely.
+        assert_eq!(ask.allows, "anything this agent does with ask");
+    }
+
+    #[test]
+    fn saying_always_to_a_shell_command_allows_that_command_and_not_that_line() {
+        // What actually happened: six "always" answers in a row and a seventh
+        // question, because the rule stored was the whole command line and no
+        // two lines were the same.
+        const ASKED: &str = r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"top -l 1 -n 15"},"permission_suggestions":[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"top -l 1 -n 15"}],"behavior":"allow"}],"tool_use_id":"toolu_1"}}"#;
+        let Event::NeedsYou(ask) = &read(ASKED)[0] else {
+            panic!("it was not a question");
+        };
+        assert_eq!(ask.rule, "top");
+        assert_eq!(ask.allows, "any top command");
+    }
+
+    #[test]
+    fn a_command_that_does_more_than_one_thing_is_still_allowed_only_as_itself() {
+        // Narrowing this to `printf` would allow the half after the semicolon
+        // too, for ever.
+        const ASKED: &str = r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"printf a > f; rm -rf x"},"permission_suggestions":[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"printf a > f; rm -rf x"}],"behavior":"allow"}],"tool_use_id":"toolu_2"}}"#;
+        let Event::NeedsYou(ask) = &read(ASKED)[0] else {
+            panic!("it was not a question");
+        };
+        assert_eq!(ask.rule, "printf a > f; rm -rf x");
+        assert_eq!(ask.allows, "only this exact command");
     }
 
     #[test]
