@@ -31,6 +31,7 @@ pub mod local;
 pub mod mcp;
 pub mod memory;
 pub mod routine;
+pub mod schedules;
 pub mod team;
 pub mod watch;
 

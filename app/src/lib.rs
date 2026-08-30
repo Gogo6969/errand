@@ -27,6 +27,7 @@ use errand_core::keys;
 use errand_core::local::{find, LlmSettings, Local};
 use errand_core::mcp;
 use errand_core::memory;
+use errand_core::routine;
 use errand_core::routine::When;
 use errand_core::store::{Settled, NOT_YET_NAMED};
 use errand_core::team;
@@ -451,6 +452,11 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
     let settling = held.settling.clone();
     let watching = held.watching.clone();
     std::thread::spawn(move || {
+        // Steps where the agent made a schedule of its own. Kept until the step
+        // finishes, because saying what a schedule means before it exists would
+        // be saying it about one that may not.
+        let mut its_own_schedules: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         while let Ok(event) = events.recv() {
             // An agent in the middle of settling on a name is answering us, not
             // whoever is at the window.
@@ -545,6 +551,44 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                         continue;
                     }
                 }
+            }
+
+            // An agent asked to do something every morning reaches for the
+            // engine's scheduler, because that is the tool in front of it and
+            // it has no idea this app has one. The job is real and Errand knows
+            // nothing about it: not in Repeat, not run here, and gone when the
+            // session is. Somebody who is told "scheduled, every day at 7:02"
+            // and nothing else finds that out on the morning it does not
+            // happen.
+            match &event {
+                Event::Doing(step) if errand_core::schedules::makes_one_of_its_own(&step.tool) => {
+                    its_own_schedules.insert(step.call.clone());
+                }
+                // Said once the schedule exists rather than once it is
+                // proposed, and only where it worked.
+                Event::Did { call, outcome }
+                    if its_own_schedules.remove(call) && !outcome.trim().is_empty() =>
+                {
+                    match store.the_app_says(
+                        &id,
+                        "note",
+                        &errand_core::schedules::what_that_means(),
+                    ) {
+                        Ok(line) => {
+                            let _ = app.emit(
+                                "noted",
+                                Noted {
+                                    conversation: id.clone(),
+                                    seq: line.seq,
+                                    kind: "note".to_string(),
+                                    text: line.text,
+                                },
+                            );
+                        }
+                        Err(why) => eprintln!("could not say whose schedule that is: {why}"),
+                    }
+                }
+                _ => {}
             }
 
             let written = match store.happened(&id, &event) {
@@ -2241,6 +2285,42 @@ async fn runs(
         .map_err(|e| e.to_string())
 }
 
+/// Whether something else already does this, and who.
+///
+/// Asked as somebody types rather than when they save, so it is a thing they
+/// know before they decide rather than an argument afterwards. Nothing stops
+/// them: two agents on the same job every morning is usually a mistake and
+/// occasionally exactly what somebody wants, and the app is not in a position
+/// to know which.
+#[tauri::command]
+async fn already_runs(
+    held: State<'_, Held>,
+    id: String,
+    at: String,
+    what: String,
+) -> Result<Option<String>, String> {
+    // Only the ones that already run, which is the whole question.
+    let all = held.store.routines().map_err(|e| e.to_string())?;
+    for one in all {
+        if one.id == id {
+            continue;
+        }
+        let (Some(theirs_at), Some(theirs_what)) = (&one.runs_at, &one.runs_what) else {
+            continue;
+        };
+        if routine::the_same_thing_twice(&at, &what, theirs_at, theirs_what) {
+            let who = held
+                .store
+                .agent(&one.agent)
+                .ok()
+                .flatten()
+                .map_or_else(|| one.name.clone(), |a| a.name);
+            return Ok(Some(routine::already_doing_this(&who, theirs_at)));
+        }
+    }
+    Ok(None)
+}
+
 /// Every conversation that runs itself, and when each is next due.
 #[derive(Clone, Serialize)]
 struct Routine {
@@ -2914,6 +2994,7 @@ pub fn run() {
             move_it,
             whats_offered,
             still_going,
+            already_runs,
             watch_it,
             watches,
             aim_at,

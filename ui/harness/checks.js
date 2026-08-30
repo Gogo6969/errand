@@ -989,6 +989,54 @@ export async function everythingLinesUp() {
   return found;
 }
 
+/**
+ * Whether something else already does this, said while it is being typed.
+ *
+ * Errand did not check at all: two agents could be given the same job every
+ * morning and nothing anywhere said so. Two identical briefings at seven is how
+ * somebody finds out, which is a week later and by accident.
+ */
+export async function alreadyRunning() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  document.getElementById("repeat").click();
+  await new Promise((r) => setTimeout(r, 300));
+
+  const at = document.getElementById("routine-at");
+  const what = document.getElementById("routine-what");
+  const type = async (when, doing) => {
+    at.value = when;
+    what.value = doing;
+    what.dispatchEvent(new Event("input"));
+    await new Promise((r) => setTimeout(r, 250));
+    return document.getElementById("routine-says").textContent;
+  };
+
+  const clashing = await type("daily 07:00", "Brief me on bitcoin");
+  check(
+    "typing one that something else already does says so, and says who",
+    clashing.includes("Bitcoin Desk already does almost exactly this"),
+    clashing.slice(0, 90),
+  );
+  check(
+    "and still says when this one would run, which is what the panel is for",
+    /runs only when you ask|Next |nothing due/.test(clashing),
+    clashing.slice(0, 90),
+  );
+
+  const fine = await type("daily 07:00", "Check whether the backups ran");
+  check(
+    "and says nothing when nothing else does it",
+    !fine.includes("already does"),
+    fine.slice(0, 80),
+  );
+
+  document.getElementById("repeat").click();
+  await new Promise((r) => setTimeout(r, 150));
+  return found;
+}
+
 export async function running() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });

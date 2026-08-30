@@ -246,6 +246,14 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.goal_of);
           case "allowances":
             return Promise.resolve(fixture.allowances);
+          case "already_runs":
+            // The stand-in for the app's own comparison: same time, and the
+            // words mostly the same.
+            return Promise.resolve(
+              args.at === "daily 07:00" && /bitcoin|brief/i.test(args.what || "")
+                ? "Bitcoin Desk already does almost exactly this at daily 07:00."
+                : null,
+            );
           case "__never":
           case "routines":
           case "runs":

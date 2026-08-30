@@ -1460,12 +1460,50 @@ el.repeat.addEventListener("click", async () => {
   const t = talking();
   if (!t) return;
   const mine = (await invoke("routines")).find((r) => r.conversation === t.id);
+  theRoutineShown = mine || null;
   el.routineAt.value = mine?.at || "";
   el.routineWhat.value = mine?.what || "";
   el.routineSays.textContent = sayWhen(mine);
   el.routine.hidden = false;
   el.routineAt.focus();
 });
+
+/**
+ * Whether something else already does this, said while it is being typed.
+ *
+ * Before saving rather than after, because two agents on the same job every
+ * morning is a thing somebody wants to know about while deciding, not to
+ * discover later from two identical briefings. Nothing is blocked: it is
+ * usually a mistake and occasionally exactly what somebody meant.
+ */
+async function sayIfSomethingElseAlreadyDoesThis() {
+  const t = talking();
+  const at = el.routineAt.value.trim();
+  const what = el.routineWhat.value.trim();
+  if (!t || !at || !what) return;
+  let already;
+  try {
+    already = await invoke("already_runs", { id: t.id, at, what });
+  } catch {
+    return;
+  }
+  // Written whether or not there is a clash, never only when there is. Setting
+  // it only on a clash leaves the last clash on screen after the text has been
+  // changed to something that does not clash, which is a warning about a
+  // routine nobody is proposing any more.
+  //
+  // Added to what the panel already says rather than replacing it: when this
+  // one would next run is the thing somebody opened the panel to see.
+  el.routineSays.textContent = already
+    ? `${sayWhen(theRoutineShown)} ${already}`
+    : sayWhen(theRoutineShown);
+}
+
+/** The routine as last read, so the warning can be added to what it says. */
+let theRoutineShown = null;
+
+el.routineAt.addEventListener("input", sayIfSomethingElseAlreadyDoesThis);
+el.routineWhat.addEventListener("input", sayIfSomethingElseAlreadyDoesThis);
 
 /** When it next runs, in words, or what is wrong with what was typed. */
 function sayWhen(routine) {
@@ -1494,7 +1532,11 @@ el.routineSave.addEventListener("click", async () => {
     return;
   }
   const mine = (await invoke("routines")).find((r) => r.conversation === t.id);
+  theRoutineShown = mine || null;
   el.routineSays.textContent = sayWhen(mine);
+  // Said again after saving, because somebody who went ahead anyway should not
+  // then be told it is fine.
+  await sayIfSomethingElseAlreadyDoesThis();
   t.repeats = true;
   drawTalks();
 });

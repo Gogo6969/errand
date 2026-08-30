@@ -153,9 +153,125 @@ fn day(said: &str) -> Result<Weekday> {
     }
 }
 
+/// Whether two routines are the same routine written twice.
+///
+/// Not string equality, which never catches it: somebody adding the briefing
+/// again next month types "brief me on bitcoin" where they typed "give me the
+/// bitcoin briefing", and gets two agents doing the same thing every morning
+/// with no sign anywhere that they are.
+///
+/// The time has to match, because the same instruction at seven and at six is
+/// two different arrangements that somebody may well want. What is said only
+/// has to be mostly the same.
+pub fn the_same_thing_twice(one_at: &str, one_what: &str, two_at: &str, two_what: &str) -> bool {
+    let Ok(one) = When::read(one_at) else {
+        return false;
+    };
+    let Ok(two) = When::read(two_at) else {
+        return false;
+    };
+    if one != two {
+        return false;
+    }
+    mostly_the_same(one_what, two_what)
+}
+
+/// Whether two instructions say mostly the same thing.
+///
+/// Compared as a set of the words that carry meaning, because word order and
+/// politeness vary and neither changes what an agent will do.
+fn mostly_the_same(one: &str, two: &str) -> bool {
+    let words = |s: &str| {
+        let mut all: Vec<String> = s
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 3)
+            .map(str::to_string)
+            .collect();
+        all.sort();
+        all.dedup();
+        all
+    };
+    let (a, b) = (words(one), words(two));
+    if a.is_empty() || b.is_empty() {
+        return one.trim().eq_ignore_ascii_case(two.trim());
+    }
+    // "brief" and "briefing" are the same word for this purpose, and that is
+    // the whole difficulty: nobody types it identically the second time, so
+    // comparing whole words catches nothing and the duplicate goes in.
+    let same_word = |x: &String, y: &String| x.starts_with(y.as_str()) || y.starts_with(x.as_str());
+    let shared = a
+        .iter()
+        .filter(|w| b.iter().any(|o| same_word(w, o)))
+        .count();
+    // Most of the shorter one, so padding one out with extra words cannot hide
+    // that it says the same thing.
+    shared * 3 >= a.len().min(b.len()) * 2
+}
+
+/// What to say about one that already exists.
+pub fn already_doing_this(who: &str, at: &str) -> String {
+    format!(
+        "{who} already does almost exactly this at {at}. Two agents on the same \
+         job every morning is usually a mistake, and nothing else here would \
+         have told you."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_same_job_at_the_same_time_is_noticed_however_it_was_worded() {
+        // Nobody types it the same way twice, so string equality never catches
+        // this and two agents end up doing the same thing every morning.
+        assert!(the_same_thing_twice(
+            "daily 07:00",
+            "Give me the Bitcoin briefing",
+            "daily 7:00",
+            "Brief me on bitcoin",
+        ));
+    }
+
+    #[test]
+    fn the_same_job_at_a_different_time_is_two_arrangements() {
+        // Somebody may well want the briefing at six and again at noon.
+        assert!(!the_same_thing_twice(
+            "daily 07:00",
+            "Give me the Bitcoin briefing",
+            "daily 12:00",
+            "Give me the Bitcoin briefing",
+        ));
+    }
+
+    #[test]
+    fn two_different_jobs_at_the_same_time_are_not_a_duplicate() {
+        assert!(!the_same_thing_twice(
+            "daily 07:00",
+            "Give me the Bitcoin briefing",
+            "daily 07:00",
+            "Check whether the backups ran overnight",
+        ));
+    }
+
+    #[test]
+    fn padding_one_out_does_not_hide_that_it_says_the_same_thing() {
+        assert!(the_same_thing_twice(
+            "daily 07:00",
+            "bitcoin briefing",
+            "daily 07:00",
+            "please could you put together the bitcoin briefing for me thanks",
+        ));
+    }
+
+    #[test]
+    fn a_schedule_nobody_can_read_is_never_called_a_duplicate() {
+        // Refusing to parse and calling it a match are different failures, and
+        // the second one blocks something that was fine.
+        assert!(!the_same_thing_twice("nonsense", "a", "daily 07:00", "a"));
+        assert!(!the_same_thing_twice("daily 07:00", "a", "nonsense", "a"));
+    }
 
     /// A local moment, because every time in here is a local time. Building
     /// these as UTC and converting was the first version, and it moved every
