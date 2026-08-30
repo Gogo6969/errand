@@ -41,10 +41,14 @@ export function checks() {
     options("engine").filter((o) => o.startsWith("Claude")).length > 1,
     options("engine").filter((o) => o.startsWith("Claude")).join(" | "),
   );
+  // Looking used to be an option inside the picker, which meant the picker
+  // was a search. It is not any more, and the check that used to demand it
+  // now demands the opposite: opening a picker must not be an invitation to
+  // wait. Where looking lives instead is checked in `whichModels`.
   check(
-    "there is a way to look on the network",
-    options("engine").some((o) => o.toLowerCase().includes("network")),
-    options("engine").at(-1),
+    "the picker offers nothing that goes looking",
+    !options("engine").some((o) => /network|look/i.test(o)),
+    options("engine").join(" | "),
   );
 
   // What was said in the conversation is what the window is for.
@@ -106,11 +110,11 @@ export function palette() {
   );
 
   // Typing narrows it, in any word order.
-  typing.value = "network models";
+  typing.value = "up models";
   typing.dispatchEvent(new Event("input"));
   check(
     "typing words in any order finds the thing",
-    list.children.length === 1 && list.children[0].textContent.includes("network"),
+    list.children.length === 1 && list.children[0].textContent.includes("models"),
     `${list.children.length}: ${list.children[0]?.textContent}`,
   );
 
@@ -525,6 +529,137 @@ export async function aiming() {
       document.querySelectorAll("#messages li").length > before,
     shown.includes("Done: get the tests passing") ? "drawn" : "nothing appeared",
   );
+  return found;
+}
+
+/**
+ * Which models show up.
+ *
+ * Two things have to be true and both were false before there was a screen for
+ * it. The picker must show exactly what somebody chose, and nothing may go
+ * looking while it is open: the old one probed the machine every time it was
+ * drawn, which is why it was slow and why what it offered changed under people.
+ */
+export async function whichModels() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const screen = document.getElementById("models");
+
+  check("it starts closed", screen.hidden, `hidden=${screen.hidden}`);
+
+  // The picker itself: what it shows and, more importantly, what it does not do.
+  const askedBefore = asked.length;
+  document.getElementById("engine").dispatchEvent(new Event("mousedown", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 200));
+  const wentLooking = asked
+    .slice(askedBefore)
+    .some((a) => a.name === "look_for_models" || a.name === "engines");
+  check(
+    "opening the picker does not go looking for anything",
+    !wentLooking,
+    asked.slice(askedBefore).map((a) => a.name).join(",") || "asked nothing",
+  );
+  check(
+    "and it offers no option that goes looking",
+    ![...document.getElementById("engine").options].some((o) =>
+      /network|look/i.test(o.textContent),
+    ),
+    [...document.getElementById("engine").options].map((o) => o.textContent).join(" / "),
+  );
+  check(
+    "it shows what was chosen, and that is all",
+    document.getElementById("engine").options.length === FIXTURE.offered.length,
+    `${document.getElementById("engine").options.length} of ${FIXTURE.offered.length}`,
+  );
+
+  document.getElementById("setup").click();
+  await new Promise((r) => setTimeout(r, 300));
+  check("the gear opens it", !screen.hidden, `hidden=${screen.hidden}`);
+
+  const chosen = document.getElementById("chosen").textContent;
+  check(
+    "it lists what is in the picker",
+    chosen.includes("Claude - Opus") && chosen.includes("qwen2.5:7b"),
+    chosen.slice(0, 80),
+  );
+  check(
+    "and everywhere models come from that was kept",
+    document.getElementById("found").textContent.includes("DeepSeek"),
+    document.getElementById("found").textContent.slice(0, 80),
+  );
+  check(
+    "a place with a key says so, and never shows it",
+    document.getElementById("found").textContent.includes("key kept") &&
+      !/sk-|Bearer/.test(document.getElementById("found").textContent),
+    document.getElementById("found").textContent.slice(0, 110),
+  );
+
+  // Looking is a thing you ask for, here, and it says what it found.
+  const wasAsked = asked.length;
+  document.getElementById("look-here").click();
+  await new Promise((r) => setTimeout(r, 300));
+  check(
+    "looking happens here, when asked",
+    asked.slice(wasAsked).some((a) => a.name === "look_for_models"),
+    asked.slice(wasAsked).map((a) => a.name).join(",") || "asked nothing",
+  );
+  check(
+    "and what it found is marked loaded or not, one by one",
+    document.getElementById("found").querySelector(".lit:not(.cold)") &&
+      document.getElementById("found").querySelector(".lit.cold"),
+    `${document.getElementById("found").querySelectorAll(".lit").length} models`,
+  );
+
+  // Adding one by hand, which is the only way to reach a hosted provider.
+  document.querySelectorAll("#presets button")[0]?.click();
+  check(
+    "picking a known provider fills the address in",
+    document.getElementById("hand-url").value.startsWith("https://"),
+    document.getElementById("hand-url").value,
+  );
+
+  document.getElementById("hand-key").value = "sk-not-a-real-key";
+  const beforeAdd = asked.length;
+  document.getElementById("by-hand").dispatchEvent(new Event("submit", { cancelable: true }));
+  await new Promise((r) => setTimeout(r, 300));
+  const sent = asked.slice(beforeAdd).find((a) => a.name === "remember_backend");
+  check("adding one by hand sends it to the app", sent, sent ? "sent" : "nothing was sent");
+  check(
+    "the key is not left sitting in the page afterwards",
+    document.getElementById("hand-key").value === "",
+    `field holds ${document.getElementById("hand-key").value.length} characters`,
+  );
+
+  document.getElementById("models-done").click();
+  check("back to chat closes it", screen.hidden, `hidden=${screen.hidden}`);
+
+  // Taking away the very thing the open agent is set to, which is a thing
+  // somebody will do, and the picker has to keep telling the truth about what
+  // it is on afterwards -- and the true reason it is not there. The old words
+  // said "not running", which would send somebody to go and check a server
+  // that is perfectly well.
+  document.getElementById("setup").click();
+  await new Promise((r) => setTimeout(r, 250));
+  const kept = FIXTURE.offered;
+  const mine = document.querySelector("#chosen li button");
+  FIXTURE.offered = kept.slice(1);
+  mine?.click();
+  await new Promise((r) => setTimeout(r, 300));
+
+  const options = [...document.getElementById("engine").options].map((o) => o.textContent);
+  check(
+    "an agent on something no longer in the list still says what it is on",
+    options.some((o) => o.includes("not in the list")),
+    options.join(" / "),
+  );
+  check(
+    "and says the true reason, rather than blaming the server",
+    !options.some((o) => /not running/i.test(o)),
+    options.join(" / "),
+  );
+
+  FIXTURE.offered = kept;
+  document.getElementById("models-done").click();
   return found;
 }
 

@@ -37,7 +37,7 @@ use serde_json::Value;
 const TO_ANSWER: Duration = Duration::from_millis(2500);
 
 /// One model, and whether it is ready this second.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Ready {
     pub model: String,
     /// Loaded and able to answer without loading first.

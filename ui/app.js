@@ -90,6 +90,20 @@ const el = {
   name: document.getElementById("thread-name"),
   engine: document.getElementById("engine"),
   sweeping: document.getElementById("sweeping"),
+  setup: document.getElementById("setup"),
+  models: document.getElementById("models"),
+  modelsDone: document.getElementById("models-done"),
+  lookHere: document.getElementById("look-here"),
+  lookWide: document.getElementById("look-wide"),
+  findSays: document.getElementById("find-says"),
+  found: document.getElementById("found"),
+  presets: document.getElementById("presets"),
+  byHand: document.getElementById("by-hand"),
+  handLabel: document.getElementById("hand-label"),
+  handUrl: document.getElementById("hand-url"),
+  handKey: document.getElementById("hand-key"),
+  handSays: document.getElementById("hand-says"),
+  chosen: document.getElementById("chosen"),
   checkup: document.getElementById("checkup"),
   working: document.getElementById("working"),
   speak: document.getElementById("speak"),
@@ -177,64 +191,9 @@ async function whatCouldAnswer() {
   return couldAnswer;
 }
 
-/**
- * The value of the last option, which is not an engine but a question.
- *
- * A model somewhere else on the network is a real answer to "what can answer
- * this", but finding one means thousands of probes across every machine on the
- * subnet and most of a minute. So it is offered rather than done: opening the
- * picker stays instant, and looking wider is a thing somebody asks for.
- */
-const LOOK_WIDER = "__wider";
-
-/** Sweep the network for models, and put whatever answered into the picker. */
-async function lookWider(a) {
-  const was = el.engine.value;
-  const hereBefore = (couldAnswer || []).filter((c) => c.engine === "local").length;
-  el.engine.disabled = true;
-  // Beside the picker rather than inside it. A closed select shows only the
-  // line that is selected, so changing an option's words says nothing at all
-  // until somebody opens it again -- and a select that has merely gone grey
-  // for five seconds reads as one that has stopped working.
-  el.sweeping.hidden = false;
-  const saying = el.engine.options[el.engine.selectedIndex];
-  if (saying) saying.textContent = "Looking on the network…";
-
-  try {
-    couldAnswer = await invoke("engines", { wider: true });
-  } catch (why) {
-    couldAnswer = null;
-    if (saying) saying.textContent = String(why);
-    el.engine.disabled = false;
-    el.sweeping.hidden = true;
-    return;
-  }
-
-  el.engine.disabled = false;
-  el.sweeping.hidden = true;
-  const found = couldAnswer.filter((c) => c.engine === "local").length - hereBefore;
-  await drawEngines(a);
-  // Nothing was chosen, only looked for, so the agent stays on what it was on.
-  el.engine.value = was === LOOK_WIDER ? keyOf(a.on, a.onSettings) : was;
-
-  // Said where it was asked for. A sweep that finds nothing and a sweep that
-  // never ran look exactly alike from a dropdown that closes unchanged, and
-  // what anybody concludes from that is that the button is broken. So the last
-  // line of the picker reports, and keeps reporting until the picker is next
-  // drawn.
-  const last = el.engine.options[el.engine.options.length - 1];
-  if (last && last.value === LOOK_WIDER) {
-    last.textContent =
-      found > 0
-        ? `Found ${found} more on the network`
-        : "Nothing on the network answered · look again";
-    last.title =
-      found > 0
-        ? ""
-        : "A model listening only on 127.0.0.1 cannot be seen from another machine. " +
-          "The server has to be bound to its network address, for example " +
-          "OLLAMA_HOST=0.0.0.0 for Ollama.";
-  }
+/** Forget the picker's list, so the next draw reads it again. */
+function thePickerHasChanged() {
+  couldAnswer = null;
 }
 
 /** How one choice is recognised again, since a model id alone does not say where it lives. */
@@ -272,19 +231,30 @@ async function drawEngines(a) {
     }),
   );
 
-  const wider = document.createElement("option");
-  wider.value = LOOK_WIDER;
-  wider.textContent = "Look on the network…";
-  el.engine.append(wider);
-
-  // A thread on a model that has since gone quiet still has to say what it is
-  // on, or the picker silently claims it is something else.
+  // An agent on something that is not in the list still has to say what it is
+  // on, or the picker quietly claims it is something else.
+  //
+  // "Not listed" rather than "not running", which is what this used to say and
+  // is no longer true: when the picker was a live search, missing meant the
+  // server had not answered. Now it means somebody took it out of the list, or
+  // never put it in, and the model may be perfectly well. Telling them it is
+  // down sends them to go and look at a server that is fine.
   if (!choices.some((c) => keyOf(c.engine, c.settings) === mine)) {
     const gone = document.createElement("option");
     gone.value = mine;
-    gone.textContent = `${JSON.parse(a.onSettings || "{}").model || "?"} · not running`;
+    gone.textContent = `${whatItIsOn(a)} · not in the list`;
     gone.selected = true;
     el.engine.prepend(gone);
+  }
+}
+
+/** What an agent is on, named the way the picker would name it. */
+function whatItIsOn(a) {
+  if (a.on !== "local") return a.onSettings ? `Claude · ${a.onSettings}` : "Claude";
+  try {
+    return JSON.parse(a.onSettings || "{}").model || "a local model";
+  } catch {
+    return "a local model";
   }
 }
 
@@ -1085,10 +1055,6 @@ el.what.addEventListener("input", () => {
 el.engine.addEventListener("change", async () => {
   const t = whose();
   if (!t) return;
-  if (el.engine.value === LOOK_WIDER) {
-    await lookWider(t);
-    return;
-  }
   const choice = (await whatCouldAnswer()).find(
     (c) => keyOf(c.engine, c.settings) === el.engine.value,
   );
@@ -1345,9 +1311,9 @@ el.reach.addEventListener("click", async () => {
 });
 
 /** One line of explanation in a panel, as whichever element belongs there. */
-function note(as, text) {
+function note(as, text, looks = "server-what") {
   const line = document.createElement(as);
-  line.className = "server-what";
+  line.className = looks;
   line.textContent = text;
   return line;
 }
@@ -1607,7 +1573,7 @@ function whatCouldBeDone() {
   add("What it may do without asking", "", () => el.granted.click(), !!a);
   add("What this thread can reach", "MCP servers", () => el.reach.click(), !!showing);
   add("Make this run on a schedule", "", () => el.repeat.click(), !!showing);
-  add("Look for models on the network", "takes a moment", () => a && lookWider(a), !!a);
+  add("Which models show up", "", () => showModels(), true);
   add("Check this setup", "what is wrong, and what to do", () => checkup());
   add("What is running", "everywhere, not just here", () => whatsRunning());
   add(
@@ -2328,4 +2294,313 @@ el.watchAgain.addEventListener("click", async () => {
   if (!showing) return;
   await invoke("look_again", { id: showing });
   await drawWatch();
+});
+
+
+// ----------------------------------------------------------- which models --
+
+/**
+ * Which models show up.
+ *
+ * The picker used to be a search: every time it opened it probed this machine,
+ * and offered to probe the network, and showed whatever answered. That is the
+ * wrong shape in four ways at once. It is slow every time. It is different
+ * every time. Most of what it finds is downloaded rather than loaded, so
+ * choosing one means waiting without being told. And nothing anybody chose was
+ * remembered, so the same search happened again tomorrow.
+ *
+ * Finding models is a thing you do once. This is the place to do it, and the
+ * picker is only ever the result.
+ */
+
+/** Addresses worth filling in for you, and what each one is called. */
+const KNOWN_PLACES = [
+  // Where each of these actually serves is not the same, which is the whole
+  // reason these are here rather than in somebody's head: Moonshot serves under
+  // /v1, Z.ai under /api/paas/v4, DeepSeek off the root. Getting it wrong gives
+  // a 404 that reads exactly like a wrong key. Errand checks which one answers
+  // when you add it, so a wrong guess here is corrected rather than kept.
+  { name: "DeepSeek", url: "https://api.deepseek.com" },
+  { name: "Kimi", url: "https://api.moonshot.ai/v1" },
+  { name: "GLM", url: "https://api.z.ai/api/paas/v4" },
+  { name: "OpenRouter", url: "https://openrouter.ai/api/v1" },
+];
+
+async function showModels() {
+  el.models.hidden = false;
+  el.presets.replaceChildren(
+    ...KNOWN_PLACES.map((place) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = place.name;
+      b.onclick = () => {
+        el.handLabel.value = place.name;
+        el.handUrl.value = place.url;
+        el.handKey.focus();
+      };
+      return b;
+    }),
+  );
+  await Promise.all([drawChosen(), drawKept()]);
+}
+
+el.setup.addEventListener("click", showModels);
+el.modelsDone.addEventListener("click", () => {
+  el.models.hidden = true;
+});
+
+/** Everything in the picker, with a way to take each one out. */
+async function drawChosen() {
+  let all;
+  try {
+    all = await invoke("whats_offered");
+  } catch (why) {
+    el.chosen.replaceChildren(note("li", String(why), "nothing"));
+    return;
+  }
+  if (!all.length) {
+    el.chosen.replaceChildren(
+      note("li", "Nothing. The picker is empty, so no agent can be given anything to answer with.", "nothing"),
+    );
+    return;
+  }
+  el.chosen.replaceChildren(
+    ...all.map((one) => {
+      const row = document.createElement("li");
+      const words = document.createElement("span");
+      words.className = "grow";
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = one.label;
+      words.append(name);
+      if (one.settings && one.engine === "local") {
+        const where = document.createElement("span");
+        where.className = "where";
+        try {
+          where.textContent = JSON.parse(one.settings).base_url || "";
+        } catch {
+          where.textContent = "";
+        }
+        words.append(where);
+      }
+      const out = document.createElement("button");
+      out.type = "button";
+      out.textContent = "Remove";
+      out.title = "Take it out of the picker. Anything already set to it goes on using it.";
+      out.onclick = async () => {
+        await invoke("stop_offering", { id: one.id });
+        thePickerHasChanged();
+        await drawChosen();
+        const a = whose();
+        if (a) await drawEngines(a);
+      };
+      row.append(words, out);
+      return row;
+    }),
+  );
+}
+
+/** Everywhere models come from that somebody has kept. */
+async function drawKept() {
+  let kept;
+  try {
+    kept = await invoke("backends");
+  } catch (why) {
+    el.found.replaceChildren(note("li", String(why), "nothing"));
+    return;
+  }
+  drawPlaces(kept, { kept: true });
+}
+
+/**
+ * One list of places, whether found by looking or kept from before.
+ *
+ * The same rows either way, because from here they are the same thing: an
+ * address with models behind it. What differs is only what the buttons do.
+ */
+function drawPlaces(places, { kept = false } = {}) {
+  if (!places.length) {
+    el.found.replaceChildren(
+      note("li", kept ? "Nothing kept yet. Look on this Mac, or add one by hand." : "Nothing answered.", "nothing"),
+    );
+    return;
+  }
+  el.found.replaceChildren(
+    ...places.flatMap((place) => {
+      const head = document.createElement("li");
+      const words = document.createElement("span");
+      words.className = "grow";
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = place.label;
+      const where = document.createElement("span");
+      where.className = "where";
+      where.textContent = place.base_url + (place.has_key ? " · key kept" : "");
+      words.append(name, where);
+      head.append(words);
+
+      if (place.trouble) {
+        const why = document.createElement("span");
+        why.className = "where";
+        why.textContent = place.trouble;
+        words.append(why);
+      }
+
+      const look = document.createElement("button");
+      look.type = "button";
+      look.textContent = "What has it got?";
+      look.onclick = async () => {
+        look.disabled = true;
+        look.textContent = "Asking…";
+        try {
+          const said = kept
+            ? await invoke("models_at", { id: place.id })
+            : { ...place };
+          drawPlaces(
+            places.map((p) => (p.id === place.id ? said : p)),
+            { kept },
+          );
+        } catch (why) {
+          look.textContent = String(why);
+          look.disabled = false;
+        }
+      };
+      head.append(look);
+
+      if (kept) {
+        const drop = document.createElement("button");
+        drop.type = "button";
+        drop.textContent = "Forget";
+        drop.title = "Forget the address and its key, and take its models out of the picker.";
+        drop.onclick = async () => {
+          await invoke("forget_backend", { id: place.id });
+          thePickerHasChanged();
+          await Promise.all([drawKept(), drawChosen()]);
+          const a = whose();
+          if (a) await drawEngines(a);
+        };
+        head.append(drop);
+      } else {
+        const keep = document.createElement("button");
+        keep.type = "button";
+        keep.textContent = "Keep";
+        keep.title = "Remember this address, so it is here next time without looking.";
+        keep.onclick = async () => {
+          keep.disabled = true;
+          await invoke("remember_backend", {
+            label: place.label,
+            provider: place.provider,
+            baseUrl: place.base_url,
+            apiKey: null,
+          }).catch(() => {});
+          await drawKept();
+        };
+        head.append(keep);
+      }
+
+      const models = (place.models || []).map((m) => {
+        const row = document.createElement("li");
+        const lit = document.createElement("span");
+        // Loaded and able to answer now, or downloaded and needing a wait.
+        // A dot rather than a sentence, because this is the one thing worth
+        // seeing at a glance down a list of twenty.
+        lit.className = m.loaded ? "lit" : "lit cold";
+        lit.title = m.loaded ? "Loaded and ready" : "Downloaded, but not loaded: the first errand waits";
+        const words = document.createElement("span");
+        words.className = "grow";
+        const name = document.createElement("span");
+        name.className = "name";
+        name.textContent = m.model;
+        words.append(name);
+
+        const add = document.createElement("button");
+        add.type = "button";
+        add.textContent = "Show in picker";
+        add.onclick = async () => {
+          add.disabled = true;
+          await invoke("offer_this", {
+            engine: "local",
+            label: `${m.model} · ${place.label}`,
+            settings: JSON.stringify({
+              provider: place.provider,
+              base_url: place.base_url,
+              model: m.model,
+            }),
+            backend: kept ? place.id : null,
+          });
+          thePickerHasChanged();
+          add.textContent = "In the picker";
+          add.className = "on";
+          await drawChosen();
+          const a = whose();
+          if (a) await drawEngines(a);
+        };
+        row.append(lit, words, add);
+        return row;
+      });
+      return [head, ...models];
+    }),
+  );
+}
+
+/** Look, here or wider. */
+async function goLooking(wider) {
+  el.lookHere.disabled = true;
+  el.lookWide.disabled = true;
+  el.sweeping.hidden = false;
+  el.findSays.textContent = wider
+    ? "Looking across the network. This takes most of a minute."
+    : "Looking on this Mac.";
+  try {
+    const places = await invoke("look_for_models", { wider });
+    // Said where it was asked for. A sweep that finds nothing and a sweep that
+    // never ran look exactly alike from a list that stays empty, and what
+    // anybody concludes from that is that the button is broken.
+    el.findSays.textContent = places.length
+      ? `Found ${places.length} ${places.length === 1 ? "place" : "places"}.`
+      : wider
+        ? "Nothing on the network answered. A model listening only on 127.0.0.1 cannot be " +
+          "seen from another machine: the server has to be bound to its network address, " +
+          "for example OLLAMA_HOST=0.0.0.0 for Ollama."
+        : "Nothing on this Mac answered. Is Ollama or LM Studio running?";
+    drawPlaces(places);
+  } catch (why) {
+    el.findSays.textContent = String(why);
+  } finally {
+    el.lookHere.disabled = false;
+    el.lookWide.disabled = false;
+    el.sweeping.hidden = true;
+  }
+}
+
+el.lookHere.addEventListener("click", () => goLooking(false));
+el.lookWide.addEventListener("click", () => goLooking(true));
+
+el.byHand.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const baseUrl = el.handUrl.value.trim();
+  if (!baseUrl) {
+    el.handSays.dataset.wrong = "true";
+    el.handSays.textContent = "It needs an address.";
+    return;
+  }
+  el.handSays.dataset.wrong = "false";
+  el.handSays.textContent = "Asking it what it has…";
+  try {
+    await invoke("remember_backend", {
+      label: el.handLabel.value.trim(),
+      provider: "openai-compat",
+      baseUrl,
+      apiKey: el.handKey.value.trim() || null,
+    });
+    el.handSays.textContent = "Added. Ask it what it has, below.";
+  } catch (why) {
+    // Kept even when nothing answered, which the message says, so somebody
+    // adding a machine that is switched off is not made to type it all again.
+    el.handSays.dataset.wrong = "true";
+    el.handSays.textContent = String(why);
+  }
+  // The key is not kept in the page for a moment longer than it takes to send.
+  el.handKey.value = "";
+  await drawKept();
 });

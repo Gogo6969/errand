@@ -119,6 +119,31 @@ export const FIXTURE = {
     left: "two of them still fail on a timeout",
     over: null,
   },
+  offered: [
+    { id: "o-default", engine: "claude", label: "Claude - your default", settings: null, backend: null, sort: 0 },
+    { id: "o-opus", engine: "claude", label: "Claude - Opus", settings: "opus", backend: null, sort: 1 },
+    { id: "o-local", engine: "local", label: "qwen2.5:7b - Ollama", backend: "b-ollama", sort: 2,
+      settings: '{"provider":"ollama","base_url":"http://127.0.0.1:11434","model":"qwen2.5:7b"}' },
+  ],
+  backends: [
+    { id: "b-ollama", label: "Ollama", provider: "ollama", base_url: "http://127.0.0.1:11434",
+      has_key: false, found: false, models: [], trouble: null },
+    { id: "b-deepseek", label: "DeepSeek", provider: "openai-compat", base_url: "https://api.deepseek.com",
+      has_key: true, found: false, models: [], trouble: null },
+  ],
+  look_for_models: [
+    { id: "http://127.0.0.1:11434", label: "Ollama", provider: "ollama",
+      base_url: "http://127.0.0.1:11434", has_key: false, found: true, trouble: null,
+      models: [
+        { model: "qwen2.5:7b", loaded: true },
+        { model: "llama3.2:1b", loaded: false },
+      ] },
+  ],
+  models_at: {
+    id: "b-deepseek", label: "DeepSeek", provider: "openai-compat",
+    base_url: "https://api.deepseek.com", has_key: true, found: false, trouble: null,
+    models: [{ model: "deepseek-v4", loaded: true }],
+  },
   outside: [
     { name: "peekaboo", from: "~/.claude.json", tools: ["see", "click", "type"], trouble: null },
     { name: "mempalace", from: "~/.claude.json", tools: [], trouble: "starting it: No such file or directory" },
@@ -162,7 +187,9 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           case "lines":
             return Promise.resolve(fixture.lines[args.id] || []);
           case "engines":
-            return Promise.resolve(fixture.engines);
+            return Promise.resolve(
+              fixture.offered.map((o) => ({ engine: o.engine, name: o.label, settings: o.settings })),
+            );
           case "outside":
             return Promise.resolve(fixture.outside);
           case "checkup":
@@ -173,6 +200,14 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.brought);
           case "watches":
             return Promise.resolve(fixture.watches);
+          case "whats_offered":
+            return Promise.resolve(fixture.offered);
+          case "backends":
+            return Promise.resolve(fixture.backends);
+          case "look_for_models":
+            return Promise.resolve(fixture.look_for_models);
+          case "models_at":
+            return Promise.resolve(fixture.models_at);
           case "goal_of":
             return Promise.resolve(fixture.goal_of);
           case "allowances":

@@ -22,7 +22,9 @@ pub struct LlmClient {
 struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [serde_json::Value],
-    temperature: f32,
+    /// Omitted entirely when nobody has asked for one. See `LlmSettings`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
     stream: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
@@ -121,10 +123,7 @@ impl LlmClient {
             normalize_for_strict_templates(messages.iter().map(serialize_message).collect());
         let tools_json: Vec<serde_json::Value> = tools.iter().map(|t| t.schema.clone()).collect();
 
-        let url = format!(
-            "{}/v1/chat/completions",
-            self.settings.base_url.trim_end_matches('/')
-        );
+        let url = self.settings.reach("chat/completions");
         let tool_choice = if tools_json.is_empty() {
             None
         } else if force_tool {
@@ -166,10 +165,7 @@ impl LlmClient {
         let payload_messages: Vec<serde_json::Value> =
             normalize_for_strict_templates(messages.iter().map(serialize_message).collect());
         let tools_json: Vec<serde_json::Value> = tools.iter().map(|t| t.schema.clone()).collect();
-        let url = format!(
-            "{}/v1/chat/completions",
-            self.settings.base_url.trim_end_matches('/')
-        );
+        let url = self.settings.reach("chat/completions");
         let tool_choice = if tools_json.is_empty() {
             None
         } else {
@@ -368,11 +364,18 @@ fn serialize_message(m: &ChatMessage) -> serde_json::Value {
         ChatMessage::Assistant {
             content,
             tool_calls,
+            reasoning,
         } => {
             let mut obj = serde_json::json!({
                 "role": "assistant",
                 "content": content,
             });
+            // Handed back exactly as it arrived. DeepSeek's reasoning models
+            // answer a request with tools in it and a turn missing this with a
+            // 400, and this app is nothing but tool loops.
+            if let Some(shown) = reasoning {
+                obj["reasoning_content"] = serde_json::Value::String(shown.clone());
+            }
             if !tool_calls.is_empty() {
                 obj["tool_calls"] = serde_json::json!(tool_calls
                     .iter()
@@ -465,6 +468,71 @@ pub fn short_server_down_reason(err: &str) -> &'static str {
         "server unreachable"
     } else {
         "server error"
+    }
+}
+
+#[cfg(test)]
+mod what_goes_on_the_wire {
+    use super::*;
+
+    #[test]
+    fn a_thinking_models_working_goes_back_the_way_it_came() {
+        // DeepSeek's reasoning models answer a request that has tools in it and
+        // an earlier assistant turn missing this with a 400 rather than a
+        // warning. Every turn in this app has tools in it, so it would work
+        // once and fail on the second.
+        let said = serialize_message(&ChatMessage::Assistant {
+            content: "The answer is 4.".into(),
+            tool_calls: vec![],
+            reasoning: Some("two and two".into()),
+        });
+        assert_eq!(said["reasoning_content"], "two and two");
+        // And it stays out of the answer. Joined on, it would end up in what
+        // somebody reads and in anything the agent later summarises.
+        assert_eq!(said["content"], "The answer is 4.");
+    }
+
+    #[test]
+    fn a_turn_with_no_working_shown_does_not_mention_it() {
+        // An empty field is not the same as no field, and some endpoints treat
+        // it as the model having thought nothing rather than not having said.
+        let said = serialize_message(&ChatMessage::Assistant {
+            content: "Hello.".into(),
+            tool_calls: vec![],
+            reasoning: None,
+        });
+        assert!(said.get("reasoning_content").is_none(), "{said}");
+    }
+
+    #[test]
+    fn nothing_asks_for_a_temperature_nobody_chose() {
+        // Kimi's current models pin sampling and answer an error rather than
+        // clamping, so a client that always sends a number fails every request
+        // against them, including the one that checks the key works.
+        let asking = ChatRequest {
+            model: "kimi-k3",
+            messages: &[],
+            temperature: None,
+            stream: true,
+            tools: vec![],
+            tool_choice: None,
+            max_tokens: None,
+            cache_prompt: None,
+        };
+        let said = serde_json::to_value(&asking).expect("serialises");
+        assert!(said.get("temperature").is_none(), "{said}");
+
+        // And one somebody did choose is still sent.
+        let chosen = ChatRequest {
+            temperature: Some(0.2),
+            ..asking
+        };
+        // Compared loosely, because a 32-bit 0.2 is not a 64-bit one and what
+        // is being checked here is that the field is there at all.
+        let sent = serde_json::to_value(&chosen).unwrap()["temperature"]
+            .as_f64()
+            .expect("a number");
+        assert!((sent - 0.2).abs() < 1e-6, "{sent}");
     }
 }
 

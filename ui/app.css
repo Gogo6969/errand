@@ -200,6 +200,184 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   font-size: 12.5px;
 }
 
+#who {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+#setup {
+  border: 1px solid transparent;
+  background: none;
+  color: var(--ink-soft);
+  font-size: 15px;
+  line-height: 1;
+  padding: 4px 7px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+#setup:hover { color: var(--ink); border-color: var(--rule); }
+#setup:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Said for anybody not looking at it. A gear on its own is a shape, not a word. */
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------- which models -- */
+
+/*
+  Its own screen over the whole window. Choosing what the picker offers is a
+  thing somebody goes and does once, not something they glance at mid-errand,
+  and it wants the room: several places models come from, each with a list.
+*/
+#models[hidden] { display: none; }
+#models {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: var(--bg);
+  overflow-y: auto;
+  padding: 26px 28px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+#models > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+#models h1 { margin: 0; font-size: 21px; letter-spacing: -.01em; }
+#models h2 { margin: 0 0 3px; font-size: 14px; }
+#models p { margin: 0; color: var(--ink-soft); font-size: 12.5px; max-width: 62ch; }
+#models-done {
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+#models-done:hover { color: var(--ink); border-color: var(--edge); }
+
+#models .card {
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: var(--side);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+#models .card-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+#models .doing { display: flex; gap: 8px; flex: none; flex-wrap: wrap; }
+#models .doing button {
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+#models .doing button:hover:not(:disabled) { color: var(--ink); border-color: var(--edge); }
+#models .doing button:disabled { opacity: .5; cursor: default; }
+
+#models ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+#models li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+#models li:hover { background: var(--hover); }
+#models li .where { color: var(--ink-soft); font-size: 12px; }
+#models li .grow { flex: 1 1 auto; min-width: 0; }
+#models li .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+/* Loaded and ready is the thing worth seeing at a glance, so it is a mark and
+   not a sentence at the end of a line nobody reads to the end of. */
+#models li .lit {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--good);
+}
+#models li .cold { background: none; box-shadow: inset 0 0 0 1.5px var(--rule); }
+#models li button {
+  flex: none;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+#models li button:hover { color: var(--ink); border-color: var(--edge); }
+#models li button.on { color: var(--accent); border-color: var(--accent); }
+#models .nothing { color: var(--ink-soft); font-size: 12.5px; padding: 4px 9px; }
+
+#by-hand {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+}
+#by-hand label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  flex: 1 1 170px;
+}
+#by-hand input {
+  padding: 6px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+#by-hand input:focus { outline: none; border-color: var(--edge); }
+#hand-save {
+  padding: 7px 16px;
+  border-radius: 8px;
+  border: 0;
+  background: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+#hand-says { flex: 1 0 100%; }
+#hand-says[data-wrong="true"] { color: var(--wrong); }
+
 /* --------------------------------------------------------------- marks -- */
 
 /*

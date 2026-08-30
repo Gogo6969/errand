@@ -25,8 +25,82 @@
         <button id="new" title="Start something new">+</button>
       </header>
       <ol id="threads"></ol>
-      <footer id="who">Errand</footer>
+      <footer id="who">
+        <span>Errand</span>
+        <!--
+          Where the list in the picker is kept. Down here rather than in the
+          header because it is not about the agent that happens to be open: it
+          is about the app, and it is the same list whichever agent you are on.
+        -->
+        <button id="setup" type="button" title="Which models show in the picker">
+          <span aria-hidden="true">&#9881;</span>
+          <span class="sr">Models</span>
+        </button>
+      </footer>
     </aside>
+
+    <!--
+      Which models show in the picker.
+      Its own screen over the whole window rather than a panel, because it is a
+      thing you go and do rather than something you glance at, and it wants room
+      for a list of everywhere models come from.
+    -->
+    <section id="models" hidden>
+      <header>
+        <h1>Which models show up</h1>
+        <button id="models-done" type="button">&#8592; Back to chat</button>
+      </header>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Find them</h2>
+            <p id="find-says">
+              Look on this machine, or across the network, for Ollama, LM Studio,
+              vLLM, llama.cpp or anything else that speaks the same protocol.
+            </p>
+          </div>
+          <div class="doing">
+            <button id="look-here" type="button">This Mac</button>
+            <button id="look-wide" type="button">Network</button>
+            <!-- Only while looking, which takes seconds on this machine and
+                 most of a minute across a network. -->
+            <span id="sweeping" hidden aria-label="Looking"></span>
+          </div>
+        </div>
+        <ul id="found"></ul>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Add one by hand</h2>
+            <p>
+              Anything that speaks the OpenAI protocol, including the hosted ones.
+              Pick a name below to fill in the address, or type your own.
+            </p>
+          </div>
+          <div class="doing" id="presets"></div>
+        </div>
+        <form id="by-hand" autocomplete="off">
+          <label>Called <input id="hand-label" type="text" placeholder="DeepSeek" autocorrect="off" autocapitalize="off" spellcheck="false" /></label>
+          <label>Address <input id="hand-url" type="url" placeholder="https://api.deepseek.com" autocorrect="off" autocapitalize="off" spellcheck="false" /></label>
+          <label>Key <input id="hand-key" type="password" placeholder="Leave empty if it needs none" autocorrect="off" autocapitalize="off" spellcheck="false" /></label>
+          <button id="hand-save" type="submit">Add</button>
+          <p id="hand-says"></p>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>In the picker</h2>
+            <p>Exactly this, in this order. Nothing else is offered anywhere in the app.</p>
+          </div>
+        </div>
+        <ul id="chosen"></ul>
+      </div>
+    </section>
 
     <main>
       <header id="title">
@@ -41,8 +115,6 @@
         <button id="goal" type="button" title="Something to get to, rather than something to do">Goal</button>
         <button id="granted" type="button" title="What it may do without asking">Allowed</button>
         <button id="reach" type="button" title="What this thread can reach">Tools</button>
-        <!-- Only while the network is being swept, which takes seconds. -->
-        <span id="sweeping" hidden aria-label="Looking on the network"></span>
       </header>
 
       <!--

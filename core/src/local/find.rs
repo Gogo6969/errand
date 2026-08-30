@@ -429,7 +429,10 @@ async fn scan_targets(hosts: Vec<String>) -> Vec<DetectedBackend> {
                     }
                     // OpenAI-compatible — works for vLLM, llama.cpp,
                     // llama-swap, LM Studio, and any drop-in clone.
-                    if let Ok(models) = list_via_openai(&client, &base_url, None).await {
+                    if let Ok(models) =
+                        list_via_openai(&client, &LlmSettings::reaching(&base_url, "models"), None)
+                            .await
+                    {
                         tracing::info!("matched openai-compat at {}", base_url);
                         return Some(DetectedBackend {
                             provider: kind.provider.into(),
@@ -477,7 +480,14 @@ pub async fn list_models(settings: &LlmSettings) -> Result<Vec<String>> {
         .unwrap_or_else(|_| reqwest::Client::new());
     match settings.provider.as_str() {
         "ollama" => list_via_ollama(&client, &settings.base_url).await,
-        _ => list_via_openai(&client, &settings.base_url, settings.api_key.as_deref()).await,
+        _ => {
+            list_via_openai(
+                &client,
+                &settings.reach("models"),
+                settings.api_key.as_deref(),
+            )
+            .await
+        }
     }
 }
 
@@ -505,7 +515,10 @@ async fn caps_via_openai(
     api_key: Option<&str>,
     model: &str,
 ) -> Result<ModelCaps> {
-    let url = format!("{}/v1/models", base.trim_end_matches('/'));
+    // The prefix, verbatim. Deciding the shape is `settle`'s job and it has
+    // already been done by the time anything is stored; doing it again here
+    // would mean a base that was settled as bare gets `/v1` put back on.
+    let url = format!("{}/models", base.trim_end_matches('/'));
     let mut req = client.get(&url);
     if let Some(k) = api_key {
         req = req.bearer_auth(k);
@@ -620,13 +633,70 @@ async fn list_via_ollama(client: &reqwest::Client, base: &str) -> Result<Vec<Str
     Ok(parsed.models.into_iter().map(|m| m.name).collect())
 }
 
+/// Find out where this address actually serves, and what it has.
+///
+/// The documentation does not settle it. DeepSeek's own pages describe the
+/// endpoints as bare paths off the root and no longer mention the `/v1` alias
+/// every client used to use; Moonshot documents `/v1`; Z.ai documents
+/// `/api/paas/v4`. None of it can be checked without a key, because all three
+/// gateways authenticate before they route, so an unauthenticated probe answers
+/// the same 401 for a real path and for nonsense.
+///
+/// So it is asked once, with the key, when somebody adds it, and the answer is
+/// kept. Three documentation ambiguities become one fact, and the fact stays
+/// right when the documentation is not.
+///
+/// Returns the address that answered, which is what to store, and what it said
+/// it has.
+pub async fn settle(base_url: &str, api_key: Option<&str>) -> Result<(String, Vec<String>)> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let plain = base_url.trim_end_matches('/').to_string();
+    // The shape this address implies first, then the other one. There are only
+    // two, and guessing wrong costs somebody an evening deciding their key is
+    // bad when the path was.
+    let shapes = match crate::local::names_its_version(&plain) {
+        true => vec![plain.clone(), format!("{plain}/v1")],
+        false => vec![format!("{plain}/v1"), plain.clone()],
+    };
+
+    let mut empty_but_answered = None;
+    let mut why = Vec::new();
+    for shape in shapes {
+        match list_via_openai(&client, &format!("{shape}/models"), api_key).await {
+            Ok(models) if !models.is_empty() => return Ok((shape, models)),
+            // An empty list is a real answer, and the true one for a key with
+            // nothing enabled on it. Held in case the other shape says more,
+            // because "it answered with nothing" beats "it did not answer".
+            Ok(_) => empty_but_answered.get_or_insert(shape),
+            Err(e) => {
+                why.push(format!("{shape} said {e}"));
+                &mut String::new()
+            }
+        };
+    }
+    match empty_but_answered {
+        Some(shape) => Ok((shape, Vec::new())),
+        None => anyhow::bail!("{}", why.join("; ")),
+    }
+}
+
+/// Ask an address, exactly as given, for its models.
+///
+/// The whole address rather than a base to build one from. Deciding where a
+/// server keeps its endpoints happens in one place, and a second place quietly
+/// deciding it again is how this came to ask for
+/// `/v1/models/v1/models` and report it as a 404.
 async fn list_via_openai(
     client: &reqwest::Client,
-    base: &str,
+    url: &str,
     api_key: Option<&str>,
 ) -> Result<Vec<String>> {
-    let url = format!("{}/v1/models", base.trim_end_matches('/'));
-    let mut req = client.get(&url);
+    let mut req = client.get(url);
     if let Some(k) = api_key {
         req = req.bearer_auth(k);
     }
@@ -755,11 +825,13 @@ pub async fn probe_alive(settings: &LlmSettings) -> bool {
                 Ok(r) if r.status().is_success() => true,
                 // A 404 means an older llama.cpp without /health — fall
                 // back to the OpenAI-compat surface before giving up.
-                Ok(r) if r.status().as_u16() == 404 => {
-                    list_via_openai(&client, &settings.base_url, settings.api_key.as_deref())
-                        .await
-                        .is_ok()
-                }
+                Ok(r) if r.status().as_u16() == 404 => list_via_openai(
+                    &client,
+                    &settings.reach("models"),
+                    settings.api_key.as_deref(),
+                )
+                .await
+                .is_ok(),
                 _ => false,
             }
         }
@@ -771,12 +843,20 @@ pub async fn probe_alive(settings: &LlmSettings) -> bool {
         // OpenAI surface before giving up.
         "ollama" => {
             list_via_ollama(&client, &settings.base_url).await.is_ok()
-                || list_via_openai(&client, &settings.base_url, settings.api_key.as_deref())
-                    .await
-                    .is_ok()
+                || list_via_openai(
+                    &client,
+                    &settings.reach("models"),
+                    settings.api_key.as_deref(),
+                )
+                .await
+                .is_ok()
         }
-        _ => list_via_openai(&client, &settings.base_url, settings.api_key.as_deref())
-            .await
-            .is_ok(),
+        _ => list_via_openai(
+            &client,
+            &settings.reach("models"),
+            settings.api_key.as_deref(),
+        )
+        .await
+        .is_ok(),
     }
 }

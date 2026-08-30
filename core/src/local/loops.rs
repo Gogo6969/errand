@@ -387,6 +387,12 @@ async fn errand(
         let mut stream = client.stream(&asking, &defs, None, cancel).await?;
 
         let mut wrote = String::new();
+        // What a thinking model showed of its working. Kept rather than
+        // dropped, because it has to go back in the next request: DeepSeek's
+        // reasoning models answer a request with tools in it and an earlier
+        // assistant turn missing this with a 400, and every turn here has
+        // tools in it.
+        let mut thought = String::new();
         let mut wants: Vec<super::stream::ToolCallAccum> = Vec::new();
         let mut broke: Option<String> = None;
 
@@ -402,7 +408,7 @@ async fn errand(
                 }
                 // The thinking is the machinery underneath, and nobody watching
                 // their own errand needs to watch it.
-                super::stream::ChatDelta::Reasoning(_) => {}
+                super::stream::ChatDelta::Reasoning(t) => thought.push_str(&t),
                 super::stream::ChatDelta::ToolCall(call) => wants.push(call),
                 super::stream::ChatDelta::Done { .. } => break,
                 super::stream::ChatDelta::Error(why) => {
@@ -477,6 +483,13 @@ async fn errand(
         history.push(ChatMessage::Assistant {
             content: wrote.trim().to_string(),
             tool_calls: calls.clone(),
+            // Kept apart from the answer, never joined onto it: joining puts
+            // the model's private working into what somebody reads, into the
+            // notes it keeps, and into anything it is later asked to summarise.
+            reasoning: match thought.trim().is_empty() {
+                true => None,
+                false => Some(thought.clone()),
+            },
         });
 
         for call in calls {

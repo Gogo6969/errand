@@ -133,6 +133,41 @@ pub struct Conversation {
     pub goal_over: Option<String>,
 }
 
+/// Somewhere models are served from.
+///
+/// One row covers a machine on the network running Ollama and a company on the
+/// other side of the world reached with a key, because from here they are the
+/// same thing: an address that lists models and answers questions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Backend {
+    pub id: String,
+    /// What somebody calls it. Theirs to choose, because "the Mac Studio" and
+    /// "work DeepSeek" are the names that mean anything.
+    pub label: String,
+    pub provider: String,
+    pub base_url: String,
+    /// Whether a key is kept for it. Never the key.
+    pub has_key: bool,
+    pub added_at: i64,
+}
+
+/// One line in the picker.
+///
+/// The picker is exactly this table, in this order. Nothing is discovered while
+/// it is open and nothing appears that somebody did not put there.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Offered {
+    pub id: String,
+    /// `claude` or `local`.
+    pub engine: String,
+    pub label: String,
+    /// For Claude, the model alias. For a local one, the settings as JSON.
+    pub settings: Option<String>,
+    /// Where it came from, so it can be looked at again. Nothing for Claude.
+    pub backend: Option<String>,
+    pub sort: i64,
+}
+
 /// One standing job, and whoever is doing it.
 ///
 /// Named after what it is for rather than after the first thing it was asked,
@@ -519,7 +554,82 @@ const CHANGES: &[&str] = &[
      ALTER TABLE conversations ADD COLUMN goal_tries INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE conversations ADD COLUMN goal_left TEXT;
      ALTER TABLE conversations ADD COLUMN goal_over TEXT;",
+    // 12: the picker stops being a search and becomes a list somebody keeps.
+    //
+    // What was there before was a question asked every time the dropdown
+    // opened: probe this machine, probe the network if asked, and show whatever
+    // answered. That is the wrong shape for the thing it is. It is slow every
+    // time, it is different every time, most of what it finds is not loaded and
+    // could not answer without a wait, and nothing anybody chose is remembered.
+    //
+    // `backends` is a place that serves models, which now includes hosted ones
+    // reached with a key. `offered` is the picker: exactly what is in it is
+    // exactly what the dropdown shows, in the order it shows them.
+    //
+    // Seeded from what is already true, because a change that empties somebody's
+    // picker is a change that breaks their app. Both halves of that: the Claude
+    // entries that were compiled in, and whatever any agent is actually set to
+    // right now, which is the one thing that must not vanish.
+    "CREATE TABLE IF NOT EXISTS backends (
+         id       TEXT PRIMARY KEY,
+         label    TEXT NOT NULL,
+         provider TEXT NOT NULL,
+         base_url TEXT NOT NULL,
+         has_key  INTEGER NOT NULL DEFAULT 0,
+         added_at INTEGER NOT NULL
+     );
+     CREATE TABLE IF NOT EXISTS offered (
+         id       TEXT PRIMARY KEY,
+         engine   TEXT NOT NULL,
+         label    TEXT NOT NULL,
+         settings TEXT,
+         backend  TEXT REFERENCES backends(id) ON DELETE CASCADE,
+         sort     INTEGER NOT NULL
+     );
+     CREATE UNIQUE INDEX IF NOT EXISTS offered_once
+         ON offered(engine, coalesce(settings, ''));
+
+     INSERT OR IGNORE INTO offered (id, engine, label, settings, backend, sort)
+     VALUES
+       ('seed-claude-default', 'claude', 'Claude - your default', NULL,   NULL, 0),
+       ('seed-claude-opus',    'claude', 'Claude - Opus',         'opus', NULL, 1),
+       ('seed-claude-sonnet',  'claude', 'Claude - Sonnet',       'sonnet', NULL, 2),
+       ('seed-claude-haiku',   'claude', 'Claude - Haiku',        'haiku', NULL, 3);
+
+     INSERT OR IGNORE INTO offered (id, engine, label, settings, backend, sort)
+     SELECT 'seed-' || a.id, 'local', 'In use by ' || a.name, a.engine_settings, NULL, 10
+       FROM agents a
+      WHERE a.engine = 'local'
+        AND a.engine_settings IS NOT NULL
+        AND trim(a.engine_settings) <> '';",
 ];
+
+/// Make a store and everything beside it readable by its owner and nobody else.
+fn nobody_elses_business(at: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    for what in [at.to_path_buf(), wal(at), shm(at)] {
+        if what.exists() {
+            let _ = std::fs::set_permissions(&what, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
+/// The write-ahead log beside a store, which holds the most recent of
+/// everything and is created by SQLite rather than by us.
+fn wal(at: &Path) -> std::path::PathBuf {
+    beside_it(at, "-wal")
+}
+
+/// The shared-memory index beside a store.
+fn shm(at: &Path) -> std::path::PathBuf {
+    beside_it(at, "-shm")
+}
+
+fn beside_it(at: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut named = at.as_os_str().to_os_string();
+    named.push(suffix);
+    std::path::PathBuf::from(named)
+}
 
 impl Store {
     /// Open the store, making it if it is not there yet.
@@ -540,6 +650,16 @@ impl Store {
             conn: Mutex::new(conn),
         };
         store.bring_up_to_date()?;
+        // Nobody else's business, and it was not: every conversation anybody
+        // has ever had with this app is in here, and the file was made
+        // readable by anything running on the machine.
+        //
+        // After the pragmas and the migration rather than before, because
+        // switching on write-ahead logging is what creates the two files
+        // beside it, and those hold the most recent of everything. Every time
+        // it is opened rather than only when it is made, because a store made
+        // by an older version is the one with the most in it.
+        nobody_elses_business(at);
         Ok(store)
     }
 
@@ -856,6 +976,114 @@ impl Store {
               WHERE id = ?",
             params![left, over, conversation],
         )?;
+        Ok(())
+    }
+
+    /// Everything the picker shows, in the order it shows it.
+    pub fn offered(&self) -> Result<Vec<Offered>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT id, engine, label, settings, backend, sort
+               FROM offered ORDER BY sort, label",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok(Offered {
+                id: r.get(0)?,
+                engine: r.get(1)?,
+                label: r.get(2)?,
+                settings: r.get(3)?,
+                backend: r.get(4)?,
+                sort: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Put something in the picker, or leave it there if it already is.
+    ///
+    /// The same model chosen twice is one line, not two, which the index
+    /// enforces rather than the caller remembering.
+    pub fn offer(&self, one: &Offered) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO offered (id, engine, label, settings, backend, sort)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(engine, coalesce(settings, '')) DO UPDATE
+                SET label = excluded.label,
+                    backend = excluded.backend,
+                    sort = excluded.sort",
+            params![
+                one.id,
+                one.engine,
+                one.label,
+                one.settings,
+                one.backend,
+                one.sort
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Take something out of the picker.
+    ///
+    /// Only out of the picker. An agent already set to it goes on using it,
+    /// because taking away what something is running on is not what "do not
+    /// show me this any more" means.
+    pub fn stop_offering(&self, id: &str) -> Result<()> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM offered WHERE id = ?", params![id])?;
+        Ok(())
+    }
+
+    /// Every place models are served from that somebody has told this about.
+    pub fn backends(&self) -> Result<Vec<Backend>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT id, label, provider, base_url, has_key, added_at
+               FROM backends ORDER BY added_at",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok(Backend {
+                id: r.get(0)?,
+                label: r.get(1)?,
+                provider: r.get(2)?,
+                base_url: r.get(3)?,
+                has_key: r.get::<_, i64>(4)? != 0,
+                added_at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Remember somewhere models are served from.
+    pub fn add_backend(&self, one: &Backend) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO backends (id, label, provider, base_url, has_key, added_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE
+                SET label = excluded.label,
+                    provider = excluded.provider,
+                    base_url = excluded.base_url,
+                    has_key = excluded.has_key",
+            params![
+                one.id,
+                one.label,
+                one.provider,
+                one.base_url,
+                i64::from(one.has_key),
+                one.added_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Forget one, and everything it was offering.
+    pub fn forget_backend(&self, id: &str) -> Result<()> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM backends WHERE id = ?", params![id])?;
         Ok(())
     }
 
@@ -2420,6 +2648,127 @@ mod tests {
             s.lines("t1").unwrap().is_empty(),
             "the lines outlived the thread"
         );
+    }
+
+    #[test]
+    fn the_picker_shows_what_was_put_in_it_and_nothing_else() {
+        // The whole point of the change: what the dropdown shows is a list
+        // somebody keeps, not the result of a search run every time it opens.
+        let store = Store::in_memory().expect("a store");
+
+        // A fresh store already has Claude in it, because a picker that starts
+        // empty is one that cannot be used until it has been set up, and
+        // nobody should have to set up "the thing it came with".
+        let seeded = store.offered().expect("the seed");
+        assert!(
+            seeded
+                .iter()
+                .any(|o| o.engine == "claude" && o.settings.is_none()),
+            "the default was not seeded: {seeded:?}"
+        );
+
+        let mine = Offered {
+            id: "one".into(),
+            engine: "local".into(),
+            label: "qwen2.5 on the Mac Studio".into(),
+            settings: Some(r#"{"model":"qwen2.5"}"#.into()),
+            backend: None,
+            sort: 20,
+        };
+        store.offer(&mine).expect("offered");
+        assert!(store.offered().unwrap().iter().any(|o| o.id == "one"));
+
+        // The same model chosen twice is one line. Choosing something already
+        // in the list is a thing people do, and it must not double it.
+        let again = Offered {
+            id: "two".into(),
+            label: "the same one, renamed".into(),
+            ..mine.clone()
+        };
+        store.offer(&again).expect("offered again");
+        let now = store.offered().unwrap();
+        assert_eq!(
+            now.iter().filter(|o| o.engine == "local").count(),
+            1,
+            "the same model went in twice: {now:?}"
+        );
+        assert_eq!(
+            now.iter().find(|o| o.engine == "local").unwrap().label,
+            "the same one, renamed"
+        );
+
+        store.stop_offering("one").expect("removed");
+        assert!(!store.offered().unwrap().iter().any(|o| o.engine == "local"));
+    }
+
+    #[test]
+    fn forgetting_a_backend_takes_what_it_was_offering_with_it() {
+        // Otherwise the picker keeps a line pointing at an address that is no
+        // longer configured, which fails at the moment somebody chooses it
+        // rather than at the moment they removed it.
+        let store = Store::in_memory().expect("a store");
+        store
+            .add_backend(&Backend {
+                id: "b1".into(),
+                label: "DeepSeek".into(),
+                provider: "openai-compat".into(),
+                base_url: "https://api.deepseek.com".into(),
+                has_key: true,
+                added_at: 1,
+            })
+            .expect("added");
+        store
+            .offer(&Offered {
+                id: "o1".into(),
+                engine: "local".into(),
+                label: "deepseek-chat".into(),
+                settings: Some(r#"{"model":"deepseek-chat"}"#.into()),
+                backend: Some("b1".into()),
+                sort: 5,
+            })
+            .expect("offered");
+
+        store.forget_backend("b1").expect("forgotten");
+        assert!(store.backends().unwrap().is_empty());
+        assert!(
+            !store.offered().unwrap().iter().any(|o| o.id == "o1"),
+            "the picker kept a line pointing at a backend that is gone"
+        );
+    }
+
+    #[test]
+    fn a_store_is_readable_by_its_owner_and_by_nobody_else() {
+        // Every conversation anybody has ever had with this app is in here.
+        // It was being made world-readable, which on a shared machine is every
+        // errand, every answer and every note, to anybody.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("errand-modes-{}", now()));
+        let at = beside(&dir);
+        let store = Store::open(&at).expect("a store");
+        // Something written, so the log beside it exists and is covered too:
+        // that file holds the most recent of everything.
+        store
+            .begin("a1", "First", std::path::Path::new("/tmp"))
+            .expect("something written");
+        drop(store);
+        // Re-opened, because the check happens on open and the files beside it
+        // are made by the first write.
+        let store = Store::open(&at).expect("opened again");
+        drop(store);
+
+        for what in [at.clone(), wal(&at), shm(&at)] {
+            if !what.exists() {
+                continue;
+            }
+            let mode = std::fs::metadata(&what).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o600,
+                "{} is readable by somebody else",
+                what.display()
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

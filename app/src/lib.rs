@@ -23,6 +23,7 @@ use errand_core::doctor;
 use errand_core::doorway;
 use errand_core::goal;
 use errand_core::keeping;
+use errand_core::keys;
 use errand_core::local::{find, LlmSettings, Local};
 use errand_core::mcp;
 use errand_core::memory;
@@ -795,107 +796,271 @@ struct Choice {
     settings: Option<String>,
 }
 
-/// Everything that could answer a thread on this machine.
+/// What the picker shows.
 ///
-/// Claude is always there; the rest is whatever is actually running and
-/// answering right now, found by asking the usual ports rather than by keeping
-/// a list somebody has to maintain. A model that was there yesterday and is not
-/// there today should not be offered, because choosing it would fail later and
-/// somewhere less obvious.
+/// A list somebody keeps, and nothing else. This used to be a question asked
+/// every time the dropdown opened -- probe this machine, probe the network if
+/// asked -- and that was wrong in four ways at once: slow every time, different
+/// every time, mostly full of models that were not loaded and could not answer
+/// without a wait, and it forgot anything anybody chose. Finding models is a
+/// thing you do once, in the place for doing it, and this is only the result.
 #[tauri::command]
-async fn engines(wider: Option<bool>) -> Result<Vec<Choice>, String> {
-    // Claude, and then Claude with a model named. The first is whatever this
-    // person's own Claude Code is set to, which stays the default because it
-    // is their CLI and their account. The rest exist because "Claude" on its
-    // own told nobody what was actually answering, and the difference between
-    // Opus and Haiku is the difference between an errand that works and one
-    // that is cheap.
-    let mut all = vec![Choice {
-        engine: "claude".into(),
-        name: "Claude · your default".into(),
-        settings: None,
-    }];
-    for (alias, shown) in errand_core::claude::MODELS {
-        all.push(Choice {
-            engine: "claude".into(),
-            name: format!("Claude · {shown}"),
-            settings: Some((*alias).to_string()),
-        });
-    }
+async fn engines(held: State<'_, Held>) -> Result<Vec<Choice>, String> {
+    Ok(held
+        .store
+        .offered()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|one| Choice {
+            engine: one.engine,
+            name: one.label,
+            settings: one.settings,
+        })
+        .collect())
+}
 
-    // Two different questions, and only one of them is cheap. The usual ports
-    // on this machine answer in under a second, so that is what opening the
-    // picker asks. Every machine on the network is thousands of probes and
-    // most of a minute, so it is asked for by name and never on a hunch.
-    //
-    // The wider sweep still includes this machine: a model bound to 127.0.0.1
-    // is invisible from the network address the sweep walks, and "look wider"
-    // finding fewer models than looking here would be a nonsense.
-    let mut seen = std::collections::HashSet::new();
+/// Somewhere models are served from, with what it is offering right now.
+#[derive(Serialize)]
+struct Somewhere {
+    id: String,
+    label: String,
+    provider: String,
+    base_url: String,
+    /// Whether a key is kept for it. Never the key itself: it goes in one
+    /// direction only, and there is no command anywhere that hands one back.
+    has_key: bool,
+    /// True when this was found by looking rather than read from the store, so
+    /// the screen can offer to keep it.
+    found: bool,
+    /// What it says it has. Empty until asked.
+    models: Vec<errand_core::local::ready::Ready>,
+    /// Why it could not be reached, if it could not.
+    trouble: Option<String>,
+}
+
+/// Look for models, here or on the network.
+///
+/// Only ever from the settings screen. This is the slow thing, and the whole
+/// point of the change is that it happens when somebody asks for it rather than
+/// every time a dropdown opens.
+#[tauri::command]
+async fn look_for_models(wider: Option<bool>) -> Result<Vec<Somewhere>, String> {
     let mut found = find::detect_all().await;
     if wider.unwrap_or(false) {
         found.extend(find::scan_local_network().await);
     }
+    let mut seen = std::collections::HashSet::new();
     let found: Vec<_> = found
         .into_iter()
         .filter(|b| seen.insert(b.base_url.clone()))
         .collect();
 
-    for found in found {
-        // What it lists and what it can answer with are not the same thing. A
-        // server names everything it has downloaded, which on a network with a
-        // few machines on it is twenty entries, most unloaded and at least one
-        // an embedding model that cannot hold a conversation at all.
-        let usable = errand_core::local::ready::what_can_answer(
-            &found.provider,
-            &found.base_url,
-            &found.models,
-        )
-        .await;
+    let mut all = Vec::new();
+    for one in found {
+        let models =
+            errand_core::local::ready::what_can_answer(&one.provider, &one.base_url, &one.models)
+                .await;
+        all.push(Somewhere {
+            id: one.base_url.clone(),
+            label: match elsewhere(&one.base_url) {
+                Some(host) => format!("{} on {host}", one.label),
+                None => one.label.clone(),
+            },
+            provider: one.provider,
+            base_url: one.base_url,
+            has_key: false,
+            found: true,
+            models,
+            trouble: None,
+        });
+    }
+    Ok(all)
+}
 
-        for ready in usable {
-            let model = ready.model;
-            // Asked rather than assumed. The window is what every budget in the
-            // engine is worked out from -- how much conversation fits, how many
-            // tools are worth putting in front of it -- and a default guess of
-            // 32k is wrong in both directions: it starves a model with 128k and
-            // overfills one with 8k. Where the server will not say, the default
-            // stands, which is the only honest thing left to do.
-            let asked = find::query_model_caps(&found.provider, &found.base_url, None, &model)
-                .await
-                .ok()
-                .and_then(|caps| caps.context_length)
-                .map(|n| n as usize);
+/// Ask somewhere what models it has.
+///
+/// The endpoint is asked rather than a list being shipped, because model names
+/// change under everybody and a name compiled in here is a name that is wrong
+/// by the time somebody uses it. A hosted provider that adds a model tomorrow
+/// shows it tomorrow without this app being rebuilt.
+#[tauri::command]
+async fn models_at(held: State<'_, Held>, id: String) -> Result<Somewhere, String> {
+    let one = held
+        .store
+        .backends()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|b| b.id == id)
+        .ok_or("there is nothing here by that name")?;
 
-            let settings = LlmSettings {
-                provider: found.provider.clone(),
-                base_url: found.base_url.clone(),
-                model: model.clone(),
-                context_window: asked.unwrap_or(LlmSettings::default().context_window),
-                ..Default::default()
-            };
-            all.push(Choice {
-                engine: "local".into(),
-                // Where it is, when it is not here. Two machines on a network
-                // running the same model are the same line otherwise, and
-                // choosing between them becomes guesswork.
-                name: {
-                    let where_it_is = match elsewhere(&found.base_url) {
-                        Some(host) => format!("{} on {host}", found.label),
-                        None => found.label.clone(),
-                    };
-                    match ready.loaded {
-                        true => format!("{model} · {where_it_is}"),
-                        // Said rather than hidden. Both servers load on demand,
-                        // so this one works; it just keeps you waiting the
-                        // first time, and that is worth knowing before you
-                        // choose it rather than after.
-                        false => format!("{model} · {where_it_is} · needs loading"),
-                    }
-                },
-                settings: serde_json::to_string(&settings).ok(),
-            });
+    let settings = LlmSettings {
+        provider: one.provider.clone(),
+        base_url: one.base_url.clone(),
+        api_key: keys::look_up(&one.id),
+        ..Default::default()
+    };
+    let (models, trouble) = match find::list_models(&settings).await {
+        Ok(named) => (
+            errand_core::local::ready::what_can_answer(&one.provider, &one.base_url, &named).await,
+            None,
+        ),
+        // The reason, as a sentence. "401 Unauthorized" and "could not resolve
+        // the host" are two entirely different afternoons, and a screen that
+        // says "could not reach it" for both has told nobody anything.
+        Err(why) => (Vec::new(), Some(format!("{why:#}"))),
+    };
+
+    Ok(Somewhere {
+        id: one.id,
+        label: one.label,
+        provider: one.provider,
+        base_url: one.base_url,
+        has_key: one.has_key,
+        found: false,
+        models,
+        trouble,
+    })
+}
+
+/// Remember somewhere models are served from.
+///
+/// The key, if there is one, goes to the keychain and its presence to the
+/// store. Nothing anywhere hands it back: it is written once, read by the thing
+/// that makes the request, and there is no command that returns it.
+#[tauri::command]
+async fn remember_backend(
+    held: State<'_, Held>,
+    id: Option<String>,
+    label: String,
+    provider: String,
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<String, String> {
+    let base_url = base_url.trim().to_string();
+    if base_url.is_empty() {
+        return Err("it needs an address".into());
+    }
+    let label = match label.trim() {
+        "" => base_url.clone(),
+        named => named.to_string(),
+    };
+    let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    // Written before the store hears about it, so that a store row claiming a
+    // key exists can never outlive a keychain that does not have one.
+    let key = api_key
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty());
+    let has_key = match &key {
+        Some(k) => {
+            keys::remember(&id, k).map_err(|e| format!("could not keep the key: {e:#}"))?;
+            true
         }
+        // Nothing typed means leave whatever is already there, which is what
+        // somebody editing the address of a thing they already set up means.
+        None => keys::look_up(&id).is_some(),
+    };
+
+    // Asked where it actually serves, rather than assumed. The three hosted
+    // providers somebody is most likely to add here document three different
+    // shapes, and two of the three fail with a 404 that reads exactly like a
+    // wrong key. Settled once, here, with the key in hand, and the address that
+    // answered is the one kept.
+    //
+    // A failure is not fatal: it is kept anyway, with the reason shown, because
+    // somebody adding a machine that is switched off right now is doing a
+    // reasonable thing and should not have to type it all again later.
+    let key_now = keys::look_up(&id);
+    let (settled, trouble) = match find::settle(&base_url, key_now.as_deref()).await {
+        Ok((where_it_is, _)) => (where_it_is, None),
+        Err(why) => (base_url.clone(), Some(format!("{why:#}"))),
+    };
+
+    held.store
+        .add_backend(&errand_core::store::Backend {
+            id: id.clone(),
+            label,
+            provider,
+            base_url: settled,
+            has_key,
+            added_at: chrono::Local::now().timestamp_millis(),
+        })
+        .map_err(|e| e.to_string())?;
+    match trouble {
+        // The id either way, because it was kept either way, and the reason
+        // where there is one. Two things, so the screen can say both.
+        Some(why) => Err(format!("Kept, but nothing answered there yet. {why}")),
+        None => Ok(id),
+    }
+}
+
+/// Forget somewhere, its key, and everything it was offering.
+#[tauri::command]
+async fn forget_backend(held: State<'_, Held>, id: String) -> Result<(), String> {
+    // The key first. A key left behind for something nobody can see any more is
+    // a secret nobody knows they still have.
+    let _ = keys::forget(&id);
+    held.store.forget_backend(&id).map_err(|e| e.to_string())
+}
+
+/// Put a model in the picker.
+#[tauri::command]
+async fn offer_this(
+    held: State<'_, Held>,
+    engine: String,
+    label: String,
+    settings: Option<String>,
+    backend: Option<String>,
+) -> Result<(), String> {
+    let next = held
+        .store
+        .offered()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .map(|o| o.sort)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    held.store
+        .offer(&errand_core::store::Offered {
+            id: uuid::Uuid::new_v4().to_string(),
+            engine,
+            label,
+            settings,
+            backend,
+            sort: next,
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Take a model out of the picker.
+#[tauri::command]
+async fn stop_offering(held: State<'_, Held>, id: String) -> Result<(), String> {
+    held.store.stop_offering(&id).map_err(|e| e.to_string())
+}
+
+/// Everything the settings screen lists, which is the picker itself.
+#[tauri::command]
+async fn whats_offered(held: State<'_, Held>) -> Result<Vec<errand_core::store::Offered>, String> {
+    held.store.offered().map_err(|e| e.to_string())
+}
+
+/// Everywhere somebody has told this about, and what each is offering.
+#[tauri::command]
+async fn backends(held: State<'_, Held>) -> Result<Vec<Somewhere>, String> {
+    let kept = held.store.backends().map_err(|e| e.to_string())?;
+    let mut all = Vec::new();
+    for one in kept {
+        all.push(Somewhere {
+            id: one.id,
+            label: one.label,
+            provider: one.provider,
+            base_url: one.base_url,
+            has_key: one.has_key,
+            found: false,
+            models: Vec::new(),
+            trouble: None,
+        });
     }
     Ok(all)
 }
@@ -2613,6 +2778,14 @@ pub fn run() {
             checkup,
             whats_running,
             stop_a_command,
+            look_for_models,
+            backends,
+            models_at,
+            remember_backend,
+            forget_backend,
+            offer_this,
+            stop_offering,
+            whats_offered,
             watch_it,
             watches,
             aim_at,
@@ -2642,61 +2815,23 @@ pub fn run() {
         // asked too soon.
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Ready) {
-                onscreen::ask();
-                // Started here rather than in setup, so neither looks at the
-                // store before it is in place, and neither is spawned into an
-                // app that is still being built.
-                watch_the_clock(app.clone());
-                let waiting = {
-                    let parked: State<Waiting> = app.state();
-                    let taken = parked.0.lock().unwrap().take();
-                    taken
-                };
-                if let Some(asked) = waiting {
-                    answer_what_engines_cannot(app.clone(), asked);
-                }
-                let endings = {
-                    let parked: State<TurnsThatEnded> = app.state();
-                    let taken = parked.0.lock().unwrap().take();
-                    taken
-                };
-                if let Some(ended) = endings {
-                    carry_on_goals(app.clone(), ended);
-                }
-                // The front door. One socket, no conversation behind it, open
-                // for as long as the app is, so something outside can hand an
-                // agent a job the way another agent does. Opened here rather
-                // than in setup for the same reason as everything else here:
-                // there is no runtime yet in setup.
-                if let Ok(here) = where_things_live(app) {
-                    let wants = {
-                        let held: State<Held> = app.state();
-                        held.wants.clone()
-                    };
-                    let opening = app.clone();
-                    // Opened from inside a runtime, not from here. Binding a
-                    // socket registers it with the reactor, and this callback
-                    // is Tauri's event loop, which is not one. What that looked
-                    // like was not an error: the file appeared, because the
-                    // system call that makes it succeeds before the
-                    // registration that fails, and then nothing was listening
-                    // on a door that was plainly there. Third time this shape
-                    // has come up in this app and the first time it was not an
-                    // outright crash.
-                    tauri::async_runtime::spawn(async move {
-                        match doorway::listen(doorway::front_door(&here), String::new(), wants) {
-                            // Kept in the app's own state so it lives as long
-                            // as the app and is unlinked when it goes.
-                            Ok(door) => {
-                                let held: State<Held> = opening.state();
-                                held.doorways.lock().unwrap().insert(String::new(), door);
-                            }
-                            // Said rather than swallowed. Everything else works
-                            // without it, and somebody whose script cannot
-                            // connect deserves to find the reason somewhere.
-                            Err(why) => eprintln!("the front door did not open: {why:#}"),
-                        }
-                    });
+                // Everything here runs inside a callback the system makes
+                // across a C boundary, and a panic cannot cross one of those:
+                // it aborts the whole process instead. So the app died at
+                // launch, with no window, no message and nothing in it that
+                // looked like a reason -- over a socket that failed to bind.
+                //
+                // Caught here so that a fault in any one of these is a line on
+                // stderr and one thing not working, rather than an app that
+                // will not open. None of them is load-bearing enough to be
+                // worth the whole app.
+                if let Some(said) =
+                    nothing_here_is_worth_the_whole_app(|| everything_that_waits_for_the_app(app))
+                {
+                    eprintln!(
+                        "something failed while the app was starting, and the rest of it \
+                         carried on: {said}"
+                    );
                 }
             }
             // A command left running outlives the errand that started it, and
@@ -2709,9 +2844,121 @@ pub fn run() {
         });
 }
 
+/// Run something that must not be able to take the app with it, and say what it
+/// said if it tried.
+///
+/// The message rather than a shrug, because a panic message is the only thing
+/// in the wreckage that says what to fix, and this one happens on a machine
+/// nobody is debugging on.
+fn nothing_here_is_worth_the_whole_app(doing: impl FnOnce()) -> Option<String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(doing))
+        .err()
+        .map(|it| {
+            // Two shapes, because `panic!("a")` is a `&str` and
+            // `panic!("a {b}")` is a `String`, and only ever looking for one of
+            // them loses the message exactly when it was worth having.
+            it.downcast_ref::<&str>()
+                .map(|said| (*said).to_string())
+                .or_else(|| it.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "it did not say".to_string())
+        })
+}
+
+/// Everything that has to wait until the app is actually up.
+///
+/// Its own function so that the whole of it sits inside one `catch_unwind` up
+/// there, and so that adding to it later cannot accidentally add to the part
+/// that is outside the net.
+fn everything_that_waits_for_the_app(app: &AppHandle) {
+    onscreen::ask();
+    // Started here rather than in setup, so neither looks at the
+    // store before it is in place, and neither is spawned into an
+    // app that is still being built.
+    watch_the_clock(app.clone());
+    let waiting = {
+        let parked: State<Waiting> = app.state();
+        let taken = parked.0.lock().unwrap().take();
+        taken
+    };
+    if let Some(asked) = waiting {
+        answer_what_engines_cannot(app.clone(), asked);
+    }
+    let endings = {
+        let parked: State<TurnsThatEnded> = app.state();
+        let taken = parked.0.lock().unwrap().take();
+        taken
+    };
+    if let Some(ended) = endings {
+        carry_on_goals(app.clone(), ended);
+    }
+    // The front door. One socket, no conversation behind it, open
+    // for as long as the app is, so something outside can hand an
+    // agent a job the way another agent does. Opened here rather
+    // than in setup for the same reason as everything else here:
+    // there is no runtime yet in setup.
+    if let Ok(here) = where_things_live(app) {
+        let wants = {
+            let held: State<Held> = app.state();
+            held.wants.clone()
+        };
+        let opening = app.clone();
+        // Opened from inside a runtime, not from here. Binding a
+        // socket registers it with the reactor, and this callback
+        // is Tauri's event loop, which is not one. What that looked
+        // like was not an error: the file appeared, because the
+        // system call that makes it succeeds before the
+        // registration that fails, and then nothing was listening
+        // on a door that was plainly there. Third time this shape
+        // has come up in this app and the first time it was not an
+        // outright crash.
+        tauri::async_runtime::spawn(async move {
+            match doorway::listen(doorway::front_door(&here), String::new(), wants) {
+                // Kept in the app's own state so it lives as long
+                // as the app and is unlinked when it goes.
+                Ok(door) => {
+                    let held: State<Held> = opening.state();
+                    held.doorways.lock().unwrap().insert(String::new(), door);
+                }
+                // Said rather than swallowed. Everything else works
+                // without it, and somebody whose script cannot
+                // connect deserves to find the reason somewhere.
+                Err(why) => eprintln!("the front door did not open: {why:#}"),
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fault_while_the_app_is_starting_does_not_take_the_app_with_it() {
+        // What actually happened: a socket that could not be bound panicked
+        // inside the callback the system makes when the app finishes
+        // launching. A panic cannot cross that boundary, so it aborted the
+        // process instead, and the app died at launch with no window, no
+        // message, and nothing that looked like a reason.
+        let quietly = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        assert_eq!(nothing_here_is_worth_the_whole_app(|| {}), None);
+        assert_eq!(
+            nothing_here_is_worth_the_whole_app(|| panic!("the front door did not open"))
+                .as_deref(),
+            Some("the front door did not open")
+        );
+        // A panic with anything interpolated into it arrives as a String
+        // rather than a &str, and looking for only one of the two loses the
+        // message in exactly the cases that had something to say.
+        let tries = 7;
+        assert_eq!(
+            nothing_here_is_worth_the_whole_app(|| panic!("gave up after {tries}")).as_deref(),
+            Some("gave up after 7")
+        );
+
+        std::panic::set_hook(quietly);
+    }
 
     #[test]
     fn a_routine_that_fails_to_start_can_still_be_started_tomorrow() {

@@ -59,9 +59,60 @@ pub struct LlmSettings {
     pub context_window: usize,
     /// For endpoints that want one. Most local ones do not.
     pub api_key: Option<String>,
-    pub temperature: f32,
+    /// What to ask for, where anybody has asked for anything.
+    ///
+    /// Nothing means "do not mention it", which is not the same as a default
+    /// and is the only safe thing to send to a model that has opinions about
+    /// it. Kimi's current models pin sampling and answer an error rather than
+    /// clamping, so a client that always sends a number fails every request
+    /// against them -- including the one that checks whether the key works,
+    /// which then reads as a bad key.
+    #[serde(default)]
+    pub temperature: Option<f32>,
     /// The ceiling on one reply.
     pub max_tokens: usize,
+}
+
+impl LlmSettings {
+    /// The address to hit for `what`, given whatever is stored as the base.
+    pub fn reach(&self, what: &str) -> String {
+        Self::reaching(&self.base_url, what)
+    }
+
+    /// The same, without needing the rest of the settings.
+    ///
+    /// There is no one shape here, which is the whole difficulty. Three hosted
+    /// providers, three different answers: Moonshot serves at `<host>/v1`, Z.ai
+    /// at `<host>/api/paas/v4`, and DeepSeek at the bare host with the endpoint
+    /// straight off the root. A client that appends `/v1` to all of them is
+    /// wrong about two, and one of the two fails as a 404 that reads exactly
+    /// like a bad key.
+    ///
+    /// So: a base that already names its version is used as it stands, and one
+    /// that does not gets `/v1`, which is where every OpenAI-compatible server
+    /// that does not say otherwise puts it. That covers all of the above and
+    /// leaves every local server already stored as a bare host working
+    /// unchanged, which matters more than tidiness: those are somebody's.
+    pub fn reaching(base_url: &str, what: &str) -> String {
+        let base = base_url.trim_end_matches('/');
+        let what = what.trim_start_matches('/');
+        match names_its_version(base) {
+            true => format!("{base}/{what}"),
+            false => format!("{base}/v1/{what}"),
+        }
+    }
+}
+
+/// Whether the last part of this address is a version, as `/v1` or `/v4` are.
+///
+/// Only the last part. A host with `v2` somewhere in the middle of its path is
+/// saying something about itself, not about where its endpoints are.
+pub(crate) fn names_its_version(base: &str) -> bool {
+    let last = base.rsplit('/').next().unwrap_or_default();
+    let Some(rest) = last.strip_prefix('v').or_else(|| last.strip_prefix('V')) else {
+        return false;
+    };
+    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
 impl Default for LlmSettings {
@@ -74,7 +125,9 @@ impl Default for LlmSettings {
             api_key: None,
             // Low on purpose. This is a thing running errands, where being
             // interesting is not a virtue and doing the same thing twice is.
-            temperature: 0.2,
+            // Not mentioned unless somebody says otherwise. Every server has
+            // a sensible default of its own and some refuse to be overruled.
+            temperature: None,
             max_tokens: 4_096,
         }
     }
@@ -100,6 +153,21 @@ pub enum ChatMessage {
         content: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCall>,
+        /// What a thinking model showed of its working, kept exactly as it
+        /// arrived and handed back exactly as it arrived.
+        ///
+        /// Not a nicety. DeepSeek's reasoning models refuse a request with
+        /// tools in it when an earlier assistant turn is missing the
+        /// `reasoning_content` they sent -- not a warning, a 400 -- and this
+        /// whole app is a tool loop, so it would work on the first turn and
+        /// fail on the second.
+        ///
+        /// Kept apart from `content` rather than joined onto it, because
+        /// joining them puts the model's private working into the answer
+        /// somebody reads, into the notes it keeps and into anything it is
+        /// asked to summarise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
     },
     Tool {
         content: String,
@@ -151,4 +219,73 @@ pub struct ToolDef {
     pub description: String,
     /// The full OpenAI function-schema object, sent as-is.
     pub schema: serde_json::Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_provider_is_reached_where_it_actually_serves() {
+        // Three hosted providers, three different shapes, all documented. A
+        // client that appends /v1 to every one of them is wrong about two, and
+        // the failure is a 404 that reads exactly like a bad key.
+        assert_eq!(
+            LlmSettings::reaching("https://api.moonshot.ai/v1", "chat/completions"),
+            "https://api.moonshot.ai/v1/chat/completions"
+        );
+        assert_eq!(
+            LlmSettings::reaching("https://api.z.ai/api/paas/v4", "chat/completions"),
+            "https://api.z.ai/api/paas/v4/chat/completions"
+        );
+        assert_eq!(
+            LlmSettings::reaching("https://api.deepseek.com/v1", "models"),
+            "https://api.deepseek.com/v1/models"
+        );
+
+        // And a bare host gets /v1, which is where a server that does not say
+        // otherwise puts it. Every local one already stored is this shape, and
+        // they are somebody's: they go on working.
+        assert_eq!(
+            LlmSettings::reaching("http://127.0.0.1:11434", "models"),
+            "http://127.0.0.1:11434/v1/models"
+        );
+
+        // A version in the middle of a path is the host saying something about
+        // itself, not about where its endpoints are.
+        assert!(!names_its_version("https://api.example.com/v2/openai"));
+        assert!(names_its_version("https://api.example.com/v2"));
+        assert!(!names_its_version("https://api.example.com/vision"));
+    }
+
+    #[test]
+    fn a_base_url_written_either_way_reaches_the_same_place() {
+        // Every hosted provider documents this differently, and both forms get
+        // typed. Appending to one that already ends in /v1 gives /v1/v1/models,
+        // which comes back 404 and reads exactly like a wrong key.
+        for base in [
+            "https://api.deepseek.com",
+            "https://api.deepseek.com/",
+            "https://api.deepseek.com/v1",
+            "https://api.deepseek.com/v1/",
+        ] {
+            assert_eq!(
+                LlmSettings::reaching(base, "models"),
+                "https://api.deepseek.com/v1/models",
+                "{base}"
+            );
+        }
+        // A trailing slash is not a path segment, whichever shape it is on.
+        assert_eq!(
+            LlmSettings::reaching("https://api.z.ai/api/paas/v4/", "models"),
+            "https://api.z.ai/api/paas/v4/models"
+        );
+
+        // A path that merely contains v1 further up is left alone: only a
+        // trailing one is the duplicate.
+        assert_eq!(
+            LlmSettings::reaching("http://box:8000/api/v1", "chat/completions"),
+            "http://box:8000/api/v1/chat/completions"
+        );
+    }
 }

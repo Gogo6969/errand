@@ -119,6 +119,50 @@ a door that is plainly there with nobody behind it. Two clues that it was this:
 the file is mode 0755 rather than 0600, because the chmod after the bind never
 ran, and `lsof -U` shows nothing holding it.
 
+### Three providers, three shapes
+
+There is no single OpenAI-compatible URL shape. Moonshot serves under `/v1`,
+Z.ai under `/api/paas/v4`, DeepSeek off the bare root. A client that appends
+`/v1` to all of them is wrong about two, and the failure is a 404 that reads
+exactly like a bad key -- so somebody spends an evening on their key.
+
+None of it can be settled from the documentation, because all three gateways
+authenticate before they route: an unauthenticated probe answers the same 401
+for a real path and for nonsense. So `find::settle` asks once, with the key, at
+the moment somebody adds the backend, and the address that answered is what gets
+stored. Three ambiguities become one fact.
+
+Two more that will fail every request rather than some:
+
+- **Send no `temperature` unless somebody chose one.** Kimi's models pin
+  sampling and answer an error rather than clamping.
+- **Hand back `reasoning_content` exactly as it arrived.** DeepSeek's reasoning
+  models refuse a request with tools in it whose earlier assistant turns are
+  missing it, and every turn here has tools in it: it would work once and fail
+  on the second. Keep it apart from `content` -- joined on, the model's private
+  working ends up in the answer, in its notes, and in anything it summarises.
+
+Model ids are not to be compiled in. Two of the three the research turned up had
+already been retired. Ask the endpoint.
+
+### Before deciding the app is broken, check the screen is awake
+
+A screenshot with no menu bar and no dock is a sleeping display or a lock
+screen, not an app with no window. An hour went into "the window is gone",
+including rebuilding the previous commit to bisect it, and the app had been
+running correctly the whole time.
+
+`osascript ... count of windows` is not the check either: it returned 0 for a
+build that was known good.
+
+### A replace that matches nothing says nothing
+
+Editing these files with `str.replace` in a throwaway script is fine and fast,
+and it fails silently: a pattern that does not match leaves the file alone and
+the script reports success. That has now caused two bugs here, the second being
+a URL built as `/v1/models/v1/models` because a signature change did not apply
+while its call sites did. **Assert every pattern is present before replacing.**
+
 ### Asking and the wall are the same job done two ways
 
 `wall` builds one sandbox profile for both engines. A local model always gets
