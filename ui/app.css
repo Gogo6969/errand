@@ -284,6 +284,22 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   gap: 16px;
   flex-wrap: wrap;
 }
+/* A switch that reads as one thing to click, label and all: a checkbox with a
+   sentence beside it that is not part of the target is a checkbox people miss. */
+#models .switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+#models .switch input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+/* What happened, or what is about to. Quiet, because it is only ever a
+   sentence confirming something the switch beside it already says. */
+#models .quiet { margin: 0; color: var(--ink-soft); font-size: 13px; }
+#models .quiet:empty { display: none; }
+#models .quiet[data-wrong="true"] { color: var(--wrong); }
+
 #models .doing { display: flex; gap: 8px; flex: none; flex-wrap: wrap; }
 #models .doing button {
   border: 1px solid var(--rule);

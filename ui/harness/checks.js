@@ -1610,6 +1610,66 @@ export async function stepsDoNotOverlap() {
   return found;
 }
 
+/**
+ * Coming back by itself after a restart.
+ *
+ * Everything this app does on its own it does while it is open, and the switch
+ * that changes that is only worth having if it says what is true. The failure
+ * to guard is a switch showing what it last remembered rather than what the
+ * system will actually do, which is a thing somebody finds out about at a
+ * login, days later, by a routine not running.
+ */
+export async function openingAtLogin() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  document.getElementById("setup").click();
+  await new Promise((r) => setTimeout(r, 250));
+  const box = document.getElementById("at-login");
+  const says = document.getElementById("at-login-says");
+  const card = box?.closest(".card");
+
+  check("there is a way to have Errand open at login", box && !box.disabled, box ? `disabled=${box.disabled}` : "missing");
+  check("it starts off, because nobody asked for it yet", box && !box.checked, `checked=${box?.checked}`);
+  // The limitation this does not fix, said where the switch is rather than
+  // discovered on the first morning the Mac was asleep.
+  const explains = card ? card.textContent : "";
+  check(
+    "it says what this does not fix",
+    /asleep|off/.test(explains) && /while it is open/.test(explains),
+    explains.slice(0, 120),
+  );
+
+  box.checked = true;
+  box.dispatchEvent(new Event("change"));
+  await new Promise((r) => setTimeout(r, 200));
+  check("turning it on asks the app to turn it on", asked.some((a) => a.name === "open_at_login" && a.args?.yes === true), JSON.stringify(asked.filter((a) => a.name === "open_at_login")));
+  check("and it stays on, rather than snapping back", box.checked, `checked=${box.checked}`);
+  // Nothing starts a second copy now, which is the part somebody would
+  // otherwise discover by watching for a window that never appears.
+  check("it says when this takes effect", /login/i.test(says.textContent), says.textContent);
+
+  // Reopened from scratch: the switch has to be read back from the app, not
+  // remembered by the page.
+  document.getElementById("models-done").click();
+  document.getElementById("setup").click();
+  await new Promise((r) => setTimeout(r, 250));
+  check(
+    "it reads what is actually set, rather than what the window remembers",
+    document.getElementById("at-login").checked,
+    `checked=${document.getElementById("at-login").checked}`,
+  );
+
+  box.checked = false;
+  box.dispatchEvent(new Event("change"));
+  await new Promise((r) => setTimeout(r, 200));
+  check("turning it off asks the app to turn it off", asked.some((a) => a.name === "open_at_login" && a.args?.yes === false), JSON.stringify(asked.filter((a) => a.name === "open_at_login")));
+  check("and says so", /not open at login/i.test(says.textContent), says.textContent);
+
+  document.getElementById("models-done").click();
+  return found;
+}
+
 export function headerFitsOnOneRow() {
   // A media query reads the viewport, not the element, so this cannot be
   // judged by widening anything on the page: run narrow, it measures a header

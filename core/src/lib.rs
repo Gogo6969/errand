@@ -16,6 +16,7 @@
 //! by a loop of our own. See `engine` for the protocol they both speak.
 
 pub mod allowing;
+pub mod atlogin;
 pub mod claude;
 pub mod doctor;
 pub mod doorway;

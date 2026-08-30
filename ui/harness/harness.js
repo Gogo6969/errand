@@ -206,6 +206,9 @@ export function tell(name, payload) {
  * readable before that finishes rather than after.
  */
 export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
+  // What the file in LaunchAgents would say. The real one is read from disk
+  // every time the screen opens; this is the same thing without a disk.
+  let atLogin = "no";
   return {
     core: {
       invoke(name, args) {
@@ -242,6 +245,15 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(args.id === fixture.liveConversation);
           case "whats_offered":
             return Promise.resolve(fixture.offered);
+          // Whether the app starts itself at login. Kept here rather than in
+          // the fixture because the switch changes it: what it says has to be
+          // what was last set, or the check cannot tell a switch that works
+          // from one that only looks like it does.
+          case "opens_at_login":
+            return Promise.resolve(atLogin);
+          case "open_at_login":
+            atLogin = args.yes ? "yes" : "no";
+            return Promise.resolve(atLogin);
           case "backends":
             return Promise.resolve(fixture.backends);
           case "look_for_models":

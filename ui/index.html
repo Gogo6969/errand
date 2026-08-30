@@ -47,7 +47,7 @@
     -->
     <section id="models" hidden>
       <header>
-        <h1>Which models show up</h1>
+        <h1>Settings</h1>
         <button id="models-done" type="button">&#8592; Back to chat</button>
       </header>
 
@@ -105,6 +105,27 @@
           </div>
         </div>
         <ul id="chosen"></ul>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>When Errand runs</h2>
+            <p>
+              Everything Errand does on its own it does while it is open: a routine
+              fires from a clock in this app, a watch looks while this window is
+              there, and a command left running stops when this stops. Starting at
+              login is not a machine of its own, and a Mac that is asleep or off is
+              still asleep or off. It is the difference between standing jobs that
+              survive a restart and standing jobs that do not.
+            </p>
+          </div>
+        </div>
+        <label class="switch">
+          <input id="at-login" type="checkbox" />
+          <span>Open Errand when I log in</span>
+        </label>
+        <p id="at-login-says" class="quiet"></p>
       </div>
     </section>
 

@@ -95,6 +95,8 @@ const el = {
   setup: document.getElementById("setup"),
   models: document.getElementById("models"),
   modelsDone: document.getElementById("models-done"),
+  atLogin: document.getElementById("at-login"),
+  atLoginSays: document.getElementById("at-login-says"),
   lookHere: document.getElementById("look-here"),
   lookWide: document.getElementById("look-wide"),
   findSays: document.getElementById("find-says"),
@@ -2706,8 +2708,66 @@ async function showModels() {
       return b;
     }),
   );
-  await Promise.all([drawChosen(), drawKept()]);
+  await Promise.all([drawChosen(), drawKept(), drawAtLogin()]);
 }
+
+/**
+ * Whether Errand starts itself at login.
+ *
+ * Read every time the screen opens rather than remembered, because the thing
+ * that decides is a file in a folder the system reads and anything could have
+ * changed it: another copy of this app, a tidied folder, a restore from a
+ * backup. A switch that shows what it remembers rather than what is true is
+ * one somebody finds out about at a login.
+ */
+async function drawAtLogin() {
+  let how;
+  try {
+    how = await invoke("opens_at_login");
+  } catch (why) {
+    el.atLogin.disabled = true;
+    say(String(why), true);
+    return;
+  }
+  el.atLogin.disabled = false;
+  el.atLogin.checked = how === "yes";
+  // The third answer, which is neither on nor off: something starts at login
+  // and it is not this copy. Worth saying, because turning it on is what fixes
+  // it and "it is already on" would be the one answer that does not.
+  say(
+    how === "something_else"
+      ? "Another copy of Errand starts at login. Turning this on points it at this one."
+      : "",
+    how === "something_else",
+  );
+}
+
+/** What the switch says under it, which is only ever about the switch. */
+function say(words, wrong) {
+  el.atLoginSays.textContent = words;
+  el.atLoginSays.dataset.wrong = String(!!wrong);
+}
+
+el.atLogin.addEventListener("change", async () => {
+  const wanted = el.atLogin.checked;
+  try {
+    const how = await invoke("open_at_login", { yes: wanted });
+    el.atLogin.checked = how === "yes";
+    // Said plainly, including the part somebody would otherwise find out at the
+    // next restart: nothing starts a second copy now.
+    say(
+      how === "yes"
+        ? "Errand will open at your next login. Nothing has started a second copy now."
+        : "Errand will not open at login.",
+      false,
+    );
+  } catch (why) {
+    // Put back, because the switch showing one thing while the file says
+    // another is the failure this whole screen is written to avoid.
+    el.atLogin.checked = !wanted;
+    say(String(why), true);
+  }
+});
 
 el.setup.addEventListener("click", showModels);
 el.modelsDone.addEventListener("click", () => {

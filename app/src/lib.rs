@@ -1210,6 +1210,42 @@ async fn still_going(held: State<'_, Held>, id: String) -> Result<bool, String> 
     Ok(held.live.lock().unwrap().contains_key(&id))
 }
 
+/// Whether Errand comes back by itself after a restart.
+///
+/// Read from the file the system obeys rather than from anything remembered
+/// here, so what the switch shows and what actually happens at a login cannot
+/// drift apart.
+#[tauri::command]
+async fn opens_at_login() -> Result<errand_core::atlogin::AtLogin, String> {
+    let (home, me) = at_login_needs()?;
+    Ok(errand_core::atlogin::how_it_stands(&home, &me))
+}
+
+/// Start Errand at login, or stop doing that.
+///
+/// Turning it on writes a file naming this copy. It does not start a second
+/// one now and does not ask for a password: everything about this happens in
+/// the person's own folder, and dragging the app to the bin ends it, because a
+/// file naming an app that is gone is a file the system quietly gives up on.
+#[tauri::command]
+async fn open_at_login(yes: bool) -> Result<errand_core::atlogin::AtLogin, String> {
+    let (home, me) = at_login_needs()?;
+    match yes {
+        true => errand_core::atlogin::turn_on(&home, &me),
+        false => errand_core::atlogin::turn_off(&home),
+    }
+    .map_err(|why| format!("{why}"))?;
+    Ok(errand_core::atlogin::how_it_stands(&home, &me))
+}
+
+/// The two paths this needs, and a sentence when either is missing.
+fn at_login_needs() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    let home =
+        std::env::var("HOME").map_err(|_| "there is no home folder to write to".to_string())?;
+    let me = std::env::current_exe().map_err(|why| format!("{why}"))?;
+    Ok((std::path::PathBuf::from(home), me))
+}
+
 /// Everything the settings screen lists, which is the picker itself.
 #[tauri::command]
 async fn whats_offered(held: State<'_, Held>) -> Result<Vec<errand_core::store::Offered>, String> {
@@ -3143,6 +3179,8 @@ pub fn run() {
             call_it_something,
             move_it,
             whats_offered,
+            opens_at_login,
+            open_at_login,
             still_going,
             already_runs,
             what_it_cost,
