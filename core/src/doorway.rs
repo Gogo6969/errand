@@ -86,7 +86,14 @@ struct Came {
 /// entirely unaffected.
 #[derive(Debug, Serialize, Deserialize)]
 struct Along {
-    doing: String,
+    /// A step being taken, named the way the window names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    doing: Option<String>,
+    /// The prose as it is written, a fragment at a time. Its own field rather
+    /// than more steps, because it is read differently: a step is one event on
+    /// a line of its own, this is one sentence arriving in pieces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    saying: Option<String>,
 }
 
 // ------------------------------------------------------------ the server --
@@ -377,13 +384,23 @@ async fn answer_one(
     // Said as it happens, where the caller asked to watch. On a task of its
     // own, so a step that takes a minute is a minute of things to read rather
     // than a minute of nothing at all.
-    let (along, mut steps) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (along, mut steps) = tokio::sync::mpsc::unbounded_channel::<team::Meanwhile>();
     let watching = passed.watching;
     let telling = watching.then(|| {
         let mine = writing.clone();
         tokio::spawn(async move {
-            while let Some(step) = steps.recv().await {
-                let Ok(line) = serde_json::to_string(&Along { doing: step }) else {
+            while let Some(said) = steps.recv().await {
+                let along = match said {
+                    team::Meanwhile::Step(what) => Along {
+                        doing: Some(what),
+                        saying: None,
+                    },
+                    team::Meanwhile::Saying(text) => Along {
+                        doing: None,
+                        saying: Some(text),
+                    },
+                };
+                let Ok(line) = serde_json::to_string(&along) else {
                     continue;
                 };
                 let mut out = mine.lock().await;
@@ -475,7 +492,7 @@ pub fn ask_from_outside(
     args: Value,
     // Called for each step, where the caller wants to watch. An errand takes
     // minutes, and minutes of silence is indistinguishable from a crash.
-    mut along_the_way: Option<&mut dyn FnMut(&str)>,
+    mut along_the_way: Option<&mut dyn FnMut(team::Meanwhile)>,
 ) -> Result<String> {
     use std::io::{BufRead, BufReader, Write};
 
@@ -493,9 +510,9 @@ pub fn ask_from_outside(
     // is reading to it rather than by length.
     let _ = socket.shutdown(std::net::Shutdown::Write);
 
-    // Lines until one of them is the answer. A step and an answer are told
-    // apart by which one parses: an answer has both of its fields and a step
-    // has neither, so neither can be mistaken for the other.
+    // Lines until one of them is the answer. Commentary and an answer are told
+    // apart by which one parses: an answer has both of its fields and
+    // commentary has neither, so neither can be mistaken for the other.
     for line in BufReader::new(&socket).lines() {
         let line = line?;
         let line = line.trim();
@@ -509,9 +526,16 @@ pub fn ask_from_outside(
             };
         }
         match (serde_json::from_str::<Along>(line), &mut along_the_way) {
-            (Ok(step), Some(tell)) => tell(&step.doing),
+            (Ok(along), Some(tell)) => {
+                if let Some(step) = along.doing {
+                    tell(team::Meanwhile::Step(step));
+                }
+                if let Some(text) = along.saying {
+                    tell(team::Meanwhile::Saying(text));
+                }
+            }
             // A shape from a newer Errand than this one. Skipped rather than
-            // treated as an error: a step nobody understands is not a reason to
+            // treated as an error: a line nobody understands is not a reason to
             // throw away the answer that follows it.
             _ => continue,
         }
@@ -550,14 +574,23 @@ mod tests {
         // An errand takes minutes. Waiting in silence for one is
         // indistinguishable from waiting for something that has crashed, and
         // the steps are already written in words a person reads.
+        //
+        // Both kinds have to arrive, and arrive as themselves. The prose is
+        // read differently from the steps -- one sentence in pieces against a
+        // list of events -- and sent as untagged text it had to be guessed
+        // apart at the far end.
         let at = std::env::temp_dir().join("errand-front-door-watching.sock");
         let (wants, mut asked) = tokio::sync::mpsc::unbounded_channel::<team::Wants>();
 
         tokio::spawn(async move {
             while let Some(want) = asked.recv().await {
                 if let Some(telling) = &want.along_the_way {
-                    let _ = telling.send("Looking something up on the web".to_string());
-                    let _ = telling.send("Reading notes.txt".to_string());
+                    let _ = telling.send(team::Meanwhile::Step(
+                        "Looking something up on the web".to_string(),
+                    ));
+                    let _ = telling.send(team::Meanwhile::Saying("It is ".to_string()));
+                    let _ = telling.send(team::Meanwhile::Saying("four.".to_string()));
+                    let _ = telling.send(team::Meanwhile::Step("Reading notes.txt".to_string()));
                 }
                 let _ = want.answer.send(Ok("Four.".to_string()));
             }
@@ -566,15 +599,15 @@ mod tests {
         let door = listen(at.clone(), String::new(), wants).expect("the door opens");
         let where_it_is = door.at().to_path_buf();
 
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<team::Meanwhile>>> = Default::default();
         let keeping = seen.clone();
         let said = tokio::task::spawn_blocking(move || {
-            let mut note = |step: &str| keeping.lock().unwrap().push(step.to_string());
+            let mut note = |along| keeping.lock().unwrap().push(along);
             ask_from_outside(
                 &where_it_is,
                 "ask",
                 json!({}),
-                Some(&mut note as &mut dyn FnMut(&str)),
+                Some(&mut note as &mut dyn FnMut(team::Meanwhile)),
             )
         })
         .await
@@ -585,10 +618,15 @@ mod tests {
         assert_eq!(
             seen.lock().unwrap().clone(),
             vec![
-                "Looking something up on the web".to_string(),
-                "Reading notes.txt".to_string()
+                team::Meanwhile::Step("Looking something up on the web".to_string()),
+                // In pieces, kept as pieces: joining them here would be this
+                // test agreeing to the very buffering that makes a word arrive
+                // with the answer instead of before it.
+                team::Meanwhile::Saying("It is ".to_string()),
+                team::Meanwhile::Saying("four.".to_string()),
+                team::Meanwhile::Step("Reading notes.txt".to_string()),
             ],
-            "the steps did not arrive, or did not arrive in order"
+            "the commentary did not arrive, arrived out of order, or lost which kind it was"
         );
     }
 

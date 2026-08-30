@@ -1332,6 +1332,72 @@ export async function watching() {
 /** The width below which the header is meant to wrap, from app.css. */
 const WRAPS_BELOW = 700;
 
+/**
+ * A sentence being written looks like a sentence being written.
+ *
+ * The flag that asks Claude Code for its prose a word at a time has been passed
+ * since the beginning, and every one of those was dropped twice over: the
+ * engine had no handler for them, and the window threw away anything unsettled.
+ * What somebody saw was dots for several seconds and then a wall of text, which
+ * is the exact thing this app says reads as a hang rather than as thinking.
+ */
+export async function writingItOut() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const where = document.getElementById("talks").value;
+  const live = () => document.querySelector("#messages .writing");
+
+  // A word at a time, the way the engine sends them.
+  for (const word of ["The ", "answer ", "is "]) {
+    tell("happened", { conversation: where, seq: 7001, kind: "said", text: word, settled: false });
+  }
+  await new Promise((r) => setTimeout(r, 150));
+  check(
+    "words arriving one at a time are shown as they arrive",
+    live(),
+    live() ? "shown" : "nothing on screen while it was writing",
+  );
+  check(
+    "and they gather into the sentence rather than replacing each other",
+    live()?.textContent === "The answer is ",
+    JSON.stringify(live()?.textContent ?? null),
+  );
+  // Dots and a half-written sentence are two answers to the same question.
+  check(
+    "the working dots give way to the words",
+    !document.querySelector("#messages .thinking"),
+    document.querySelector("#messages .thinking") ? "both at once" : "just the words",
+  );
+
+  // Then the whole line lands, and the pieces must not be left beside it.
+  tell("happened", {
+    conversation: where,
+    seq: 7002,
+    kind: "said",
+    text: "The answer is four.",
+    settled: true,
+  });
+  await new Promise((r) => setTimeout(r, 150));
+  const shown = document.getElementById("messages").textContent;
+  check(
+    "the finished line replaces the half-written one instead of doubling it",
+    !live() && shown.split("The answer is").length === 2,
+    `${shown.split("The answer is").length - 1} copies, live=${!!live()}`,
+  );
+
+  // A turn stopped mid-word leaves nothing hanging.
+  tell("happened", { conversation: where, seq: 7003, kind: "said", text: "And also", settled: false });
+  await new Promise((r) => setTimeout(r, 100));
+  tell("happened", { conversation: where, seq: 7004, kind: "done" });
+  await new Promise((r) => setTimeout(r, 150));
+  check(
+    "a turn that stops mid-word leaves no half sentence behind",
+    !live() && !document.getElementById("messages").textContent.includes("And also"),
+    live() ? "still writing" : "cleared",
+  );
+  return found;
+}
+
 export function headerFitsOnOneRow() {
   // A media query reads the viewport, not the element, so this cannot be
   // judged by widening anything on the page: run narrow, it measures a header

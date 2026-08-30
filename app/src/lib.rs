@@ -2108,7 +2108,7 @@ async fn wait_for_the_answer(
     // Where to say what is happening, for a caller watching rather than
     // waiting. Nothing for an engine: a model handed a commentary on somebody
     // else's work puts all of it in its context and none of it is the answer.
-    along_the_way: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    along_the_way: Option<tokio::sync::mpsc::UnboundedSender<errand_core::team::Meanwhile>>,
 ) -> anyhow::Result<String> {
     use std::time::Duration;
     // Shared with the collecting task, so that giving up still reports what was
@@ -2131,17 +2131,29 @@ async fn wait_for_the_answer(
             // step is called is already written for a person to read, so there
             // is nothing to invent here.
             if let Some(telling) = &along_the_way {
+                use errand_core::team::Meanwhile;
                 let _ = match &event {
-                    Event::Doing(step) => telling.send(step.what.clone()),
+                    Event::Doing(step) => telling.send(Meanwhile::Step(step.what.clone())),
+                    // The answer as it is written, which is what somebody stood
+                    // at a terminal is actually waiting for. Steps alone say
+                    // that it is working; only this says what it is coming to,
+                    // and over a long errand the difference is minutes of
+                    // reading rather than minutes of watching a spinner.
+                    Event::Said {
+                        text,
+                        settled: false,
+                    } => telling.send(Meanwhile::Saying(text.clone())),
                     // Where to answer it, because the answer is not here. The
                     // question is a card in the window, and somebody not told
                     // that waits at a terminal for something that will never
                     // arrive there.
-                    Event::NeedsYou(ask) => telling.send(format!(
+                    Event::NeedsYou(ask) => telling.send(Meanwhile::Step(format!(
                         "Waiting on you: {} \u{2014} answer it in the Errand window",
                         ask.asking
-                    )),
-                    Event::Failed { why } => telling.send(format!("It could not: {why}")),
+                    ))),
+                    Event::Failed { why } => {
+                        telling.send(Meanwhile::Step(format!("It could not: {why}")))
+                    }
                     _ => Ok(()),
                 };
             }
@@ -2945,13 +2957,36 @@ fn from_a_terminal(args: Vec<String>) -> i32 {
     // Said as it happens, on stderr, so that piping the answer somewhere still
     // gets the answer and nothing else. An errand takes minutes, and minutes of
     // silence is indistinguishable from a crash.
-    let mut telling = |step: &str| eprintln!("· {step}");
+    // The prose is written without a prefix and without a line of its own,
+    // because it is one sentence arriving in pieces rather than a list of
+    // things that happened. `mid_sentence` is what closes that line before the
+    // next step is written under it, or the two run together on one line.
+    let mut mid_sentence = false;
+    let mut telling = |said: errand_core::team::Meanwhile| {
+        use errand_core::team::Meanwhile;
+        match said {
+            Meanwhile::Step(step) => {
+                if std::mem::take(&mut mid_sentence) {
+                    eprintln!();
+                }
+                eprintln!("· {step}");
+            }
+            Meanwhile::Saying(text) => {
+                mid_sentence = true;
+                eprint!("{text}");
+                // Written through, because a word held in a buffer until the
+                // sentence ends is a word that arrives with the answer, which
+                // is the thing this exists to stop.
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+            }
+        }
+    };
     let watching = std::env::var("ERRAND_QUIET").is_err();
     match doorway::ask_from_outside(
         &door,
         tool,
         args,
-        watching.then_some(&mut telling as &mut dyn FnMut(&str)),
+        watching.then_some(&mut telling as &mut dyn FnMut(errand_core::team::Meanwhile)),
     ) {
         Ok(said) => {
             println!("{said}");

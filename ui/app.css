@@ -693,6 +693,21 @@ main > aside, main > #title, main > #composer { flex: none; }
 @keyframes pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 0.9; } }
 @media (prefers-reduced-motion: reduce) { .thinking i { animation: none; } }
 
+/* The sentence being written this second. It reads as a said line because it is
+   about to be one, with a caret so that a pause between words looks like a
+   pause and not like the end. */
+.writing::after {
+  content: "";
+  display: inline-block;
+  width: 2px; height: 1em;
+  vertical-align: text-bottom;
+  margin-left: 2px;
+  background: var(--ink-soft);
+  animation: caret 1s step-end infinite;
+}
+@keyframes caret { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .writing::after { animation: none; } }
+
 /* ----------------------------------------------------------- composer --- */
 
 #composer {

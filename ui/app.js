@@ -30,6 +30,7 @@ function complain(why) {
     return;
   }
   t.working = false;
+  t.writing = "";
   t.messages.push({ kind: "ended", failed: true, text: why });
   drawMessages();
 }
@@ -595,7 +596,17 @@ function drawMessages() {
   const t = talking();
   if (!t) return;
   el.messages.replaceChildren(...t.messages.map(draw).filter(Boolean));
-  if (t.working) el.messages.append(thinking());
+  // What is being written this second, under everything already said. Dots
+  // while there are no words yet, because dots say "working" and an empty box
+  // says nothing.
+  if (t.writing) {
+    const writing = document.createElement("li");
+    writing.className = "said writing";
+    writing.textContent = t.writing;
+    el.messages.append(writing);
+  } else if (t.working) {
+    el.messages.append(thinking());
+  }
   el.messages.scrollTop = el.messages.scrollHeight;
 }
 
@@ -827,12 +838,20 @@ listen("happened", ({ payload }) => {
       break;
     }
 
-    // Only settled lines are kept. The partial ones exist so that a sentence
-    // being written looks like a sentence being written, and keeping them all
-    // would mean keeping every prefix of every sentence.
+    // Only settled lines are kept. The partial ones are shown and thrown away:
+    // a sentence being written should look like one, and keeping them all would
+    // keep every prefix of every sentence.
+    //
+    // They used to be dropped without being shown, which left several seconds
+    // of dots and then a wall of text -- the exact thing this app says reads as
+    // a hang rather than as thinking.
     case "said":
-      if (payload.settled)
+      if (payload.settled) {
+        t.writing = "";
         t.messages.push({ kind: "said", text: payload.text, seq: payload.seq });
+      } else {
+        t.writing = (t.writing || "") + payload.text;
+      }
       break;
 
     case "doing":
@@ -890,11 +909,15 @@ listen("happened", ({ payload }) => {
 
     case "done":
       t.working = false;
+      // Half a sentence must not outlive the turn writing it. Normally the
+      // settled line has already cleared this; a turn stopped mid-word has not.
+      t.writing = "";
       // Naming is the agent's own job now, asked for after this by the app.
       break;
 
     case "failed":
       t.working = false;
+      t.writing = "";
       t.messages.push({ kind: "ended", failed: true, text: payload.why || "It could not finish." });
       break;
   }

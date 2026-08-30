@@ -40,7 +40,22 @@ pub struct Wants {
     /// commentary on somebody else's work would put all of it in its context
     /// and none of it is the answer. Something for a person at a terminal,
     /// where minutes of silence and a crash look identical.
-    pub along_the_way: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    pub along_the_way: Option<tokio::sync::mpsc::UnboundedSender<Meanwhile>>,
+}
+
+/// What can be said while an errand is still running.
+///
+/// Two kinds, kept apart all the way to the terminal, because they are read
+/// differently: a step is one event on a line of its own, and the prose is one
+/// sentence arriving in pieces. Sent down one channel as untagged text they had
+/// to be guessed apart at the far end, and the guess was wrong exactly where it
+/// mattered, on prose that happened to look like a step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Meanwhile {
+    /// A step being taken, in the same words the window uses for it.
+    Step(String),
+    /// The answer as it is written, a fragment at a time.
+    Saying(String),
 }
 
 /// The tools the app provides, as an engine has to declare them.

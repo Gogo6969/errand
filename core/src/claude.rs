@@ -898,6 +898,44 @@ pub fn read(line: &str) -> Vec<Event> {
             })
             .unwrap_or_default(),
 
+        // The prose as it is written. `--include-partial-messages` has been
+        // passed since the beginning and every one of these was dropped on the
+        // floor, so with this engine an answer arrived whole after several
+        // seconds of nothing -- which is the exact thing the note at the top of
+        // this file says reads as a hang rather than as thinking.
+        //
+        // Not written down: these are prefixes of a sentence that arrives whole
+        // a moment later as an `assistant` message, and keeping them would keep
+        // every prefix of every sentence.
+        "stream_event" => {
+            let event = v.get("event");
+            match event.and_then(|e| e.get("type")).and_then(|t| t.as_str()) {
+                Some("content_block_delta") => {
+                    let delta = event.and_then(|e| e.get("delta"));
+                    let kind = delta.and_then(|d| d.get("type")).and_then(|t| t.as_str());
+                    // What it says, and only that. A thinking model's working
+                    // arrives on this same stream as `thinking_delta`, and
+                    // there is nowhere here to put it that is not the answer:
+                    // the other engine has a channel of its own for it and a
+                    // test insisting the two never run together, because
+                    // joined, a model's private working ends up in what
+                    // somebody reads and in everything summarised afterwards.
+                    let text = match kind {
+                        Some("text_delta") => delta.and_then(|d| d.get("text")),
+                        _ => None,
+                    };
+                    match text.and_then(|t| t.as_str()).unwrap_or_default() {
+                        "" => vec![],
+                        said => vec![Event::Said {
+                            text: said.to_string(),
+                            settled: false,
+                        }],
+                    }
+                }
+                _ => vec![],
+            }
+        }
+
         "result" => {
             let said = v
                 .get("result")
@@ -1205,6 +1243,41 @@ mod tests {
                 outcome: "hello-from-a-tool".into()
             }]
         );
+    }
+
+    #[test]
+    fn the_prose_arrives_as_it_is_written_rather_than_all_at_once() {
+        // The flag that asks for this has been passed since the beginning and
+        // every one of these was dropped, so an answer landed whole after
+        // several seconds of nothing. Captured from a real run.
+        const DELTA: &str = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The"}},"session_id":"408c"}"#;
+        assert_eq!(
+            read(DELTA),
+            vec![Event::Said {
+                text: "The".into(),
+                // Not kept: this is a prefix of a sentence that arrives whole a
+                // moment later, and keeping them would keep every prefix of
+                // every sentence.
+                settled: false
+            }]
+        );
+
+        // What a thinking model shows of its working arrives on this same
+        // stream, and must not join what it says. There is nowhere here to put
+        // it that is not the answer, and joined, a model's private working ends
+        // up in what somebody reads and in everything summarised afterwards.
+        const THINKING: &str = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"weighing"}}}"#;
+        assert_eq!(read(THINKING), vec![]);
+
+        // Everything else in that stream is bookkeeping and says nothing to
+        // anybody.
+        for quiet in [
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#,
+            r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
+        ] {
+            assert_eq!(read(quiet), vec![], "{quiet}");
+        }
     }
 
     #[test]
