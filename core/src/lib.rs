@@ -32,6 +32,7 @@ pub mod mcp;
 pub mod memory;
 pub mod routine;
 pub mod schedules;
+pub mod shape;
 pub mod team;
 pub mod watch;
 

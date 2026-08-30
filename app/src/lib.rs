@@ -2919,14 +2919,19 @@ const FROM_OUTSIDE: &str = "ask";
 
 /// What to say when somebody runs this with nothing it understands.
 const HOW_TO_ASK: &str = "\
-Usage: Errand ask <agent> <request>
+Usage: Errand ask [--json | --shape <example>] <agent> <request>
        Errand ask --who
 
 Hands a job to one of your agents in the running app and prints what it says.
 Errand has to be open: this talks to it, it does not start it.
 
-What it is doing goes to stderr as it happens, so the answer on stdout is
-still just the answer. Set ERRAND_QUIET to leave that out.";
+What it is doing goes to stderr as it happens, along with the answer as it is
+written, so the answer on stdout is still just the answer and arrives once.
+Set ERRAND_QUIET to leave that out.
+
+--json asks for the answer as JSON, and --shape asks for it as JSON matching
+an example you give. Either way the answer is checked before it is printed:
+prose where a script expected an object exits 3 rather than being piped on.";
 
 /// Ask a running Errand something from a terminal.
 ///
@@ -2940,13 +2945,37 @@ fn from_a_terminal(args: Vec<String>) -> i32 {
     };
     let door = doorway::front_door(&here);
 
+    // What shape the answer has to be, taken off the front before anything
+    // else is read. Nothing means prose, which is what a person wants and what
+    // this did for its whole life until now.
+    let (shape, args) = match args.split_first() {
+        Some((flag, rest)) if flag == "--json" => (Some(None), rest.to_vec()),
+        Some((flag, rest)) if flag == "--shape" => match rest.split_first() {
+            Some((example, rest)) => (Some(Some(example.clone())), rest.to_vec()),
+            // A flag that quietly means nothing is worse than a flag that
+            // fails: a script would run for a minute and then be handed prose.
+            None => {
+                eprintln!("--shape needs an example of the answer you want");
+                return 2;
+            }
+        },
+        _ => (None, args),
+    };
+    let wanted = shape.as_ref().map(|s| s.as_deref());
+
     let (tool, args) = match args.split_first() {
         Some((one, rest)) if one == "--who" && rest.is_empty() => {
             ("mcp__errand__who_else", serde_json::json!({}))
         }
         Some((agent, rest)) if !rest.is_empty() => (
             "mcp__errand__ask",
-            serde_json::json!({ "agent": agent, "request": rest.join(" ") }),
+            serde_json::json!({
+                "agent": agent,
+                "request": match wanted {
+                    Some(shape) => errand_core::shape::asked_for(&rest.join(" "), shape),
+                    None => rest.join(" "),
+                },
+            }),
         ),
         _ => {
             eprintln!("{HOW_TO_ASK}");
@@ -2988,10 +3017,28 @@ fn from_a_terminal(args: Vec<String>) -> i32 {
         args,
         watching.then_some(&mut telling as &mut dyn FnMut(errand_core::team::Meanwhile)),
     ) {
-        Ok(said) => {
+        Ok(said) if wanted.is_none() => {
             println!("{said}");
             0
         }
+        // Asked for in a shape, so checked before it is printed. A script that
+        // is handed prose where it expected an object finds out three steps
+        // later as a wrong value; this is the moment it can find out cheaply.
+        //
+        // Its own exit code, because "the agent could not be reached" and "the
+        // agent answered, but not in the shape you asked for" are different
+        // problems with different fixes, and a script that retries the first
+        // should not retry the second.
+        Ok(said) => match errand_core::shape::what_came_back(&said) {
+            Ok(json) => {
+                println!("{json}");
+                0
+            }
+            Err(why) => {
+                eprintln!("{why}");
+                3
+            }
+        },
         // On stderr and non-zero, so a script can tell the difference between
         // an agent that answered and an agent that could not be reached. That
         // difference is the whole reason this is worth having a protocol for.
