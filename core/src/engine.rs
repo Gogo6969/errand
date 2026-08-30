@@ -104,7 +104,10 @@ pub enum Answer {
 }
 
 /// Everything an engine is allowed to say.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not `Eq`: one of these carries an amount of money, and money is not a thing
+/// to compare for exact equality.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
     /// The thread is live and this is what is answering it.
@@ -124,9 +127,31 @@ pub enum Event {
     /// Stopped, and it is a person's turn. The work is halted until answered.
     NeedsYou(NeedsYou),
     /// The turn is over and this is what came of it.
-    Done { said: String },
+    Done {
+        said: String,
+        /// What the turn cost, where the engine says. Nothing for a model
+        /// running on this machine, where the answer is not zero dollars but
+        /// no dollars: saying $0.00 beside a local model would be an answer to
+        /// a question nobody asked about it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost: Option<Cost>,
+    },
     /// The turn ended badly. Not the same as a question: nobody was asked.
     Failed { why: String },
+}
+
+/// What one turn cost.
+///
+/// Per turn, not per session: checked against a real engine, two messages into
+/// one process, and the second reported its own cost rather than the running
+/// total. Summing them is therefore right, and would have been badly wrong the
+/// other way round.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Cost {
+    /// What it came to, as the engine reports it.
+    pub dollars: f64,
+    /// How many times the model went round before it answered.
+    pub turns: i64,
 }
 
 impl Event {

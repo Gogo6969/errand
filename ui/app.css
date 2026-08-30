@@ -1480,6 +1480,38 @@ body.catching #what { border-color: var(--accent); }
    will not finish on its own. */
 #working .one[data-waiting="true"] .who { color: var(--accent); }
 
+/* What it has cost, in the same shape as what is running. The two are opened
+   the same way and read the same way, and there is no reason for them to look
+   like different kinds of thing. */
+#costing[hidden] { display: none; }
+#costing {
+  border-bottom: 1px solid var(--rule);
+  background: var(--side);
+  padding: 12px 18px;
+  max-height: 40vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#costing .one {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 7px;
+  margin: -4px -7px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+#costing .who { font-weight: 600; font-size: 13px; }
+/* Lined up, because these are numbers somebody compares down a column. */
+#costing .where {
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* A command left running is not a turn: there is nothing to open, and there is
    something to stop. Both of those are said by how the row behaves. */
 #working .one[data-command] { cursor: default; }

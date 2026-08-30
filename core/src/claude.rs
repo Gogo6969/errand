@@ -908,7 +908,18 @@ pub fn read(line: &str) -> Vec<Event> {
             if v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false) {
                 vec![Event::Failed { why: said }]
             } else {
-                vec![Event::Done { said }]
+                // What it cost, where the engine says. Per turn: checked
+                // against a real one, two messages into a single process, and
+                // the second reported its own cost rather than a running total.
+                let cost = v
+                    .get("total_cost_usd")
+                    .and_then(|c| c.as_f64())
+                    .filter(|d| *d > 0.0)
+                    .map(|dollars| crate::engine::Cost {
+                        dollars,
+                        turns: v.get("num_turns").and_then(|t| t.as_i64()).unwrap_or(1),
+                    });
+                vec![Event::Done { said, cost }]
             }
         }
 
@@ -1201,6 +1212,14 @@ mod tests {
         assert_eq!(
             read(DONE),
             vec![Event::Done {
+                // Read from the same line the answer is, because the engine
+                // says what the turn cost there and this app used to throw it
+                // away -- leaving no answer at all to the one question anybody
+                // running errands has.
+                cost: Some(crate::engine::Cost {
+                    dollars: 0.18,
+                    turns: 2
+                }),
                 said: "Output: hello".into()
             }]
         );

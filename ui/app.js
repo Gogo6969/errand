@@ -108,6 +108,7 @@ const el = {
   chosen: document.getElementById("chosen"),
   checkup: document.getElementById("checkup"),
   working: document.getElementById("working"),
+  costing: document.getElementById("costing"),
   speak: document.getElementById("speak"),
   watch: document.getElementById("watch"),
   watching: document.getElementById("watching"),
@@ -395,6 +396,7 @@ async function show(id) {
   el.granting.hidden = true;
   el.watching.hidden = true;
   el.aiming.hidden = true;
+  el.costing.hidden = true;
   if (a) {
     drawMark(a);
     drawPinned(a);
@@ -1677,6 +1679,7 @@ function whatCouldBeDone() {
   add("What this thread can reach", "MCP servers", () => el.reach.click(), !!showing);
   add("Make this run on a schedule", "", () => el.repeat.click(), !!showing);
   add("Which models show up", "", () => showModels(), true);
+  add("What it has cost", "today and this month", () => whatItCost(), true);
   add("Check this setup", "what is wrong, and what to do", () => checkup());
   add("What is running", "everywhere, not just here", () => whatsRunning());
   add(
@@ -2885,3 +2888,80 @@ el.byHand.addEventListener("submit", async (e) => {
   backToAdding();
   await drawKept();
 });
+
+
+// ------------------------------------------------------------- what it cost --
+
+/**
+ * What it has cost.
+ *
+ * The engine says on every turn and this app threw it away, so an errand that
+ * ran every morning for a month had no answer at all to the one question
+ * anybody running errands has. Kept per turn, so today and this month are both
+ * askable rather than one running total answering neither.
+ *
+ * Nothing about a model on this machine appears here, because the answer for
+ * one of those is not zero dollars, it is no dollars, and a row of zeroes would
+ * make the total a lie about what it is a total of.
+ */
+async function whatItCost() {
+  if (!el.costing.hidden) {
+    el.costing.hidden = true;
+    return;
+  }
+  el.costing.hidden = false;
+  el.costing.replaceChildren(note("p", "Adding it up…"));
+
+  let spent;
+  try {
+    spent = await invoke("what_it_cost");
+  } catch (why) {
+    el.costing.replaceChildren(note("p", String(why)));
+    return;
+  }
+
+  if (spent.nothing_yet) {
+    el.costing.replaceChildren(
+      note(
+        "p",
+        "Nothing has cost anything yet. Only Claude is paid for: a model running " +
+          "on this machine costs no money, so it never appears here.",
+      ),
+    );
+    return;
+  }
+
+  const money = (d) => `$${d.toFixed(2)}`;
+  const total = (rows) => rows.reduce((sum, one) => sum + one.dollars, 0);
+
+  const section = (title, rows) => {
+    const head = document.createElement("p");
+    head.className = "server-what";
+    head.textContent = rows.length
+      ? `${title}: ${money(total(rows))} across ${rows.length} ${rows.length === 1 ? "agent" : "agents"}.`
+      : `${title}: nothing.`;
+    const list = rows.map((one) => {
+      const row = document.createElement("div");
+      row.className = "one";
+      const who = document.createElement("span");
+      who.className = "who";
+      who.textContent = one.who;
+      const much = document.createElement("span");
+      much.className = "where";
+      // Turns as well as errands, because a single errand that went round
+      // thirty times is the one worth looking at and its price alone does not
+      // say that.
+      much.textContent = `${money(one.dollars)} · ${one.errands} ${
+        one.errands === 1 ? "errand" : "errands"
+      }, ${one.turns} ${one.turns === 1 ? "turn" : "turns"}`;
+      row.append(who, much);
+      return row;
+    });
+    return [head, ...list];
+  };
+
+  el.costing.replaceChildren(
+    ...section("Today", spent.today),
+    ...section("This month", spent.this_month),
+  );
+}

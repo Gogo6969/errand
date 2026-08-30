@@ -1037,6 +1037,68 @@ export async function alreadyRunning() {
   return found;
 }
 
+/**
+ * What it has cost.
+ *
+ * The engine says on every turn and this app threw it away, so there was no
+ * answer at all to the one question anybody running errands has.
+ */
+export async function whatItCost() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const panel = document.getElementById("costing");
+
+  check("it starts closed", panel.hidden, `hidden=${panel.hidden}`);
+
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  const typing = document.getElementById("palette-what");
+  typing.value = "what it has cost";
+  typing.dispatchEvent(new Event("input"));
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await new Promise((r) => setTimeout(r, 300));
+
+  check("it opens", !panel.hidden, `hidden=${panel.hidden}`);
+  const said = panel.textContent;
+  check(
+    "it answers today and this month separately, since they are two questions",
+    said.includes("Today: $0.19") && said.includes("This month: $4.70"),
+    said.slice(0, 120),
+  );
+  check(
+    "and says turns as well as money, since one errand going round thirty times is the one to look at",
+    said.includes("12 errands, 30 turns"),
+    said.slice(0, 160),
+  );
+  check(
+    "spending outlives the agent that did it",
+    said.includes("an agent that is gone"),
+    said.slice(0, 160),
+  );
+
+  // Nothing paid for is not the same as nothing loaded: somebody running only
+  // local models should be told why this is empty rather than left to wonder.
+  const was = FIXTURE.what_it_cost;
+  FIXTURE.what_it_cost = { today: [], this_month: [], nothing_yet: true };
+  document.getElementById("costing").hidden = false;
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  typing.value = "what it has cost";
+  typing.dispatchEvent(new Event("input"));
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await new Promise((r) => setTimeout(r, 250));
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  typing.value = "what it has cost";
+  typing.dispatchEvent(new Event("input"));
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await new Promise((r) => setTimeout(r, 300));
+  check(
+    "nothing paid for says why, rather than looking like nothing loaded",
+    document.getElementById("costing").textContent.includes("costs no money"),
+    document.getElementById("costing").textContent.slice(0, 110),
+  );
+  FIXTURE.what_it_cost = was;
+  return found;
+}
+
 export async function running() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });

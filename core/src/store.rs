@@ -173,6 +173,20 @@ pub struct Offered {
     pub mark: String,
 }
 
+/// What one agent has cost over some stretch of time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Spending {
+    pub agent: String,
+    /// What it is called, or something honest if it has been forgotten. The
+    /// spending outlives the agent, because it happened.
+    pub who: String,
+    pub dollars: f64,
+    /// How many times a model went round, across all of it.
+    pub turns: i64,
+    /// How many turns were paid for.
+    pub errands: i64,
+}
+
 /// One standing job, and whoever is doing it.
 ///
 /// Named after what it is for rather than after the first thing it was asked,
@@ -655,6 +669,27 @@ const CHANGES: &[&str] = &[
 
      DROP INDEX IF EXISTS offered_once;
      CREATE UNIQUE INDEX offered_once ON offered(mark);",
+    // 15: what it cost.
+    //
+    // The engine says on every turn and this app threw it away, so an errand
+    // that ran every morning for a month had no answer at all to the one
+    // question anybody asks about running errands.
+    //
+    // Kept per turn rather than as a running total on the conversation, because
+    // "today" and "this month" are both questions and a total answers neither.
+    //
+    // No foreign key to the conversation, on purpose. Money spent is a fact
+    // whether or not the thread it was spent on is still kept, and deleting the
+    // record along with the thread would quietly understate what was spent.
+    "CREATE TABLE IF NOT EXISTS spending (
+         id           TEXT PRIMARY KEY,
+         agent        TEXT NOT NULL,
+         conversation TEXT NOT NULL,
+         at           INTEGER NOT NULL,
+         dollars      REAL NOT NULL,
+         turns        INTEGER NOT NULL DEFAULT 1
+     );
+     CREATE INDEX IF NOT EXISTS spending_when ON spending(at);",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -1200,6 +1235,57 @@ impl Store {
             .unwrap()
             .execute("DELETE FROM backends WHERE id = ?", params![id])?;
         Ok(())
+    }
+
+    /// Write down what a turn cost.
+    ///
+    /// Only where there was one. A model on this machine costs no dollars, and
+    /// a row of zeroes would make every total a lie by omission of what it is
+    /// a total of.
+    pub fn spent(
+        &self,
+        agent: &str,
+        conversation: &str,
+        dollars: f64,
+        turns: i64,
+        at: i64,
+    ) -> Result<()> {
+        if dollars <= 0.0 {
+            return Ok(());
+        }
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO spending (id, agent, conversation, at, dollars, turns)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![uuid(), agent, conversation, at, dollars, turns],
+        )?;
+        Ok(())
+    }
+
+    /// What has been spent since a moment, by agent, biggest first.
+    pub fn spending_since(&self, at: i64) -> Result<Vec<Spending>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT s.agent,
+                    coalesce(a.name, 'an agent that is gone'),
+                    sum(s.dollars),
+                    sum(s.turns),
+                    count(*)
+               FROM spending s
+               LEFT JOIN agents a ON a.id = s.agent
+              WHERE s.at >= ?
+              GROUP BY s.agent
+              ORDER BY sum(s.dollars) DESC",
+        )?;
+        let rows = q.query_map([at], |r| {
+            Ok(Spending {
+                agent: r.get(0)?,
+                who: r.get(1)?,
+                dollars: r.get(2)?,
+                turns: r.get(3)?,
+                errands: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Every conversation that is watching something and has not stopped.
@@ -2585,6 +2671,7 @@ mod tests {
         s.happened(
             "t1",
             &Event::Done {
+                cost: None,
                 said: "All done".into(),
             },
         )
@@ -2912,6 +2999,72 @@ mod tests {
             !store.offered().unwrap().iter().any(|o| o.id == "o1"),
             "the picker kept a line pointing at a backend that is gone"
         );
+    }
+
+    #[test]
+    fn what_was_spent_is_kept_per_turn_so_any_stretch_of_time_can_be_asked_about() {
+        // A running total answers neither "today" nor "this month", and those
+        // are the two questions anybody actually has.
+        let store = Store::in_memory().expect("a store");
+        store
+            .begin("a1", NOT_YET_NAMED, std::path::Path::new("/tmp"))
+            .expect("an agent");
+        store.rename("a1", "Bitcoin Desk", "Markets", "Briefs").ok();
+
+        let day = 24 * 60 * 60 * 1000;
+        let now = now();
+        store.spent("a1", "c1", 0.20, 2, now).expect("written");
+        store.spent("a1", "c2", 0.30, 1, now).expect("written");
+        // Older than a day, so a question about today must not count it.
+        store
+            .spent("a1", "c3", 5.00, 9, now - 3 * day)
+            .expect("written");
+
+        let today = store.spending_since(now - day).expect("readable");
+        assert_eq!(today.len(), 1, "{today:?}");
+        assert!((today[0].dollars - 0.50).abs() < 1e-9, "{today:?}");
+        assert_eq!(today[0].turns, 3);
+        assert_eq!(today[0].errands, 2);
+        assert_eq!(today[0].who, "Bitcoin Desk");
+
+        let everything = store.spending_since(0).expect("readable");
+        assert!(
+            (everything[0].dollars - 5.50).abs() < 1e-9,
+            "{everything:?}"
+        );
+    }
+
+    #[test]
+    fn a_model_on_this_machine_costs_no_dollars_rather_than_zero_of_them() {
+        // A row of zeroes would make every total a lie by omission of what it
+        // is a total of: five local errands and one paid one is not six.
+        let store = Store::in_memory().expect("a store");
+        store.spent("a1", "c1", 0.0, 1, now()).expect("nothing");
+        store.spent("a1", "c1", -1.0, 1, now()).expect("nothing");
+        assert!(store.spending_since(0).expect("readable").is_empty());
+    }
+
+    #[test]
+    fn what_was_spent_outlives_the_thread_it_was_spent_on() {
+        // The money went whether or not the conversation was kept, and losing
+        // the record with the thread would quietly understate the total.
+        let store = Store::in_memory().expect("a store");
+        store
+            .begin("a1", NOT_YET_NAMED, std::path::Path::new("/tmp"))
+            .expect("an agent");
+        store
+            .begin_conversation("gone", "a1", "Doomed")
+            .expect("a conversation");
+        store.spent("a1", "gone", 0.42, 1, now()).expect("written");
+
+        store.forget("gone").expect("forgotten");
+        let still = store.spending_since(0).expect("readable");
+        assert_eq!(
+            still.len(),
+            1,
+            "the spending went with the thread: {still:?}"
+        );
+        assert!((still[0].dollars - 0.42).abs() < 1e-9);
     }
 
     #[test]

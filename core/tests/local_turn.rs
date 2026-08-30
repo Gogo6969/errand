@@ -47,7 +47,7 @@ async fn one_turn_with_every_event_it_produces() {
                 it.answer(&ask.call, errand_core::Answer::Yes).unwrap();
             }
             Ok(Event::Started { model, .. }) => println!("STARTED  {model}"),
-            Ok(Event::Done { said }) => {
+            Ok(Event::Done { said, .. }) => {
                 println!("DONE     {said:?}");
                 return;
             }

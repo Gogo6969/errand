@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use chrono::Datelike;
 use errand_core::doctor;
 use errand_core::doorway;
 use errand_core::goal;
@@ -159,7 +160,7 @@ fn beside_everything_else() -> Option<std::path::PathBuf> {
 /// its notifications turned off, along with the ones that mattered.
 fn tell_them(app: &AppHandle, store: &Store, id: &str, event: &Event) {
     let (title, body) = match event {
-        Event::Done { said } => (called(store, id), gist(said)),
+        Event::Done { said, .. } => (called(store, id), gist(said)),
         Event::Failed { why } => (format!("{} stopped", called(store, id)), gist(why)),
         // An agent that has stopped to ask is the one thing here that is
         // actually waiting on somebody. Finishing can be read whenever; a
@@ -591,6 +592,26 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 _ => {}
             }
 
+            // What the turn cost, written down as it ends. Only where the
+            // engine said: a model on this machine costs no dollars, and a row
+            // of zeroes would make every total a lie about what it totals.
+            if let Event::Done {
+                cost: Some(cost), ..
+            } = &event
+            {
+                if let Ok(Some(talk)) = store.conversation(&id) {
+                    if let Err(why) = store.spent(
+                        &talk.agent,
+                        &id,
+                        cost.dollars,
+                        cost.turns,
+                        chrono::Local::now().timestamp_millis(),
+                    ) {
+                        eprintln!("could not write down what {id} cost: {why}");
+                    }
+                }
+            }
+
             let written = match store.happened(&id, &event) {
                 Ok(line) => line.map(|l| l.seq),
                 Err(e) => {
@@ -612,7 +633,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 // later. This is the same arrangement the app already uses for
                 // everything an engine asks it to do.
                 let said = match &event {
-                    Event::Done { said } => said.clone(),
+                    Event::Done { said, .. } => said.clone(),
                     // A turn that failed is not the end of a goal by itself.
                     // Written as the thing that is left, so that the same
                     // failure twice running trips the going-in-circles rule and
@@ -1126,6 +1147,53 @@ async fn move_it(held: State<'_, Held>, id: String, up: bool) -> Result<(), Stri
 #[tauri::command]
 async fn stop_offering(held: State<'_, Held>, id: String) -> Result<(), String> {
     held.store.stop_offering(&id).map_err(|e| e.to_string())
+}
+
+/// What everything has cost, over a stretch of time.
+///
+/// The one question anybody running errands has, and this app threw away the
+/// answer on every turn until now. Two stretches rather than one, because
+/// "today" and "this month" are different questions and a single running total
+/// answers neither.
+#[derive(Serialize)]
+struct WhatItCost {
+    today: Vec<errand_core::store::Spending>,
+    this_month: Vec<errand_core::store::Spending>,
+    /// Nothing has ever been paid for. Said apart from an empty list, because
+    /// somebody running only local models is not somebody whose spending failed
+    /// to load.
+    nothing_yet: bool,
+}
+
+#[tauri::command]
+async fn what_it_cost(held: State<'_, Held>) -> Result<WhatItCost, String> {
+    let now = chrono::Local::now();
+    // From midnight rather than twenty-four hours back: somebody asking what
+    // today cost means today.
+    let midnight = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|t| t.and_local_timezone(*now.offset()).earliest())
+        .map_or(0, |t| t.timestamp_millis());
+    let month = chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .and_then(|t| t.and_local_timezone(*now.offset()).earliest())
+        .map_or(0, |t| t.timestamp_millis());
+
+    let today = held
+        .store
+        .spending_since(midnight)
+        .map_err(|e| e.to_string())?;
+    let this_month = held
+        .store
+        .spending_since(month)
+        .map_err(|e| e.to_string())?;
+    let ever = held.store.spending_since(0).map_err(|e| e.to_string())?;
+    Ok(WhatItCost {
+        today,
+        this_month,
+        nothing_yet: ever.is_empty(),
+    })
 }
 
 /// Whether this conversation is live, and whether it is stopped for somebody.
@@ -2995,6 +3063,7 @@ pub fn run() {
             whats_offered,
             still_going,
             already_runs,
+            what_it_cost,
             watch_it,
             watches,
             aim_at,

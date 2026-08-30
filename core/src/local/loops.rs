@@ -223,7 +223,9 @@ async fn conversation(
         .await;
         match ran {
             Ok(Done::Finished(said)) => {
-                let _ = out.send(Event::Done { said });
+                // Nothing: a model on this machine costs no dollars, and saying
+                // $0.00 beside it would answer a question nobody asked about it.
+                let _ = out.send(Event::Done { said, cost: None });
             }
             Ok(Done::Abandoned) => break,
             Err(why) => {

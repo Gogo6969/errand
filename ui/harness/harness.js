@@ -172,6 +172,14 @@ export const FIXTURE = {
     { id: "al-1", tool: "Bash", rule: "top", covers: "any top command" },
     { id: "al-2", tool: "Bash", rule: "printf a > f; ls", covers: "only this exact command" },
   ],
+  what_it_cost: {
+    today: [{ agent: "agent-bitcoin", who: "Bitcoin Desk", dollars: 0.19, turns: 1, errands: 1 }],
+    this_month: [
+      { agent: "agent-bitcoin", who: "Bitcoin Desk", dollars: 4.2, turns: 30, errands: 12 },
+      { agent: "agent-gone", who: "an agent that is gone", dollars: 0.5, turns: 2, errands: 2 },
+    ],
+    nothing_yet: false,
+  },
   outside: [
     { name: "peekaboo", from: "~/.claude.json", tools: ["see", "click", "type"], trouble: null },
     { name: "mempalace", from: "~/.claude.json", tools: [], trouble: "starting it: No such file or directory" },
@@ -246,6 +254,8 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.goal_of);
           case "allowances":
             return Promise.resolve(fixture.allowances);
+          case "what_it_cost":
+            return Promise.resolve(fixture.what_it_cost);
           case "already_runs":
             // The stand-in for the app's own comparison: same time, and the
             // words mostly the same.
