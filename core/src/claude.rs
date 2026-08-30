@@ -323,67 +323,84 @@ impl Claude {
             Some(crate::doorway::config(&program, socket))
         });
 
-        let mut child = tokio::process::Command::new("claude")
-            .args([
-                "--print",
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-                "--include-partial-messages",
-                "--verbose",
-                // What a helper says, so that handing part of an errand to one
-                // is something you can watch rather than a step that sits
-                // there. It arrives tagged with the step that started it, and
-                // is shown underneath that step.
-                "--forward-subagent-text",
-                "--permission-mode",
-                // The agent's, not one decision for the whole app. A research
-                // agent and one that edits your files do not deserve the same
-                // posture, and it was compiled in until now.
-                match asks {
-                    "auto" => "bypassPermissions",
-                    "edits" => "acceptEdits",
-                    // Work the job out and come back with the plan, having
-                    // changed nothing. The posture somebody wants for an errand
-                    // whose shape they are not sure of yet: it reads, it looks
-                    // things up, and then it says what it would do, which is a
-                    // thing you can argue with before it happens rather than
-                    // after.
-                    "plan" => "plan",
-                    _ => "default",
-                },
-                "--allowedTools",
-            ])
-            .args(GRANTED)
-            .args([
-                "--permission-prompt-tool",
-                "stdio",
-                "--append-system-prompt",
-                &steering,
-            ])
-            .args(&opening)
-            // Not `--strict-mcp-config`, which would silently switch off every
-            // server the person has set up for Claude Code. Ours is added to
-            // theirs, the way anybody would expect.
-            .args(match &reach_us {
-                Some(config) => vec!["--mcp-config", config.as_str()],
-                None => vec![],
-            })
-            // Nothing chosen means whatever this person's Claude Code is set
-            // to, which is the right default: it is their CLI and their
-            // account, and overruling it from here would be a surprise.
-            .args(match model {
-                Some(named) => vec!["--model", named],
-                None => vec![],
-            })
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .context("starting claude; is Claude Code installed and on the PATH?")?;
+        // Walled in exactly when nobody is going to be asked.
+        //
+        // Asking is the better mechanism while it is switched on: it explains
+        // itself, it happens per action, and it lets somebody say yes to the
+        // thing they actually wanted. A wall explains nothing and refuses in
+        // the same words whatever the reason. So on an agent set to ask, the
+        // asking is the wall; on one set to get on with it without asking,
+        // there is nothing else left, and this is what stands in its place.
+        //
+        // It costs something even here: everything Claude Code starts is inside
+        // it too, MCP servers and hooks included, so the profile has to make
+        // room for the directories those write to. That list is in one place
+        // rather than two, because a second copy of it went stale.
+        let walled = asks == "auto" && crate::wall::possible();
+        let mut child = match walled {
+            true => crate::wall::around("claude", cwd),
+            false => tokio::process::Command::new("claude"),
+        }
+        .args([
+            "--print",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--verbose",
+            // What a helper says, so that handing part of an errand to one
+            // is something you can watch rather than a step that sits
+            // there. It arrives tagged with the step that started it, and
+            // is shown underneath that step.
+            "--forward-subagent-text",
+            "--permission-mode",
+            // The agent's, not one decision for the whole app. A research
+            // agent and one that edits your files do not deserve the same
+            // posture, and it was compiled in until now.
+            match asks {
+                "auto" => "bypassPermissions",
+                "edits" => "acceptEdits",
+                // Work the job out and come back with the plan, having
+                // changed nothing. The posture somebody wants for an errand
+                // whose shape they are not sure of yet: it reads, it looks
+                // things up, and then it says what it would do, which is a
+                // thing you can argue with before it happens rather than
+                // after.
+                "plan" => "plan",
+                _ => "default",
+            },
+            "--allowedTools",
+        ])
+        .args(GRANTED)
+        .args([
+            "--permission-prompt-tool",
+            "stdio",
+            "--append-system-prompt",
+            &steering,
+        ])
+        .args(&opening)
+        // Not `--strict-mcp-config`, which would silently switch off every
+        // server the person has set up for Claude Code. Ours is added to
+        // theirs, the way anybody would expect.
+        .args(match &reach_us {
+            Some(config) => vec!["--mcp-config", config.as_str()],
+            None => vec![],
+        })
+        // Nothing chosen means whatever this person's Claude Code is set
+        // to, which is the right default: it is their CLI and their
+        // account, and overruling it from here would be a surprise.
+        .args(match model {
+            Some(named) => vec!["--model", named],
+            None => vec![],
+        })
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("starting claude; is Claude Code installed and on the PATH?")?;
         let waiting: Waiting = Arc::default();
         let brought: Arc<Mutex<crate::Brought>> = Arc::default();
         let turning_up = brought.clone();

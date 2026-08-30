@@ -22,6 +22,7 @@ pub mod engine;
 pub mod jobs;
 pub mod keeping;
 pub mod store;
+pub mod wall;
 
 pub mod local;
 pub mod mcp;

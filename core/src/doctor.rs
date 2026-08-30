@@ -250,12 +250,33 @@ pub fn somewhere_to_work(here: &Path) -> Finding {
     }
 }
 
+/// Whether an agent that never asks can be walled in.
+///
+/// Worth saying out loud rather than assuming, because the answer decides what
+/// "Never" means: with the wall, it means an agent confined to its own folder;
+/// without it, it means an agent that can do anything and will not mention it.
+pub fn the_wall() -> Finding {
+    match crate::wall::possible() {
+        true => Finding::fine(
+            "The wall",
+            "agents set to never ask are confined to their own folder",
+        ),
+        false => Finding::odd(
+            "The wall",
+            "this machine has no sandbox-exec, so nothing can be walled in",
+            "An agent set to never ask has nothing between it and the rest of the machine. \
+             Set those agents back to asking first, where you decide each time.",
+        ),
+    }
+}
+
 /// Everything, at once.
 pub async fn everything(store: &crate::Store, here: &Path, cwd: &Path) -> Vec<Finding> {
     let mut all = vec![
         claude_code(),
         somewhere_to_work(here),
         the_store(store),
+        the_wall(),
         doorways(here),
     ];
     // Bounded, because two of these talk to the network and a check that hangs

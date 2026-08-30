@@ -118,6 +118,7 @@ const el = {
   granting: document.getElementById("granting"),
   asks: document.getElementById("asks"),
   allowed: document.getElementById("allowed"),
+  asksMeans: document.getElementById("asks-means"),
   routine: document.getElementById("routine"),
   routineAt: document.getElementById("routine-at"),
   routineWhat: document.getElementById("routine-what"),
@@ -1478,6 +1479,7 @@ async function drawGranted() {
   const a = whose();
   if (!a) return;
   el.asks.value = a.asks || "ask";
+  sayWhatAsksMeans();
 
   const allowed = await invoke("allowances", { agent: a.id });
   el.allowed.replaceChildren(
@@ -1509,10 +1511,33 @@ async function drawGranted() {
   );
 }
 
+/**
+ * What choosing this actually does, said next to the choice.
+ *
+ * "Never" is the one that needs saying. Switching the asking off does not leave
+ * an agent with nothing between it and the machine: it leaves it walled into
+ * its own folder, because asking and a wall are the two mechanisms there are
+ * and turning one off is when the other has to be on. Somebody choosing it
+ * should know both halves before they choose, not discover the second half as a
+ * refused write later.
+ */
+function sayWhatAsksMeans() {
+  el.asksMeans.textContent =
+    {
+      plan: "It reads, looks things up and comes back with what it would do. It changes nothing.",
+      ask: "It stops and asks before anything that changes something. Your answer can become a rule below.",
+      edits: "It writes files in its own folder without asking, and stops for everything else.",
+      auto:
+        "It never asks. Nobody is going to say no, so it is walled into its own folder instead: " +
+        "it can write there and in the usual temporary places, and nowhere else on this Mac.",
+    }[el.asks.value] || "";
+}
+
 el.asks.addEventListener("change", async () => {
   const a = whose();
   if (!a) return;
   a.asks = el.asks.value;
+  sayWhatAsksMeans();
   await invoke("asks", { id: a.id, how: a.asks });
 });
 

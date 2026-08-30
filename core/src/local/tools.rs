@@ -259,30 +259,12 @@ fn inside(home: &Path, said: &str) -> Result<std::path::PathBuf> {
 /// complete -- a command can still read anything the person can read, and that
 /// is deliberate, since reading is what most errands are -- but it is the
 /// difference between "it was asked not to" and "it cannot".
-fn walled_in(home: &Path, command: &str) -> tokio::process::Command {
-    let profile = format!(
-        r#"(version 1)
-(allow default)
-(deny file-write*)
-(allow file-write*
-  (subpath "{}")
-  (subpath "/private/tmp")
-  (subpath "/private/var/folders")
-  (subpath "/tmp")
-  (literal "/dev/null")
-  (literal "/dev/stdout")
-  (literal "/dev/stderr")
-  (regex #"^/dev/tty"))"#,
-        home.display()
-    );
-    let mut sh = tokio::process::Command::new("/usr/bin/sandbox-exec");
-    sh.arg("-p")
-        .arg(profile)
-        .arg("/bin/sh")
-        .arg("-lc")
-        .arg(command);
-    sh
-}
+// The wall itself lives in one place, so that the profile a local model runs
+// under and the one Claude Code runs under cannot drift apart. They did: this
+// copy had no allowance for the directories package managers write to, so
+// anything reached through `npx` failed here with npm's own advice to change
+// the ownership of a directory that was fine.
+use crate::wall::shell as walled_in;
 
 /// Do it, and say what happened.
 ///
@@ -369,7 +351,7 @@ pub async fn run(
         }
 
         "run_command" => {
-            let running = walled_in(home, &get("command")).current_dir(home).output();
+            let running = walled_in(home, &get("command")).output();
             let Ok(out) = tokio::time::timeout(LONG_ENOUGH_TO_WAIT, running).await else {
                 // Said as a result rather than an error, and said as a next step
                 // rather than a refusal, because there is one and the model
@@ -402,10 +384,8 @@ pub async fn run(
 
         "start_command" => {
             let command = get("command");
-            let mut walled = walled_in(home, &command);
-            walled.current_dir(home);
             let started = crate::jobs::start(
-                walled,
+                walled_in(home, &command),
                 &command,
                 match get("description").as_str() {
                     "" => &command,

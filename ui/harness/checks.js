@@ -386,6 +386,62 @@ export async function stopping() {
   return found;
 }
 
+/**
+ * What each posture actually does, said where it is chosen.
+ *
+ * "Never" is the one that has to say two things, not one. Switching the asking
+ * off does not leave an agent with nothing in the way: it leaves it walled into
+ * its own folder, because asking and a wall are the two mechanisms there are
+ * and turning one off is exactly when the other goes up. Somebody choosing it
+ * should know that before they choose, not meet it later as a refused write
+ * they cannot explain.
+ */
+export async function postures() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  document.getElementById("granted").click();
+  await new Promise((r) => setTimeout(r, 250));
+  const asks = document.getElementById("asks");
+  const means = document.getElementById("asks-means");
+
+  const said = {};
+  for (const how of ["plan", "ask", "edits", "auto"]) {
+    asks.value = how;
+    asks.dispatchEvent(new Event("change"));
+    await new Promise((r) => setTimeout(r, 60));
+    said[how] = means.textContent;
+  }
+
+  check(
+    "every posture says what it does",
+    Object.values(said).every((t) => t.length > 20),
+    Object.entries(said)
+      .map(([k, v]) => `${k}:${v.length}`)
+      .join(" "),
+  );
+  check(
+    "they do not all say the same thing",
+    new Set(Object.values(said)).size === 4,
+    `${new Set(Object.values(said)).size} distinct`,
+  );
+  check(
+    "choosing never says the wall goes up, not just that it stops asking",
+    said.auto.includes("walled") && said.auto.includes("own folder"),
+    said.auto.slice(0, 90),
+  );
+  check(
+    "and the postures that do ask do not claim to be walled",
+    !said.ask.includes("walled") && !said.edits.includes("walled"),
+    `${said.ask.slice(0, 40)} / ${said.edits.slice(0, 40)}`,
+  );
+
+  asks.value = "ask";
+  asks.dispatchEvent(new Event("change"));
+  document.getElementById("granted").click();
+  return found;
+}
+
 export async function running() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });

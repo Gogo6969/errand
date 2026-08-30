@@ -1018,6 +1018,17 @@ body.catching #what { border-color: var(--accent); }
   text-transform: uppercase;
   color: var(--ink-soft);
 }
+/* What the choice above does, in a sentence, beside the choice rather than
+   somewhere it has to be looked for. */
+#asks-means {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+  max-width: 58ch;
+}
+#asks-means:empty { display: none; }
+
 #asks {
   padding: 5px 9px;
   border-radius: 8px;
