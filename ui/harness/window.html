@@ -125,19 +125,40 @@
     }
   };
 
-  const { standIn } = await import(`./harness.js${fresh}`);
+  const { standIn, FIXTURE } = await import(`./harness.js${fresh}`);
+  // `?empty` is a copy of Errand nobody has ever used. It is its own mode
+  // rather than a check, because a first run is a different page: the window
+  // makes an agent for itself and there is nothing else in it, so every check
+  // written against the fixture would fail for the right reason and drown the
+  // one thing being looked at.
+  const brandNew = new URLSearchParams(location.search).has("empty");
   // `?slow` makes opening a conversation take as long as it really does when
   // an engine has to start behind it. That switch is what reproduced a window
   // which drew nothing at all for its first few seconds.
   const slow = new URLSearchParams(location.search).has("slow");
-  window.__TAURI__ = standIn(undefined, {}, slow ? { open_thread: 3000 } : {});
+  window.__TAURI__ = standIn(
+    brandNew ? { ...FIXTURE, agents: [], conversations: {} } : undefined,
+    {},
+    slow ? { open_thread: 3000 } : {},
+  );
 
   await import(`../app.js${fresh}`);
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
 
-  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut, aCall, stepsDoNotOverlap, openingAtLogin } =
+  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut, aCall, stepsDoNotOverlap, openingAtLogin, sayingWhatThisIs, firstRun } =
     await import(`./checks.js${fresh}`);
+  // A first run is looked at on its own, because there is nothing else in it.
+  if (brandNew) {
+    const found = firstRun();
+    const failed = found.filter((f) => !f.ok);
+    report.innerHTML =
+      `<h1>${failed.length ? failed.length + " FAILED of " + found.length : "all " + found.length + " passed"}</h1>` +
+      found.map((f) => `<span class="${f.ok ? "ok" : "no"}">${f.ok ? "PASS" : "FAIL"}</span>  ${f.what}  <em>(${f.saw})</em>`).join("\n");
+    window.__RESULT__ = { passed: found.length - failed.length, failed: failed.length, found };
+    throw new Error("first run only");
+  }
+
   const found = checks().concat(
     carryingOn(),
     palette(),
@@ -152,6 +173,7 @@
     await aCall(),
     await stepsDoNotOverlap(),
     await openingAtLogin(),
+    await sayingWhatThisIs(),
     await aiming(),
     await whichModels(),
     await questionsStillOpen(),

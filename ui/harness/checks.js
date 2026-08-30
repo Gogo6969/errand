@@ -1670,6 +1670,93 @@ export async function openingAtLogin() {
   return found;
 }
 
+/**
+ * What this app is, for somebody who has just opened it.
+ *
+ * Two things have to be true and they pull against each other. It has to
+ * appear on its own the first time, because an empty window that explains
+ * itself beats an empty window. And it has to go away and stay away, because
+ * the one thing worse than no explanation is one that will not leave.
+ */
+export async function sayingWhatThisIs() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const tour = document.getElementById("tour");
+
+  // Not in the way of somebody who has used this before.
+  check("it is not sitting there for somebody who already has agents", tour.hidden, `hidden=${tour.hidden}`);
+
+  // Reachable when it is wanted, from the one place everything is reachable.
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  await new Promise((r) => setTimeout(r, 120));
+  const entry = [...document.querySelectorAll("#palette-list li")].find((li) =>
+    /what errand is/i.test(li.textContent),
+  );
+  check("there is a way back to it", entry, "not in the palette");
+  entry?.click();
+  await new Promise((r) => setTimeout(r, 150));
+  check("opening it shows it", !tour.hidden, `hidden=${tour.hidden}`);
+
+  const said = tour.textContent;
+  // Named by what they do. "Repeat" says nothing to somebody who has never
+  // used it; "the same errand every morning" is the thing they came wanting.
+  check(
+    "it says what the things in the window are for, not what they are called",
+    /every morning/.test(said) && /wake it when something changes/.test(said),
+    said.slice(0, 90),
+  );
+  check(
+    "it covers the whole app rather than the chat box",
+    ["agent", "Allowed", "gear", "terminal", "Goal"].every((word) => said.includes(word)),
+    ["agent", "Allowed", "gear", "terminal", "Goal"].filter((w) => !said.includes(w)).join(",") || "all there",
+  );
+  // It must be possible to be done with it.
+  const done = tour.querySelector(".tour-done");
+  check("there is a way to be finished with it", done, "no button");
+  done?.click();
+  await new Promise((r) => setTimeout(r, 100));
+  check("and it goes away", tour.hidden, `hidden=${tour.hidden}`);
+
+  return found;
+}
+
+/**
+ * The very first time this app is opened.
+ *
+ * Its own mode (`?empty`), because a first run is a different window: nothing
+ * has been done in it, the window makes an agent for itself, and every check
+ * written against the fixture would fail for the right reason and bury the one
+ * thing worth looking at. Which is this: somebody who has just installed this
+ * gets an empty box and no idea what any of it is for, unless something says.
+ */
+export function firstRun() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const tour = document.getElementById("tour");
+
+  check(
+    "a copy nobody has used explains itself without being asked",
+    tour && !tour.hidden,
+    tour ? `hidden=${tour.hidden}` : "no panel at all",
+  );
+  check(
+    "and there is still somewhere to type",
+    document.getElementById("what") && !document.getElementById("composer").hidden,
+    "the box is there",
+  );
+  // Explaining the app is not the same as being the app: the window behind it
+  // has to be the real one, ready to be used the moment it is put away.
+  check(
+    "it explains the window rather than replacing it",
+    document.querySelectorAll("#threads li").length >= 1,
+    `${document.querySelectorAll("#threads li").length} agent(s) made for it`,
+  );
+  const done = tour?.querySelector(".tour-done");
+  done?.click();
+  check("and it can be put away on the first click", tour && tour.hidden, `hidden=${tour?.hidden}`);
+  return found;
+}
+
 export function headerFitsOnOneRow() {
   // A media query reads the viewport, not the element, so this cannot be
   // judged by widening anything on the page: run narrow, it measures a header

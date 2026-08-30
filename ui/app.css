@@ -1523,6 +1523,44 @@ body.catching #what { border-color: var(--accent); }
    will not finish on its own. */
 #working .one[data-waiting="true"] .who { color: var(--accent); }
 
+/* What this app is. The same panel as the others, because it is read the same
+   way and there is no reason for the one that explains the app to be the one
+   that looks least like it. */
+#tour[hidden] { display: none; }
+#tour {
+  border-bottom: 1px solid var(--rule);
+  background: var(--side);
+  padding: 14px 18px;
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* The name of the thing above what it does, rather than beside it: these are
+   sentences, and a sentence squeezed into the right-hand half of a row is a
+   sentence nobody reads. */
+#tour .tour-one {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 78ch;
+}
+#tour .who { font-weight: 500; color: var(--ink); }
+#tour .where { color: var(--ink-soft); font-size: 13px; line-height: 1.5; }
+#tour .tour-done {
+  align-self: flex-start;
+  margin-top: 2px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+#tour .tour-done:hover { color: var(--ink); border-color: var(--edge); }
+
 /* What it has cost, in the same shape as what is running. The two are opened
    the same way and read the same way, and there is no reason for them to look
    like different kinds of thing. */

@@ -113,6 +113,7 @@ const el = {
   checkup: document.getElementById("checkup"),
   working: document.getElementById("working"),
   costing: document.getElementById("costing"),
+  tour: document.getElementById("tour"),
   speak: document.getElementById("speak"),
   call: document.getElementById("call"),
   watch: document.getElementById("watch"),
@@ -347,7 +348,14 @@ async function catchUp() {
   for (const a of known) agents.set(a.id, asAgent(a, agents.get(a.id)));
   drawThreads();
   if (known.length) await openAgent(known[0].id);
-  else await start();
+  else {
+    await start();
+    // Nothing has ever been done in this copy, so there is nothing on screen
+    // to read and nothing to work out from. Shown once, here, rather than
+    // remembered and shown again: the second time somebody opens this app they
+    // have an agent, and this never runs.
+    showTheTour();
+  }
 }
 
 /** Open an agent, at whichever conversation it spoke in most recently. */
@@ -1717,6 +1725,7 @@ function whatCouldBeDone() {
   add("What this thread can reach", "MCP servers", () => el.reach.click(), !!showing);
   add("Make this run on a schedule", "", () => el.repeat.click(), !!showing);
   add("Which models show up", "", () => showModels(), true);
+  add("What Errand is", "the whole thing, in seven lines", () => showTheTour(), true);
   add("What it has cost", "today and this month", () => whatItCost(), true);
   add("Check this setup", "what is wrong, and what to do", () => checkup());
   add("What is running", "everywhere, not just here", () => whatsRunning());
@@ -3159,6 +3168,102 @@ el.byHand.addEventListener("submit", async (e) => {
  * one of those is not zero dollars, it is no dollars, and a row of zeroes would
  * make the total a lie about what it is a total of.
  */
+/**
+ * What this app is, for somebody who has just opened it.
+ *
+ * Not a carousel and not a sequence of things to dismiss. Each line names a
+ * thing that is actually on screen and says what it is for, so it can be read
+ * with the window behind it rather than instead of it.
+ *
+ * Written in what the thing does rather than what it is called. "Repeat" means
+ * nothing to somebody who has not used it; "the same errand every morning"
+ * means the thing they came here wanting.
+ */
+const WHAT_THIS_IS = [
+  [
+    "An agent, not a chat",
+    "The list on the left is agents, not conversations. An agent is somebody you " +
+      "come back to: it keeps what it learned, what it is allowed to do and what " +
+      "it can reach. Starting again tomorrow is starting again with all of that.",
+  ],
+  [
+    "Say what you want done",
+    "Type it in the box at the bottom, in whatever words you would use to a " +
+      "person. You can say something else while it is still working, and you can " +
+      "change your mind halfway.",
+  ],
+  [
+    "Repeat · the same errand every morning",
+    "Give it a time and something to say, and it says it on its own. It runs " +
+      "while Errand is open, which is what the switch under Settings is about.",
+  ],
+  [
+    "Watch · wake it when something changes",
+    "A folder that gets a file, a page that changes its mind. It says how often " +
+      "it will look and what that comes to before you agree to it.",
+  ],
+  [
+    "Goal · something to get to",
+    "Repeat is something to do; a goal is something to reach. It keeps going " +
+      "until it gets there, says so when it does, and stops itself if it is going " +
+      "round in circles.",
+  ],
+  [
+    "Allowed and Tools · what it may do",
+    "It asks before it does anything to your machine. Allowed is what you have " +
+      "said yes to for good, in words rather than in rules, and you can take any " +
+      "of it back. Tools is what this thread can reach.",
+  ],
+  [
+    "The gear, bottom left",
+    "Which models show up in the picker, and nothing else is offered anywhere in " +
+      "the app. Add hosted ones with a key, or find what is already running on " +
+      "this machine.",
+  ],
+  [
+    "From a terminal, too",
+    "Errand ask \"Day Check\" \"what is the date?\" hands the job to that agent " +
+      "and prints the answer. Add --json to get something a script can read.",
+  ],
+];
+
+/**
+ * Show it, or put it away.
+ *
+ * Opened by hand from the palette, and once on its own: the first time this app
+ * is opened there is nothing in it, and an empty window that explains itself is
+ * better than an empty window.
+ */
+function showTheTour() {
+  if (!el.tour.hidden) {
+    el.tour.hidden = true;
+    return;
+  }
+  el.tour.hidden = false;
+  const head = note("p", "This is Errand. Seven things and then you know it.");
+  const rows = WHAT_THIS_IS.map(([title, said]) => {
+    const row = document.createElement("div");
+    row.className = "one tour-one";
+    const what = document.createElement("span");
+    what.className = "who";
+    what.textContent = title;
+    const why = document.createElement("span");
+    why.className = "where";
+    why.textContent = said;
+    row.append(what, why);
+    return row;
+  });
+  const done = document.createElement("button");
+  done.type = "button";
+  done.className = "tour-done";
+  done.textContent = "Got it";
+  done.onclick = () => {
+    el.tour.hidden = true;
+    el.what.focus();
+  };
+  el.tour.replaceChildren(head, ...rows, done);
+}
+
 async function whatItCost() {
   if (!el.costing.hidden) {
     el.costing.hidden = true;
