@@ -10,4 +10,11 @@ PORT="${PORT:-8792}"
 python3 -m http.server "$PORT" --bind 127.0.0.1 --directory . >/dev/null 2>&1 &
 echo $! > /tmp/errand-harness.pid
 sleep 1
-echo "open http://127.0.0.1:$PORT/ui/harness/window.html"
+# With something different on the end every time.
+#
+# Everything the harness loads is already cache-busted from inside, but the page
+# doing the busting is itself a file a browser will happily keep. It kept one:
+# for three runs the harness reported green while testing markup from two edits
+# earlier, which is precisely the failure it exists to prevent, arriving through
+# the HTTP cache instead of through a copied file.
+echo "open http://127.0.0.1:$PORT/ui/harness/window.html?at=$(date +%s)"

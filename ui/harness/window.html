@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <title>Errand window, under test</title>
+<!-- Never kept. See run.sh: a cached harness reports green on code that is no
+     longer there, which is worse than no harness at all. -->
+<meta http-equiv="cache-control" content="no-store">
 <link rel="stylesheet" href="../app.css">
 <style>
   /* The report sits over the window it is reporting on. */
@@ -25,7 +28,13 @@
   // and the page it was supposedly checking threw on load. A harness that
   // tests yesterday's markup is worse than no harness, because it reports
   // green while doing it.
-  const page = await (await fetch("../index.html")).text();
+  // Nothing here may be cached, and that is not a detail. The whole reason
+  // this harness reads the real files at run time is that a copy went stale
+  // within the hour and reported green while testing markup that no longer
+  // existed. An HTTP cache is the same failure wearing a different coat: it
+  // was serving an index.html from two edits ago, and the checks passed.
+  const fresh = `?at=${Date.now()}`;
+  const page = await (await fetch(`../index.html${fresh}`, { cache: "no-store" })).text();
   const real = new DOMParser().parseFromString(page, "text/html");
   const report = document.getElementById("report");
   // Its own script tags came with it and would run unstubbed.
@@ -67,19 +76,19 @@
     }
   };
 
-  const { standIn } = await import("./harness.js");
+  const { standIn } = await import(`./harness.js${fresh}`);
   // `?slow` makes opening a conversation take as long as it really does when
   // an engine has to start behind it. That switch is what reproduced a window
   // which drew nothing at all for its first few seconds.
   const slow = new URLSearchParams(location.search).has("slow");
   window.__TAURI__ = standIn(undefined, {}, slow ? { open_thread: 3000 } : {});
 
-  await import("../app.js");
+  await import(`../app.js${fresh}`);
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
 
   const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, whatItCanReach, dictation, watching } =
-    await import("./checks.js");
+    await import(`./checks.js${fresh}`);
   const found = checks().concat(
     carryingOn(),
     palette(),

@@ -478,6 +478,12 @@ pub async fn list_models(settings: &LlmSettings) -> Result<Vec<String>> {
         .danger_accept_invalid_certs(true)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
+    // Which protocol first, because it decides the address and the header, and
+    // only then who is serving. Asking them the other way round is how a
+    // backend somebody set to the second format got asked in the first one.
+    if settings.how_it_talks() == crate::local::stream::Wire::Anthropic {
+        return crate::local::anthropic::list_models(&client, settings).await;
+    }
     match settings.provider.as_str() {
         "ollama" => list_via_ollama(&client, &settings.base_url).await,
         _ => {
@@ -648,7 +654,11 @@ async fn list_via_ollama(client: &reqwest::Client, base: &str) -> Result<Vec<Str
 ///
 /// Returns the address that answered, which is what to store, and what it said
 /// it has.
-pub async fn settle(base_url: &str, api_key: Option<&str>) -> Result<(String, Vec<String>)> {
+pub async fn settle(
+    base_url: &str,
+    api_key: Option<&str>,
+    wire: &str,
+) -> Result<(String, Vec<String>)> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(12))
         .danger_accept_invalid_certs(true)
@@ -667,7 +677,19 @@ pub async fn settle(base_url: &str, api_key: Option<&str>) -> Result<(String, Ve
     let mut empty_but_answered = None;
     let mut why = Vec::new();
     for shape in shapes {
-        match list_via_openai(&client, &format!("{shape}/models"), api_key).await {
+        let asking = match wire {
+            "anthropic" => {
+                let settings = LlmSettings {
+                    base_url: shape.clone(),
+                    api_key: api_key.map(str::to_string),
+                    wire: "anthropic".into(),
+                    ..Default::default()
+                };
+                crate::local::anthropic::list_models(&client, &settings).await
+            }
+            _ => list_via_openai(&client, &format!("{shape}/models"), api_key).await,
+        };
+        match asking {
             Ok(models) if !models.is_empty() => return Ok((shape, models)),
             // An empty list is a real answer, and the true one for a key with
             // nothing enabled on it. Held in case the other shape says more,

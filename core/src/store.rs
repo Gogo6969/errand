@@ -148,6 +148,8 @@ pub struct Backend {
     pub base_url: String,
     /// Whether a key is kept for it. Never the key.
     pub has_key: bool,
+    /// Which protocol it speaks: `openai` or `anthropic`.
+    pub wire: String,
     pub added_at: i64,
 }
 
@@ -576,6 +578,7 @@ const CHANGES: &[&str] = &[
          provider TEXT NOT NULL,
          base_url TEXT NOT NULL,
          has_key  INTEGER NOT NULL DEFAULT 0,
+         wire     TEXT NOT NULL DEFAULT 'openai',
          added_at INTEGER NOT NULL
      );
      CREATE TABLE IF NOT EXISTS offered (
@@ -1040,7 +1043,7 @@ impl Store {
     pub fn backends(&self) -> Result<Vec<Backend>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
-            "SELECT id, label, provider, base_url, has_key, added_at
+            "SELECT id, label, provider, base_url, has_key, wire, added_at
                FROM backends ORDER BY added_at",
         )?;
         let rows = q.query_map([], |r| {
@@ -1050,7 +1053,8 @@ impl Store {
                 provider: r.get(2)?,
                 base_url: r.get(3)?,
                 has_key: r.get::<_, i64>(4)? != 0,
-                added_at: r.get(5)?,
+                wire: r.get(5)?,
+                added_at: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1059,19 +1063,21 @@ impl Store {
     /// Remember somewhere models are served from.
     pub fn add_backend(&self, one: &Backend) -> Result<()> {
         self.conn.lock().unwrap().execute(
-            "INSERT INTO backends (id, label, provider, base_url, has_key, added_at)
-             VALUES (?, ?, ?, ?, ?, ?)
+            "INSERT INTO backends (id, label, provider, base_url, has_key, wire, added_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE
                 SET label = excluded.label,
                     provider = excluded.provider,
                     base_url = excluded.base_url,
-                    has_key = excluded.has_key",
+                    has_key = excluded.has_key,
+                    wire = excluded.wire",
             params![
                 one.id,
                 one.label,
                 one.provider,
                 one.base_url,
                 i64::from(one.has_key),
+                one.wire,
                 one.added_at
             ],
         )?;
@@ -2714,6 +2720,7 @@ mod tests {
                 provider: "openai-compat".into(),
                 base_url: "https://api.deepseek.com".into(),
                 has_key: true,
+                wire: "openai".into(),
                 added_at: 1,
             })
             .expect("added");

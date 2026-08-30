@@ -20,6 +20,7 @@
 //! A local model running a shell command is exactly as capable of ruining your
 //! afternoon as a hosted one, and it goes through the same card.
 
+pub mod anthropic;
 pub mod find;
 pub mod ready;
 pub mod stream;
@@ -51,6 +52,17 @@ use serde::{Deserialize, Serialize};
 pub struct LlmSettings {
     /// One of: ollama, lmstudio, vllm, llamacpp, openai-compat.
     pub provider: String,
+    /// Which protocol this one speaks: `openai` or `anthropic`.
+    ///
+    /// Not the same question as the provider, which is about who is serving.
+    /// DeepSeek serves both from the same host at different addresses, and
+    /// somebody with a working setup pointed at the second one could not use
+    /// it here at all, because there was only ever one answer to this.
+    ///
+    /// Defaults to the one almost everything speaks, so nothing stored before
+    /// this existed changes meaning.
+    #[serde(default = "the_usual_protocol")]
+    pub wire: String,
     /// Where it answers, e.g. `http://localhost:11434`.
     pub base_url: String,
     /// Which model, e.g. `qwen2.5-coder:14b`.
@@ -73,10 +85,24 @@ pub struct LlmSettings {
     pub max_tokens: usize,
 }
 
+/// What almost everything speaks, and what anything stored before there was a
+/// choice must go on meaning.
+fn the_usual_protocol() -> String {
+    "openai".to_string()
+}
+
 impl LlmSettings {
     /// The address to hit for `what`, given whatever is stored as the base.
     pub fn reach(&self, what: &str) -> String {
         Self::reaching(&self.base_url, what)
+    }
+
+    /// Which protocol this one speaks.
+    pub fn how_it_talks(&self) -> crate::local::stream::Wire {
+        match self.wire.as_str() {
+            "anthropic" => crate::local::stream::Wire::Anthropic,
+            _ => crate::local::stream::Wire::Openai,
+        }
     }
 
     /// The same, without needing the rest of the settings.
@@ -119,6 +145,7 @@ impl Default for LlmSettings {
     fn default() -> Self {
         Self {
             provider: "ollama".into(),
+            wire: the_usual_protocol(),
             base_url: "http://localhost:11434".into(),
             model: String::new(),
             context_window: 32_768,

@@ -380,9 +380,30 @@ pub struct StreamHandle {
     pub cancel: CancellationToken,
 }
 
+/// Which protocol is on the other end.
+///
+/// Two, and only two, and both end up as the same `ChatDelta`, which is the
+/// whole reason a second one was affordable: nothing downstream knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wire {
+    /// OpenAI chat completions, which is what almost everything speaks.
+    Openai,
+    /// Anthropic messages, which is what DeepSeek and Z.ai serve beside it.
+    Anthropic,
+}
+
 pub async fn open(
     request: reqwest::RequestBuilder,
     cancel: CancellationToken,
+) -> Result<StreamHandle> {
+    open_as(request, cancel, Wire::Openai).await
+}
+
+/// The same, saying which protocol to read back.
+pub async fn open_as(
+    request: reqwest::RequestBuilder,
+    cancel: CancellationToken,
+    wire: Wire,
 ) -> Result<StreamHandle> {
     // Honor cancellation while the initial HTTP send is in flight.
     // Without this select, a stalled LLM (TCP connect succeeded but
@@ -406,12 +427,79 @@ pub async fn open(
     let cancel_for_task = cancel.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = pump(resp, tx.clone(), cancel_for_task).await {
+        let went = match wire {
+            Wire::Openai => pump(resp, tx.clone(), cancel_for_task).await,
+            Wire::Anthropic => pump_anthropic(resp, tx.clone(), cancel_for_task).await,
+        };
+        if let Err(e) = went {
             let _ = tx.send(ChatDelta::Error(e.to_string()));
         }
     });
 
     Ok(StreamHandle { rx, cancel })
+}
+
+/// The same job for the other format.
+///
+/// Its own loop rather than a branch inside the first one. The OpenAI pump
+/// carries a great deal that only applies to it -- the harmony channel parser,
+/// tool-call fragments indexed by position, `[DONE]` -- and threading a second
+/// protocol through all of that would make both harder to be sure of. What is
+/// shared is the thing that matters: both send `ChatDelta` and nothing further
+/// down knows there are two.
+async fn pump_anthropic(
+    resp: reqwest::Response,
+    tx: mpsc::UnboundedSender<ChatDelta>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    use eventsource_stream::Eventsource;
+    let mut events = resp.bytes_stream().eventsource();
+    // What each open content block is. A delta names only its index, and the
+    // same delta shape means different things depending on what was opened.
+    let mut blocks: Vec<super::anthropic::Block> = Vec::new();
+    let mut ended = false;
+
+    // The same inactivity ceiling as the other pump: no cap on how long a turn
+    // may take, but a server that goes quiet for this long is gone.
+    const INACTIVITY: std::time::Duration = std::time::Duration::from_secs(300);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                let _ = tx.send(ChatDelta::Done { reason: "cancelled".into() });
+                return Ok(());
+            }
+            next = tokio::time::timeout(INACTIVITY, futures_util::StreamExt::next(&mut events)) => {
+                let Ok(next) = next else {
+                    let _ = tx.send(ChatDelta::Error(
+                        "the model server went silent for 5 minutes -- connection treated as stalled".into(),
+                    ));
+                    return Ok(());
+                };
+                let Some(item) = next else {
+                    // The end of the body. Said only if the server did not,
+                    // because saying it twice ends the turn twice.
+                    if !ended {
+                        let _ = tx.send(ChatDelta::Done { reason: "stream-end".into() });
+                    }
+                    return Ok(());
+                };
+                let event = item.map_err(|e| anyhow!("sse: {e}"))?;
+                for delta in super::anthropic::read_event(&event.event, &event.data, &mut blocks) {
+                    if matches!(delta, ChatDelta::Done { .. }) {
+                        // This format says it twice: once with the reason and
+                        // once to close. The first is the one with something in
+                        // it, and the second would end the turn a second time.
+                        if ended {
+                            continue;
+                        }
+                        ended = true;
+                    }
+                    let _ = tx.send(delta);
+                }
+            }
+        }
+    }
 }
 
 // ---- Pump (SSE → ChatDelta) -----------------------------------------------

@@ -155,6 +155,21 @@ running correctly the whole time.
 `osascript ... count of windows` is not the check either: it returned 0 for a
 build that was known good.
 
+### The harness will test yesterday's code if you let it
+
+It reads the real files at run time because an embedded copy went stale within
+the hour. The HTTP cache is that same failure in a different coat, and it
+happened: three runs reported green while testing markup from two edits back,
+including a form field that did not exist.
+
+Everything it loads now carries a cache-busting query, `window.html` asks not to
+be kept, and `run.sh` prints a URL with a timestamp on it. **Open the URL
+`run.sh` prints.** A bare `location.reload()` does not re-fetch the modules.
+
+When a check fails for a reason that makes no sense, check first that the page
+is running the code you just wrote: `document.getElementById("the-new-thing")`
+in the console settles it in one line.
+
 ### A replace that matches nothing says nothing
 
 Editing these files with `str.replace` in a throwaway script is fine and fast,

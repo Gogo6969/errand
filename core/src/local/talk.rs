@@ -119,6 +119,23 @@ impl LlmClient {
         cancel: tokio_util::sync::CancellationToken,
         force_tool: bool,
     ) -> Result<StreamHandle> {
+        // The other protocol, where somebody has pointed this at one. Handled
+        // before anything below because almost none of it applies: a different
+        // address, a different header for the key, a different shape for the
+        // messages and the tools, and a different thing coming back.
+        if self.settings.how_it_talks() == super::stream::Wire::Anthropic {
+            return super::anthropic::stream(
+                &self.http,
+                &self.settings,
+                messages,
+                tools,
+                max_tokens,
+                cancel,
+                force_tool,
+            )
+            .await;
+        }
+
         let payload_messages: Vec<serde_json::Value> =
             normalize_for_strict_templates(messages.iter().map(serialize_message).collect());
         let tools_json: Vec<serde_json::Value> = tools.iter().map(|t| t.schema.clone()).collect();

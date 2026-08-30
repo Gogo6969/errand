@@ -127,13 +127,13 @@ export const FIXTURE = {
   ],
   backends: [
     { id: "b-ollama", label: "Ollama", provider: "ollama", base_url: "http://127.0.0.1:11434",
-      has_key: false, found: false, models: [], trouble: null },
-    { id: "b-deepseek", label: "DeepSeek", provider: "openai-compat", base_url: "https://api.deepseek.com",
-      has_key: true, found: false, models: [], trouble: null },
+      has_key: false, wire: "openai", found: false, models: [], trouble: null },
+    { id: "b-deepseek", label: "DeepSeek", provider: "openai-compat", base_url: "https://api.deepseek.com/anthropic",
+      has_key: true, wire: "anthropic", found: false, models: [], trouble: null },
   ],
   look_for_models: [
     { id: "http://127.0.0.1:11434", label: "Ollama", provider: "ollama",
-      base_url: "http://127.0.0.1:11434", has_key: false, found: true, trouble: null,
+      base_url: "http://127.0.0.1:11434", has_key: false, wire: "openai", found: true, trouble: null,
       models: [
         { model: "qwen2.5:7b", loaded: true },
         { model: "llama3.2:1b", loaded: false },
@@ -141,8 +141,9 @@ export const FIXTURE = {
   ],
   models_at: {
     id: "b-deepseek", label: "DeepSeek", provider: "openai-compat",
-    base_url: "https://api.deepseek.com", has_key: true, found: false, trouble: null,
-    models: [{ model: "deepseek-v4", loaded: true }],
+    base_url: "https://api.deepseek.com/anthropic", has_key: true, wire: "anthropic",
+    found: false, trouble: null,
+    models: [{ model: "deepseek-v4-flash", loaded: true }],
   },
   outside: [
     { name: "peekaboo", from: "~/.claude.json", tools: ["see", "click", "type"], trouble: null },
@@ -207,6 +208,8 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           case "look_for_models":
             return Promise.resolve(fixture.look_for_models);
           case "models_at":
+            return Promise.resolve(fixture.models_at);
+          case "remember_backend":
             return Promise.resolve(fixture.models_at);
           case "goal_of":
             return Promise.resolve(fixture.goal_of);

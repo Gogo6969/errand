@@ -102,6 +102,7 @@ const el = {
   handLabel: document.getElementById("hand-label"),
   handUrl: document.getElementById("hand-url"),
   handKey: document.getElementById("hand-key"),
+  handWire: document.getElementById("hand-wire"),
   handSays: document.getElementById("hand-says"),
   chosen: document.getElementById("chosen"),
   checkup: document.getElementById("checkup"),
@@ -2313,17 +2314,68 @@ el.watchAgain.addEventListener("click", async () => {
  * picker is only ever the result.
  */
 
-/** Addresses worth filling in for you, and what each one is called. */
+/**
+ * Addresses worth filling in for you.
+ *
+ * No two of these serve in the same place, which is the whole reason they are
+ * here rather than in somebody's head, and getting it wrong gives a 404 that
+ * reads exactly like a wrong key. So each one was checked rather than read off
+ * a documentation page, by asking the host for both the path and a deliberately
+ * nonsense one beside it: where the two answers differ, the path is proved.
+ *
+ *   Kimi        /v1/chat/completions answered 401 "Incorrect API key" -- the
+ *               route is there and wants a key -- while /chat/completions
+ *               answered 404 url.not_found. Proved, and the other one disproved.
+ *   GLM         /api/paas/v4/chat/completions reached Z.ai's own auth and
+ *               answered 1001; /v1/chat/completions was refused by nginx with a
+ *               plain 404, so it is not served there at all.
+ *   OpenRouter  /api/v1/models answered 200 with the real list, no key needed.
+ *               /v1/... answered 404.
+ *   DeepSeek    checks the key before it looks at the path, on every surface
+ *               it has, so a nonsense path answers exactly the same 401 as a
+ *               real one with a key and without: it cannot be proved from
+ *               outside by anybody, and that is a fact about DeepSeek rather
+ *               than a gap here. It is settled against the real key the moment
+ *               somebody adds it, which is the one point at which the question
+ *               can be answered at all, and the address that answered is what
+ *               gets kept and shown.
+ */
 const KNOWN_PLACES = [
-  // Where each of these actually serves is not the same, which is the whole
-  // reason these are here rather than in somebody's head: Moonshot serves under
-  // /v1, Z.ai under /api/paas/v4, DeepSeek off the root. Getting it wrong gives
-  // a 404 that reads exactly like a wrong key. Errand checks which one answers
-  // when you add it, so a wrong guess here is corrected rather than kept.
-  { name: "DeepSeek", url: "https://api.deepseek.com" },
-  { name: "Kimi", url: "https://api.moonshot.ai/v1" },
-  { name: "GLM", url: "https://api.z.ai/api/paas/v4" },
-  { name: "OpenRouter", url: "https://openrouter.ai/api/v1" },
+  {
+    name: "DeepSeek",
+    url: "https://api.deepseek.com",
+    wire: "openai",
+    sure: true,
+    why: "Errand confirms the exact path against your key as you add it, because DeepSeek checks the key before it looks at the path.",
+  },
+  {
+    // The same company, a second surface, a different protocol. Worth its own
+    // button because it is not a variation on the address: it changes what is
+    // sent and what comes back.
+    name: "DeepSeek · Anthropic",
+    url: "https://api.deepseek.com/anthropic",
+    wire: "anthropic",
+    sure: true,
+    why: "DeepSeek's Anthropic-protocol surface, which speaks /v1/messages rather than /v1/chat/completions.",
+  },
+  {
+    name: "Kimi",
+    url: "https://api.moonshot.ai/v1",
+    sure: true,
+    why: "Checked: this is where it answers.",
+  },
+  {
+    name: "GLM",
+    url: "https://api.z.ai/api/paas/v4",
+    sure: true,
+    why: "Checked: this is where it answers. Not /v1, which is not served at all.",
+  },
+  {
+    name: "OpenRouter",
+    url: "https://openrouter.ai/api/v1",
+    sure: true,
+    why: "Checked: this is where it answers.",
+  },
 ];
 
 async function showModels() {
@@ -2333,9 +2385,20 @@ async function showModels() {
       const b = document.createElement("button");
       b.type = "button";
       b.textContent = place.name;
+      b.title = `${place.url} — ${place.why}`;
+      if (!place.sure) b.dataset.unsure = "true";
       b.onclick = () => {
         el.handLabel.value = place.name;
         el.handUrl.value = place.url;
+        // Set with the address, because the two go together: the same host
+        // serves both protocols at different paths, and either one alone is a
+        // setup that cannot work.
+        el.handWire.value = place.wire || "openai";
+        // Said where the address is, rather than only in a tooltip nobody
+        // hovers. Which of these was actually confirmed is the difference
+        // between an address to trust and one to watch.
+        el.handSays.dataset.wrong = "false";
+        el.handSays.textContent = place.why;
         el.handKey.focus();
       };
       return b;
@@ -2435,7 +2498,10 @@ function drawPlaces(places, { kept = false } = {}) {
       name.textContent = place.label;
       const where = document.createElement("span");
       where.className = "where";
-      where.textContent = place.base_url + (place.has_key ? " · key kept" : "");
+      where.textContent =
+        place.base_url +
+        (place.wire === "anthropic" ? " · Anthropic protocol" : "") +
+        (place.has_key ? " · key kept" : "");
       words.append(name, where);
       head.append(words);
 
@@ -2525,6 +2591,10 @@ function drawPlaces(places, { kept = false } = {}) {
               provider: place.provider,
               base_url: place.base_url,
               model: m.model,
+              // Carried onto the choice itself. Without it a model added from
+              // an Anthropic backend is later asked in the other protocol,
+              // which fails when somebody uses it rather than here.
+              wire: place.wire || "openai",
             }),
             backend: kept ? place.id : null,
           });
@@ -2585,18 +2655,30 @@ el.byHand.addEventListener("submit", async (e) => {
     return;
   }
   el.handSays.dataset.wrong = "false";
-  el.handSays.textContent = "Asking it what it has…";
+  el.handSays.textContent = "Asking it where it answers…";
   try {
-    await invoke("remember_backend", {
+    const kept = await invoke("remember_backend", {
       label: el.handLabel.value.trim(),
       provider: "openai-compat",
       baseUrl,
       apiKey: el.handKey.value.trim() || null,
+      wire: el.handWire.value,
     });
-    el.handSays.textContent = "Added. Ask it what it has, below.";
+    // The address it settled on, said out loud, because it is often not the one
+    // that was typed and that is the whole point of asking: these providers do
+    // not agree on where they serve, and a wrong path answers 404 in a way that
+    // reads exactly like a wrong key.
+    const moved = kept.base_url !== baseUrl;
+    el.handSays.dataset.wrong = !!kept.trouble;
+    el.handSays.textContent = kept.trouble
+      ? `Kept, but nothing answered there yet, so the address is unchecked. ${kept.trouble}`
+      : [
+          moved ? `It answers at ${kept.base_url}, not quite what was typed.` : "Checked: it answers there.",
+          kept.models.length
+            ? `${kept.models.length} model${kept.models.length === 1 ? "" : "s"} to choose from below.`
+            : "It offered no models, which is what a key with nothing enabled on it looks like.",
+        ].join(" ");
   } catch (why) {
-    // Kept even when nothing answered, which the message says, so somebody
-    // adding a machine that is switched off is not made to type it all again.
     el.handSays.dataset.wrong = "true";
     el.handSays.textContent = String(why);
   }

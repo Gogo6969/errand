@@ -352,6 +352,17 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   color: var(--ink-soft);
   flex: 1 1 170px;
 }
+#by-hand select {
+  padding: 6px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: 0;
+}
 #by-hand input {
   padding: 6px 9px;
   border-radius: 8px;

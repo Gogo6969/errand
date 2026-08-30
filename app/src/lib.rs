@@ -829,6 +829,8 @@ struct Somewhere {
     /// Whether a key is kept for it. Never the key itself: it goes in one
     /// direction only, and there is no command anywhere that hands one back.
     has_key: bool,
+    /// Which protocol it speaks: `openai` or `anthropic`.
+    wire: String,
     /// True when this was found by looking rather than read from the store, so
     /// the screen can offer to keep it.
     found: bool,
@@ -869,6 +871,9 @@ async fn look_for_models(wider: Option<bool>) -> Result<Vec<Somewhere>, String> 
             provider: one.provider,
             base_url: one.base_url,
             has_key: false,
+            // Anything found by looking is a local server, and they all speak
+            // the usual one.
+            wire: "openai".to_string(),
             found: true,
             models,
             trouble: None,
@@ -897,6 +902,7 @@ async fn models_at(held: State<'_, Held>, id: String) -> Result<Somewhere, Strin
         provider: one.provider.clone(),
         base_url: one.base_url.clone(),
         api_key: keys::look_up(&one.id),
+        wire: one.wire.clone(),
         ..Default::default()
     };
     let (models, trouble) = match find::list_models(&settings).await {
@@ -916,6 +922,7 @@ async fn models_at(held: State<'_, Held>, id: String) -> Result<Somewhere, Strin
         provider: one.provider,
         base_url: one.base_url,
         has_key: one.has_key,
+        wire: one.wire,
         found: false,
         models,
         trouble,
@@ -935,7 +942,8 @@ async fn remember_backend(
     provider: String,
     base_url: String,
     api_key: Option<String>,
-) -> Result<String, String> {
+    wire: Option<String>,
+) -> Result<Somewhere, String> {
     let base_url = base_url.trim().to_string();
     if base_url.is_empty() {
         return Err("it needs an address".into());
@@ -971,27 +979,44 @@ async fn remember_backend(
     // somebody adding a machine that is switched off right now is doing a
     // reasonable thing and should not have to type it all again later.
     let key_now = keys::look_up(&id);
-    let (settled, trouble) = match find::settle(&base_url, key_now.as_deref()).await {
-        Ok((where_it_is, _)) => (where_it_is, None),
-        Err(why) => (base_url.clone(), Some(format!("{why:#}"))),
+    let wire = wire.unwrap_or_else(|| "openai".to_string());
+    let (settled, models, trouble) = match find::settle(&base_url, key_now.as_deref(), &wire).await
+    {
+        Ok((where_it_is, named)) => {
+            let ready =
+                errand_core::local::ready::what_can_answer(&provider, &where_it_is, &named).await;
+            (where_it_is, ready, None)
+        }
+        Err(why) => (base_url.clone(), Vec::new(), Some(format!("{why:#}"))),
     };
 
     held.store
         .add_backend(&errand_core::store::Backend {
             id: id.clone(),
-            label,
-            provider,
-            base_url: settled,
+            label: label.clone(),
+            provider: provider.clone(),
+            base_url: settled.clone(),
             has_key,
+            wire: wire.clone(),
             added_at: chrono::Local::now().timestamp_millis(),
         })
         .map_err(|e| e.to_string())?;
-    match trouble {
-        // The id either way, because it was kept either way, and the reason
-        // where there is one. Two things, so the screen can say both.
-        Some(why) => Err(format!("Kept, but nothing answered there yet. {why}")),
-        None => Ok(id),
-    }
+
+    // Kept either way, and the reason where there is one, in one answer. It
+    // used to report a kept backend as an error, which is two different things
+    // wearing the same coat: a screen cannot tell "this failed" from "this
+    // worked but the machine is off right now" if both arrive as a failure.
+    Ok(Somewhere {
+        id,
+        label,
+        provider,
+        base_url: settled,
+        has_key,
+        wire,
+        found: false,
+        models,
+        trouble,
+    })
 }
 
 /// Forget somewhere, its key, and everything it was offering.
@@ -1057,6 +1082,7 @@ async fn backends(held: State<'_, Held>) -> Result<Vec<Somewhere>, String> {
             provider: one.provider,
             base_url: one.base_url,
             has_key: one.has_key,
+            wire: one.wire,
             found: false,
             models: Vec::new(),
             trouble: None,

@@ -85,6 +85,12 @@
         <form id="by-hand" autocomplete="off">
           <label>Called <input id="hand-label" type="text" placeholder="DeepSeek" autocorrect="off" autocapitalize="off" spellcheck="false" /></label>
           <label>Address <input id="hand-url" type="url" placeholder="https://api.deepseek.com" autocorrect="off" autocapitalize="off" spellcheck="false" /></label>
+          <label>Speaks
+            <select id="hand-wire">
+              <option value="openai">OpenAI (/v1/chat/completions)</option>
+              <option value="anthropic">Anthropic (/v1/messages)</option>
+            </select>
+          </label>
           <label>Key <input id="hand-key" type="password" placeholder="Leave empty if it needs none" autocorrect="off" autocapitalize="off" spellcheck="false" /></label>
           <button id="hand-save" type="submit">Add</button>
           <p id="hand-says"></p>

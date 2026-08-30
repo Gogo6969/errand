@@ -1,7 +1,16 @@
 // What somebody looking at the window would check, written down so nobody has
 // to look. Each one names the thing that was actually found wrong.
 
-import { asked, FIXTURE, tell } from "./harness.js";
+// The same instance the page is using, not a second one.
+//
+// Everything here is loaded with a cache-busting query so the harness can never
+// test yesterday's code. That query has to be carried across this import too:
+// `./harness.js` and `./harness.js?at=1` are two different modules to a browser,
+// with two different `asked` arrays and two different fixtures, and the checks
+// would then be reading an empty log of things the page never asked *this* copy.
+const { asked, FIXTURE, tell } = await import(
+  `./harness.js${new URL(import.meta.url).search}`
+);
 
 const has = (id) => document.getElementById(id);
 const text = (id) => (has(id) ? has(id).textContent.trim() : "<missing>");
@@ -588,6 +597,11 @@ export async function whichModels() {
     document.getElementById("found").textContent.slice(0, 80),
   );
   check(
+    "one that speaks the other protocol says so, since it changes what is sent",
+    document.getElementById("found").textContent.includes("Anthropic protocol"),
+    document.getElementById("found").textContent.slice(0, 130),
+  );
+  check(
     "a place with a key says so, and never shows it",
     document.getElementById("found").textContent.includes("key kept") &&
       !/sk-|Bearer/.test(document.getElementById("found").textContent),
@@ -617,6 +631,30 @@ export async function whichModels() {
     document.getElementById("hand-url").value.startsWith("https://"),
     document.getElementById("hand-url").value,
   );
+  check(
+    "and says whether that address was actually checked",
+    document.getElementById("hand-says").textContent.length > 20,
+    document.getElementById("hand-says").textContent.slice(0, 70),
+  );
+
+  // The protocol travels with the address. The same host serves both at
+  // different paths, so either one on its own is a setup that cannot work.
+  const anth = [...document.querySelectorAll("#presets button")].find((b) =>
+    b.textContent.includes("Anthropic"),
+  );
+  anth?.click();
+  check(
+    "an Anthropic-protocol address brings its protocol with it",
+    document.getElementById("hand-url").value.endsWith("/anthropic") &&
+      document.getElementById("hand-wire").value === "anthropic",
+    `${document.getElementById("hand-url").value} as ${document.getElementById("hand-wire").value}`,
+  );
+  document.querySelectorAll("#presets button")[0]?.click();
+  check(
+    "and choosing an ordinary one puts the protocol back",
+    document.getElementById("hand-wire").value === "openai",
+    document.getElementById("hand-wire").value,
+  );
 
   document.getElementById("hand-key").value = "sk-not-a-real-key";
   const beforeAdd = asked.length;
@@ -624,6 +662,11 @@ export async function whichModels() {
   await new Promise((r) => setTimeout(r, 300));
   const sent = asked.slice(beforeAdd).find((a) => a.name === "remember_backend");
   check("adding one by hand sends it to the app", sent, sent ? "sent" : "nothing was sent");
+  check(
+    "and sends which protocol it speaks",
+    sent?.args?.wire === "openai" || sent?.args?.wire === "anthropic",
+    JSON.stringify(sent?.args?.wire),
+  );
   check(
     "the key is not left sitting in the page afterwards",
     document.getElementById("hand-key").value === "",
