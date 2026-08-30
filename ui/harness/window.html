@@ -72,6 +72,10 @@
     }
     start() {
       window.__HEARD__.push("start");
+      // The one the window is actually listening with, so a check can make the
+      // things a real recogniser does on its own happen: giving up after a
+      // stretch of quiet, or being refused the microphone.
+      window.__EARS__ = this;
       // Answer the way a real one does: an unsettled guess, then the words.
       setTimeout(() => {
         this.onresult?.({

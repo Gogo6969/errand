@@ -24,14 +24,31 @@ import { toSay } from "./speech.js";
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
+/**
+ * A turn is over, however it ended.
+ *
+ * Two things stop being true at once and there is no ending where one stops
+ * without the other: it is not working, and it is not part way through a
+ * sentence. Written apart, the sentence was left behind by every ending the
+ * engine does not send -- somebody pressing Stop, or changing the model
+ * mid-turn -- because a killed engine sends nothing at all. What stayed on
+ * screen was half an answer with a caret blinking under it, through every
+ * redraw and every conversation switch, and the next turn's first word was
+ * appended to it.
+ */
+function itHasStopped(talk) {
+  if (!talk) return;
+  talk.working = false;
+  talk.writing = "";
+}
+
 function complain(why) {
   const t = talking();
   if (!t) {
     document.getElementById("thread-name").textContent = why;
     return;
   }
-  t.working = false;
-  t.writing = "";
+  itHasStopped(t);
   t.messages.push({ kind: "ended", failed: true, text: why });
   drawMessages();
 }
@@ -775,6 +792,13 @@ async function answer(m, said, label) {
     ? `You said yes, and to allow ${m.allows || "this"} from now on`
     : `You said ${label.toLowerCase()}`;
   t.working = said !== "no";
+  // The call was waiting on exactly this. Whichever way it was answered, it is
+  // not waiting any more: the turn either carries on, and ends normally, or it
+  // stops and the call picks the conversation back up.
+  if (inACall && itsYourTurn === "waiting") {
+    itsYourTurn = t.working ? "working" : "listening";
+    if (!t.working) listenAgain();
+  }
   drawMessages();
   drawThreads();
   try {
@@ -922,14 +946,19 @@ listen("happened", ({ payload }) => {
       const already = t.messages.findIndex((m) => m.kind === "doing" && m.call === payload.step);
       if (already >= 0) t.messages[already] = asking;
       else t.messages.push(asking);
+      // In a call this is the end of the loop unless something says so. It is
+      // not an ending the call listens for, and a card cannot be answered by
+      // voice, so it says what it is waiting for and waits: deaf on purpose,
+      // because anything said now would be sent as the next errand rather than
+      // as an answer to this.
+      if (inACall && payload.conversation === showing) waitingOnYou(payload.asking);
       break;
     }
 
     case "done":
-      t.working = false;
       // Half a sentence must not outlive the turn writing it. Normally the
-      // settled line has already cleared this; a turn stopped mid-word has not.
-      t.writing = "";
+      // settled line has already cleared it; a turn stopped mid-word has not.
+      itHasStopped(t);
       // Either end of the turn can finish last: a short answer is read out
       // before the turn ends and a long one is still being read after it.
       if (inACall && payload.conversation === showing) listenAgain();
@@ -937,8 +966,7 @@ listen("happened", ({ payload }) => {
       break;
 
     case "failed":
-      t.working = false;
-      t.writing = "";
+      itHasStopped(t);
       // A call that goes quiet after a failure sounds like one that hung up.
       if (inACall && payload.conversation === showing) {
         sayOutLoud(payload.why || "It could not finish.");
@@ -1173,7 +1201,9 @@ el.engine.addEventListener("change", async () => {
   t.onSettings = choice.settings;
 
   const talk = talking();
-  if (talk) talk.working = false;
+  // Whatever was answering has been killed, and a killed engine says nothing
+  // about having stopped.
+  itHasStopped(talk);
   try {
     // The choice is the agent's; the session that has to be restarted is this
     // conversation's. Two ids, and passing either one to both is the mistake
@@ -1808,8 +1838,7 @@ function whatCouldBeDone() {
       // ending arrives from the engine, and an engine that was killed never
       // sends one, so without this the conversation goes on saying "Working"
       // and offering to stop something that stopped minutes ago.
-      const talk = talks.get(stopping);
-      if (talk) talk.working = false;
+      itHasStopped(talks.get(stopping));
       if (showing === stopping) drawMessages();
       drawThreads();
       drawTalks();
@@ -2270,9 +2299,14 @@ function startListening({ sendOnPause = false } = {}) {
     if (inACall && itsYourTurn === "listening") startListening({ sendOnPause: true });
   };
   hearing.onerror = (e) => {
-    // Whatever went wrong, it went wrong with the ears, and a call with no
-    // ears is somebody talking to a window that cannot hear them.
-    if (inACall) endTheCall();
+    // Only the ones that mean the ears are actually gone. `no-speech` is
+    // raised as a matter of course after a stretch of quiet, and ending a call
+    // on it meant that thinking for a few seconds about what to ask hung up on
+    // you: the mic went off, the placeholder went back, and the next thing you
+    // said went nowhere. That silence is what `onend` restarts from, eight
+    // lines above, and this was taking the call away before it could.
+    const gone = e.error === "not-allowed" || e.error === "service-not-allowed" || e.error === "audio-capture";
+    if (inACall && gone) endTheCall();
     stopListening();
     // The one worth saying out loud: a refusal is permanent until somebody
     // changes it in System Settings, and it looks exactly like a broken button.
@@ -2337,11 +2371,37 @@ el.form.addEventListener("submit", () => {
  */
 const Speaking = window.speechSynthesis;
 
+
+/**
+ * Say what it has stopped to ask, and wait to be told.
+ *
+ * Where it can be answered as well as what it is: somebody in a call is by
+ * definition not looking at the window, and "it needs permission" without
+ * "in the Errand window" leaves them waiting for a question they cannot hear
+ * the rest of.
+ */
+function waitingOnYou(asking) {
+  sayOutLoud(
+    `It stopped to ask permission to ${asking}. Answer it in the Errand window.`,
+    "waiting",
+  );
+}
+
 /** How long a silence means somebody has finished a sentence. */
 const ENOUGH_OF_A_PAUSE = 1400;
 
 let inACall = false;
-/** What the call is doing: listening, working, or speaking. */
+/**
+ * What the call is doing: listening, working, speaking, or waiting on you.
+ *
+ * The last is the one that is not obvious and is also the common case: the
+ * default posture is to ask before touching the machine, so an errand said out
+ * loud stops on a permission card more often than not. That is not an ending
+ * the call listens for, and a card cannot be answered by voice, so it says what
+ * it is waiting for and then waits, deaf on purpose. Without this it went deaf
+ * silently and never listened again, which from across a room is a call that
+ * hung up for no reason.
+ */
 let itsYourTurn = "listening";
 let waitingForAPause = null;
 
@@ -2396,18 +2456,34 @@ document.addEventListener("keydown", (e) => {
  * first paragraph is being read while the second is still being written. The
  * browser queues them in order, which is the whole of the ordering logic here.
  */
-function sayOutLoud(text) {
+function sayOutLoud(text, thenWhat = "speaking") {
   const saying = toSay(text);
-  if (!saying) return;
+  if (!saying) {
+    // Nothing worth saying, and still something worth remembering: a call that
+    // is waiting must not go back to listening because the sentence about it
+    // happened to be empty.
+    itsYourTurn = thenWhat === "waiting" ? "waiting" : itsYourTurn;
+    return;
+  }
   itsYourTurn = "speaking";
   stopListening();
+  // What the call is doing once this has been said. Everything is back to
+  // listening except a question, which is nobody's turn but yours.
+  const after = thenWhat;
 
   const utterance = new SpeechSynthesisUtterance(saying);
   utterance.lang = navigator.language || "en-US";
-  utterance.onend = listenAgain;
+  const done = () => {
+    if (after === "waiting") {
+      itsYourTurn = "waiting";
+      return;
+    }
+    listenAgain();
+  };
+  utterance.onend = done;
   // A voice that fails silently leaves a call that never listens again, which
   // looks exactly like a call that hung up.
-  utterance.onerror = listenAgain;
+  utterance.onerror = done;
   Speaking.speak(utterance);
 }
 
@@ -2420,6 +2496,9 @@ function sayOutLoud(text) {
  */
 function listenAgain() {
   if (!inACall) return;
+  // A question on screen is nobody's turn but yours, and listening through it
+  // would send whatever was said as the next errand rather than as an answer.
+  if (itsYourTurn === "waiting") return;
   if (Speaking.speaking || Speaking.pending) return;
   const t = talking();
   if (t && t.working) return;

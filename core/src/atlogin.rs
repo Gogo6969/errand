@@ -110,16 +110,47 @@ pub fn how_it_stands(home: &Path, running: &Path) -> AtLogin {
     let Ok(found) = std::fs::read_to_string(where_it_goes(home)) else {
         return AtLogin::No;
     };
-    match what_to_start(running)
-        .iter()
-        .all(|word| found.contains(&escaped(word)))
-    {
+    // What it actually starts, whole, rather than whether our path appears
+    // somewhere in the file. Searched as text, a copy in `~/Applications` and
+    // one in `/Applications` are the same answer: the first ends with the
+    // second, so the copy in `/Applications` reads the other one's file and
+    // says "already on" while the other copy is the one that opens.
+    match what_it_starts(&found) == what_to_start(running) {
         true => AtLogin::Yes,
         // The same app from somewhere else, or a copy that has since moved.
         // Worth telling apart: turning it on again is what fixes it, and
         // "it is already on" would be the one answer that does not.
         false => AtLogin::SomethingElse,
     }
+}
+
+/// What a file like this one starts, in order.
+///
+/// A hand-rolled read of the one shape this program writes, because bringing in
+/// something that understands the whole format to read back four lines we wrote
+/// ourselves is more machinery than the thing being read.
+fn what_it_starts(plist: &str) -> Vec<String> {
+    let Some((_, after)) = plist.split_once("<key>ProgramArguments</key>") else {
+        return vec![];
+    };
+    let inside = after
+        .split_once("</array>")
+        .map_or(after, |(inside, _)| inside);
+    inside
+        .split("<string>")
+        .skip(1)
+        .filter_map(|piece| piece.split_once("</string>"))
+        .map(|(word, _)| unescaped(word.trim()))
+        .collect()
+}
+
+/// The three characters put back the way they were written.
+fn unescaped(word: &str) -> String {
+    // `&amp;` last, or a written `&amp;lt;` comes back as a bracket rather than
+    // as the text somebody actually has in a folder name.
+    word.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 /// What the file says, if anything.
@@ -227,6 +258,47 @@ mod tests {
             ),
             AtLogin::SomethingElse
         );
+    }
+
+    #[test]
+    fn a_copy_whose_path_merely_ends_the_same_way_is_still_a_different_copy() {
+        // `~/Applications` is where somebody without an administrator password
+        // installs things, and it ends with the path of the copy in
+        // `/Applications`. Looked for as text anywhere in the file, the second
+        // copy reads the first one's arrangement and reports itself as already
+        // starting at login, while the copy that actually opens is the other.
+        let home = somewhere("suffix");
+        turn_on(
+            &home,
+            Path::new("/Users/me/Applications/Errand.app/Contents/MacOS/errand-app"),
+        )
+        .expect("it wrote");
+        assert_eq!(
+            how_it_stands(
+                &home,
+                Path::new("/Applications/Errand.app/Contents/MacOS/errand-app")
+            ),
+            AtLogin::SomethingElse
+        );
+        // And the copy that really is named there still recognises itself.
+        assert_eq!(
+            how_it_stands(
+                &home,
+                Path::new("/Users/me/Applications/Errand.app/Contents/MacOS/errand-app")
+            ),
+            AtLogin::Yes
+        );
+    }
+
+    #[test]
+    fn a_folder_with_an_ampersand_in_it_is_read_back_as_it_was_written() {
+        // Written escaped, so it has to come back unescaped, or the app in
+        // `Ben & Jerry` never recognises its own arrangement and every look at
+        // the switch says somebody else's copy starts at login.
+        let home = somewhere("ampersand");
+        let me = Path::new("/Users/me/Ben & Jerry/Errand.app/Contents/MacOS/errand-app");
+        turn_on(&home, me).expect("it wrote");
+        assert_eq!(how_it_stands(&home, me), AtLogin::Yes);
     }
 
     #[test]

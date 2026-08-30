@@ -3114,12 +3114,22 @@ fn from_a_terminal(args: Vec<String>) -> i32 {
         }
     };
     let watching = std::env::var("ERRAND_QUIET").is_err();
-    match doorway::ask_from_outside(
+    let outcome = doorway::ask_from_outside(
         &door,
         tool,
         args,
         watching.then_some(&mut telling as &mut dyn FnMut(errand_core::team::Meanwhile)),
-    ) {
+    );
+    // The last thing streamed is nearly always a fragment of prose, and a
+    // fragment does not end a line. Left open, the answer was printed onto the
+    // end of it: "It is Sunday.It is Sunday." on one line, with nothing to say
+    // where the commentary stopped and the answer began. Even redirected apart,
+    // the log's last line was unterminated.
+    if mid_sentence {
+        eprintln!();
+    }
+
+    match outcome {
         Ok(said) if wanted.is_none() => {
             println!("{said}");
             0

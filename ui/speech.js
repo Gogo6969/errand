@@ -35,7 +35,12 @@ export function worthSaying(written) {
 
   // A table read aloud is a list of pipes. Two rows or more, because a single
   // line with a pipe in it is usually a shell command in a sentence.
-  saying = saying.replace(/^(\|.*\|[ \t]*\n){2,}/gm, " A table, on screen. ");
+  //
+  // The last row has nothing after it when the answer ends with the table,
+  // which is the ordinary shape: a settled answer is trimmed. Requiring a
+  // newline on every row left that row behind to be read out as pipes, right
+  // after announcing that the table was on screen.
+  saying = saying.replace(/^(\|.*\|[ \t]*(?:\n|$)){2,}/gm, " A table, on screen. ");
 
   const said = [];
   for (let line of saying.split("\n")) {
@@ -62,8 +67,16 @@ export function worthSaying(written) {
   saying = saying.replace(/\bhttps?:\/\/\S+/g, "a link");
 
   // Emphasis is a thing the eye sees. Kept as its words, without its marks.
-  saying = saying.replace(/\*\*([^*]+)\*\*/g, "$1");
-  saying = saying.replace(/__([^_]+)__/g, "$1");
+  //
+  // Bold first, and not by forbidding asterisks inside it: `**run a*b**` and
+  // `**Total: *about* five**` both contain one, and a rule that cannot see past
+  // it left the markers in and the voice read them out, which is the exact
+  // "star star Price colon star star" this module exists to stop. Shortest
+  // match wins, so two bold spans in a sentence stay two.
+  saying = saying.replace(/\*\*([\s\S]+?)\*\*/g, "$1");
+  saying = saying.replace(/__([\s\S]+?)__/g, "$1");
+  // Then whatever single marks are left, including the ones that were nested
+  // inside the bold a moment ago.
   saying = saying.replace(/(^|\W)\*([^*\n]+)\*(?=\W|$)/g, "$1$2");
   saying = saying.replace(/(^|\W)_([^_\n]+)_(?=\W|$)/g, "$1$2");
   // Inline code is nearly always a filename or a flag, which is worth hearing.

@@ -45,6 +45,31 @@ test("a table is named rather than read as a row of pipes", () => {
   assert.doesNotMatch(said, /\|/);
 });
 
+test("including its last row, when the answer ends with the table", () => {
+  // The ordinary shape, and the one that was left behind: a settled answer is
+  // trimmed, so the final row has nothing after it. It was read out as pipes
+  // immediately after announcing that the table was on screen.
+  assert.doesNotMatch(worthSaying("Here:\n| a | b |\n|---|---|\n| 1 | 2 |"), /\|/);
+  assert.doesNotMatch(worthSaying("| a | b |\n|---|---|"), /\|/);
+});
+
+test("emphasis with something starred inside it still loses its marks", () => {
+  // A rule that cannot see past an asterisk left `**` in and the voice read it
+  // out, which is the "star star Price colon star star" this module exists to
+  // stop, arriving through the one case nobody writes a test for.
+  assert.equal(worthSaying("**run `a*b`** now"), "run a*b now");
+  assert.equal(worthSaying("- **Total: *about* five** pounds"), "Total: about five pounds");
+  // And two bold spans in a sentence are still two, rather than everything
+  // between the first and the last being swallowed.
+  assert.equal(worthSaying("**one** and **two**"), "one and two");
+});
+
+test("an underscore inside a name is not emphasis", () => {
+  // `my_var_name` is a name, and reading it as "my var name" would be reading
+  // something that was never written.
+  assert.equal(worthSaying("a file called my_var_name.txt"), "a file called my_var_name.txt");
+});
+
 test("a long answer stops on a sentence and says where the rest is", () => {
   const long = "This is a sentence about something. ".repeat(40);
   const said = enoughOfIt(long);

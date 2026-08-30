@@ -1399,6 +1399,33 @@ export async function writingItOut() {
     !live() && !document.getElementById("messages").textContent.includes("And also"),
     live() ? "still writing" : "cleared",
   );
+
+  // And the ending nothing sends. Pressing Stop kills the engine, and a killed
+  // engine says nothing about having stopped, so the window has to finish the
+  // turn itself -- all of it. It used to set "not working" and leave the half
+  // sentence on screen for good, with a caret blinking under the transcript
+  // through every redraw, and the next turn's first word joined onto it.
+  // Sent the way somebody sends one, because Stop is only offered while there
+  // is something to stop and only saying something makes that true.
+  document.getElementById("what").value = "Write me something long";
+  document.getElementById("composer").requestSubmit();
+  await new Promise((r) => setTimeout(r, 300));
+  tell("happened", { conversation: where, seq: 7005, kind: "said", text: "Half a thou", settled: false });
+  await new Promise((r) => setTimeout(r, 150));
+  check("a stopped turn starts from something half written", live(), live() ? "writing" : "nothing being written");
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  await new Promise((r) => setTimeout(r, 150));
+  const stop = [...document.querySelectorAll("#palette-list li")].find((li) =>
+    /stop what it is doing/i.test(li.textContent),
+  );
+  check("there is a way to stop it", stop, "not in the palette");
+  stop?.click();
+  await new Promise((r) => setTimeout(r, 350));
+  check(
+    "and stopping it takes the half sentence with it",
+    !live() && !document.getElementById("messages").textContent.includes("Half a thou"),
+    live() ? `still writing: ${live().textContent}` : "cleared",
+  );
   return found;
 }
 
@@ -1506,6 +1533,74 @@ export async function aCall() {
     window.__HEARD__.join(","),
   );
 
+  // Silence is what a call is mostly made of. Recognition raises `no-speech`
+  // as a matter of course after a stretch of quiet, and ending the call on it
+  // meant that pausing to think about what to ask hung up on you.
+  window.__HEARD__.length = 0;
+  window.__EARS__?.onerror?.({ error: "no-speech" });
+  await new Promise((r) => setTimeout(r, 200));
+  check(
+    "a pause to think does not end the call",
+    call.getAttribute("aria-pressed") === "true",
+    call.getAttribute("aria-pressed"),
+  );
+  check(
+    "and it goes back to listening by itself",
+    window.__HEARD__.includes("start"),
+    window.__HEARD__.join(","),
+  );
+
+  // A question is the common case, because the default is to ask before
+  // touching anything. It is not an ending the call listens for, and a card
+  // cannot be answered out loud, so it has to say what it is waiting for and
+  // then wait rather than going deaf without a word.
+  window.__SAID__.length = 0;
+  window.__HEARD__.length = 0;
+  tell("happened", {
+    conversation: where,
+    seq: 9200,
+    kind: "needs_you",
+    asking: "empty the downloads folder",
+    detail: "rm -rf ~/Downloads/*",
+    tool: "Bash",
+    call: "q1",
+    step: "q1",
+    can_remember: true,
+    rule: "rm",
+    allows: "any rm command",
+  });
+  await new Promise((r) => setTimeout(r, 400));
+  const aboutIt = window.__SAID__.join(" ");
+  check(
+    "a question in a call is read out rather than met with silence",
+    /permission/i.test(aboutIt) && aboutIt.includes("empty the downloads folder"),
+    JSON.stringify(aboutIt),
+  );
+  check(
+    "and it says where to answer it, since nobody in a call is looking",
+    /Errand window/i.test(aboutIt),
+    JSON.stringify(aboutIt),
+  );
+  check(
+    "and it does not listen through it, which would send the answer as an errand",
+    !window.__HEARD__.includes("start"),
+    window.__HEARD__.join(",") || "not listening",
+  );
+
+  // Answered, and the call picks the conversation back up.
+  const card = document.querySelector("#messages .asking .choices");
+  const yes = [...(card?.querySelectorAll("button") || [])].find((b) => /^yes/i.test(b.textContent));
+  check("the question can still be answered in the window", yes, card ? "no yes button" : "no card");
+  yes?.click();
+  await new Promise((r) => setTimeout(r, 300));
+  tell("happened", { conversation: where, seq: 9201, kind: "done" });
+  await new Promise((r) => setTimeout(r, 400));
+  check(
+    "answering it puts the call back to listening",
+    window.__HEARD__.lastIndexOf("start") > window.__HEARD__.lastIndexOf("stop"),
+    window.__HEARD__.join(","),
+  );
+
   // The way out somebody reaches for without looking, in the one state where
   // their hands are not on the keyboard.
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
@@ -1555,7 +1650,12 @@ export async function stepsDoNotOverlap() {
     // `what`, which is the field the app actually sends. Sending `text` here
     // drew an empty name, and every measurement below then compared an empty
     // box against a full one and called it a pass.
-    what: "A hook of yours ran: SessionStart:startup",
+    // Long enough to be squeezed. `SessionStart:startup` is twenty characters
+    // and a conversation column is a thousand pixels wide, so nothing was ever
+    // squeezed and every check below passed with the fix taken back out. A step
+    // name is a sentence with a path in it often enough, and a path is one
+    // unbreakable word.
+    what: "A hook of yours ran: /Users/me/.claude/hooks/SessionStart:startup-check-everything-before-it-runs.sh",
     tool: "Bash",
     call: "hook-1",
     step: "hook-1",
@@ -1567,9 +1667,18 @@ export async function stepsDoNotOverlap() {
     call: "hook-1",
     outcome:
       "/last30days: Ready to use. Run /last30days to get started. Reddit, Hacker News " +
-      "and Polymarket work out of the box. The setup wizard can unlock more.",
+      "and Polymarket work out of the box. The setup wizard can unlock more, and " +
+      "it will say which of them are signed in already and which are not.",
   });
   await new Promise((r) => setTimeout(r, 150));
+
+  // Measured in a column the width of the one this happened in, rather than
+  // whatever width the harness happens to be opened at. A thousand pixels of
+  // conversation hides the fault completely: the name is never squeezed, and
+  // every check below passes with the fix taken back out.
+  const list = document.getElementById("messages");
+  const wasWide = list.style.maxWidth;
+  list.style.maxWidth = "380px";
 
   const row = [...document.querySelectorAll("#messages .doing")].pop();
   const name = row?.querySelector(".what");
@@ -1617,6 +1726,8 @@ export async function stepsDoNotOverlap() {
       `row ends ${Math.round(parent.right)}, name ${Math.round(a.right)}, outcome ${Math.round(b.right)}`,
     );
   }
+
+  list.style.maxWidth = wasWide;
   return found;
 }
 
@@ -1661,7 +1772,16 @@ export async function openingAtLogin() {
 
   // Reopened from scratch: the switch has to be read back from the app, not
   // remembered by the page.
+  //
+  // The screen is hidden and unhidden rather than rebuilt, so the box keeps
+  // whatever was last left on it and simply asserting it is still ticked is
+  // true whether or not anything was ever asked. Put wrong first, on purpose:
+  // only reading the answer back can put it right. Written the other way, the
+  // window could stop asking the app at all and this would still pass, and the
+  // switch would be showing what it last remembered rather than what the file
+  // says.
   document.getElementById("models-done").click();
+  document.getElementById("at-login").checked = false;
   document.getElementById("setup").click();
   await new Promise((r) => setTimeout(r, 250));
   check(
