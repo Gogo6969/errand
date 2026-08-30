@@ -1281,6 +1281,40 @@ body.catching #what { border-color: var(--accent); }
 }
 #routine-stop:hover, #watch-stop:hover, #watch-again:hover, #goal-stop:hover { color: var(--ink); border-color: var(--edge); }
 /* What it says back: when it next runs, or why what was typed is not a time. */
+/* What was actually asked in this conversation, to take rather than retype.
+   Its own row across the panel, so the boxes and buttons above it keep the one
+   height they all share. */
+.from-here[hidden] { display: none; }
+.from-here {
+  flex: 1 0 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.from-here-what {
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.from-here-one {
+  max-width: 100%;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 3px 9px;
+  cursor: pointer;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.from-here-one:hover { color: var(--ink); border-color: var(--edge); }
+
 #routine-says, #watch-says, #goal-says {
   flex: 1 0 100%;
   margin: 0;

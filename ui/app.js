@@ -126,6 +126,7 @@ const el = {
   goalSays: document.getElementById("goal-says"),
   watchAt: document.getElementById("watch-at"),
   watchWhat: document.getElementById("watch-what"),
+  watchSaid: document.getElementById("watch-said"),
   watchSave: document.getElementById("watch-save"),
   watchStop: document.getElementById("watch-stop"),
   watchAgain: document.getElementById("watch-again"),
@@ -2447,6 +2448,9 @@ el.watch.addEventListener("click", async () => {
   if (!showing) return;
   el.watching.hidden = false;
   await drawWatch();
+  // The same offer as Repeat, for the same reason: what a watch should say when
+  // it wakes is nearly always something already worked out here.
+  offerWhatWasAskedHere(el.watchSaid, el.watchWhat);
   keepWatchHonest();
   el.watchAt.focus();
 });

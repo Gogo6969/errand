@@ -12,6 +12,28 @@ const { asked, FIXTURE, tell } = await import(
   `./harness.js${new URL(import.meta.url).search}`
 );
 
+/**
+ * Open one of the fixture's conversations, the way somebody would.
+ *
+ * The agent that owns it first: the conversation picker only ever lists the
+ * conversations of whoever is open, so setting it to somebody else's does
+ * nothing at all and quietly leaves the wrong thread on screen.
+ */
+async function openTalk(id) {
+  const owner = Object.entries(FIXTURE.conversations).find(([, talks]) =>
+    talks.some((t) => t.id === id),
+  )?.[0];
+  const rows = [...document.querySelectorAll("#threads li")];
+  const at = FIXTURE.agents.findIndex((a) => a.id === owner);
+  rows[at]?.click();
+  await new Promise((r) => setTimeout(r, 300));
+
+  const picker = document.getElementById("talks");
+  picker.value = id;
+  picker.dispatchEvent(new Event("change"));
+  await new Promise((r) => setTimeout(r, 400));
+}
+
 const has = (id) => document.getElementById(id);
 const text = (id) => (has(id) ? has(id).textContent.trim() : "<missing>");
 const options = (id) => (has(id) ? [...has(id).options].map((o) => o.textContent) : []);
@@ -824,24 +846,6 @@ export async function whichModels() {
 export async function questionsStillOpen() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
-
-  // The agent that owns it first: the conversation picker only ever lists the
-  // conversations of whoever is open, so setting it to somebody else's does
-  // nothing at all and quietly leaves the wrong thread on screen.
-  const openTalk = async (id) => {
-    const owner = Object.entries(FIXTURE.conversations).find(([, talks]) =>
-      talks.some((t) => t.id === id),
-    )?.[0];
-    const rows = [...document.querySelectorAll("#threads li")];
-    const at = FIXTURE.agents.findIndex((a) => a.id === owner);
-    rows[at]?.click();
-    await new Promise((r) => setTimeout(r, 300));
-
-    const picker = document.getElementById("talks");
-    picker.value = id;
-    picker.dispatchEvent(new Event("change"));
-    await new Promise((r) => setTimeout(r, 400));
-  };
 
   await openTalk("talk-3");
   const live = document.getElementById("messages").textContent;
@@ -1768,6 +1772,74 @@ export function firstRun() {
   const done = tour?.querySelector(".tour-done");
   done?.click();
   check("and it can be put away on the first click", tour && tour.hidden, `hidden=${tour?.hidden}`);
+  return found;
+}
+
+/**
+ * Making a routine out of the errand you actually refined.
+ *
+ * This is the end of the loop the whole app is for: you say what you want, it
+ * tries, you correct it, and the version that finally worked is the one worth
+ * having every morning. Until this, that version lived only in the conversation
+ * and setting it to repeat meant reading it off the screen and typing it out
+ * again, which is how a routine ends up being a slightly different job from the
+ * one that was tested.
+ */
+export async function repeatingWhatWasAsked() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  await openTalk("talk-1");
+  const box = document.getElementById("routine-what");
+  const offered = document.getElementById("routine-said");
+
+  document.getElementById("repeat").click();
+  await new Promise((r) => setTimeout(r, 250));
+
+  check("what was asked here is offered", offered && !offered.hidden, offered ? `hidden=${offered.hidden}` : "missing");
+  const chips = [...(offered?.querySelectorAll(".from-here-one") || [])];
+  check("there is at least one to take", chips.length > 0, `${chips.length} offered`);
+  // Enough to find the one you mean, few enough to read at a glance.
+  check("and not the whole conversation", chips.length <= 4, `${chips.length} offered`);
+
+  if (chips.length) {
+    // The chip is cut to fit; what it puts in the box must not be.
+    const whole = chips[0].title;
+    chips[0].click();
+    await new Promise((r) => setTimeout(r, 80));
+    check(
+      "taking one fills in what was actually asked, whole",
+      box.value === whole && whole.length > 0,
+      `${JSON.stringify(box.value)} from ${JSON.stringify(whole)}`,
+    );
+    check(
+      "and nothing is saved by taking it",
+      !asked.some((a) => a.name === "runs" && a.args?.what === whole),
+      "not saved",
+    );
+  }
+
+  // The panel is one row of boxes and buttons, all the same height, with this
+  // underneath rather than in among them.
+  const at = document.getElementById("routine-at").getBoundingClientRect();
+  const save = document.getElementById("routine-save").getBoundingClientRect();
+  const row = offered.getBoundingClientRect();
+  // Height rather than position: whether the row wraps depends on how wide the
+  // window is, and it is meant to. That they are all one height is the rule
+  // this must not have broken, and it holds at every width.
+  check(
+    "the boxes above it are still all one height",
+    Math.abs(at.height - save.height) <= 1 && Math.round(at.height) === 34,
+    `when ${Math.round(at.height)}, save ${Math.round(save.height)}`,
+  );
+  check(
+    "and it sits under them rather than among them",
+    row.top >= at.bottom - 1,
+    `offered at ${Math.round(row.top)}, boxes end ${Math.round(at.bottom)}`,
+  );
+
+  box.value = "";
+  document.getElementById("repeat").click();
   return found;
 }
 
