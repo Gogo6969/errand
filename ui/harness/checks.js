@@ -1963,6 +1963,73 @@ export async function repeatingWhatWasAsked() {
   return found;
 }
 
+/**
+ * The other half of what an agent may do without asking.
+ *
+ * The panel that answers that question was answering half of it. Errand's own
+ * list is what somebody agreed to here and can take back here; the engine reads
+ * rules of its own out of its settings files, and on the machine this was
+ * written on there were nineteen of them, none of them visible anywhere in this
+ * app. An allowlist you cannot read is not a boundary, which is a thing this app
+ * says out loud about somebody else's arrangement.
+ */
+export async function whatElseIsAllowed() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  // Put back afterwards. A check that leaves somebody else's conversation open
+  // is a check that breaks the next one, which is how a green run turns red in
+  // a place that has nothing to do with the change.
+  const wasOn = document.getElementById("talks").value;
+  await openTalk("talk-2");
+  document.getElementById("granted").click();
+  await new Promise((r) => setTimeout(r, 300));
+
+  const also = document.getElementById("also-allowed");
+  check("what the engine allows on its own is shown too", also && !also.hidden, also ? `hidden=${also.hidden}` : "missing");
+  const said = also?.textContent || "";
+  check(
+    "each rule is there, as the engine writes it",
+    said.includes("Bash(awk *)") && said.includes("Bash(chmod +x:*)"),
+    said.slice(0, 120),
+  );
+  // Which file, because that is the only way to go and change one.
+  check(
+    "and says which file it lives in",
+    said.includes("~/.claude/settings.json") && said.includes("~/.claude/settings.local.json"),
+    said.slice(0, 160),
+  );
+  // A refusal explains something that otherwise looks like a fault.
+  check("what is refused outright is shown as refused", /Refused .*Read\(\/\/etc/.test(said), said.slice(0, 200));
+  check(
+    "it says plainly that Errand cannot take these back",
+    /cannot take them back/i.test(said),
+    said.slice(0, 90),
+  );
+  // No button, because a button here would be this app writing rules into the
+  // one place it cannot show them.
+  check(
+    "and offers no button that would edit somebody else's settings file",
+    !also.querySelector("button"),
+    also.querySelector("button") ? also.querySelector("button").textContent : "no buttons",
+  );
+  // The half that is not a list at all, and the reason a command can run with
+  // nothing on either list covering it.
+  check(
+    "it says the engine also judges some things harmless by itself",
+    /judges harmless/i.test(said),
+    said.slice(-90),
+  );
+  // Errand's own list is still there and still revocable: this is beside it,
+  // not instead of it.
+  const ours = [...document.querySelectorAll("#allowed li button")];
+  check("Errand's own list still offers to take its rules back", ours.length > 0, `${ours.length} buttons`);
+
+  document.getElementById("granted").click();
+  await openTalk(wasOn);
+  return found;
+}
+
 export function headerFitsOnOneRow() {
   // A media query reads the viewport, not the element, so this cannot be
   // judged by widening anything on the page: run narrow, it measures a header

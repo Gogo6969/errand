@@ -165,6 +165,7 @@ const el = {
   granting: document.getElementById("granting"),
   asks: document.getElementById("asks"),
   allowed: document.getElementById("allowed"),
+  alsoAllowed: document.getElementById("also-allowed"),
   asksMeans: document.getElementById("asks-means"),
   routine: document.getElementById("routine"),
   routineAt: document.getElementById("routine-at"),
@@ -1737,6 +1738,88 @@ async function drawGranted() {
           ),
         ]),
   );
+  await drawAlsoAllowed();
+}
+
+/**
+ * What the engine allows on its own, which this app can show and cannot revoke.
+ *
+ * The list above is what somebody agreed to here and every line of it can be
+ * taken back here. It was never the whole answer and this panel said it was:
+ * Claude Code reads rules of its own out of its settings files, and they are in
+ * force for every errand run through this app. An allowlist you cannot read is
+ * not a boundary, which is a thing this app says out loud about somebody else's
+ * arrangement while keeping half of one itself.
+ *
+ * Shown apart, and never with a Take back beside it. A button that edited
+ * somebody's settings file from in here would be this app quietly writing rules
+ * into the one place it cannot show them, which is the thing the whole
+ * arrangement exists to avoid.
+ */
+async function drawAlsoAllowed() {
+  const a = whose();
+  let theirs;
+  try {
+    theirs = await invoke("also_allowed", { agent: a.id });
+  } catch {
+    // Somebody else's files, and not being able to read them says nothing
+    // about this agent. Silence beats a red line about a file nobody here
+    // wrote.
+    el.alsoAllowed.hidden = true;
+    return;
+  }
+
+  const mode = theirs.mode && whatTheModeMeans(theirs.mode);
+  const rows = [...theirs.allow, ...theirs.deny.map((d) => ({ ...d, refused: true }))];
+  el.alsoAllowed.hidden = !rows.length && !mode;
+  if (el.alsoAllowed.hidden) return;
+
+  const parts = [];
+  const head = note("p", "Claude Code also allows these on its own. Errand cannot take them back here.", "also-what");
+  parts.push(head);
+  // The loudest thing first where there is one: a mode that asks nothing makes
+  // every list on this screen beside the point, and a list of careful rules
+  // above it reads as a boundary that is not there.
+  if (mode) {
+    const said = note("p", mode, "also-mode");
+    parts.push(said);
+  }
+  const list = document.createElement("ul");
+  list.className = "also-list";
+  for (const one of rows) {
+    const row = document.createElement("li");
+    const what = document.createElement("span");
+    what.textContent = one.refused ? `Refused · ${one.rule}` : one.rule;
+    const where = document.createElement("span");
+    where.className = "where";
+    where.textContent = one.whose;
+    row.append(what, where);
+    list.append(row);
+  }
+  if (rows.length) parts.push(list);
+  // The other half of what runs without asking, and the half that is not a
+  // list at all. Checked rather than assumed: `echo hello-from-errand` ran in
+  // this app with nothing in either list covering it, and `ls -la /private/tmp`
+  // in the same agent a minute later stopped and asked.
+  parts.push(
+    note(
+      "p",
+      "Some commands the engine judges harmless it runs without asking either list.",
+      "also-what",
+    ),
+  );
+  el.alsoAllowed.replaceChildren(...parts);
+}
+
+/** What a mode set for every session means, where it changes who is asked. */
+function whatTheModeMeans(mode) {
+  const said = {
+    bypassPermissions:
+      "The engine is set to ask nothing at all, so none of this decides anything: every tool runs.",
+    acceptEdits: "The engine is set to accept file edits without asking, whatever is listed here.",
+    plan: "The engine is set to plan rather than act, so nothing runs.",
+  }[mode.rule];
+  return said ? `${said} Set in ${mode.whose}.` : "";
 }
 
 /**

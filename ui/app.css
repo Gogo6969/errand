@@ -1322,6 +1322,35 @@ body.catching #what { border-color: var(--accent); }
   color: var(--ink-soft);
 }
 
+/* What somebody else allows, shown here because it is in force here. Set apart
+   from Errand's own list and with no button beside it, since a button that
+   edited somebody's settings file from in here would be this app writing rules
+   into the one place it cannot show them. */
+#also-allowed[hidden] { display: none; }
+#also-allowed {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#also-allowed .also-what { margin: 0; font-size: 12.5px; color: var(--ink-soft); }
+/* A mode that asks nothing makes every list on this screen beside the point,
+   which is not a quiet fact. */
+#also-allowed .also-mode { margin: 0; font-size: 12.5px; color: var(--wrong); }
+#also-allowed .also-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+#also-allowed .also-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+#also-allowed .also-list .where { color: var(--faint); font-size: 11.5px; flex: none; }
+
 /* -------------------------------------------------------- what it may -- */
 
 #granted {

@@ -20,6 +20,7 @@ pub mod atlogin;
 pub mod claude;
 pub mod doctor;
 pub mod doorway;
+pub mod elsewhere;
 pub mod engine;
 pub mod goal;
 pub mod jobs;

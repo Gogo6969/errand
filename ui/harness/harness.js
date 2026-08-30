@@ -172,6 +172,17 @@ export const FIXTURE = {
     { id: "al-1", tool: "Bash", rule: "top", covers: "any top command" },
     { id: "al-2", tool: "Bash", rule: "printf a > f; ls", covers: "only this exact command" },
   ],
+  // What Claude Code allows out of its own settings, which Errand can show and
+  // cannot revoke. Two files, because which file a rule is in is the part
+  // somebody needs in order to go and change it.
+  also_allowed: {
+    allow: [
+      { rule: "Bash(awk *)", whose: "~/.claude/settings.json" },
+      { rule: "Bash(chmod +x:*)", whose: "~/.claude/settings.local.json" },
+    ],
+    deny: [{ rule: "Read(//etc/**)", whose: "~/.claude/settings.json" }],
+    mode: null,
+  },
   what_it_cost: {
     today: [{ agent: "agent-bitcoin", who: "Bitcoin Desk", dollars: 0.19, turns: 1, errands: 1 }],
     this_month: [
@@ -266,6 +277,10 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.goal_of);
           case "allowances":
             return Promise.resolve(fixture.allowances);
+          // What the engine allows out of its own settings files, which this
+          // app can show and cannot take back.
+          case "also_allowed":
+            return Promise.resolve(fixture.also_allowed);
           case "what_it_cost":
             return Promise.resolve(fixture.what_it_cost);
           case "already_runs":

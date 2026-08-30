@@ -2377,6 +2377,35 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// What the engine allows without being asked, which is not this app's to grant.
+///
+/// Beside Errand's own list rather than instead of it, because the panel that
+/// says what an agent may do without asking was showing half the answer: the
+/// engine reads permission rules of its own out of its settings files, and on
+/// the machine this was written on there were nineteen of them, none of them
+/// visible anywhere in this app.
+///
+/// Read from the agent's own folder as well as the person's, because a folder
+/// has rules of its own and those are the ones nobody remembers agreeing to.
+#[tauri::command]
+async fn also_allowed(
+    held: State<'_, Held>,
+    agent: String,
+) -> Result<errand_core::elsewhere::Theirs, String> {
+    let home = std::env::var("HOME").map_err(|_| "there is no home folder".to_string())?;
+    // Where this agent actually works, since a folder's own settings are in
+    // force for the errands run in it.
+    let working_in = held
+        .store
+        .agent(&agent)
+        .map_err(|e| e.to_string())?
+        .map(|a| std::path::PathBuf::from(a.cwd))
+        .unwrap_or_else(|| std::path::PathBuf::from(&home));
+    Ok(errand_core::elsewhere::read(
+        &errand_core::elsewhere::where_they_live(std::path::Path::new(&home), &working_in),
+    ))
+}
+
 /// Everything an agent may do without being asked again.
 #[tauri::command]
 async fn allowances(held: State<'_, Held>, agent: String) -> Result<Vec<Allowed>, String> {
@@ -3239,6 +3268,7 @@ pub fn run() {
             runs,
             routines,
             allowances,
+            also_allowed,
             revoke,
             asks,
             outside,
