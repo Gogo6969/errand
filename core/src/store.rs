@@ -839,6 +839,24 @@ impl Store {
         Ok(())
     }
 
+    /// Everything a new agent needs to exist, before anything points at it.
+    ///
+    /// An agent made in the window is not written down until there is something
+    /// to write: somebody who makes one and then thinks better of it should not
+    /// leave a row behind. The cost of that is that the first thing ever said to
+    /// a new agent is said to something that does not exist, and the line
+    /// written for it fails on the foreign key -- which is what somebody saw
+    /// instead of an answer, on the first thing they ever typed into this app.
+    ///
+    /// One call rather than two, so there is one moment an agent starts existing
+    /// and it cannot be half done. Saying it twice is not a second agent.
+    pub fn make_sure_it_exists(&self, id: &str, name: &str, cwd: &Path) -> Result<()> {
+        self.begin(id, name, cwd)?;
+        // Its first conversation shares the agent's id, which is what the
+        // migration did for every agent that existed before conversations did.
+        self.begin_conversation(id, id, "First")
+    }
+
     /// Start a thread, or say nothing if it is already there.
     pub fn begin(&self, id: &str, name: &str, cwd: &Path) -> Result<()> {
         let now = now();
@@ -2109,6 +2127,38 @@ mod tests {
             tool: "Bash".into(),
             call: call.into(),
         })
+    }
+
+    #[test]
+    fn nothing_can_be_said_in_a_conversation_nobody_has_begun() {
+        // The failure somebody actually saw, on the first thing they ever typed
+        // into this app: "FOREIGN KEY constraint failed", in red, where the
+        // answer should have been. The line was written before the rows it
+        // points at, and nothing anywhere wrote them first.
+        let s = Store::in_memory().unwrap();
+        assert!(
+            s.asked("never-begun", "Show me my unread mail").is_err(),
+            "a line was written for a conversation that does not exist"
+        );
+
+        // And with the one call that makes an agent exist, the same line lands.
+        s.make_sure_it_exists("new-one", NOT_YET_NAMED, Path::new("/tmp/new-one"))
+            .unwrap();
+        s.asked("new-one", "Show me my unread mail")
+            .expect("the first thing said to a new agent");
+
+        // Said twice, because it is called on every message and only the first
+        // one finds nothing there.
+        s.make_sure_it_exists("new-one", NOT_YET_NAMED, Path::new("/tmp/new-one"))
+            .unwrap();
+        assert_eq!(s.agents().unwrap().len(), 1, "a second agent appeared");
+        assert_eq!(
+            s.conversations("new-one").unwrap().len(),
+            1,
+            "a second conversation appeared"
+        );
+        // And what was said is still there, once.
+        assert_eq!(s.lines("new-one").unwrap().len(), 1);
     }
 
     #[test]

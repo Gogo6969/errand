@@ -218,9 +218,112 @@ pub fn already_doing_this(who: &str, at: &str) -> String {
     )
 }
 
+/// What a run that arrives late should say about itself.
+///
+/// It used to say the time it was actually running, which is the one time
+/// nobody needs: a briefing due at seven and opened at nine announced itself as
+/// "due at 09:00 and nothing was running then", which is not late, not true,
+/// and not what happened. The whole worth of the sentence is the gap between
+/// the two times, and it had thrown one of them away.
+///
+/// The day is named as well as the time once it is not today. "Due at 07:00" on
+/// a Monday morning reads as an hour ago; if the Mac was shut all weekend it
+/// was three days ago, and those are different pieces of news.
+pub fn arriving_late(due: DateTime<Local>, now: DateTime<Local>) -> String {
+    let clock = due.format("%H:%M");
+    // By calendar day rather than by hours: something due at 23:50 and run at
+    // 00:10 is yesterday's, though it is twenty minutes old.
+    let days = (now.date_naive() - due.date_naive()).num_days();
+    let when = match days {
+        ..=0 => format!("at {clock}"),
+        1 => format!("at {clock} yesterday"),
+        // Inside the week the name of the day is what somebody actually thinks
+        // in. Past that it stops being a name and starts being a guess about
+        // which week.
+        2..=6 => format!("at {clock} on {}", due.format("%A")),
+        _ => format!("at {clock} on {}", due.format("%-d %B")),
+    };
+    format!("(This is late: it was due {when} and nothing was running then.)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_late_run_names_the_time_it_was_due_and_not_the_time_it_is_now() {
+        // The bug this replaces: a briefing due at seven and opened at nine
+        // announced itself as due at nine, which is not late, not true, and not
+        // what happened. The gap between the two times is the whole point of
+        // the sentence and one of them had been thrown away.
+        let due = Local
+            .with_ymd_and_hms(2026, 8, 30, 7, 0, 0)
+            .single()
+            .expect("a time");
+        let now = Local
+            .with_ymd_and_hms(2026, 8, 30, 9, 12, 0)
+            .single()
+            .expect("a time");
+        let said = arriving_late(due, now);
+        assert!(said.contains("07:00"), "{said}");
+        assert!(!said.contains("09:12"), "{said}");
+    }
+
+    #[test]
+    fn a_run_from_another_day_says_which_day() {
+        // "Due at 07:00" on a Monday reads as an hour ago. If the Mac was shut
+        // all weekend it was three days ago, and those are different news.
+        let due = Local
+            .with_ymd_and_hms(2026, 8, 28, 7, 0, 0)
+            .single()
+            .expect("a time");
+        assert!(arriving_late(
+            due,
+            Local
+                .with_ymd_and_hms(2026, 8, 29, 9, 0, 0)
+                .single()
+                .unwrap()
+        )
+        .contains("yesterday"),);
+        // Friday, from the following Monday.
+        assert!(arriving_late(
+            due,
+            Local
+                .with_ymd_and_hms(2026, 8, 31, 9, 0, 0)
+                .single()
+                .unwrap()
+        )
+        .contains("Friday"),);
+        // Past a week the name of a day stops being a name and starts being a
+        // guess about which week it was.
+        let old = arriving_late(
+            due,
+            Local
+                .with_ymd_and_hms(2026, 9, 20, 9, 0, 0)
+                .single()
+                .unwrap(),
+        );
+        assert!(old.contains("28 August"), "{old}");
+    }
+
+    #[test]
+    fn a_run_late_across_midnight_belongs_to_the_day_it_was_due() {
+        // Twenty minutes old and still yesterday's, which is what somebody
+        // reading it at ten past midnight needs to be told.
+        let due = Local
+            .with_ymd_and_hms(2026, 8, 29, 23, 50, 0)
+            .single()
+            .expect("a time");
+        let now = Local
+            .with_ymd_and_hms(2026, 8, 30, 0, 10, 0)
+            .single()
+            .expect("a time");
+        assert!(
+            arriving_late(due, now).contains("yesterday"),
+            "{}",
+            arriving_late(due, now)
+        );
+    }
 
     #[test]
     fn the_same_job_at_the_same_time_is_noticed_however_it_was_worded() {

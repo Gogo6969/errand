@@ -151,6 +151,7 @@ const el = {
   routine: document.getElementById("routine"),
   routineAt: document.getElementById("routine-at"),
   routineWhat: document.getElementById("routine-what"),
+  routineSaid: document.getElementById("routine-said"),
   routineSave: document.getElementById("routine-save"),
   routineStop: document.getElementById("routine-stop"),
   routineSays: document.getElementById("routine-says"),
@@ -1512,9 +1513,62 @@ el.repeat.addEventListener("click", async () => {
   el.routineAt.value = mine?.at || "";
   el.routineWhat.value = mine?.what || "";
   el.routineSays.textContent = sayWhen(mine);
+  offerWhatWasAskedHere(el.routineSaid, el.routineWhat);
   el.routine.hidden = false;
   el.routineAt.focus();
 });
+
+/**
+ * The errands actually asked here, to take rather than retype.
+ *
+ * This is the end of the loop the whole app is for: you say what you want, it
+ * tries, you correct it, and the version that finally worked is the one worth
+ * having every morning. Until now that version lived only in the conversation,
+ * and setting it to repeat meant reading it off the screen and typing it out
+ * again from memory -- which is how a routine ends up being a slightly
+ * different job from the one that was tested.
+ *
+ * Offered rather than filled in. Neither the first thing asked nor the last is
+ * reliably the right one: the first is usually the fullest and the last is
+ * often "yes, that one". The person who refined it knows which, and nobody
+ * else can.
+ *
+ * @param {HTMLElement} where the row to draw them in
+ * @param {HTMLInputElement} into the box a chosen one goes into
+ */
+function offerWhatWasAskedHere(where, into) {
+  const t = talking();
+  const asked = t ? t.messages.filter((m) => m.kind === "mine").map((m) => m.text) : [];
+  // Newest first, because the refined one is nearer the bottom, and without
+  // repeats: asking the same thing twice is ordinary and two identical chips
+  // are not a choice.
+  const distinct = [...new Set(asked.map((x) => x.trim()).filter(Boolean))].reverse();
+  // Enough to find the one you mean, few enough to read at a glance. A long
+  // conversation would otherwise put thirty of these across the panel.
+  const few = distinct.slice(0, 4);
+  where.hidden = few.length === 0;
+  if (!few.length) return;
+
+  const label = document.createElement("span");
+  label.className = "from-here-what";
+  label.textContent = "Asked here:";
+  const chips = few.map((said) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "from-here-one";
+    // Cut for the chip, whole into the box and whole in the tooltip: the end of
+    // a long errand is often the part that made it work.
+    chip.textContent = said.length > 52 ? `${said.slice(0, 52).trimEnd()}…` : said;
+    chip.title = said;
+    chip.onclick = () => {
+      into.value = said;
+      into.dispatchEvent(new Event("input"));
+      into.focus();
+    };
+    return chip;
+  });
+  where.replaceChildren(label, ...chips);
+}
 
 /**
  * Whether something else already does this, said while it is being typed.

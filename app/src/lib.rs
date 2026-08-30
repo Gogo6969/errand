@@ -268,12 +268,51 @@ async fn call_it(held: State<'_, Held>, id: String, name: String) -> Result<(), 
     held.store.call_it(&id, &name).map_err(|e| e.to_string())
 }
 
+/// The rows an agent needs, for one that has never been written down.
+///
+/// An agent made in the window is not written down until there is something to
+/// write: somebody who makes one and then thinks better of it should not leave
+/// a row behind, and certainly not a process. The cost of that is this: the
+/// first thing ever said to a new agent is said to something that does not
+/// exist yet, and the line written for it fails on the foreign key.
+///
+/// Which is what somebody saw instead of an answer, on the first thing they
+/// ever typed into this app: "FOREIGN KEY constraint failed". It was written
+/// before anything pointed at these rows except the engine, and the engine was
+/// started after the line was written, so nothing ever went first.
+///
+/// Here rather than in two places, because the folder an agent works in is
+/// decided here and a second opinion about that is a second folder.
+fn write_it_down_if_new(app: &AppHandle, held: &Held, id: &str) -> Result<(), String> {
+    if held
+        .store
+        .conversation(id)
+        .map_err(|e| e.to_string())?
+        .is_some()
+    {
+        return Ok(());
+    }
+    // Its own folder per thread, so one errand cannot tidy up after another,
+    // and so "the files from that thing last Tuesday" are still somewhere
+    // findable.
+    let home = where_things_live(app)?.join("threads").join(id);
+    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
+    // Resolved, because Claude Code resolves it too, and a comparison between a
+    // resolved path and an unresolved one is a comparison that fails on a
+    // machine with a symlink in it.
+    let home = home.canonicalize().unwrap_or(home);
+    held.store
+        .make_sure_it_exists(id, NOT_YET_NAMED, &home)
+        .map_err(|e| e.to_string())
+}
+
 /// Open a conversation, or pick up one from before.
 #[tauri::command]
 async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Result<(), String> {
     if held.live.lock().unwrap().contains_key(&id) {
         return Ok(()); // Already talking to it.
     }
+    write_it_down_if_new(&app, &held, &id)?;
 
     // A thread we have met before is resumed, in the directory it was started
     // in; a new one is begun there. Both facts live in the store because
@@ -283,6 +322,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
     // Two lookups, because the two halves live in different places now: how to
     // reach the engine belongs to the agent, and whether this particular
     // conversation has run before belongs to the conversation.
+    // Both exist by now, whether they were written a moment ago or a month ago.
     let conversation = held.store.conversation(&id).map_err(|e| e.to_string())?;
     let known = match &conversation {
         Some(c) => held.store.agent(&c.agent).map_err(|e| e.to_string())?,
@@ -297,28 +337,11 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             std::path::PathBuf::from(&a.cwd),
             conversation.as_ref().is_some_and(|c| c.opened),
         ),
-        None => {
-            // Its own folder per thread, so one errand cannot tidy up after
-            // another, and so "the files from that thing last Tuesday" are
-            // still somewhere findable.
-            let home = where_things_live(&app)?.join("threads").join(&id);
-            std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-            // Resolved, because Claude Code resolves it too, and a comparison
-            // between a resolved path and an unresolved one is a comparison
-            // that fails on a machine with a symlink in it.
-            let home = home.canonicalize().unwrap_or(home);
-            held.store
-                .begin(&id, NOT_YET_NAMED, &home)
-                .map_err(|e| e.to_string())?;
-            // Its first conversation shares the agent's id, which is what the
-            // migration did for every agent that existed before conversations
-            // did. Keeping the two the same for a first conversation means
-            // there is one rule rather than two.
-            held.store
-                .begin_conversation(&id, &id, "First")
-                .map_err(|e| e.to_string())?;
-            (home, false)
-        }
+        // Only if the rows went missing between being written and being read,
+        // which is a broken store rather than a new agent. Working in the app's
+        // own folder is a poor answer and refusing to answer at all is a worse
+        // one.
+        None => (where_things_live(&app)?, false),
     };
 
     // What this agent has already been told about its job. Read here, in the
@@ -707,6 +730,10 @@ async fn say(
         1 => format!("{text}\n\n(with a picture)"),
         n => format!("{text}\n\n(with {n} pictures)"),
     };
+    // Before the line, because the line points at it. An agent made in the
+    // window is not written down until there is something to write, and this is
+    // that moment.
+    write_it_down_if_new(&app, &held, &id)?;
     let written = held.store.asked(&id, &said).map_err(|e| e.to_string())?;
 
     // Started here, because saying something is the first moment there is
@@ -2275,7 +2302,7 @@ fn watch_the_clock(app: AppHandle) {
 /// Anything whose time has come, started once each.
 async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
     let now = chrono::Local::now();
-    let due: Vec<(String, String, bool)> = {
+    let due: Vec<(String, String, Option<chrono::DateTime<chrono::Local>>)> = {
         let held: State<Held> = app.state();
         held.store
             .routines()
@@ -2287,7 +2314,10 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
                 // Late by more than a schedule's own patience is worth saying
                 // out loud. Ten minutes is arbitrary and only decides whether
                 // the run announces itself as late.
-                let late = now.signed_duration_since(next).num_minutes() > 10;
+                // Late by more than a schedule's own patience carries the time
+                // it was actually due, which is the only part of this worth
+                // reading.
+                let late = (now.signed_duration_since(next).num_minutes() > 10).then_some(next);
                 let what = c.runs_what.clone()?;
                 // Not if the last run is still going. A routine that takes
                 // longer than its own interval is ordinary, and starting it on
@@ -2315,10 +2345,10 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
         };
         open_thread(app.clone(), app.state(), conversation.clone()).await?;
         let said = match late {
-            false => what,
-            true => format!(
-                "{what}\n\n(This is late: it was due at {} and nothing was running then.)",
-                now.format("%H:%M")
+            None => what,
+            Some(due) => format!(
+                "{what}\n\n{}",
+                errand_core::routine::arriving_late(due, now)
             ),
         };
         // A routine says what it was set to say, and nothing else.
