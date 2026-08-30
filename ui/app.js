@@ -2428,7 +2428,7 @@ async function drawChosen() {
     return;
   }
   el.chosen.replaceChildren(
-    ...all.map((one) => {
+    ...all.map((one, at) => {
       const row = document.createElement("li");
       const words = document.createElement("span");
       words.className = "grow";
@@ -2446,6 +2446,56 @@ async function drawChosen() {
         }
         words.append(where);
       }
+      // The order is what the dropdown shows, top to bottom, so it is the
+      // point rather than a nicety: what somebody uses most belongs where their
+      // eye lands.
+      const shuffle = (up) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "nudge";
+        b.textContent = up ? "↑" : "↓";
+        b.title = up ? "Further up the picker" : "Further down";
+        b.disabled = up ? at === 0 : at === all.length - 1;
+        b.onclick = async () => {
+          await invoke("move_it", { id: one.id, up });
+          thePickerHasChanged();
+          await drawChosen();
+          const a = whose();
+          if (a) await drawEngines(a);
+        };
+        return b;
+      };
+
+      // Named by somebody rather than by whatever it was seeded from. The ones
+      // carried over from an agent already using them were called after the
+      // agent, which is not what a model is called.
+      const rename = document.createElement("button");
+      rename.type = "button";
+      rename.textContent = "Rename";
+      rename.onclick = () => {
+        const box = document.createElement("input");
+        box.type = "text";
+        box.className = "renaming";
+        box.value = one.label;
+        const keep = async () => {
+          const wanted = box.value.trim();
+          if (!wanted || wanted === one.label) return drawChosen();
+          await invoke("call_it_something", { id: one.id, label: wanted });
+          thePickerHasChanged();
+          await drawChosen();
+          const a = whose();
+          if (a) await drawEngines(a);
+        };
+        box.onkeydown = (e) => {
+          if (e.key === "Enter") keep();
+          if (e.key === "Escape") drawChosen();
+        };
+        box.onblur = keep;
+        name.replaceWith(box);
+        box.focus();
+        box.select();
+      };
+
       const out = document.createElement("button");
       out.type = "button";
       out.textContent = "Remove";
@@ -2457,7 +2507,7 @@ async function drawChosen() {
         const a = whose();
         if (a) await drawEngines(a);
       };
-      row.append(words, out);
+      row.append(words, shuffle(true), shuffle(false), rename, out);
       return row;
     }),
   );

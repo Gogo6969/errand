@@ -591,6 +591,58 @@ export async function whichModels() {
     chosen.includes("Claude - Opus") && chosen.includes("qwen2.5:7b"),
     chosen.slice(0, 80),
   );
+
+  // The order is what the dropdown shows, top to bottom, so it has to be
+  // somebody's to set. The ends have to be honest about being the ends: an up
+  // arrow on the top line that looks pressable and does nothing is worse than
+  // no arrow.
+  const rows = [...document.querySelectorAll("#chosen li")];
+  const nudges = (row) => [...row.querySelectorAll("button.nudge")];
+  check(
+    "every line can be moved up and down",
+    rows.length > 1 && rows.every((r) => nudges(r).length === 2),
+    `${rows.length} rows, ${nudges(rows[0] || document.createElement("li")).length} arrows on the first`,
+  );
+  check(
+    "and the top and bottom say they are the top and bottom",
+    nudges(rows[0])[0]?.disabled === true &&
+      nudges(rows[rows.length - 1])[1]?.disabled === true &&
+      nudges(rows[0])[1]?.disabled === false,
+    `top up=${nudges(rows[0])[0]?.disabled} bottom down=${nudges(rows[rows.length - 1])[1]?.disabled}`,
+  );
+
+  const beforeMove = asked.length;
+  nudges(rows[1])[0]?.click();
+  await new Promise((r) => setTimeout(r, 200));
+  const moved = asked.slice(beforeMove).find((a) => a.name === "move_it");
+  check(
+    "moving one asks the app to move that one",
+    moved?.args?.id === FIXTURE.offered[1].id && moved?.args?.up === true,
+    JSON.stringify(moved?.args) || "nothing was asked",
+  );
+
+  // Renaming, because the ones carried over from an agent already using them
+  // were named after the agent, which is not what a model is called.
+  const nowShowing = [...document.querySelectorAll("#chosen li")];
+  const renameButton = [...nowShowing[0].querySelectorAll("button")].find(
+    (b) => b.textContent === "Rename",
+  );
+  renameButton?.click();
+  await new Promise((r) => setTimeout(r, 120));
+  const box = document.querySelector("#chosen .renaming");
+  check("a line can be renamed in place", box, box ? "a box appeared" : "no box");
+  if (box) {
+    const beforeName = asked.length;
+    box.value = "The good one";
+    box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await new Promise((r) => setTimeout(r, 250));
+    const named = asked.slice(beforeName).find((a) => a.name === "call_it_something");
+    check(
+      "and the new name is sent",
+      named?.args?.label === "The good one",
+      JSON.stringify(named?.args) || "nothing was sent",
+    );
+  }
   check(
     "and everywhere models come from that was kept",
     document.getElementById("found").textContent.includes("DeepSeek"),
@@ -684,7 +736,9 @@ export async function whichModels() {
   document.getElementById("setup").click();
   await new Promise((r) => setTimeout(r, 250));
   const kept = FIXTURE.offered;
-  const mine = document.querySelector("#chosen li button");
+  const mine = [...document.querySelectorAll("#chosen li button")].find(
+    (b) => b.textContent === "Remove",
+  );
   FIXTURE.offered = kept.slice(1);
   mine?.click();
   await new Promise((r) => setTimeout(r, 300));

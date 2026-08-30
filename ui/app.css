@@ -334,6 +334,26 @@ body { display: grid; grid-template-columns: 232px 1fr; }
 }
 #models li button:hover { color: var(--ink); border-color: var(--edge); }
 #models li button.on { color: var(--accent); border-color: var(--accent); }
+/* Small, because there are two of them on every row and they are not the
+   thing anybody came here to do. */
+#models li button.nudge {
+  padding: 2px 7px;
+  font-size: 11px;
+  line-height: 1.2;
+}
+#models li .renaming {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--edge);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+#models li .renaming:focus { outline: none; border-color: var(--accent); }
+
 #models .nothing { color: var(--ink-soft); font-size: 12.5px; padding: 4px 9px; }
 
 #by-hand {

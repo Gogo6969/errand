@@ -120,9 +120,10 @@ export const FIXTURE = {
     over: null,
   },
   offered: [
-    { id: "o-default", engine: "claude", label: "Claude - your default", settings: null, backend: null, sort: 0 },
-    { id: "o-opus", engine: "claude", label: "Claude - Opus", settings: "opus", backend: null, sort: 1 },
+    { id: "o-default", engine: "claude", label: "Claude - your default", settings: null, backend: null, sort: 0, mark: "claude|" },
+    { id: "o-opus", engine: "claude", label: "Claude - Opus", settings: "opus", backend: null, sort: 1, mark: "claude|opus" },
     { id: "o-local", engine: "local", label: "qwen2.5:7b - Ollama", backend: "b-ollama", sort: 2,
+      mark: "local|http://127.0.0.1:11434|qwen2.5:7b",
       settings: '{"provider":"ollama","base_url":"http://127.0.0.1:11434","model":"qwen2.5:7b"}' },
   ],
   backends: [

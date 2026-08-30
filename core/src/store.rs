@@ -168,6 +168,9 @@ pub struct Offered {
     /// Where it came from, so it can be looked at again. Nothing for Claude.
     pub backend: Option<String>,
     pub sort: i64,
+    /// What makes this the same line as another: the alias for Claude, the
+    /// address and model name for anything else. Never how it is configured.
+    pub mark: String,
 }
 
 /// One standing job, and whoever is doing it.
@@ -578,7 +581,6 @@ const CHANGES: &[&str] = &[
          provider TEXT NOT NULL,
          base_url TEXT NOT NULL,
          has_key  INTEGER NOT NULL DEFAULT 0,
-         wire     TEXT NOT NULL DEFAULT 'openai',
          added_at INTEGER NOT NULL
      );
      CREATE TABLE IF NOT EXISTS offered (
@@ -605,7 +607,73 @@ const CHANGES: &[&str] = &[
       WHERE a.engine = 'local'
         AND a.engine_settings IS NOT NULL
         AND trim(a.engine_settings) <> '';",
+    // 13: which protocol a backend speaks.
+    //
+    // Its own change rather than a column added to the one above, and the
+    // reason is written at the top of this list: a change that has already run
+    // on somebody's machine is history, not a description. Editing 12 gave
+    // fresh installs a column that every existing store lacked, and the screen
+    // that lists backends answered "no such column: wire" -- which is exactly
+    // the failure the note above describes, from the person who had just read
+    // it.
+    "ALTER TABLE backends ADD COLUMN wire TEXT NOT NULL DEFAULT 'openai';",
+    // 14: what makes two lines in the picker the same line.
+    //
+    // It was the settings blob, compared as text, which is not what identifies
+    // a model: the same model reached the same way is one line whether or not
+    // the JSON around it also carries a context window and a temperature. It
+    // does not, when one came from an agent that was already using it and the
+    // other from somebody ticking it in the list, so the picker showed
+    // qwen2.5:7b-instruct twice on the very first use of the screen built to
+    // stop exactly that.
+    //
+    // What identifies it: for Claude the alias, and for anything else the
+    // address and the model name. Nothing about how it is configured.
+    //
+    // The seeded labels are made readable on the way past. "In use by Run the
+    // shell command: echo the-picker-wo…" is what an agent was called, not what
+    // a model is called, and it is the first thing anybody would want to
+    // change.
+    "ALTER TABLE offered ADD COLUMN mark TEXT;
+
+     UPDATE offered
+        SET label = coalesce(json_extract(settings, '$.model'), 'a model') || ' · ' ||
+                    replace(replace(coalesce(json_extract(settings, '$.base_url'), ''),
+                            'https://', ''), 'http://', '')
+      WHERE label LIKE 'In use by %'
+        AND json_extract(settings, '$.model') IS NOT NULL;
+
+     UPDATE offered
+        SET mark = CASE engine
+                     WHEN 'claude' THEN 'claude|' || coalesce(settings, '')
+                     ELSE 'local|' || coalesce(json_extract(settings, '$.base_url'), '')
+                             || '|' || coalesce(json_extract(settings, '$.model'), '')
+                   END;
+
+     DELETE FROM offered
+      WHERE rowid NOT IN (SELECT min(rowid) FROM offered GROUP BY mark);
+
+     DROP INDEX IF EXISTS offered_once;
+     CREATE UNIQUE INDEX offered_once ON offered(mark);",
 ];
+
+/// What makes two lines in the picker the same line.
+///
+/// The alias for Claude, and the address with the model name for anything else.
+/// Never how it is configured: the same model reached the same way is one line
+/// whether or not the settings around it also carry a context window.
+pub fn what_makes_it_the_same(engine: &str, settings: Option<&str>) -> String {
+    if engine != "local" {
+        return format!("claude|{}", settings.unwrap_or_default());
+    }
+    let named: serde_json::Value =
+        serde_json::from_str(settings.unwrap_or("{}")).unwrap_or(serde_json::Value::Null);
+    format!(
+        "local|{}|{}",
+        named["base_url"].as_str().unwrap_or_default(),
+        named["model"].as_str().unwrap_or_default()
+    )
+}
 
 /// Make a store and everything beside it readable by its owner and nobody else.
 fn nobody_elses_business(at: &Path) {
@@ -986,7 +1054,7 @@ impl Store {
     pub fn offered(&self) -> Result<Vec<Offered>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
-            "SELECT id, engine, label, settings, backend, sort
+            "SELECT id, engine, label, settings, backend, sort, mark
                FROM offered ORDER BY sort, label",
         )?;
         let rows = q.query_map([], |r| {
@@ -997,6 +1065,7 @@ impl Store {
                 settings: r.get(3)?,
                 backend: r.get(4)?,
                 sort: r.get(5)?,
+                mark: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1008,20 +1077,60 @@ impl Store {
     /// enforces rather than the caller remembering.
     pub fn offer(&self, one: &Offered) -> Result<()> {
         self.conn.lock().unwrap().execute(
-            "INSERT INTO offered (id, engine, label, settings, backend, sort)
-             VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT(engine, coalesce(settings, '')) DO UPDATE
+            "INSERT INTO offered (id, engine, label, settings, backend, sort, mark)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(mark) DO UPDATE
                 SET label = excluded.label,
                     backend = excluded.backend,
-                    sort = excluded.sort",
+                    settings = excluded.settings",
             params![
                 one.id,
                 one.engine,
                 one.label,
                 one.settings,
                 one.backend,
-                one.sort
+                one.sort,
+                what_makes_it_the_same(&one.engine, one.settings.as_deref()),
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Give a line in the picker a name somebody chose.
+    pub fn call_it_something(&self, id: &str, label: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE offered SET label = ? WHERE id = ?",
+            params![label, id],
+        )?;
+        Ok(())
+    }
+
+    /// Move a line up or down the picker.
+    ///
+    /// Swapped with its neighbour rather than renumbered, so moving one line
+    /// does not rewrite the position of every other.
+    pub fn move_it(&self, id: &str, up: bool) -> Result<()> {
+        let all = self.offered()?;
+        let Some(at) = all.iter().position(|o| o.id == id) else {
+            return Ok(());
+        };
+        let swap_with = match up {
+            true if at > 0 => at - 1,
+            false if at + 1 < all.len() => at + 1,
+            // Already at the end it was going towards. Not a failure: somebody
+            // pressing up on the top line meant nothing by it.
+            _ => return Ok(()),
+        };
+        // By position in the list rather than by the numbers already stored,
+        // which may be equal, sparse, or both after a seed.
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE offered SET sort = ? WHERE id = ?",
+            params![swap_with as i64, all[at].id],
+        )?;
+        conn.execute(
+            "UPDATE offered SET sort = ? WHERE id = ?",
+            params![at as i64, all[swap_with].id],
         )?;
         Ok(())
     }
@@ -2677,18 +2786,27 @@ mod tests {
             id: "one".into(),
             engine: "local".into(),
             label: "qwen2.5 on the Mac Studio".into(),
-            settings: Some(r#"{"model":"qwen2.5"}"#.into()),
+            settings: Some(r#"{"base_url":"http://box:11434","model":"qwen2.5"}"#.into()),
             backend: None,
             sort: 20,
+            mark: String::new(),
         };
         store.offer(&mine).expect("offered");
         assert!(store.offered().unwrap().iter().any(|o| o.id == "one"));
 
-        // The same model chosen twice is one line. Choosing something already
-        // in the list is a thing people do, and it must not double it.
+        // The same model chosen twice is one line, even when the settings
+        // around it differ. That is the case that actually happens: one row
+        // seeded from an agent already using it, carrying a context window and
+        // a temperature, and one from somebody ticking it in the list. Compared
+        // as text those are two models, and the picker showed the same one
+        // twice on the first use of the screen built to stop that.
         let again = Offered {
             id: "two".into(),
             label: "the same one, renamed".into(),
+            settings: Some(
+                r#"{"base_url":"http://box:11434","model":"qwen2.5","context_window":32768}"#
+                    .into(),
+            ),
             ..mine.clone()
         };
         store.offer(&again).expect("offered again");
@@ -2705,6 +2823,58 @@ mod tests {
 
         store.stop_offering("one").expect("removed");
         assert!(!store.offered().unwrap().iter().any(|o| o.engine == "local"));
+    }
+
+    #[test]
+    fn the_picker_can_be_put_in_the_order_somebody_wants() {
+        // The list is what the dropdown shows, top to bottom, so the order is
+        // the point rather than a nicety: what somebody uses most belongs where
+        // their eye lands.
+        let store = Store::in_memory().expect("a store");
+        let names = || {
+            store
+                .offered()
+                .unwrap()
+                .into_iter()
+                .map(|o| o.label)
+                .collect::<Vec<_>>()
+        };
+        let was = names();
+        assert!(was.len() >= 4, "{was:?}");
+
+        let third = store.offered().unwrap()[2].id.clone();
+        store.move_it(&third, true).expect("moved");
+        let now = names();
+        assert_eq!(now[1], was[2], "it did not move up: {now:?}");
+        assert_eq!(
+            now[2], was[1],
+            "the one above it did not move down: {now:?}"
+        );
+
+        store.move_it(&third, false).expect("moved back");
+        assert_eq!(names(), was, "moving back did not put it back");
+
+        // Pressing up on the top line means nothing by it, and must not be a
+        // failure or a silent reshuffle.
+        let top = store.offered().unwrap()[0].id.clone();
+        store.move_it(&top, true).expect("nothing to do");
+        assert_eq!(names(), was);
+    }
+
+    #[test]
+    fn a_line_in_the_picker_can_be_called_something_somebody_chose() {
+        // The seeded ones are named after whatever agent happened to be using
+        // them, which is not what a model is called.
+        let store = Store::in_memory().expect("a store");
+        let one = store.offered().unwrap()[0].id.clone();
+        store
+            .call_it_something(&one, "The good one")
+            .expect("named");
+        assert!(store
+            .offered()
+            .unwrap()
+            .iter()
+            .any(|o| o.label == "The good one"));
     }
 
     #[test]
@@ -2732,6 +2902,7 @@ mod tests {
                 settings: Some(r#"{"model":"deepseek-chat"}"#.into()),
                 backend: Some("b1".into()),
                 sort: 5,
+                mark: String::new(),
             })
             .expect("offered");
 

@@ -1054,8 +1054,29 @@ async fn offer_this(
             settings,
             backend,
             sort: next,
+            // Worked out by the store, which is the one place that knows what
+            // makes two of these the same.
+            mark: String::new(),
         })
         .map_err(|e| e.to_string())
+}
+
+/// Give a line in the picker a name somebody chose.
+#[tauri::command]
+async fn call_it_something(held: State<'_, Held>, id: String, label: String) -> Result<(), String> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err("it needs a name".into());
+    }
+    held.store
+        .call_it_something(&id, label)
+        .map_err(|e| e.to_string())
+}
+
+/// Move a line up or down the picker.
+#[tauri::command]
+async fn move_it(held: State<'_, Held>, id: String, up: bool) -> Result<(), String> {
+    held.store.move_it(&id, up).map_err(|e| e.to_string())
 }
 
 /// Take a model out of the picker.
@@ -2811,6 +2832,8 @@ pub fn run() {
             forget_backend,
             offer_this,
             stop_offering,
+            call_it_something,
+            move_it,
             whats_offered,
             watch_it,
             watches,
