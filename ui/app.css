@@ -372,37 +372,61 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   color: var(--ink-soft);
   flex: 1 1 170px;
 }
-#by-hand select {
-  padding: 6px 9px;
-  border-radius: 8px;
-  border: 1px solid var(--rule);
-  background: var(--bg);
-  color: var(--ink);
-  font: inherit;
-  font-size: 13px;
-  text-transform: none;
-  letter-spacing: 0;
-}
-#by-hand input {
-  padding: 6px 9px;
-  border-radius: 8px;
-  border: 1px solid var(--rule);
-  background: var(--bg);
-  color: var(--ink);
-  font: inherit;
-  font-size: 13px;
-  text-transform: none;
-  letter-spacing: 0;
-}
-#by-hand input:focus { outline: none; border-color: var(--edge); }
+/* One row of controls, so they are one height and one baseline.
+   A native select on this platform ignores the height it is given and comes out
+   two pixels shorter than an input beside it. Two pixels is enough: the labels
+   sit above the controls and are bottom-aligned to them, so a shorter control
+   drops its own label below the other three, and the row reads as broken
+   because it is. Hence a stated height and appearance: none, which means
+   drawing the arrow rather than being given one. */
+#by-hand input,
+#by-hand select,
 #hand-save {
-  padding: 7px 16px;
+  height: 34px;
   border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+#by-hand input,
+#by-hand select {
+  padding: 0 9px;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  color: var(--ink);
+}
+#by-hand select {
+  appearance: none;
+  /* Room for the arrow drawn below it. */
+  padding-right: 26px;
+}
+/* The arrow, since the platform's own went with appearance: none. On the label
+   rather than the control, because a select cannot have children of its own. */
+#by-hand label:has(select) { position: relative; }
+#by-hand label:has(select)::after {
+  content: "\2304";
+  position: absolute;
+  right: 9px;
+  /* Centred on the control rather than guessed at from the bottom: the control
+     is the bottom 34px of the label, so this is that band, and the glyph is
+     centred in it. */
+  bottom: 0;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--ink-soft);
+  pointer-events: none;
+}
+#by-hand input:focus,
+#by-hand select:focus { outline: none; border-color: var(--edge); }
+#hand-save {
+  padding: 0 16px;
   border: 0;
   background: var(--accent);
   color: var(--on-accent);
-  font: inherit;
-  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
 }
@@ -1159,36 +1183,40 @@ body.catching #what { border-color: var(--accent); }
 /* A goal is one long sentence rather than two short fields. */
 #aiming label { flex: 1 1 100%; }
 #routine input, #watching input, #aiming input {
-  padding: 6px 9px;
-  border-radius: 8px;
+  padding: 0 9px;
   border: 1px solid var(--rule);
   background: var(--bg);
   color: var(--ink);
-  font: inherit;
-  font-size: 13px;
   text-transform: none;
   letter-spacing: 0;
 }
 #routine input:focus, #watching input:focus, #aiming input:focus { outline: none; border-color: var(--edge); }
-#routine-save, #watch-save, #goal-save {
-  padding: 7px 16px;
+/* One height for everything on a row, in every one of these panels.
+   The outlined buttons carry a border and the filled ones do not, which made
+   them two pixels taller and, bottom-aligned, two pixels higher than the boxes
+   beside them. Two pixels is enough to read as sloppy, and it was. */
+#routine input, #watching input, #aiming input,
+#routine-save, #watch-save, #goal-save,
+#routine-stop, #watch-stop, #watch-again, #goal-stop {
+  height: 34px;
   border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+}
+
+#routine-save, #watch-save, #goal-save {
+  padding: 0 16px;
   border: 0;
   background: var(--accent);
   color: var(--on-accent);
-  font: inherit;
-  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
 }
 #routine-stop, #watch-stop, #watch-again, #goal-stop {
-  padding: 7px 14px;
-  border-radius: 8px;
+  padding: 0 14px;
   border: 1px solid var(--rule);
   background: transparent;
   color: var(--ink-soft);
-  font: inherit;
-  font-size: 13px;
   cursor: pointer;
 }
 #routine-stop:hover, #watch-stop:hover, #watch-again:hover, #goal-stop:hover { color: var(--ink); border-color: var(--edge); }

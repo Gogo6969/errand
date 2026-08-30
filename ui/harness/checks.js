@@ -851,6 +851,97 @@ export async function questionsStillOpen() {
   return found;
 }
 
+/**
+ * Everything on a row is one height and one line.
+ *
+ * Not fussiness. The labels in these panels sit above their controls and are
+ * bottom-aligned to them, so a control two pixels shorter than its neighbours
+ * drops its own label below the rest of the row -- which is what a native
+ * select does, and what an outlined button does beside a filled one. Two pixels
+ * is enough to read as sloppy, and it read as sloppy.
+ */
+export async function everythingLinesUp() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  const row = (within) =>
+    [...document.querySelectorAll(`${within} input, ${within} select, ${within} button`)].filter(
+      (e) => e.offsetParent,
+    );
+  const measure = (within) => {
+    const all = row(within);
+    return {
+      count: all.length,
+      heights: [...new Set(all.map((e) => Math.round(e.getBoundingClientRect().height)))],
+      tops: [...new Set(all.map((e) => Math.round(e.getBoundingClientRect().top)))],
+    };
+  };
+
+  // A goal is one long sentence and its buttons belong under it, so that panel
+  // is two lines on purpose. Every control in it is still the same height, and
+  // the ones sharing a line still share a line -- what is not true of it is
+  // that the whole panel is one row, and asserting that would be asserting
+  // something nobody wants.
+  const panels = [
+    ["repeat", "#routine", { oneLine: true }],
+    ["watch", "#watching", { oneLine: true }],
+    ["goal", "#aiming", { oneLine: false }],
+  ];
+  for (const [button, panel, how] of panels) {
+    document.getElementById(button).click();
+    await new Promise((r) => setTimeout(r, 350));
+    const seen = measure(panel);
+    check(
+      `everything on one row in ${panel} is one height`,
+      seen.count > 1 && seen.heights.length === 1,
+      `${seen.count} controls, heights ${seen.heights.join("/")}`,
+    );
+    check(
+      how.oneLine
+        ? `and sits on one line in ${panel}`
+        : `and what shares a line in ${panel} lines up`,
+      how.oneLine
+        ? seen.count > 1 && seen.tops.length === 1
+        : seen.count > 1 && seen.tops.length <= 2,
+      `tops ${seen.tops.join("/")}`,
+    );
+    document.getElementById(button).click();
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  // The one that was actually complained about, and the only row with a select
+  // in it. A native select ignores the height it is given, so this is the row
+  // where being one height had to be made to happen rather than assumed.
+  document.getElementById("setup").click();
+  await new Promise((r) => setTimeout(r, 450));
+  const hand = measure("#by-hand");
+  check(
+    "every field in the add-by-hand row is one height",
+    hand.heights.length === 1,
+    `heights ${hand.heights.join("/")}`,
+  );
+  check(
+    "and they all start on the same line",
+    hand.tops.length === 1,
+    `tops ${hand.tops.join("/")}`,
+  );
+  const labelTops = [
+    ...new Set(
+      [...document.querySelectorAll("#by-hand label")].map((l) =>
+        Math.round(l.getBoundingClientRect().top),
+      ),
+    ),
+  ];
+  check(
+    "so every label above them starts on the same line too",
+    labelTops.length === 1,
+    `tops ${labelTops.join("/")}`,
+  );
+  document.getElementById("models-done").click();
+  await new Promise((r) => setTimeout(r, 200));
+  return found;
+}
+
 export async function running() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });

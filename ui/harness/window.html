@@ -6,7 +6,13 @@
 <!-- Never kept. See run.sh: a cached harness reports green on code that is no
      longer there, which is worse than no harness at all. -->
 <meta http-equiv="cache-control" content="no-store">
-<link rel="stylesheet" href="../app.css">
+<!--
+  Loaded by the script below rather than here, so it can carry the same
+  cache-busting query everything else does. Left as a plain link it was the one
+  file the browser went on keeping: the stylesheet in the page was three edits
+  old, a rule that plainly existed on disk simply was not in it, and every
+  measurement taken of the layout was a measurement of the wrong layout.
+-->
 <style>
   /* The report sits over the window it is reporting on. */
   #report { position: fixed; inset: auto 0 0 0; max-height: 45vh; overflow: auto;
@@ -34,6 +40,16 @@
   // existed. An HTTP cache is the same failure wearing a different coat: it
   // was serving an index.html from two edits ago, and the checks passed.
   const fresh = `?at=${Date.now()}`;
+  // Before anything is measured or drawn, and waited for: a check that runs
+  // against an unstyled page measures nothing worth knowing.
+  await new Promise((ready) => {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = `../app.css${fresh}`;
+    link.onload = ready;
+    link.onerror = ready;
+    document.head.append(link);
+  });
   const page = await (await fetch(`../index.html${fresh}`, { cache: "no-store" })).text();
   const real = new DOMParser().parseFromString(page, "text/html");
   const report = document.getElementById("report");
@@ -87,7 +103,7 @@
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
 
-  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, whatItCanReach, dictation, watching } =
+  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, whatItCanReach, dictation, watching } =
     await import(`./checks.js${fresh}`);
   const found = checks().concat(
     carryingOn(),
@@ -102,6 +118,7 @@
     await aiming(),
     await whichModels(),
     await questionsStillOpen(),
+    await everythingLinesUp(),
     themes(),
   );
   const header = headerFitsOnOneRow();
