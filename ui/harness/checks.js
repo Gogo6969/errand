@@ -1,7 +1,7 @@
 // What somebody looking at the window would check, written down so nobody has
 // to look. Each one names the thing that was actually found wrong.
 
-import { asked, FIXTURE } from "./harness.js";
+import { asked, FIXTURE, tell } from "./harness.js";
 
 const has = (id) => document.getElementById(id);
 const text = (id) => (has(id) ? has(id).textContent.trim() : "<missing>");
@@ -439,6 +439,92 @@ export async function postures() {
   asks.value = "ask";
   asks.dispatchEvent(new Event("change"));
   document.getElementById("granted").click();
+  return found;
+}
+
+/**
+ * A goal, and where it has got to.
+ *
+ * The two things that have to be on screen are what it is aiming at and how
+ * many turns it has spent, because between them they are the difference
+ * between an agent working and an agent going round. Both were invisible in
+ * every version of this before there was a panel.
+ */
+export async function aiming() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const panel = document.getElementById("aiming");
+
+  check("it starts closed", panel.hidden, `hidden=${panel.hidden}`);
+  document.getElementById("goal").click();
+  await new Promise((r) => setTimeout(r, 250));
+  check("the Goal button opens it", !panel.hidden, `hidden=${panel.hidden}`);
+
+  check(
+    "it shows what is being aimed at",
+    document.getElementById("goal-what").value === "Get the tests passing",
+    document.getElementById("goal-what").value,
+  );
+
+  const says = document.getElementById("goal-says").textContent;
+  check(
+    "it says how many turns have gone and how many there are, in numbers",
+    says.includes("3 of 8 turns used"),
+    says.slice(0, 60),
+  );
+  check(
+    "it says what the agent itself said was left",
+    says.includes("two of them still fail on a timeout"),
+    says.slice(0, 120),
+  );
+  check(
+    "and what it will do, before anybody agrees to it",
+    says.includes("stops early if it says the same thing is left twice"),
+    says.slice(-90),
+  );
+
+  // A goal that has ended says which of the four endings it was, because they
+  // want different things done about them.
+  FIXTURE.goal_of.over = "going round";
+  await new Promise((r) => setTimeout(r, 4400));
+  const ended = document.getElementById("goal-says").textContent;
+  check(
+    "when it ends it says which ending, not just that it stopped",
+    ended.includes("same thing was left twice running"),
+    ended.slice(0, 80),
+  );
+  FIXTURE.goal_of.over = null;
+
+  document.getElementById("goal").click();
+  check("clicking again closes it", panel.hidden, `hidden=${panel.hidden}`);
+
+  // A goal ending is written by the app, not said by an agent and not typed by
+  // anybody, and it is the one line that says why nothing more will happen.
+  // Pushed in as its own kind it drew as nothing at all live and drew fine
+  // after a reload, which is the worst way round: invisible exactly when it
+  // matters and present when anybody goes looking for why.
+  const before = document.querySelectorAll("#messages li").length;
+  // Whichever conversation is actually on screen, since the point is that it
+  // is drawn now rather than found later.
+  const heard = tell("noted", {
+    conversation: document.getElementById("talks").value,
+    seq: 9990,
+    kind: "goal",
+    text: "Done: get the tests passing",
+  });
+  await new Promise((r) => setTimeout(r, 150));
+  const shown = document.getElementById("messages").textContent;
+  check(
+    "the window is listening for a line the app writes itself",
+    heard > 0,
+    `${heard} listener(s)`,
+  );
+  check(
+    "and draws it rather than silently dropping it",
+    shown.includes("Done: get the tests passing") &&
+      document.querySelectorAll("#messages li").length > before,
+    shown.includes("Done: get the tests passing") ? "drawn" : "nothing appeared",
+  );
   return found;
 }
 

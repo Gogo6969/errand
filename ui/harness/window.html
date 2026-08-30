@@ -78,7 +78,7 @@
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
 
-  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, whatItCanReach, dictation, watching } =
+  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whatItCanReach, dictation, watching } =
     await import("./checks.js");
   const found = checks().concat(
     carryingOn(),
@@ -90,6 +90,7 @@
     await whatItCanReach(),
     await dictation(),
     await watching(),
+    await aiming(),
     themes(),
   );
   const header = headerFitsOnOneRow();

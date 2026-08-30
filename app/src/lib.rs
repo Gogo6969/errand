@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use errand_core::doctor;
 use errand_core::doorway;
+use errand_core::goal;
 use errand_core::keeping;
 use errand_core::local::{find, LlmSettings, Local};
 use errand_core::mcp;
@@ -74,6 +75,8 @@ struct Held {
     /// not depend on a window being open at all -- which matters, because a
     /// routine at seven in the morning may delegate.
     watching: Arc<Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<Event>>>>,
+    /// Turns that have just ended, for whatever goal they belong to.
+    goals: tokio::sync::mpsc::UnboundedSender<(String, String)>,
     /// What each conversation is doing, for the ones that are doing something.
     ///
     /// Kept by the app rather than worked out in the window, because the window
@@ -550,6 +553,22 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 let held: State<Held> = app.state();
                 held.running.lock().unwrap().remove(&id);
                 held.doing.lock().unwrap().remove(&id);
+                // And a goal decides whether there is another one. Handed on
+                // rather than done here: deciding means possibly starting the
+                // next turn, and starting a turn inside the handler for the end
+                // of the last one is a shape that has to be untangled sooner or
+                // later. This is the same arrangement the app already uses for
+                // everything an engine asks it to do.
+                let said = match &event {
+                    Event::Done { said } => said.clone(),
+                    // A turn that failed is not the end of a goal by itself.
+                    // Written as the thing that is left, so that the same
+                    // failure twice running trips the going-in-circles rule and
+                    // a passing one does not end anything.
+                    Event::Failed { why } => format!("GOAL: not yet - the turn failed: {why}"),
+                    _ => String::new(),
+                };
+                let _ = held.goals.send((id.clone(), said));
             } else {
                 // What it is on, in the words the window would use. Anything
                 // that is not an ending means a turn is in flight; a step says
@@ -1193,6 +1212,164 @@ async fn look_once(
     }
 }
 
+/// A line the app itself put into a conversation, on its way to the window.
+#[derive(Clone, Serialize)]
+struct Noted {
+    conversation: String,
+    seq: i64,
+    kind: String,
+    text: String,
+}
+
+/// A conversation's goal, as the window shows it.
+#[derive(Serialize)]
+struct Aiming {
+    /// What it is trying to get to. Nothing means it has no goal.
+    goal: Option<String>,
+    /// What that will actually do, in numbers, before anybody agrees to it.
+    means: String,
+    tries: i64,
+    at_most: i64,
+    /// What the agent last said was still to do.
+    left: Option<String>,
+    /// Why it ended, if it has.
+    over: Option<String>,
+}
+
+/// What this conversation is trying to get to.
+#[tauri::command]
+async fn goal_of(held: State<'_, Held>, id: String) -> Result<Aiming, String> {
+    let talk = held
+        .store
+        .conversation(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or("there is no such conversation")?;
+    Ok(Aiming {
+        means: match talk.goal.as_deref() {
+            Some(what) => goal::what_it_means(what),
+            None => String::new(),
+        },
+        goal: talk.goal,
+        tries: talk.goal_tries,
+        at_most: goal::AT_MOST_TRIES,
+        left: talk.goal_left,
+        over: talk.goal_over,
+    })
+}
+
+/// Set or change what this conversation is trying to get to.
+///
+/// Setting one starts it, because a goal that has to be set and then separately
+/// kicked off is two steps where somebody meant one, and the second step is the
+/// one that gets forgotten. Clearing it stops it where it stands.
+#[tauri::command]
+async fn aim_at(
+    app: AppHandle,
+    held: State<'_, Held>,
+    id: String,
+    goal: Option<String>,
+) -> Result<(), String> {
+    let goal = goal.map(|g| g.trim().to_string()).filter(|g| !g.is_empty());
+    held.store
+        .aim_at(
+            &id,
+            goal.as_deref(),
+            chrono::Local::now().timestamp_millis(),
+        )
+        .map_err(|e| e.to_string())?;
+    let Some(what) = goal else {
+        return Ok(());
+    };
+    say(
+        app.clone(),
+        app.state(),
+        id,
+        goal::how_to_report(&what, 0, None),
+        None,
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Whether a goal has another turn in it, and starting that turn if it has.
+///
+/// Everything that decides this lives in `goal`; what is here is the part that
+/// touches the store and sends the next message. Three of the four endings are
+/// failures of a kind, and each says a different thing, because "it finished",
+/// "it ran out of turns", "it went round in circles" and "it stopped saying
+/// where it was" want three different things done about them and one
+/// celebration.
+async fn keep_at_it(app: &AppHandle, id: &str, said: &str) -> Result<(), String> {
+    let talk = {
+        let held: State<Held> = app.state();
+        held.store
+            .conversation(id)
+            .map_err(|e| e.to_string())?
+            .ok_or("there is no such conversation")?
+    };
+    // No goal, or one that has already ended. The second is the one that
+    // matters: without it the message saying a goal is over would itself end a
+    // turn and start the whole thing again.
+    let (Some(what), None) = (talk.goal.as_deref(), talk.goal_over.as_deref()) else {
+        return Ok(());
+    };
+
+    let next = goal::read(said, talk.goal_tries, talk.goal_left.as_deref());
+    let over = match &next {
+        goal::Next::Keep(_) => None,
+        goal::Next::Done => Some("done"),
+        goal::Next::Circling(_) => Some("going round"),
+        goal::Next::Enough => Some("out of turns"),
+        goal::Next::Silent => Some("stopped reporting"),
+    };
+    let left = match &next {
+        goal::Next::Keep(left) | goal::Next::Circling(left) => Some(left.clone()),
+        _ => None,
+    };
+    {
+        let held: State<Held> = app.state();
+        held.store
+            .got_to(id, left.as_deref(), over)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Written down before the next turn starts, and before anything can fail,
+    // for the reason a routine's last run is: a goal that spends a turn and
+    // does not record it would spend that turn again.
+    if next.over() {
+        let line = {
+            let held: State<Held> = app.state();
+            held.store
+                .the_app_says(id, "goal", &next.in_plain_words(what))
+                .map_err(|e| e.to_string())?
+        };
+        // Told to the window as well as written down. A line that only appears
+        // when somebody clicks away and back is a line nobody sees at the
+        // moment it is about, and the moment is the whole of it: this is what
+        // says a goal has stopped and why.
+        let _ = app.emit(
+            "noted",
+            Noted {
+                conversation: id.to_string(),
+                seq: line.seq,
+                kind: "goal".to_string(),
+                text: line.text,
+            },
+        );
+        return Ok(());
+    }
+
+    say(
+        app.clone(),
+        app.state(),
+        id.to_string(),
+        goal::how_to_report(what, talk.goal_tries + 1, left.as_deref()),
+        None,
+    )
+    .await
+    .map(|_| ())
+}
+
 /// What an agent is asked once it has done its first errand.
 ///
 /// After rather than before, and that is the whole design. Grok Bot asks a new
@@ -1315,6 +1492,27 @@ struct Waiting(Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<team::Wants>>>)
 /// running, either of which may delegate again. Serialising it makes the first
 /// version something whose behaviour can be predicted, and the queue is where
 /// that decision is written down rather than assumed.
+/// The receiving end of turns that have ended, parked until the app is up.
+///
+/// Parked for the same reason the other one is: setup runs while the app is
+/// still being built, and spawning work into it there is how the window stops
+/// appearing at all.
+struct TurnsThatEnded(Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<(String, String)>>>);
+
+/// One task, reading the ends of turns and deciding whether a goal goes again.
+fn carry_on_goals(
+    app: AppHandle,
+    mut ended: tokio::sync::mpsc::UnboundedReceiver<(String, String)>,
+) {
+    tauri::async_runtime::spawn(async move {
+        while let Some((id, said)) = ended.recv().await {
+            if let Err(why) = keep_at_it(&app, &id, &said).await {
+                eprintln!("the goal in {id}: {why}");
+            }
+        }
+    });
+}
+
 fn answer_what_engines_cannot(
     app: AppHandle,
     mut wants: tokio::sync::mpsc::UnboundedReceiver<team::Wants>,
@@ -2297,10 +2495,12 @@ pub fn run() {
             let here = where_things_live(&app.handle().clone())?;
             let store = Store::open(&errand_core::store::beside(&here))?;
             let (wants, asked) = tokio::sync::mpsc::unbounded_channel();
+            let (goals, ended) = tokio::sync::mpsc::unbounded_channel();
             app.manage(Held {
                 live: Mutex::new(HashMap::new()),
                 settling: Settling::default(),
                 wants,
+                goals,
                 running: Arc::default(),
                 watching: Arc::default(),
                 doing: Arc::default(),
@@ -2313,6 +2513,7 @@ pub fn run() {
             // being built, and spawning work into it there is how the window
             // stops appearing at all.
             app.manage(Waiting(Mutex::new(Some(asked))));
+            app.manage(TurnsThatEnded(Mutex::new(Some(ended))));
 
             sweep_up_after_a_crash(&here);
             say_if_the_name_is_taken(&here);
@@ -2343,6 +2544,8 @@ pub fn run() {
             stop_a_command,
             watch_it,
             watches,
+            aim_at,
+            goal_of,
             look_again,
             brought,
             export_conversation,
@@ -2380,6 +2583,14 @@ pub fn run() {
                 };
                 if let Some(asked) = waiting {
                     answer_what_engines_cannot(app.clone(), asked);
+                }
+                let endings = {
+                    let parked: State<TurnsThatEnded> = app.state();
+                    let taken = parked.0.lock().unwrap().take();
+                    taken
+                };
+                if let Some(ended) = endings {
+                    carry_on_goals(app.clone(), ended);
                 }
             }
             // A command left running outlives the errand that started it, and

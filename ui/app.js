@@ -95,6 +95,12 @@ const el = {
   speak: document.getElementById("speak"),
   watch: document.getElementById("watch"),
   watching: document.getElementById("watching"),
+  goal: document.getElementById("goal"),
+  aiming: document.getElementById("aiming"),
+  goalWhat: document.getElementById("goal-what"),
+  goalSave: document.getElementById("goal-save"),
+  goalStop: document.getElementById("goal-stop"),
+  goalSays: document.getElementById("goal-says"),
   watchAt: document.getElementById("watch-at"),
   watchWhat: document.getElementById("watch-what"),
   watchSave: document.getElementById("watch-save"),
@@ -406,6 +412,7 @@ async function show(id) {
   el.routine.hidden = true;
   el.granting.hidden = true;
   el.watching.hidden = true;
+  el.aiming.hidden = true;
   if (a) {
     drawMark(a);
     drawPinned(a);
@@ -757,6 +764,25 @@ listen("settled", ({ payload }) => {
     el.name.textContent = t.name;
     drawMark(t);
   }
+  drawThreads();
+});
+
+/**
+ * A line the app itself put in, rather than an agent or a person.
+ *
+ * A goal ending is neither of those, and it is the one line that says why
+ * nothing more is going to happen. Waiting for somebody to click away and back
+ * before it appears would hide it at exactly the moment it is about.
+ */
+listen("noted", ({ payload }) => {
+  const t = talks.get(payload.conversation);
+  if (!t) return;
+  // Through the same reader a reload goes through, so a line that arrives live
+  // and the same line read back tomorrow are the same thing. Pushed straight in
+  // as its own kind, it drew as nothing at all live and drew fine after a
+  // reload, which is the worst way round.
+  t.messages.push(fromStore(payload));
+  if (showing === payload.conversation) drawMessages();
   drawThreads();
 });
 
@@ -2164,6 +2190,114 @@ async function drawWatch({ leaveTheFields = false } = {}) {
     .filter(Boolean)
     .join(" ");
 }
+
+/**
+ * Something to get to, rather than something to do.
+ *
+ * The fourth way an errand can start, and the only one where the agent decides
+ * the steps. Everything else here is a request in some form: typed, on a
+ * schedule, or when the world changes. A goal is a description of what being
+ * finished looks like, and it keeps going on the strength of the agent's own
+ * account of where it has got to, which it gives at the end of every turn.
+ *
+ * Changeable while it is running, on purpose. Watching an agent work is the
+ * fastest way to find out the goal was the wrong one, and being able to say so
+ * without starting again is the difference between telling something what to do
+ * and working something out with it.
+ */
+el.goal.addEventListener("click", async () => {
+  if (!el.aiming.hidden) {
+    el.aiming.hidden = true;
+    clearInterval(goalTicking);
+    goalTicking = null;
+    return;
+  }
+  if (!showing) return;
+  el.aiming.hidden = false;
+  await drawGoal();
+  keepGoalHonest();
+  el.goalWhat.focus();
+});
+
+// A goal moves on its own, turn by turn, so a panel drawn once is a panel that
+// is wrong within a minute. The same reason the watch panel re-reads.
+let goalTicking = null;
+function keepGoalHonest() {
+  clearInterval(goalTicking);
+  goalTicking = setInterval(() => {
+    if (el.aiming.hidden || !showing) {
+      clearInterval(goalTicking);
+      goalTicking = null;
+      return;
+    }
+    drawGoal({ leaveTheField: true });
+  }, 4000);
+}
+
+async function drawGoal({ leaveTheField = false } = {}) {
+  if (!showing) return;
+  let now;
+  try {
+    now = await invoke("goal_of", { id: showing });
+  } catch (why) {
+    el.goalSays.textContent = String(why);
+    return;
+  }
+  if (!leaveTheField) el.goalWhat.value = now.goal || "";
+  el.goalStop.hidden = !now.goal;
+  el.goalSave.textContent = now.goal ? "Change it" : "Start";
+  el.goalSays.dataset.over = String(!!now.over);
+
+  if (!now.goal) {
+    el.goalSays.textContent =
+      "No goal. Say what being finished looks like, and it works out the steps itself.";
+    return;
+  }
+  // Where it has got to, in numbers, said the same way whether it is going
+  // well or badly. A progress line that only appears when something is wrong
+  // is one nobody trusts when it does appear.
+  const over = {
+    done: "It finished.",
+    "going round": "It stopped: it said the same thing was left twice running.",
+    "out of turns": "It stopped: it used all its turns without finishing.",
+    "stopped reporting": "It stopped: it stopped saying where it had got to.",
+  };
+  el.goalSays.textContent = [
+    now.over ? over[now.over] || `It stopped: ${now.over}` : null,
+    `${now.tries} of ${now.at_most} turns used.`,
+    now.left ? `Last said what is left: ${now.left}` : null,
+    now.over ? null : now.means,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+el.goalSave.addEventListener("click", async () => {
+  if (!showing) return;
+  const goal = el.goalWhat.value.trim();
+  if (!goal) {
+    el.goalSays.textContent = "It needs something to aim at.";
+    return;
+  }
+  el.goalSave.disabled = true;
+  try {
+    await invoke("aim_at", { id: showing, goal });
+  } catch (why) {
+    el.goalSays.dataset.over = "true";
+    el.goalSays.textContent = String(why);
+    return;
+  } finally {
+    el.goalSave.disabled = false;
+  }
+  await drawGoal();
+  keepGoalHonest();
+});
+
+el.goalStop.addEventListener("click", async () => {
+  if (!showing) return;
+  await invoke("aim_at", { id: showing, goal: null });
+  await drawGoal();
+});
 
 el.watchSave.addEventListener("click", async () => {
   if (!showing) return;

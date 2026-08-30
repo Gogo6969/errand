@@ -119,6 +119,18 @@ pub struct Conversation {
     pub misses: i64,
     /// Why it stopped, if it has. Nothing means it is still looking.
     pub paused: Option<String>,
+    /// What this conversation is trying to get to. Nothing means it is doing
+    /// what it is asked and no more.
+    pub goal: Option<String>,
+    pub goal_at: Option<i64>,
+    /// Turns spent on it, against the ceiling that stops it being a bill.
+    pub goal_tries: i64,
+    /// What the agent last said was still to do. Compared against what it says
+    /// next time, which is the only way to see a goal going round in circles.
+    pub goal_left: Option<String>,
+    /// Why it ended, if it has: finished, ran out of turns, went round, or
+    /// stopped saying where it was. Four different things to do about it.
+    pub goal_over: Option<String>,
 }
 
 /// One standing job, and whoever is doing it.
@@ -491,6 +503,22 @@ const CHANGES: &[&str] = &[
      ALTER TABLE conversations ADD COLUMN unsettled INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE conversations ADD COLUMN misses INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE conversations ADD COLUMN paused TEXT;",
+    // 11: something to get to, rather than something to do.
+    //
+    // `goal_tries` is the ceiling that stops a goal turning into a bill, and
+    // `goal_left` is what the agent last said was still to do. That second one
+    // is not a nicety: comparing it against what the agent says this time is
+    // the only way to notice a goal going round in circles, which is the way
+    // this fails in practice, because every individual turn looks like work.
+    //
+    // `goal_over` is why it ended rather than whether, since "it finished" and
+    // "it ran out of turns" and "it stopped saying where it was" want three
+    // different things done about them.
+    "ALTER TABLE conversations ADD COLUMN goal TEXT;
+     ALTER TABLE conversations ADD COLUMN goal_at INTEGER;
+     ALTER TABLE conversations ADD COLUMN goal_tries INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE conversations ADD COLUMN goal_left TEXT;
+     ALTER TABLE conversations ADD COLUMN goal_over TEXT;",
 ];
 
 impl Store {
@@ -802,6 +830,35 @@ impl Store {
         Ok(())
     }
 
+    /// Set, change or clear what this conversation is trying to get to.
+    ///
+    /// Changing a goal starts it over rather than carrying the count on. That is
+    /// the point of being able to change it: somebody who has watched an agent
+    /// struggle and has narrowed the goal is starting a different attempt, and
+    /// giving the new one the old one's spent turns would end it before it
+    /// began.
+    pub fn aim_at(&self, conversation: &str, goal: Option<&str>, now: i64) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE conversations
+                SET goal = ?, goal_at = ?, goal_tries = 0,
+                    goal_left = NULL, goal_over = NULL
+              WHERE id = ?",
+            params![goal, goal.map(|_| now), conversation],
+        )?;
+        Ok(())
+    }
+
+    /// Write down where a goal has got to after a turn.
+    pub fn got_to(&self, conversation: &str, left: Option<&str>, over: Option<&str>) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE conversations
+                SET goal_tries = goal_tries + 1, goal_left = ?, goal_over = ?
+              WHERE id = ?",
+            params![left, over, conversation],
+        )?;
+        Ok(())
+    }
+
     /// Every conversation that is watching something and has not stopped.
     pub fn watching(&self) -> Result<Vec<Conversation>> {
         Ok(self
@@ -896,7 +953,8 @@ impl Store {
                     runs_at, runs_what, ran_at, asked_by,
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
-                    woke_at, woke_today, woke_on, unsettled, misses, paused
+                    woke_at, woke_today, woke_on, unsettled, misses, paused,
+                    goal, goal_at, goal_tries, goal_left, goal_over
                FROM conversations",
         )?;
         let rows = q.query_map([], read_conversation)?;
@@ -954,7 +1012,8 @@ impl Store {
                     runs_at, runs_what, ran_at, asked_by,
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
-                    woke_at, woke_today, woke_on, unsettled, misses, paused
+                    woke_at, woke_today, woke_on, unsettled, misses, paused,
+                    goal, goal_at, goal_tries, goal_left, goal_over
                FROM conversations WHERE agent = ? ORDER BY spoke_at DESC",
         )?;
         let rows = q.query_map([agent], read_conversation)?;
@@ -969,7 +1028,8 @@ impl Store {
                     runs_at, runs_what, ran_at, asked_by,
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
-                    woke_at, woke_today, woke_on, unsettled, misses, paused
+                    woke_at, woke_today, woke_on, unsettled, misses, paused,
+                    goal, goal_at, goal_tries, goal_left, goal_over
                FROM conversations WHERE id = ?",
         )?;
         let mut rows = q.query_map([id], read_conversation)?;
@@ -1065,7 +1125,8 @@ impl Store {
                     runs_at, runs_what, ran_at, asked_by,
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
-                    woke_at, woke_today, woke_on, unsettled, misses, paused
+                    woke_at, woke_today, woke_on, unsettled, misses, paused,
+                    goal, goal_at, goal_tries, goal_left, goal_over
                FROM conversations
               WHERE runs_at IS NOT NULL AND runs_what IS NOT NULL
               ORDER BY spoke_at DESC",
@@ -1321,6 +1382,16 @@ impl Store {
     }
 
     /// The one place a line is written, so the one place a position is decided.
+    /// A line the app itself puts into a conversation.
+    ///
+    /// Not everything in a transcript was said by an agent or typed by
+    /// somebody. A goal ending is neither, and dressing it as one or the other
+    /// would be a small lie in the one place a person goes to find out what
+    /// actually happened.
+    pub fn the_app_says(&self, conversation: &str, kind: &str, text: &str) -> Result<Line> {
+        self.append(conversation, kind, text, None, None)
+    }
+
     fn append(
         &self,
         conversation: &str,
@@ -1568,6 +1639,11 @@ fn read_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
         unsettled: r.get(22)?,
         misses: r.get(23)?,
         paused: r.get(24)?,
+        goal: r.get(25)?,
+        goal_at: r.get(26)?,
+        goal_tries: r.get(27)?,
+        goal_left: r.get(28)?,
+        goal_over: r.get(29)?,
     })
 }
 

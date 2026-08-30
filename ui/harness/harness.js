@@ -108,6 +108,17 @@ export const FIXTURE = {
     misses: 0,
     paused: null,
   },
+  goal_of: {
+    goal: "Get the tests passing",
+    means:
+      "The agent works towards this on its own and says at the end of every turn whether it is done. " +
+      "It gets at most 8 turns, it stops early if it says the same thing is left twice running, and it " +
+      "stops if it stops reporting at all. It only runs while Errand is open. The goal is: Get the tests passing",
+    tries: 3,
+    at_most: 8,
+    left: "two of them still fail on a timeout",
+    over: null,
+  },
   outside: [
     { name: "peekaboo", from: "~/.claude.json", tools: ["see", "click", "type"], trouble: null },
     { name: "mempalace", from: "~/.claude.json", tools: [], trouble: "starting it: No such file or directory" },
@@ -116,6 +127,15 @@ export const FIXTURE = {
 
 /** Everything the window asked for, so a check can say what was never called. */
 export const asked = [];
+
+/** Everything the page is listening for, by name. */
+const listeners = {};
+
+/** Deliver an event to the page, the way the app would. */
+export function tell(name, payload) {
+  for (const fn of listeners[name] || []) fn({ payload });
+  return (listeners[name] || []).length;
+}
 
 /**
  * Stand in for the app, answering the way it does.
@@ -153,6 +173,8 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.brought);
           case "watches":
             return Promise.resolve(fixture.watches);
+          case "goal_of":
+            return Promise.resolve(fixture.goal_of);
           case "allowances":
           case "routines":
           case "runs":
@@ -165,9 +187,17 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
       },
     },
     event: {
-      // Nothing arrives on its own in the harness. Returning the unlisten
-      // function the real one returns, because the page keeps it.
-      listen: () => Promise.resolve(() => {}),
+      // Nothing arrives on its own in the harness, but what would arrive can
+      // be delivered on purpose. Kept rather than discarded so a check can
+      // send the page an event and watch what it does with it: several things
+      // the window only ever learns about this way had no test at all while
+      // this returned a shrug.
+      listen: (name, fn) => {
+        (listeners[name] ||= []).push(fn);
+        return Promise.resolve(() => {
+          listeners[name] = (listeners[name] || []).filter((f) => f !== fn);
+        });
+      },
     },
   };
 }

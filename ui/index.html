@@ -38,6 +38,7 @@
         <select id="engine" title="What answers this agent"></select>
         <button id="repeat" type="button" title="Make this run on a schedule">Repeat</button>
         <button id="watch" type="button" title="Wake this when something changes">Watch</button>
+        <button id="goal" type="button" title="Something to get to, rather than something to do">Goal</button>
         <button id="granted" type="button" title="What it may do without asking">Allowed</button>
         <button id="reach" type="button" title="What this thread can reach">Tools</button>
         <!-- Only while the network is being swept, which takes seconds. -->
@@ -74,6 +75,20 @@
         <button id="watch-stop" type="button">Stop watching</button>
         <button id="watch-again" type="button" hidden>Look again</button>
         <p id="watch-says"></p>
+      </aside>
+
+      <!--
+        Something to get to, rather than something to do. The agent works out
+        the steps and says at the end of every turn where it has got to; this is
+        where somebody sets it, watches it, and changes it when watching it
+        makes the goal look wrong, which is the whole reason it can be changed.
+      -->
+      <aside id="aiming" hidden>
+        <label>Goal <input id="goal-what" type="text" placeholder="What being finished looks like" autocomplete="off"
+                 autocorrect="off" autocapitalize="off" spellcheck="false" /></label>
+        <button id="goal-save" type="button">Start</button>
+        <button id="goal-stop" type="button">Give up on it</button>
+        <p id="goal-says"></p>
       </aside>
 
       <!-- What this agent may do, and how much it asks first. -->
