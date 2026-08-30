@@ -839,6 +839,24 @@ impl Store {
         Ok(())
     }
 
+    /// A change that matched no rows changed nothing, whatever it reported.
+    ///
+    /// SQLite answers "0 rows" and calls it success, so every setting written
+    /// against an agent that did not exist yet was accepted by the app, agreed
+    /// to on screen, and kept by nobody. A routine set that way left the panel
+    /// saying "this runs only when you ask it to", and the only way to find out
+    /// was the morning it did not happen.
+    ///
+    /// Seven of those were found in one afternoon. This is what stops the
+    /// eighth being quiet: an update that matches nothing is a failure, and it
+    /// says which thing was not there.
+    fn only_if_it_is_there(changed: usize, what: &str) -> Result<()> {
+        match changed {
+            0 => Err(anyhow::anyhow!("there is no {what} here to change")),
+            _ => Ok(()),
+        }
+    }
+
     /// Everything a new agent needs to exist, before anything points at it.
     ///
     /// An agent made in the window is not written down until there is something
@@ -858,6 +876,8 @@ impl Store {
     }
 
     /// Start a thread, or say nothing if it is already there.
+    ///
+    /// Nothing here uses this directly except `make_sure_it_exists`.
     pub fn begin(&self, id: &str, name: &str, cwd: &Path) -> Result<()> {
         let now = now();
         self.conn.lock().unwrap().execute(
@@ -1062,7 +1082,7 @@ impl Store {
         watches: Option<&str>,
         what: Option<&str>,
     ) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        let changed = self.conn.lock().unwrap().execute(
             "UPDATE conversations
                 SET watches = ?, watches_what = ?,
                     saw = NULL, saw_note = NULL, seeing = NULL, looked_at = NULL,
@@ -1071,7 +1091,7 @@ impl Store {
               WHERE id = ?",
             params![watches, what, conversation],
         )?;
-        Ok(())
+        Self::only_if_it_is_there(changed, "conversation")
     }
 
     /// Set, change or clear what this conversation is trying to get to.
@@ -1082,14 +1102,14 @@ impl Store {
     /// giving the new one the old one's spent turns would end it before it
     /// began.
     pub fn aim_at(&self, conversation: &str, goal: Option<&str>, now: i64) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        let changed = self.conn.lock().unwrap().execute(
             "UPDATE conversations
                 SET goal = ?, goal_at = ?, goal_tries = 0,
                     goal_left = NULL, goal_over = NULL
               WHERE id = ?",
             params![goal, goal.map(|_| now), conversation],
         )?;
-        Ok(())
+        Self::only_if_it_is_there(changed, "conversation")
     }
 
     /// Write down where a goal has got to after a turn.
@@ -1548,11 +1568,11 @@ impl Store {
     /// from an old timestamp would either fire it at once or hold it back by
     /// however long it happened to be since.
     pub fn runs(&self, conversation: &str, at: Option<&str>, what: Option<&str>) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        let changed = self.conn.lock().unwrap().execute(
             "UPDATE conversations SET runs_at = ?, runs_what = ?, ran_at = NULL WHERE id = ?",
             params![at, what, conversation],
         )?;
-        Ok(())
+        Self::only_if_it_is_there(changed, "conversation")
     }
 
     /// Say that a routine has just run.
@@ -1584,11 +1604,11 @@ impl Store {
 
     /// Give a conversation the name it will be picked out by.
     pub fn call_it(&self, conversation: &str, name: &str) -> Result<()> {
-        self.conn.lock().unwrap().execute(
+        let changed = self.conn.lock().unwrap().execute(
             "UPDATE conversations SET name = ? WHERE id = ?",
             params![name, conversation],
         )?;
-        Ok(())
+        Self::only_if_it_is_there(changed, "conversation")
     }
 
     /// Every thread, the one spoken to most recently first.
@@ -1792,31 +1812,31 @@ impl Store {
     /// Change something about an conversation by hand, whatever it settled on.
     pub fn rename(&self, conversation: &str, name: &str, title: &str, about: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE agents SET name = ?2, title = ?3, about = ?4 WHERE id = ?1",
             params![conversation, name, title, about],
         )?;
-        Ok(())
+        Self::only_if_it_is_there(changed, "agent")
     }
 
     /// Keep it at the top of the list, or stop.
     pub fn pin(&self, conversation: &str, pinned: bool) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE agents SET pinned = ? WHERE id = ?",
             params![pinned as i64, conversation],
         )?;
-        Ok(())
+        Self::only_if_it_is_there(changed, "agent")
     }
 
     /// Take it out of the list. It keeps working; it is only out of the way.
     pub fn hide(&self, conversation: &str, hidden: bool) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE agents SET hidden = ? WHERE id = ?",
             params![hidden as i64, conversation],
         )?;
-        Ok(())
+        Self::only_if_it_is_there(changed, "agent")
     }
 
     /// Forget a thread and everything in it.
@@ -1960,10 +1980,11 @@ impl Store {
     /// say why.
     pub fn use_engine(&self, id: &str, engine: &str, settings: Option<&str>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let changed = conn.execute(
             "UPDATE agents SET engine = ?, engine_settings = ?, model = NULL WHERE id = ?",
             params![engine, settings, id],
         )?;
+        Self::only_if_it_is_there(changed, "agent")?;
         // Every one of its conversations, not the agent: `opened` moved to the
         // conversation when conversations arrived and this update did not
         // follow it, which is the quiet kind of wrong. A conversation that has
@@ -2159,6 +2180,52 @@ mod tests {
         );
         // And what was said is still there, once.
         assert_eq!(s.lines("new-one").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_setting_written_against_nothing_says_so_rather_than_reporting_success() {
+        // The quiet half of the same fault. SQLite answers "0 rows" and calls
+        // it success, so a routine set on an agent that did not exist yet was
+        // accepted here, agreed to on screen, and kept by nobody: the panel
+        // went straight back to saying "this runs only when you ask it to", and
+        // the only way to find out was the morning it did not happen.
+        //
+        // Seven of those were found in one afternoon, which is the argument for
+        // this being a failure rather than a rule to remember.
+        let s = Store::in_memory().unwrap();
+        assert!(s
+            .runs("nobody", Some("daily 07:00"), Some("Morning"))
+            .is_err());
+        assert!(s
+            .watch("nobody", Some("~/Downloads every 10m"), Some("Tell me"))
+            .is_err());
+        assert!(s.aim_at("nobody", Some("Get it done"), 1).is_err());
+        assert!(s.call_it("nobody", "First").is_err());
+        assert!(s.rename("nobody", "Name", "Title", "About").is_err());
+        assert!(s.pin("nobody", true).is_err());
+        assert!(s.hide("nobody", true).is_err());
+        assert!(s.use_engine("nobody", "claude", None).is_err());
+
+        // And every one of them lands the moment the agent exists, which is the
+        // other half: a guard that refuses the ordinary case is worse than none.
+        s.make_sure_it_exists("here", NOT_YET_NAMED, Path::new("/tmp/here"))
+            .unwrap();
+        s.runs("here", Some("daily 07:00"), Some("Morning"))
+            .unwrap();
+        s.watch("here", Some("~/Downloads every 10m"), Some("Tell me"))
+            .unwrap();
+        s.aim_at("here", Some("Get it done"), 1).unwrap();
+        s.call_it("here", "First").unwrap();
+        s.rename("here", "Name", "Title", "About").unwrap();
+        s.pin("here", true).unwrap();
+        s.hide("here", true).unwrap();
+        s.use_engine("here", "claude", None).unwrap();
+
+        // Said, not merely accepted.
+        let c = s.conversation("here").unwrap().expect("it is there");
+        assert_eq!(c.runs_at.as_deref(), Some("daily 07:00"));
+        assert_eq!(c.goal.as_deref(), Some("Get it done"));
+        assert_eq!(s.agent("here").unwrap().expect("an agent").name, "Name");
     }
 
     #[test]
