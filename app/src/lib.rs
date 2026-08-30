@@ -264,7 +264,13 @@ async fn start_conversation(
 
 /// Give a conversation the name it is picked out by.
 #[tauri::command]
-async fn call_it(held: State<'_, Held>, id: String, name: String) -> Result<(), String> {
+async fn call_it(
+    app: AppHandle,
+    held: State<'_, Held>,
+    id: String,
+    name: String,
+) -> Result<(), String> {
+    write_it_down_if_new(&app, &held, &id)?;
     held.store.call_it(&id, &name).map_err(|e| e.to_string())
 }
 
@@ -281,8 +287,16 @@ async fn call_it(held: State<'_, Held>, id: String, name: String) -> Result<(), 
 /// before anything pointed at these rows except the engine, and the engine was
 /// started after the line was written, so nothing ever went first.
 ///
-/// Here rather than in two places, because the folder an agent works in is
+/// Here rather than in several places, because the folder an agent works in is
 /// decided here and a second opinion about that is a second folder.
+///
+/// Called by everything that writes something about an agent, not only by
+/// saying something to it. The rest were quieter versions of the same fault: a
+/// routine set on a new agent updated no rows and reported success, so the
+/// panel went back to saying "this runs only when you ask it to" and the only
+/// way to find out was the morning it did not happen. An agent starts existing
+/// the moment somebody does something to it, and every one of these is
+/// somebody doing something to it.
 fn write_it_down_if_new(app: &AppHandle, held: &Held, id: &str) -> Result<(), String> {
     if held
         .store
@@ -1324,11 +1338,15 @@ fn elsewhere(base_url: &str) -> Option<String> {
 /// conversation it never had.
 #[tauri::command]
 async fn use_engine(
+    app: AppHandle,
     held: State<'_, Held>,
     id: String,
     engine: String,
     settings: Option<String>,
 ) -> Result<(), String> {
+    // The quietest of the lot: pick a model for a brand-new agent, say
+    // something to it, and be answered by the one you did not pick.
+    write_it_down_if_new(&app, &held, &id)?;
     // Every conversation this agent has, not one. The map is keyed by
     // conversation and the id here is the agent's, so removing by it stopped
     // nothing at all: the old engine kept running and kept writing, which is
@@ -1677,6 +1695,7 @@ async fn aim_at(
     id: String,
     goal: Option<String>,
 ) -> Result<(), String> {
+    write_it_down_if_new(&app, &held, &id)?;
     let goal = goal.map(|g| g.trim().to_string()).filter(|g| !g.is_empty());
     held.store
         .aim_at(
@@ -2416,11 +2435,13 @@ async fn asks(held: State<'_, Held>, id: String, how: String) -> Result<(), Stri
 /// Give a conversation a schedule, or take one away.
 #[tauri::command]
 async fn runs(
+    app: AppHandle,
     held: State<'_, Held>,
     id: String,
     at: Option<String>,
     what: Option<String>,
 ) -> Result<(), String> {
+    write_it_down_if_new(&app, &held, &id)?;
     // Read before it is stored, so a schedule nobody can parse is refused here
     // and not at seven in the morning by not happening.
     if let Some(at) = at.as_deref() {
@@ -2676,11 +2697,13 @@ struct Watching {
 /// keyboard rather than at ten past the hour by not happening.
 #[tauri::command]
 async fn watch_it(
+    app: AppHandle,
     held: State<'_, Held>,
     id: String,
     watches: Option<String>,
     what: Option<String>,
 ) -> Result<(), String> {
+    write_it_down_if_new(&app, &held, &id)?;
     if let Some(said) = watches.as_deref() {
         let watch = watch::Watch::read(said).map_err(|e| format!("{e:#}"))?;
 
@@ -2923,12 +2946,14 @@ async fn outside(held: State<'_, Held>, id: String) -> Result<Vec<Outside>, Stri
 /// own. Nothing here is required, and an empty field simply becomes empty.
 #[tauri::command]
 async fn rename(
+    app: AppHandle,
     held: State<'_, Held>,
     id: String,
     name: String,
     title: String,
     about: String,
 ) -> Result<(), String> {
+    write_it_down_if_new(&app, &held, &id)?;
     held.store
         .rename(&id, &name, &title, &about)
         .map_err(|e| e.to_string())
@@ -2936,7 +2961,13 @@ async fn rename(
 
 /// Keep an agent at the top of the list, or stop.
 #[tauri::command]
-async fn pin(held: State<'_, Held>, id: String, pinned: bool) -> Result<(), String> {
+async fn pin(
+    app: AppHandle,
+    held: State<'_, Held>,
+    id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    write_it_down_if_new(&app, &held, &id)?;
     held.store.pin(&id, pinned).map_err(|e| e.to_string())
 }
 
@@ -2946,7 +2977,13 @@ async fn pin(held: State<'_, Held>, id: String, pinned: bool) -> Result<(), Stri
 /// still holds its conversation and still runs whatever it runs. It is out of
 /// the way, not gone.
 #[tauri::command]
-async fn hide(held: State<'_, Held>, id: String, hidden: bool) -> Result<(), String> {
+async fn hide(
+    app: AppHandle,
+    held: State<'_, Held>,
+    id: String,
+    hidden: bool,
+) -> Result<(), String> {
+    write_it_down_if_new(&app, &held, &id)?;
     held.store.hide(&id, hidden).map_err(|e| e.to_string())
 }
 
