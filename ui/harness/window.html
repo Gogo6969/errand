@@ -76,19 +76,24 @@
       // things a real recogniser does on its own happen: giving up after a
       // stretch of quiet, or being refused the microphone.
       window.__EARS__ = this;
-      // Answer the way a real one does: an unsettled guess, then the words.
+      // Answer the way a real one does: an unsettled guess, then, a moment
+      // later, the words. Both in one callback meant the pause a call waits for
+      // was armed exactly once and never had to be cancelled and restarted, so
+      // nothing here exercised the thing that decides when a call sends.
       setTimeout(() => {
         this.onresult?.({
           resultIndex: 0,
           results: [Object.assign([{ transcript: "check the" }], { isFinal: false })],
         });
+      }, 10);
+      setTimeout(() => {
         this.onresult?.({
           resultIndex: 0,
           results: [
             Object.assign([{ transcript: "check the invoices" }], { isFinal: true }),
           ],
         });
-      }, 10);
+      }, 120);
     }
     stop() {
       window.__HEARD__.push("stop");

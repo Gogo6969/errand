@@ -80,10 +80,16 @@ test("a long answer stops on a sentence and says where the rest is", () => {
 });
 
 test("one very long sentence still stops at a word", () => {
-  const one = `${"walking ".repeat(300)}home`;
-  const said = enoughOfIt(one);
+  // Every word different, so where it stops can be seen. The old fixture
+  // repeated one word, and cutting mid-word produced a fragment that also
+  // appeared whole elsewhere in the string: the check passed with the
+  // word-boundary cut deleted entirely.
+  const words = Array.from({ length: 400 }, (_, i) => `word${i}`);
+  const said = enoughOfIt(words.join(" "));
   assert.ok(said.length < 900, `${said.length} characters`);
-  assert.doesNotMatch(said, /walkin\b/, "cut in the middle of a word");
+  // Whatever it ends on has to be a whole one of those words.
+  const last = said.replace(/ The rest of it is on screen\.$/, "").split(" ").pop();
+  assert.ok(words.includes(last), `ends mid-word: ${JSON.stringify(last)}`);
 });
 
 test("a short answer is said exactly as it is", () => {

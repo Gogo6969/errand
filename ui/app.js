@@ -513,6 +513,10 @@ function asTalk(c, keeping) {
     repeats: !!c.runs_at,
     messages: keeping?.messages ?? [],
     working: keeping?.working ?? false,
+    // Carried like the rest of what is going on. Left out, clicking the agent
+    // while an answer was arriving threw away the sentence being written and
+    // put the working dots back under a half-finished line.
+    writing: keeping?.writing ?? "",
     loaded: keeping?.loaded ?? false,
   };
 }
@@ -2307,11 +2311,15 @@ if (Listening) {
   el.speak.setAttribute("aria-pressed", "false");
 }
 
+/** Which button is showing that the microphone is on. */
+let lit = null;
+
 function stopListening() {
   if (!ears) return;
   const going = ears;
   ears = null;
-  el.speak.setAttribute("aria-pressed", "false");
+  lit?.setAttribute("aria-pressed", "false");
+  lit = null;
   try {
     going.stop();
   } catch {
@@ -2326,7 +2334,7 @@ function stopListening() {
  * box and stops there; a call does the same and then sends on a pause, which
  * is the only difference between the two and is worth it being the only one.
  */
-function startListening({ sendOnPause = false } = {}) {
+function startListening({ sendOnPause = false, lights = el.speak } = {}) {
   if (ears) return true;
 
   const hearing = new Listening();
@@ -2379,7 +2387,9 @@ function startListening({ sendOnPause = false } = {}) {
   // answer is being spoken is how it transcribes its own voice.
   hearing.onend = () => {
     stopListening();
-    if (inACall && itsYourTurn === "listening") startListening({ sendOnPause: true });
+    if (inACall && itsYourTurn === "listening") {
+      startListening({ sendOnPause: true, lights: el.call });
+    }
   };
   hearing.onerror = (e) => {
     // Only the ones that mean the ears are actually gone. `no-speech` is
@@ -2404,7 +2414,11 @@ function startListening({ sendOnPause = false } = {}) {
   try {
     hearing.start();
     ears = hearing;
-    el.speak.setAttribute("aria-pressed", "true");
+    // Whichever button asked for the ears is the one that shows they are on.
+    // Both lit at once, the composer had two identical pulsing circles beside
+    // each other and nothing to say which of the two things was happening.
+    lit = lights;
+    lit?.setAttribute("aria-pressed", "true");
     return true;
   } catch (why) {
     complain(String(why));
@@ -2522,14 +2536,19 @@ el.call.addEventListener("click", () => {
   // What the box says while it is on, because sending on a pause is the one
   // thing in this window that acts without being told to.
   el.what.placeholder = "Talk. It sends when you stop.";
-  if (!startListening({ sendOnPause: true })) endTheCall();
+  if (!startListening({ sendOnPause: true, lights: el.call })) endTheCall();
 });
 
 // The way out that somebody reaches for without thinking. A call is the one
 // state in this window where the keyboard is not where their hands are, and
 // the one they most want to be able to leave quickly.
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && inACall) endTheCall();
+  if (e.key !== "Escape" || !inACall) return;
+  // Not while something else is in front of it. Escape closes the thing you
+  // are looking at, and dismissing the palette while ending a call as a side
+  // effect is one keypress doing two things, only one of which anybody meant.
+  if (!el.palette.hidden || !el.whois.hidden) return;
+  endTheCall();
 });
 
 /**
@@ -2586,7 +2605,7 @@ function listenAgain() {
   const t = talking();
   if (t && t.working) return;
   itsYourTurn = "listening";
-  startListening({ sendOnPause: true });
+  startListening({ sendOnPause: true, lights: el.call });
 }
 
 

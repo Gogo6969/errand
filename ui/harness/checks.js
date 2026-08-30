@@ -1241,7 +1241,7 @@ export async function dictation() {
     speak.getAttribute("aria-pressed"),
   );
 
-  await new Promise((r) => setTimeout(r, 60));
+  await new Promise((r) => setTimeout(r, 300));
   check(
     "what it heard is added to what was already typed, not put over it",
     box.value === "Tomorrow morning, check the invoices",
@@ -1472,8 +1472,17 @@ export async function aCall() {
     box.placeholder,
   );
 
-  // Heard, then a pause. The pause is the whole mechanism: it is what a person
-  // finishing a sentence looks like from here.
+  // Heard, and then nothing sent yet. The pause is the whole mechanism -- it is
+  // what somebody finishing a sentence looks like from here -- and without this
+  // the check passed for a version that sent the moment it heard anything.
+  await new Promise((r) => setTimeout(r, 500));
+  check(
+    "it does not send the moment it hears something",
+    !document.getElementById("messages").textContent.includes("check the invoices"),
+    document.getElementById("what").value || "nothing in the box",
+  );
+
+  // Then the pause.
   //
   // Comfortably longer than the pause rather than a shade longer. A browser
   // throttles timers in a tab nobody is looking at, and at one a second the
@@ -1795,6 +1804,27 @@ export async function openingAtLogin() {
   await new Promise((r) => setTimeout(r, 200));
   check("turning it off asks the app to turn it off", asked.some((a) => a.name === "open_at_login" && a.args?.yes === false), JSON.stringify(asked.filter((a) => a.name === "open_at_login")));
   check("and says so", /not open at login/i.test(says.textContent), says.textContent);
+
+  // The third answer, which no amount of pressing this switch can produce:
+  // something starts at login and it is not this copy. Worth telling apart
+  // from off, because turning it on is what fixes it and "it is already on"
+  // is the one answer that would not.
+  window.__AT_LOGIN__ = "something_else";
+  document.getElementById("models-done").click();
+  document.getElementById("setup").click();
+  await new Promise((r) => setTimeout(r, 250));
+  check(
+    "another copy starting at login does not read as this one being on",
+    !document.getElementById("at-login").checked,
+    `checked=${document.getElementById("at-login").checked}`,
+  );
+  check(
+    "and it says so, rather than leaving the switch to explain itself",
+    /another copy/i.test(says.textContent),
+    says.textContent,
+  );
+  window.__AT_LOGIN__ = undefined;
+  document.getElementById("models-done").click();
 
   document.getElementById("models-done").click();
   return found;

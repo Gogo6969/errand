@@ -261,7 +261,10 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           // what was last set, or the check cannot tell a switch that works
           // from one that only looks like it does.
           case "opens_at_login":
-            return Promise.resolve(atLogin);
+            // A check can put the third answer here, which is the one the app
+            // cannot produce by pressing anything: something starts at login
+            // and it is not this copy.
+            return Promise.resolve(window.__AT_LOGIN__ ?? atLogin);
           case "open_at_login":
             atLogin = args.yes ? "yes" : "no";
             return Promise.resolve(atLogin);
