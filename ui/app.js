@@ -1725,7 +1725,7 @@ function whatCouldBeDone() {
   add("What this thread can reach", "MCP servers", () => el.reach.click(), !!showing);
   add("Make this run on a schedule", "", () => el.repeat.click(), !!showing);
   add("Which models show up", "", () => showModels(), true);
-  add("What Errand is", "the whole thing, in seven lines", () => showTheTour(), true);
+  add("What Errand is", `the whole thing, in ${WHAT_THIS_IS.length} lines`, () => showTheTour(), true);
   add("What it has cost", "today and this month", () => whatItCost(), true);
   add("Check this setup", "what is wrong, and what to do", () => checkup());
   add("What is running", "everywhere, not just here", () => whatsRunning());
@@ -3240,7 +3240,10 @@ function showTheTour() {
     return;
   }
   el.tour.hidden = false;
-  const head = note("p", "This is Errand. Seven things and then you know it.");
+  // Counted rather than written down. It said seven while there were eight of
+  // them, which is a small lie in the one part of the app whose whole job is
+  // to be believed, and it would drift again the next time one was added.
+  const head = note("p", `This is Errand. ${WHAT_THIS_IS.length} things and then you know it.`);
   const rows = WHAT_THIS_IS.map(([title, said]) => {
     const row = document.createElement("div");
     row.className = "one tour-one";

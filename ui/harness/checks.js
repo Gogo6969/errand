@@ -1443,7 +1443,13 @@ export async function aCall() {
 
   // Heard, then a pause. The pause is the whole mechanism: it is what a person
   // finishing a sentence looks like from here.
-  await new Promise((r) => setTimeout(r, 2000));
+  //
+  // Comfortably longer than the pause rather than a shade longer. A browser
+  // throttles timers in a tab nobody is looking at, and at one a second the
+  // wait and the pause it is waiting for landed in whichever order they felt
+  // like, which is a check that fails for a reason that has nothing to do with
+  // the thing it is checking.
+  await new Promise((r) => setTimeout(r, 4000));
   check(
     "stopping talking sends it, without anybody pressing anything",
     document.getElementById("messages").textContent.includes("check the invoices"),
@@ -1704,6 +1710,14 @@ export async function sayingWhatThisIs() {
     "it says what the things in the window are for, not what they are called",
     /every morning/.test(said) && /wake it when something changes/.test(said),
     said.slice(0, 90),
+  );
+  // A number written into a sentence beside a list is a number that goes
+  // wrong the next time the list changes.
+  const rows = tour.querySelectorAll(".tour-one").length;
+  check(
+    "the number it claims is the number of things it says",
+    said.includes(`${rows} things`),
+    `${rows} rows, and it says: ${said.slice(0, 45)}`,
   );
   check(
     "it covers the whole app rather than the chat box",
