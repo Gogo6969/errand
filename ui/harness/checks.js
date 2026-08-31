@@ -2309,6 +2309,116 @@ export async function whatChangedInThisOne() {
   return found;
 }
 
+/**
+ * What can be done to an agent without opening it.
+ *
+ * The list answered a right-click with nothing at all, which was not a missing
+ * convenience: there was no way to delete an agent from the window whatsoever,
+ * so a thread somebody made by mistake stayed in their list for good. Somebody
+ * said so, having tried.
+ */
+export async function theMenuOnAnAgent() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const menu = document.getElementById("menu");
+  // Whatever the window has open, read the way the window itself would.
+  const showingAgentId = () =>
+    document.querySelector('#threads li[aria-current="true"]')?.dataset.agent || "";
+  const rowFor = (id) =>
+    [...document.querySelectorAll("#threads li")].find((li) => li.dataset.agent === id);
+
+  // One made for the purpose, which is also the case somebody complained
+  // about: a thread made by mistake that could not be got rid of. Deleting a
+  // fixture agent instead would take three later checks with it, since they
+  // open its conversations.
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  await new Promise((r) => setTimeout(r, 150));
+  [...document.querySelectorAll("#palette-list li")]
+    .find((li) => /^New agent/.test(li.textContent))
+    ?.click();
+  await new Promise((r) => setTimeout(r, 400));
+
+  const before = document.querySelectorAll("#threads li").length;
+  const row = [...document.querySelectorAll("#threads li")].find((li) =>
+    /New errand/.test(li.textContent),
+  );
+  check("the new agent is in the list to begin with", row, `${before} rows`);
+  const doomed = { id: showingAgentId() };
+
+  row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 200 }));
+  await new Promise((r) => setTimeout(r, 120));
+  check("right-clicking an agent offers what can be done to it", !menu.hidden, `hidden=${menu.hidden}`);
+
+  const labels = [...menu.querySelectorAll("button")].map((b) => b.textContent);
+  check(
+    "including the one somebody went looking for",
+    labels.some((l) => /^Delete/.test(l)),
+    labels.join(" | "),
+  );
+  check(
+    "and the things only doable from outside an agent",
+    labels.some((l) => /Pin/.test(l)) && labels.some((l) => /Hide/.test(l)) && labels.some((l) => /Who this is/.test(l)),
+    labels.join(" | "),
+  );
+  // Asking about an agent is not asking to go and look at it: switching under
+  // somebody loses whatever they were reading.
+  check(
+    "right-clicking does not open the agent",
+    document.getElementById("threads").querySelector('li[aria-current="true"]') !== row,
+    "left where it was",
+  );
+
+  // Delete asks before it does it.
+  const del = [...menu.querySelectorAll("button")].find((b) => /^Delete/.test(b.textContent));
+  del.click();
+  await new Promise((r) => setTimeout(r, 100));
+  check(
+    "the first press asks rather than deletes",
+    !asked.some((a) => a.name === "forget") && /Delete .*\?/.test(del.textContent),
+    del.textContent,
+  );
+  check("and says what goes with it", /said goes too/.test(del.textContent), del.textContent);
+
+  // The second press is the answer.
+  del.click();
+  await new Promise((r) => setTimeout(r, 300));
+  check(
+    "the second press deletes it",
+    asked.some((a) => a.name === "forget"),
+    JSON.stringify(asked.filter((a) => a.name === "forget")),
+  );
+  check("the menu goes away with it", menu.hidden, `hidden=${menu.hidden}`);
+  check(
+    "and it leaves the list",
+    document.querySelectorAll("#threads li").length === before - 1,
+    `${document.querySelectorAll("#threads li").length} rows, was ${before}`,
+  );
+  check(
+    "the window still has an agent open",
+    document.getElementById("thread-name").textContent.trim().length > 0,
+    document.getElementById("thread-name").textContent,
+  );
+
+  // And it closes the way everything else here closes.
+  rowFor(FIXTURE.agents[0].id)?.dispatchEvent(
+    new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 100, clientY: 150 }),
+  );
+  await new Promise((r) => setTimeout(r, 100));
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await new Promise((r) => setTimeout(r, 100));
+  check("escape closes it", menu.hidden, `hidden=${menu.hidden}`);
+
+  rowFor(FIXTURE.agents[0].id)?.dispatchEvent(
+    new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 100, clientY: 150 }),
+  );
+  await new Promise((r) => setTimeout(r, 100));
+  document.body.click();
+  await new Promise((r) => setTimeout(r, 100));
+  check("clicking anywhere else closes it", menu.hidden, `hidden=${menu.hidden}`);
+
+  return found;
+}
+
 export function headerFitsOnOneRow() {
   // A media query reads the viewport, not the element, so this cannot be
   // judged by widening anything on the page: run narrow, it measures a header

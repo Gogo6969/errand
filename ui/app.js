@@ -105,6 +105,7 @@ let showing = null; // the conversation on screen
 
 const el = {
   threads: document.getElementById("threads"),
+  menu: document.getElementById("menu"),
   messages: document.getElementById("messages"),
   name: document.getElementById("thread-name"),
   engine: document.getElementById("engine"),
@@ -582,6 +583,155 @@ function fromStore(line, live = false) {
   }
 }
 
+/**
+ * What can be done to an agent, without opening it.
+ *
+ * Right-clicking a thing and being offered what can be done to it is how every
+ * list on this machine works, and this one answered with nothing at all. The
+ * consequence was not a missing convenience: there was no way to delete an
+ * agent from the window at all, so a thread somebody made by mistake stayed in
+ * their list for good.
+ *
+ * Deliberately short. Everything here is something that can only be done to an
+ * agent from outside it, or that somebody would look for here first.
+ */
+let menuIsFor = null;
+
+function closeTheMenu() {
+  el.menu.hidden = true;
+  menuIsFor = null;
+}
+
+/**
+ * @param {object} a the agent right-clicked
+ * @param {number} x where the pointer was
+ * @param {number} y
+ */
+function openTheMenu(a, x, y) {
+  menuIsFor = a.id;
+  const items = [];
+
+  const item = (label, run, how = "") => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    if (how) b.className = how;
+    b.textContent = label;
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      await run(b);
+    };
+    items.push(b);
+    return b;
+  };
+
+  item(a.pinned ? "Unpin" : "Pin to the top", async () => {
+    a.pinned = !a.pinned;
+    closeTheMenu();
+    drawThreads();
+    if (a.id === showingAgent) drawPinned(a);
+    await invoke("pin", { id: a.id, pinned: a.pinned });
+  });
+
+  item("Who this is", async () => {
+    closeTheMenu();
+    // Its own profile, which means opening it first: the panel edits whoever
+    // is on screen, and editing one agent's name into another's is the one
+    // mistake this must not make easy.
+    if (a.id !== showingAgent) await openAgent(a.id);
+    el.whois.hidden = true;
+    el.name.click();
+  });
+
+  item("New conversation with this agent", async () => {
+    closeTheMenu();
+    if (a.id !== showingAgent) await openAgent(a.id);
+    await alsoAsk();
+  });
+
+  item("Copy its id", async (b) => {
+    try {
+      await navigator.clipboard.writeText(a.id);
+      b.textContent = "Copied";
+    } catch {
+      // A clipboard that refuses is not worth an error in the conversation,
+      // and the id is on screen in the button either way.
+      b.textContent = a.id;
+    }
+  });
+
+  item(a.hidden ? "Show in the list" : "Hide from the list", async () => {
+    a.hidden = !a.hidden;
+    closeTheMenu();
+    drawThreads();
+    await invoke("hide", { id: a.id, hidden: a.hidden });
+  });
+
+  // Last, apart, and asked about twice. Everything it ever said goes with it.
+  const remove = item("Delete", async (b) => {
+    // The second press is the answer to a question the first press asked, so
+    // the button becomes the question rather than a dialog appearing over it.
+    if (b.dataset.sure !== "true") {
+      b.dataset.sure = "true";
+      b.textContent = `Delete ${a.name}? Everything it said goes too`;
+      return;
+    }
+    closeTheMenu();
+    await forgetAgent(a);
+  }, "danger");
+  remove.dataset.sure = "false";
+
+  el.menu.replaceChildren(...items);
+  el.menu.hidden = false;
+  // Placed after it is shown, because where it fits depends on how big it is.
+  const box = el.menu.getBoundingClientRect();
+  const room = { x: window.innerWidth - box.width - 8, y: window.innerHeight - box.height - 8 };
+  el.menu.style.left = `${Math.max(8, Math.min(x, room.x))}px`;
+  el.menu.style.top = `${Math.max(8, Math.min(y, room.y))}px`;
+}
+
+/**
+ * Delete an agent, and leave the window somewhere sensible.
+ *
+ * The files it made are not touched. They are in its own folder and they are
+ * somebody's work, not the app's to throw away on the strength of a menu
+ * click; what goes is everything Errand knows about it.
+ */
+async function forgetAgent(a) {
+  try {
+    await invoke("forget", { id: a.id });
+  } catch (why) {
+    complain(String(why));
+    return;
+  }
+  agents.delete(a.id);
+  for (const [id, t] of talks) if (t.agent === a.id) talks.delete(id);
+
+  // Whatever was on screen has just been deleted, so something else has to be.
+  if (showingAgent === a.id) {
+    const next = [...agents.values()].find((other) => !other.hidden);
+    showing = null;
+    showingAgent = null;
+    if (next) await openAgent(next.id);
+    else await start();
+  }
+  drawThreads();
+}
+
+// Anywhere else, and the menu is not the thing being clicked any more.
+document.addEventListener("click", () => {
+  if (!el.menu.hidden) closeTheMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !el.menu.hidden) {
+    e.stopPropagation();
+    closeTheMenu();
+  }
+});
+// A menu pinned to a pointer is wrong the moment anything moves under it.
+window.addEventListener("resize", closeTheMenu);
+el.threads.addEventListener("scroll", closeTheMenu);
+
 function drawThreads() {
   // Hidden ones are out of the way, not gone: a search still finds them,
   // because "where did that go" is exactly when somebody looks.
@@ -599,7 +749,18 @@ function drawThreads() {
     ...listed.map((a) => {
       const li = document.createElement("li");
       li.setAttribute("aria-current", String(a.id === showingAgent));
+      // Which agent this row is, on the row. Everything that acts on one had
+      // to close over it, which is fine for a click and no use at all to
+      // anything asking the list what it is showing.
+      li.dataset.agent = a.id;
       li.onclick = () => openAgent(a.id);
+      li.oncontextmenu = (e) => {
+        e.preventDefault();
+        // Not opening it. Somebody asking what can be done to an agent has not
+        // asked to go and look at it, and switching under them loses whatever
+        // they were reading.
+        openTheMenu(a, e.clientX, e.clientY);
+      };
       li.append(tile(kindFor(a), busy(a.id), a.hue));
       if (a.pinned) li.classList.add("pinned");
 

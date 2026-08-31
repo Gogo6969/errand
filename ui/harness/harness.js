@@ -290,6 +290,11 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           case "seen_what_changed":
             window.__TOLD__ = true;
             return Promise.resolve(null);
+          // Deleting an agent. Answers plainly rather than doing anything to
+          // the fixture: what the check is watching is that the window asks,
+          // and what it does with its own list afterwards.
+          case "forget":
+            return Promise.resolve(null);
           case "opens_at_login":
             // A check can put the third answer here, which is the one the app
             // cannot produce by pressing anything: something starts at login
