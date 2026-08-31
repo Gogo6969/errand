@@ -183,14 +183,38 @@
 
       <!-- A conversation woken by something changing. -->
       <aside id="watching" hidden>
-        <label>Watch <input id="watch-at" type="text" placeholder="~/Downloads every 10m" autocomplete="off"
+        <!--
+          Three plain questions rather than one field with a language in it.
+          `~/Downloads every 10m` is a sentence somebody has to be taught, and
+          nothing on the screen taught it: what it watched, how often, and what
+          "then say" meant were all guesses. How often is now a list of the
+          answers, so the only thing to type is the thing being watched.
+        -->
+        <label>Watch this <input id="watch-at" type="text" placeholder="~/Downloads, or https://a-page.com" autocomplete="off"
                  autocorrect="off" autocapitalize="off" spellcheck="false" /></label>
-        <label>Then say <input id="watch-what" type="text" placeholder="What it should do when it changes" autocomplete="off" /></label>
+        <label>Look
+          <select id="watch-often">
+            <option value="5m">every 5 minutes</option>
+            <option value="10m" selected>every 10 minutes</option>
+            <option value="30m">every 30 minutes</option>
+            <option value="1h">every hour</option>
+            <option value="3h">every 3 hours</option>
+            <option value="12h">twice a day</option>
+            <option value="24h">once a day</option>
+          </select>
+        </label>
+        <label>Then ask this agent to <input id="watch-what" type="text" placeholder="tell me what is new and whether it matters" autocomplete="off" /></label>
         <button id="watch-save" type="button">Save</button>
-        <button id="watch-try" type="button" title="Say it now, as if it had just woken">Try it now</button>
-        <button id="watch-stop" type="button">Stop watching</button>
+        <button id="watch-try" type="button" title="Send that request now, without waiting for anything to change">Try it now</button>
+        <button id="watch-stop" type="button" hidden>Stop watching</button>
         <button id="watch-again" type="button" hidden>Look again</button>
         <div id="watch-said" class="from-here" hidden></div>
+        <!--
+          What will actually happen, in the words of what has been typed, before
+          anything is saved. Everything else in this panel describes the state
+          it is in; this describes what pressing Save would do.
+        -->
+        <p id="watch-plain"></p>
         <p id="watch-says"></p>
       </aside>
 

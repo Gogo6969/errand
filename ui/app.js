@@ -145,6 +145,8 @@ const el = {
   goalSays: document.getElementById("goal-says"),
   watchAt: document.getElementById("watch-at"),
   watchWhat: document.getElementById("watch-what"),
+  watchOften: document.getElementById("watch-often"),
+  watchPlain: document.getElementById("watch-plain"),
   watchSaid: document.getElementById("watch-said"),
   watchTry: document.getElementById("watch-try"),
   watchSave: document.getElementById("watch-save"),
@@ -1746,7 +1748,11 @@ el.repeat.addEventListener("click", async () => {
  */
 function offerWhatWasAskedHere(where, into) {
   const t = talking();
-  const asked = t ? t.messages.filter((m) => m.kind === "mine").map((m) => m.text) : [];
+  const asked = t
+    ? t.messages
+        .filter((m) => m.kind === "mine" && !m.text.startsWith(NOT_ASKED_BY_ANYBODY))
+        .map((m) => m.text)
+    : [];
   // Newest first, because the refined one is nearer the bottom, and without
   // repeats: asking the same thing twice is ordinary and two identical chips
   // are not a choice.
@@ -1811,6 +1817,10 @@ async function sayIfSomethingElseAlreadyDoesThis() {
 
 /** The routine as last read, so the warning can be added to what it says. */
 let theRoutineShown = null;
+
+el.watchAt.addEventListener("input", sayWhatItWouldDo);
+el.watchWhat.addEventListener("input", sayWhatItWouldDo);
+el.watchOften.addEventListener("change", sayWhatItWouldDo);
 
 el.routineAt.addEventListener("input", sayIfSomethingElseAlreadyDoesThis);
 el.routineWhat.addEventListener("input", sayIfSomethingElseAlreadyDoesThis);
@@ -1882,6 +1892,11 @@ el.routineTry.addEventListener("click", () =>
   tryItNow(el.routineWhat, el.routineSays, el.routine),
 );
 el.watchTry.addEventListener("click", () => tryItNow(el.watchWhat, el.watchSays, el.watching));
+
+// Nothing the app writes on somebody's behalf is something they asked for. The
+// goal instruction is sent as though typed, because that is what the engine has
+// to receive, and it turned up in this list as an errand to repeat.
+const NOT_ASKED_BY_ANYBODY = "This conversation has a goal";
 
 el.routineStop.addEventListener("click", async () => {
   const t = talking();
@@ -2864,6 +2879,49 @@ function keepWatchHonest() {
   }, 5000);
 }
 
+/** What the thing being watched and how often come to, as the app stores it. */
+function whatIsBeingWatched() {
+  const at = el.watchAt.value.trim();
+  return at ? `${at} every ${el.watchOften.value}` : "";
+}
+
+/** How often, in the words the list uses rather than in `10m`. */
+function howOftenInWords() {
+  const chosen = el.watchOften.selectedOptions[0];
+  return chosen ? chosen.textContent : "";
+}
+
+/**
+ * What pressing Save would actually do, in the words of what has been typed.
+ *
+ * The rest of this panel describes the state it is already in. This one
+ * describes the state it would be put into, which is the question somebody
+ * filling in a form is actually asking, and the one nothing on the screen
+ * answered: what is watched, where, how often, and what happens then.
+ */
+function sayWhatItWouldDo() {
+  const at = el.watchAt.value.trim();
+  const what = el.watchWhat.value.trim();
+  if (!at && !what) {
+    el.watchPlain.textContent =
+      "Name a folder, a file or a web address, choose how often to look, and say what " +
+      "this agent should do when it changes.";
+    return;
+  }
+  if (!at) {
+    el.watchPlain.textContent = "Name a folder, a file or a web address to watch.";
+    return;
+  }
+  const page = /^https?:\/\//i.test(at);
+  const looking = page ? `read ${at}` : `look at ${at}`;
+  const changed = page ? "If the page has changed" : "If anything there has changed";
+  const then = what
+    ? `it will ask this agent to ${what.replace(/^(please\s+)?/i, "")}.`
+    : "it will wake this agent. Say what it should do, above.";
+  el.watchPlain.textContent =
+    `It will ${looking} ${howOftenInWords()}, while Errand is open. ${changed}, ${then}`;
+}
+
 async function drawWatch({ leaveTheFields = false } = {}) {
   if (!showing) return;
   let now;
@@ -2878,9 +2936,21 @@ async function drawWatch({ leaveTheFields = false } = {}) {
   // takes focus the moment the panel opens, so guarding the whole redraw on
   // that silenced it altogether.
   if (!leaveTheFields) {
-    el.watchAt.value = now.watches || "";
+    // Back into the two controls it was typed into, rather than as the one
+    // string it is stored as.
+    const stored = now.watches || "";
+    const split = stored.lastIndexOf(" every ");
+    el.watchAt.value = split > 0 ? stored.slice(0, split) : stored;
+    const often = split > 0 ? stored.slice(split + 7).trim() : "";
+    if (often && [...el.watchOften.options].some((o) => o.value === often)) {
+      el.watchOften.value = often;
+    }
     el.watchWhat.value = now.what || "";
   }
+  // Only where there is one to stop. Offering to stop something that was never
+  // started is the panel asking a question about a state it is not in.
+  el.watchStop.hidden = !now.watches;
+  sayWhatItWouldDo();
   el.watchAgain.hidden = !now.paused;
   el.watchSays.dataset.paused = String(!!now.paused);
 
@@ -2891,8 +2961,10 @@ async function drawWatch({ leaveTheFields = false } = {}) {
     return;
   }
   if (!now.watches) {
-    el.watchSays.textContent =
-      "Nothing is watched. Name a folder, a file or a page, and how often to look.";
+    // Only the state. What to do about it is the line above, which says it in
+    // the words of whatever is half-typed, and two lines telling somebody what
+    // to type is one more than anybody reads.
+    el.watchSays.textContent = "Nothing is being watched yet.";
     return;
   }
   const when = (at) => (at ? new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : null);
@@ -3026,10 +3098,12 @@ el.goalStop.addEventListener("click", async () => {
 
 el.watchSave.addEventListener("click", async () => {
   if (!showing) return;
-  const watches = el.watchAt.value.trim();
+  // The two controls, put back together into the one line the app stores.
+  const watches = whatIsBeingWatched();
   const what = el.watchWhat.value.trim();
   if (!watches || !what) {
-    el.watchSays.textContent = "It needs something to watch and something to say.";
+    el.watchSays.textContent =
+      "It needs something to watch and something for this agent to do when it changes.";
     return;
   }
   try {

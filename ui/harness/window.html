@@ -155,7 +155,7 @@
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
 
-  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut, aCall, stepsDoNotOverlap, openingAtLogin, sayingWhatThisIs, repeatingWhatWasAsked, whatElseIsAllowed, whatChangedInThisOne, theMenuOnAnAgent, firstRun } =
+  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut, aCall, stepsDoNotOverlap, openingAtLogin, sayingWhatThisIs, repeatingWhatWasAsked, whatElseIsAllowed, whatChangedInThisOne, theMenuOnAnAgent, settingAWatchExplainsItself, firstRun } =
     await import(`./checks.js${fresh}`);
   // A first run is looked at on its own, because there is nothing else in it.
   if (brandNew) {
@@ -187,6 +187,7 @@
     await whatElseIsAllowed(),
     await whatChangedInThisOne(),
     await theMenuOnAnAgent(),
+    await settingAWatchExplainsItself(),
     await aiming(),
     await whichModels(),
     await questionsStillOpen(),

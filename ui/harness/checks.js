@@ -2419,6 +2419,87 @@ export async function theMenuOnAnAgent() {
   return found;
 }
 
+/**
+ * Whether somebody could set a watch without being taught the app first.
+ *
+ * The old panel asked for `~/Downloads every 10m` in one box and "then say" in
+ * another, and nothing on the screen said what either meant. Somebody who had
+ * been shown it once still asked, reasonably: what is it watching, where, every
+ * 10 what, and what does "then say" mean, can it speak? A form that has to be
+ * explained in a message is a form that has not explained itself.
+ */
+export async function settingAWatchExplainsItself() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  await openTalk("talk-1");
+  document.getElementById("watch").click();
+  await new Promise((r) => setTimeout(r, 350));
+
+  const at = document.getElementById("watch-at");
+  const often = document.getElementById("watch-often");
+  const what = document.getElementById("watch-what");
+  const plain = document.getElementById("watch-plain");
+  const stop = document.getElementById("watch-stop");
+
+  // How often is a list of answers rather than a syntax to learn.
+  check("how often is chosen rather than typed", often && often.tagName === "SELECT", often ? often.tagName : "missing");
+  check(
+    "and the choices are in words",
+    [...(often?.options || [])].every((o) => /minute|hour|day/.test(o.textContent)),
+    [...(often?.options || [])].map((o) => o.textContent).join(", "),
+  );
+  // Nothing is being watched yet, so there is nothing to stop.
+  check("it does not offer to stop something that never started", stop.hidden, `hidden=${stop.hidden}`);
+  check(
+    "an empty panel says what to do rather than nothing",
+    /Name a folder/.test(plain.textContent),
+    plain.textContent,
+  );
+
+  // Typed the way somebody would, and the sentence follows along.
+  at.value = "~/Downloads";
+  at.dispatchEvent(new Event("input"));
+  often.value = "1h";
+  often.dispatchEvent(new Event("change"));
+  what.value = "tell me what is new and whether it matters";
+  what.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 120));
+
+  const said = plain.textContent;
+  check("it says what it will look at", said.includes("~/Downloads"), said);
+  check("how often, in the words that were chosen", /every hour/.test(said), said);
+  check("what it will ask the agent to do", /tell me what is new/.test(said), said);
+  // The limitation that decides whether it works at all, said where it is set
+  // rather than found out on the first morning.
+  check("and that it only looks while Errand is open", /while Errand is open/.test(said), said);
+
+  // A web address reads as reading a page, not as looking in a folder.
+  at.value = "https://example.com/prices";
+  at.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 100));
+  check(
+    "a web address is described as a page rather than a folder",
+    /read https:\/\/example\.com\/prices/.test(plain.textContent) && /page has changed/.test(plain.textContent),
+    plain.textContent,
+  );
+
+  // Saving sends the two controls as the one line the app stores.
+  at.value = "~/Downloads";
+  at.dispatchEvent(new Event("input"));
+  document.getElementById("watch-save").click();
+  await new Promise((r) => setTimeout(r, 300));
+  const sent = asked.filter((a) => a.name === "watch_it").pop();
+  check(
+    "saving puts the two controls back together the way the app stores them",
+    sent?.args?.watches === "~/Downloads every 1h",
+    JSON.stringify(sent?.args),
+  );
+
+  document.getElementById("watch").click();
+  return found;
+}
+
 export function headerFitsOnOneRow() {
   // A media query reads the viewport, not the element, so this cannot be
   // judged by widening anything on the page: run narrow, it measures a header

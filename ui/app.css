@@ -1286,7 +1286,7 @@ body.catching #what { border-color: var(--accent); }
 #routine label:nth-child(2), #watching label:nth-child(2) { flex: 3 1 340px; }
 /* A goal is one long sentence rather than two short fields. */
 #aiming label { flex: 1 1 100%; }
-#routine input, #watching input, #aiming input {
+#routine input, #watching input, #watching select, #aiming input {
   padding: 0 9px;
   border: 1px solid var(--rule);
   background: var(--bg);
@@ -1299,7 +1299,7 @@ body.catching #what { border-color: var(--accent); }
    The outlined buttons carry a border and the filled ones do not, which made
    them two pixels taller and, bottom-aligned, two pixels higher than the boxes
    beside them. Two pixels is enough to read as sloppy, and it was. */
-#routine input, #watching input, #aiming input,
+#routine input, #watching input, #watching select, #aiming input,
 #routine-save, #watch-save, #goal-save,
 #routine-try, #watch-try,
 #routine-stop, #watch-stop, #watch-again, #goal-stop {
@@ -1361,6 +1361,16 @@ body.catching #what { border-color: var(--accent); }
   white-space: nowrap;
 }
 .from-here-one:hover { color: var(--ink); border-color: var(--edge); }
+
+/* What Save would do, said before it is pressed. Louder than the state line
+   under it, because it is the one somebody filling in the form is reading. */
+#watch-plain {
+  flex: 1 0 100%;
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink);
+}
+#watch-plain:empty { display: none; }
 
 #routine-says, #watch-says, #goal-says {
   flex: 1 0 100%;
