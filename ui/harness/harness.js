@@ -182,6 +182,9 @@ export const FIXTURE = {
     ],
     deny: [{ rule: "Read(//etc/**)", whose: "~/.claude/settings.json" }],
     mode: null,
+    // The sentence the app writes, because it is the only side that knows what
+    // this agent's posture puts on the command line.
+    mode_says: null,
   },
   // Notes for the version running, as the app compiles them in.
   what_changed: {
@@ -310,7 +313,9 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           // What the engine allows out of its own settings files, which this
           // app can show and cannot take back.
           case "also_allowed":
-            return Promise.resolve(fixture.also_allowed);
+            // A check can put a different arrangement here, since the ones
+            // worth checking are the ones no amount of clicking can produce.
+            return Promise.resolve(window.__ALSO_MODE__ ?? fixture.also_allowed);
           case "what_it_cost":
             return Promise.resolve(fixture.what_it_cost);
           case "already_runs":

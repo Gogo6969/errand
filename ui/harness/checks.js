@@ -2120,6 +2120,64 @@ export async function whatElseIsAllowed() {
     /judges harmless/i.test(said),
     said.slice(-90),
   );
+  // A mode set for every session, said the way the app says it. The window
+  // does not write this sentence: it does not know what Errand puts on the
+  // command line, and when it did write it, it was the one line on the screen
+  // that was not true.
+  window.__ALSO_MODE__ = {
+    allow: [{ rule: "Bash(awk *)", whose: "~/.claude/settings.json" }],
+    deny: [],
+    mode: { rule: "bypassPermissions", whose: "~/.claude/settings.json", managed: false },
+    mode_says:
+      "~/.claude/settings.json sets the engine to ask nothing at all: every tool runs. " +
+      "That does not apply here: Errand starts this agent as default, on the command " +
+      "line, which overrules it.",
+  };
+  document.getElementById("granted").click();
+  await new Promise((r) => setTimeout(r, 200));
+  document.getElementById("granted").click();
+  await new Promise((r) => setTimeout(r, 300));
+  const withMode = document.getElementById("also-allowed").textContent;
+  check(
+    "a mode Errand overrules is said as overruled, not as fact",
+    /does not apply here/.test(withMode),
+    withMode.slice(0, 140),
+  );
+  check(
+    "and is not dressed as an alarm",
+    !document.querySelector("#also-allowed .also-mode"),
+    document.querySelector("#also-allowed .also-mode")?.textContent || "quiet",
+  );
+
+  // The one file Errand cannot overrule is the one that is loud.
+  window.__ALSO_MODE__ = {
+    allow: [],
+    deny: [],
+    mode: {
+      rule: "bypassPermissions",
+      whose: "/Library/Application Support/ClaudeCode/managed-settings.json",
+      managed: true,
+    },
+    mode_says:
+      "Whoever administers this Mac has set the engine to ask nothing at all: every tool " +
+      "runs, in /Library/Application Support/ClaudeCode/managed-settings.json. That " +
+      "outranks anything Errand asks for.",
+  };
+  document.getElementById("granted").click();
+  await new Promise((r) => setTimeout(r, 200));
+  document.getElementById("granted").click();
+  await new Promise((r) => setTimeout(r, 300));
+  check(
+    "a mode Errand cannot overrule is said loudly",
+    document.querySelector("#also-allowed .also-mode")?.textContent.includes("outranks"),
+    document.querySelector("#also-allowed .also-mode")?.textContent || "nothing said",
+  );
+  window.__ALSO_MODE__ = undefined;
+  document.getElementById("granted").click();
+  await new Promise((r) => setTimeout(r, 200));
+  document.getElementById("granted").click();
+  await new Promise((r) => setTimeout(r, 300));
+
   // Errand's own list is still there and still revocable: this is beside it,
   // not instead of it.
   const ours = [...document.querySelectorAll("#allowed li button")];

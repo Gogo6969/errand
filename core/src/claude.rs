@@ -235,6 +235,26 @@ pub const MODELS: &[(&str, &str)] = &[
 ///
 /// Claude Code files a transcript under a flattening of the working directory,
 /// which is why the directory has to be the same one it was started in.
+/// The engine's own word for a posture.
+///
+/// Named here rather than written inline where it is used, because it goes on
+/// the command line every time and a command-line argument outranks the same
+/// setting in a settings file. Anything describing what the engine will
+/// actually do has to know this, or it is describing a file that is overruled.
+pub fn the_mode_for(asks: &str) -> &'static str {
+    match asks {
+        "auto" => "bypassPermissions",
+        "edits" => "acceptEdits",
+        // Work the job out and come back with the plan, having changed nothing.
+        // The posture somebody wants for an errand whose shape they are not
+        // sure of yet: it reads, it looks things up, and then it says what it
+        // would do, which is a thing you can argue with before it happens
+        // rather than after.
+        "plan" => "plan",
+        _ => "default",
+    }
+}
+
 pub fn already_going(session: &str, cwd: &std::path::Path) -> bool {
     let Ok(home) = std::env::var("HOME") else {
         return false;
@@ -358,18 +378,7 @@ impl Claude {
             // The agent's, not one decision for the whole app. A research
             // agent and one that edits your files do not deserve the same
             // posture, and it was compiled in until now.
-            match asks {
-                "auto" => "bypassPermissions",
-                "edits" => "acceptEdits",
-                // Work the job out and come back with the plan, having
-                // changed nothing. The posture somebody wants for an errand
-                // whose shape they are not sure of yet: it reads, it looks
-                // things up, and then it says what it would do, which is a
-                // thing you can argue with before it happens rather than
-                // after.
-                "plan" => "plan",
-                _ => "default",
-            },
+            the_mode_for(asks),
             "--allowedTools",
         ])
         .args(GRANTED)

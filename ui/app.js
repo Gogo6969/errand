@@ -1816,7 +1816,10 @@ async function drawAlsoAllowed() {
     return;
   }
 
-  const mode = theirs.mode && whatTheModeMeans(theirs.mode);
+  // Said by the app, which knows what this agent's posture puts on the command
+  // line. Written here as well, it was the same sentence in two places, and one
+  // of them did not know the thing that decides whether it is true.
+  const mode = theirs.mode_says;
   const rows = [...theirs.allow, ...theirs.deny.map((d) => ({ ...d, refused: true }))];
   el.alsoAllowed.hidden = !rows.length && !mode;
   if (el.alsoAllowed.hidden) return;
@@ -1828,8 +1831,11 @@ async function drawAlsoAllowed() {
   // every list on this screen beside the point, and a list of careful rules
   // above it reads as a boundary that is not there.
   if (mode) {
-    const said = note("p", mode, "also-mode");
-    parts.push(said);
+    // Red only for the one that actually decides. A mode Errand overrules is
+    // worth saying and is not an alarm, and colouring it like one is how a
+    // screen full of red teaches somebody to ignore red.
+    const loud = theirs.mode?.managed === true;
+    parts.push(note("p", mode, loud ? "also-mode" : "also-what"));
   }
   const list = document.createElement("ul");
   list.className = "also-list";
@@ -1858,16 +1864,7 @@ async function drawAlsoAllowed() {
   el.alsoAllowed.replaceChildren(...parts);
 }
 
-/** What a mode set for every session means, where it changes who is asked. */
-function whatTheModeMeans(mode) {
-  const said = {
-    bypassPermissions:
-      "The engine is set to ask nothing at all, so none of this decides anything: every tool runs.",
-    acceptEdits: "The engine is set to accept file edits without asking, whatever is listed here.",
-    plan: "The engine is set to plan rather than act, so nothing runs.",
-  }[mode.rule];
-  return said ? `${said} Set in ${mode.whose}.` : "";
-}
+
 
 /**
  * What choosing this actually does, said next to the choice.

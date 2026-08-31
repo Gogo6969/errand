@@ -2421,22 +2421,50 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
 /// Read from the agent's own folder as well as the person's, because a folder
 /// has rules of its own and those are the ones nobody remembers agreeing to.
 #[tauri::command]
-async fn also_allowed(
-    held: State<'_, Held>,
-    agent: String,
-) -> Result<errand_core::elsewhere::Theirs, String> {
+async fn also_allowed(held: State<'_, Held>, agent: String) -> Result<AlsoAllowed, String> {
     let home = std::env::var("HOME").map_err(|_| "there is no home folder".to_string())?;
+    let known = held.store.agent(&agent).map_err(|e| e.to_string())?;
+
+    // These are Claude Code's files. An agent answering on a model running on
+    // this machine reads none of them, and showing somebody a list of rules
+    // that decide nothing about the agent they are looking at is the same fault
+    // as not showing them at all, pointing the other way.
+    if known.as_ref().is_some_and(|a| a.engine != "claude") {
+        return Ok(AlsoAllowed::default());
+    }
+
     // Where this agent actually works, since a folder's own settings are in
     // force for the errands run in it.
-    let working_in = held
-        .store
-        .agent(&agent)
-        .map_err(|e| e.to_string())?
-        .map(|a| std::path::PathBuf::from(a.cwd))
+    let working_in = known
+        .as_ref()
+        .map(|a| std::path::PathBuf::from(&a.cwd))
         .unwrap_or_else(|| std::path::PathBuf::from(&home));
-    Ok(errand_core::elsewhere::read(
-        &errand_core::elsewhere::where_they_live(std::path::Path::new(&home), &working_in),
-    ))
+    let theirs = errand_core::elsewhere::read(&errand_core::elsewhere::where_they_live(
+        std::path::Path::new(&home),
+        &working_in,
+    ));
+    // Said here, where this agent's posture is known. Errand puts that posture
+    // on the command line every time it starts the engine, and a command-line
+    // argument outranks the same setting in every one of these files except the
+    // administrator's, so a sentence about the mode written without it is a
+    // sentence about a file that is being overruled.
+    let asks = known.as_ref().map_or("ask", |a| a.asks.as_str());
+    Ok(AlsoAllowed {
+        mode_says: theirs.what_the_mode_means(asks),
+        theirs,
+    })
+}
+
+/// The engine's own rules, and what its session-wide mode means for this agent.
+#[derive(Default, serde::Serialize)]
+struct AlsoAllowed {
+    #[serde(flatten)]
+    theirs: errand_core::elsewhere::Theirs,
+    /// Nothing where the mode changes nothing, which is most of the time. One
+    /// sentence, written in one place: it was written twice, once here and once
+    /// in the window, and the two would have drifted the first time either
+    /// changed.
+    mode_says: Option<String>,
 }
 
 /// Everything an agent may do without being asked again.
