@@ -28,7 +28,7 @@ struct ChatRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
-    /// When tools are present, send `"auto"` — this is what well-behaved
+    /// When tools are present, send `"auto"` -- this is what well-behaved
     /// agent harnesses do (CCC, OpenAI Agents SDK, etc.), and several vLLM
     /// serving paths only dispatch into the harmony tool-call parser when
     /// the flag is set explicitly. With no tools, omit the field entirely.
@@ -39,7 +39,7 @@ struct ChatRequest<'a> {
     /// llama.cpp: reuse the server-side prompt cache across requests.
     /// Explicit rather than relying on the server default, because the
     /// whole prompt layout is now built around prefix stability.
-    /// Omitted for every other provider — OpenAI-style APIs reject or
+    /// Omitted for every other provider -- OpenAI-style APIs reject or
     /// ignore unknown fields depending on vendor mood.
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_prompt: Option<bool>,
@@ -63,13 +63,13 @@ impl LlmClient {
             // No OVERALL request timeout. A streaming generation on the deep
             // slot (a large reasoning model on llama.cpp) routinely runs
             // longer than a few minutes, and a total-request cap (was 180s)
-            // killed it mid-stream — surfacing as
+            // killed it mid-stream -- surfacing as
             // "sse: Transport error: error decoding response body". Streaming
             // liveness is instead enforced by a per-chunk inactivity timeout
             // in the pump (src/llm/stream.rs); a runaway request is bounded by
             // the user's Stop (CancellationToken). Non-streaming `complete()`
             // calls set their own per-request ceiling below.
-            // 4s: governs only the TCP connect phase — LAN model servers
+            // 4s: governs only the TCP connect phase -- LAN model servers
             // connect in <100ms, and a SYN-dropping endpoint (host asleep,
             // firewall drop) previously left the user staring at
             // thinking-dots for 20s per dead slot before failover kicked in.
@@ -102,8 +102,8 @@ impl LlmClient {
     ///
     /// `force_tool` sends `tool_choice: "required"`, which is the only
     /// forcing form both of our backends honour. The OpenAI
-    /// "force this exact function" object — `{"type":"function",
-    /// "function":{"name":…}}` — is silently ignored by llama.cpp: it
+    /// "force this exact function" object -- `{"type":"function",
+    /// "function":{"name":…}}` -- is silently ignored by llama.cpp: it
     /// answers normally, with no tool call and no error, so a caller that
     /// trusted it would think it had a guarantee it never had.
     ///
@@ -162,7 +162,7 @@ impl LlmClient {
         let mut builder = self.http.post(&url).json(&req);
         // Only attach an Authorization header when there's actually a key.
         // A blank/whitespace key means "local server" (llama.cpp, LM Studio,
-        // Ollama, vLLM) — those need no auth, and sending `Bearer ` (empty)
+        // Ollama, vLLM) -- those need no auth, and sending `Bearer ` (empty)
         // makes some of them answer 401. Cloud endpoints always set a key.
         if let Some(key) = self.settings.api_key.as_deref() {
             if !key.trim().is_empty() {
@@ -208,7 +208,7 @@ impl LlmClient {
             .json(&req);
         // Only attach an Authorization header when there's actually a key.
         // A blank/whitespace key means "local server" (llama.cpp, LM Studio,
-        // Ollama, vLLM) — those need no auth, and sending `Bearer ` (empty)
+        // Ollama, vLLM) -- those need no auth, and sending `Bearer ` (empty)
         // makes some of them answer 401. Cloud endpoints always set a key.
         if let Some(key) = self.settings.api_key.as_deref() {
             if !key.trim().is_empty() {
@@ -247,7 +247,7 @@ pub struct CompleteResult {
     /// the caller cannot tell that apart from a dead endpoint.
     pub reasoning: String,
     /// `finish_reason == "length"`: generation stopped at the output
-    /// ceiling. This is the *reliable* "ran out of room" signal — several
+    /// ceiling. This is the *reliable* "ran out of room" signal -- several
     /// hosted models bill reasoning against `max_tokens` while returning
     /// no reasoning text at all, so an empty `reasoning` cannot rule
     /// truncation out.
@@ -263,7 +263,7 @@ struct ChatRespFull {
 struct ChatChoiceFull {
     message: ChatChoiceMsgFull,
     /// Why generation stopped. `"length"` means the output ceiling was
-    /// reached — the only trustworthy signal that a reply was cut off
+    /// reached -- the only trustworthy signal that a reply was cut off
     /// rather than simply empty. Absent on some servers, hence Option.
     #[serde(default)]
     finish_reason: Option<String>,
@@ -278,7 +278,7 @@ struct ChatChoiceMsgFull {
     /// Chain-of-thought channel. Same field-name zoo as the streaming
     /// path (see `StreamDelta` in stream.rs): `reasoning` on vLLM and
     /// several OpenAI-compatible gateways, `reasoning_content` on
-    /// llama.cpp, DeepSeek and Qwen3. Accept both — reading only one
+    /// llama.cpp, DeepSeek and Qwen3. Accept both -- reading only one
     /// spelling is what broke the deep slot back in 0.2.46, and here it
     /// would silently disable the fact-check retry on half the backends
     /// KinAI supports.
@@ -288,7 +288,7 @@ struct ChatChoiceMsgFull {
 
 /// Make the message list safe for strict chat templates.
 ///
-/// Some templates refuse a `system` role anywhere but position 0 —
+/// Some templates refuse a `system` role anywhere but position 0 --
 /// `Qwen3.6-35B-A3B-base-static` raises
 /// `Jinja Exception: System message must be at the beginning`, which
 /// llama.cpp returns as a 400 and the user sees instead of an answer
@@ -345,7 +345,7 @@ fn serialize_message(m: &ChatMessage) -> serde_json::Value {
             image_data_urls,
         } => {
             // When images are attached we emit the OpenAI multipart
-            // `content` array form — `[{type:"text",...}, {type:"image_url",...}]`.
+            // `content` array form -- `[{type:"text",...}, {type:"image_url",...}]`.
             // Every supported vision endpoint (Gemini OpenAI-compat shim,
             // Anthropic OpenAI-compat shim, vLLM/Ollama llava/qwen-vl,
             // OpenAI proper) accepts this shape. For text-only turns we
@@ -420,7 +420,7 @@ fn serialize_message(m: &ChatMessage) -> serde_json::Value {
 }
 
 /// True when an LLM-turn error means the model SERVER itself is
-/// unreachable or not ready — the failure class another slot can rescue
+/// unreachable or not ready -- the failure class another slot can rescue
 /// (connection refused, connect/DNS trouble, 5xx incl. llama.cpp's
 /// "503 Loading model", timeouts, and the stall watchdog). Deliberately
 /// narrower than `vision::is_transient_failure`: content-level failures
@@ -433,7 +433,7 @@ fn serialize_message(m: &ChatMessage) -> serde_json::Value {
 /// tool_choice",...}}`. llama.cpp and vLLM both accept `required`, so
 /// KinAI's forced-search round worked everywhere until the Online slot
 /// pointed at a hosted reasoning model (field report 2026-08-12: "which
-/// are the top 10 stocks in the QQQ fund — look it up for today?" died
+/// are the top 10 stocks in the QQQ fund -- look it up for today?" died
 /// with a raw 400 instead of an answer).
 ///
 /// Matched on the phrase rather than the status code: providers differ
@@ -561,7 +561,7 @@ mod tests {
     /// non-streaming path reads it to decide whether an empty reply was a
     /// budget overrun (retry, explain) or a dead endpoint (don't retry).
     /// Reading only one spelling silently disables that on every backend
-    /// using the other — the same mistake that broke the deep slot in
+    /// using the other -- the same mistake that broke the deep slot in
     /// 0.2.46, which is why stream.rs guards both. Guard both here too.
     #[test]
     fn parses_reasoning_content_spelling() {
@@ -621,7 +621,7 @@ mod tool_choice_tests {
         ));
     }
 
-    /// Must NOT swallow unrelated failures — those still have to reach
+    /// Must NOT swallow unrelated failures -- those still have to reach
     /// the user instead of being retried into a different error.
     #[test]
     fn unrelated_errors_are_left_alone() {
@@ -664,7 +664,7 @@ mod strict_template_tests {
         assert_eq!(out.iter().filter(|m| m["role"] == "system").count(), 1);
     }
 
-    /// Demoting must not create two user turns in a row — other
+    /// Demoting must not create two user turns in a row -- other
     /// templates dislike that as much as this one dislikes late system
     /// messages. The stray text is folded into the preceding user turn.
     #[test]
@@ -693,7 +693,7 @@ mod strict_template_tests {
         assert_eq!(out, input);
     }
 
-    /// A multipart (image) user turn must not be corrupted by folding —
+    /// A multipart (image) user turn must not be corrupted by folding --
     /// its content is an array, not a string.
     #[test]
     fn multipart_user_turns_are_not_folded_into() {

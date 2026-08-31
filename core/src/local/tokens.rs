@@ -37,7 +37,7 @@ pub fn trim_to_fit(messages: &mut Vec<ChatMessage>, budget: usize) {
 
     // Tokenize each message ONCE up front. The previous loop called
     // `estimate_messages` (a full BPE encode of every message) on every
-    // iteration, so dropping K messages from N re-encoded O(N·K) bodies —
+    // iteration, so dropping K messages from N re-encoded O(N·K) bodies --
     // the dominant cost of a long-thread turn. A per-message cost vector
     // kept in lock-step with `messages` makes the trim O(N): removing a
     // message just subtracts its precomputed cost. Token cost of a message

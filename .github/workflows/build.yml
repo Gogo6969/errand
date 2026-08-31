@@ -1,0 +1,85 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # Nothing here bundles the app. Bundling signs it with a Developer ID that
+  # lives in one keychain on one Mac, so a job that tried would fail for a
+  # reason that has nothing to do with the change being tested.
+  rust:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `frontendDist` is ../ui, which is tracked rather than built, so there is
+      # nothing to make before cargo can run. Said out loud because the same
+      # config pointing at a build artifact is what kept the other repo's build
+      # red for a week, failing in the Tauri build script before a single gate
+      # had run.
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+  window:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      # The parts of the window that are pure functions and can be tested
+      # without a browser: what an answer sounds like read aloud, and what a
+      # model's Markdown becomes.
+      #
+      # The rest of the window is checked by ui/harness, which drives the real
+      # page in a real browser. That does not run here, and pretending otherwise
+      # by adding a headless job that only loads the file would be a check that
+      # passes without checking. It is run by hand, and what it found is in the
+      # commit messages.
+      - name: What can be tested without a browser
+        run: node --test ui/speech.test.mjs ui/markdown.test.mjs
+
+  scrub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      # Over the whole history, not the working tree. A secret deleted in a
+      # later commit is still a secret anybody can read, and this repo is
+      # public.
+      - name: Secrets, over the full history
+        run: gitleaks detect --redact --no-banner --exit-code 2
+
+      # House rule, and the kind that stops being true the moment nobody checks.
+      - name: No em dashes
+        run: |
+          # Everything but this file, which has to contain the character it
+          # is looking for.
+          if hits=$(git ls-files | grep -v '^.github/workflows/build.yml$' \
+                      | xargs grep -nI $'—' 2>/dev/null); then
+            echo "Em dashes found. The rule is none, anywhere:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "none"

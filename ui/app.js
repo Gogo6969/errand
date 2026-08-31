@@ -2982,7 +2982,7 @@ async function showModels() {
       const b = document.createElement("button");
       b.type = "button";
       b.textContent = place.name;
-      b.title = `${place.url} — ${place.why}`;
+      b.title = `${place.url} · ${place.why}`;
       if (!place.sure) b.dataset.unsure = "true";
       b.onclick = () => {
         editing = null;

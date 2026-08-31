@@ -6,20 +6,20 @@
 
 //! Backend auto-detection.
 //!
-//! Two phases for the LAN scan (no live-host gate — too easy to miss boxes
+//! Two phases for the LAN scan (no live-host gate -- too easy to miss boxes
 //! that only run an LLM and nothing else, e.g. SSH/HTTP disabled):
-//!   1. **LLM port scan** — TCP-probe every (host, llm_port) pair in the
+//!   1. **LLM port scan** -- TCP-probe every (host, llm_port) pair in the
 //!      /24 with bounded concurrency. ~60 ports × 254 hosts ≈ 15k probes.
 //!      Dead hosts return RST/timeout fast; live ones come back quickly.
-//!   2. **HTTP(S) probe** — for each live host:port, try both `http://`
+//!   2. **HTTP(S) probe** -- for each live host:port, try both `http://`
 //!      and `https://` against the provider's API endpoint. Accept
 //!      self-signed certs (LAN trust; JWT on the WS layer is what
 //!      authenticates).
 //!
-//! Worst-case ~25–35s on a /24 — the price of not assuming any "discovery"
+//! Worst-case ~25–35s on a /24 -- the price of not assuming any "discovery"
 //! port is open on the target. The port set is generated from dense
 //! CONTIGUOUS RANGES around each known LLM base port (see `llm_ports`),
-//! not a sparse hand-picked list — because the single most common real
+//! not a sparse hand-picked list -- because the single most common real
 //! miss is "the user started a second/third model instance on the next
 //! port over" (vLLM 8000→8001→8002…, llama.cpp 8080→8081→8082…, Ollama
 //! 11434→11435…). The larger list is offset by higher phase-1 concurrency
@@ -48,7 +48,7 @@ pub struct ModelCaps {
 }
 
 /// LLM-likely TCP port + the best-guess provider label. We probe both
-/// http and https on each one. The provider/label is only a UI hint —
+/// http and https on each one. The provider/label is only a UI hint --
 /// the HTTP probe confirms the real shape via `/v1/models` or Ollama's
 /// `/api/tags` regardless of which guess the port implied.
 #[derive(Clone, Copy)]
@@ -72,7 +72,7 @@ struct PortRange {
 /// Contiguous ranges around each known LLM base port. The key design
 /// choice: people run multiple llama.cpp / vLLM / Ollama instances on
 /// incrementing ports, so we sweep a band around each base rather than
-/// a few sparse points. Keep ranges modest — every extra port multiplies
+/// a few sparse points. Keep ranges modest -- every extra port multiplies
 /// the probe count by the host count.
 const LLM_PORT_RANGES: &[PortRange] = &[
     PortRange {
@@ -191,7 +191,7 @@ const LLM_PORT_SINGLES: &[LlmPort] = &[
 ];
 
 /// Materialize the full port set from ranges + singles, deduped and
-/// sorted. Built once per scan (cheap — ~60 entries).
+/// sorted. Built once per scan (cheap -- ~60 entries).
 fn llm_ports() -> Vec<LlmPort> {
     let mut out: Vec<LlmPort> = Vec::new();
     for r in LLM_PORT_RANGES {
@@ -215,7 +215,7 @@ fn llm_ports() -> Vec<LlmPort> {
 /// WebSocket clients) before a LAN scan opens its concurrent probe
 /// sockets. Raising the soft limit toward the hard cap (clamped to a
 /// sane 8192) prevents `EMFILE` both for scanning AND for a busy host
-/// serving many family clients. Failure is non-fatal — `scan_concurrency`
+/// serving many family clients. Failure is non-fatal -- `scan_concurrency`
 /// still sizes itself to whatever limit is actually in effect.
 #[cfg(unix)]
 pub fn raise_fd_limit_best_effort() {
@@ -228,7 +228,7 @@ pub fn raise_fd_limit_best_effort() {
             return;
         }
         // Target 8192, but never exceed the hard cap (which may be
-        // RLIM_INFINITY — then 8192 is our self-imposed ceiling).
+        // RLIM_INFINITY -- then 8192 is our self-imposed ceiling).
         let target = if lim.rlim_max == libc::RLIM_INFINITY {
             8192
         } else {
@@ -291,7 +291,7 @@ fn scan_concurrency() -> usize {
 
 /// Detect backends on localhost only (fast).
 pub async fn detect_all() -> Vec<DetectedBackend> {
-    // No host discovery — just scan the LLM port list against 127.0.0.1.
+    // No host discovery -- just scan the LLM port list against 127.0.0.1.
     scan_targets(vec!["127.0.0.1".to_string()]).await
 }
 
@@ -340,7 +340,7 @@ pub async fn scan_local_network() -> Vec<DetectedBackend> {
 }
 
 /// Phase 1 + 2: TCP-probe every LLM port on every target host, then HTTP(S)
-/// probe the ones that answer. No liveness gate — boxes that only run an
+/// probe the ones that answer. No liveness gate -- boxes that only run an
 /// LLM (e.g. MINISFORUM dedicated to llama.cpp on :8081) have nothing else
 /// to phone home on.
 async fn scan_targets(hosts: Vec<String>) -> Vec<DetectedBackend> {
@@ -364,7 +364,7 @@ async fn scan_targets(hosts: Vec<String>) -> Vec<DetectedBackend> {
     );
 
     // Fan-out sized to the live fd budget (see `scan_concurrency`). TCP
-    // connects are cheap, but each in-flight probe holds a socket — too
+    // connects are cheap, but each in-flight probe holds a socket -- too
     // many at once exhausts the process's file descriptors and the whole
     // scan fails with EMFILE (which is exactly how a 256-wide fan-out
     // silently found *nothing* under macOS's 256-fd GUI default). Dead
@@ -427,7 +427,7 @@ async fn scan_targets(hosts: Vec<String>) -> Vec<DetectedBackend> {
                             });
                         }
                     }
-                    // OpenAI-compatible — works for vLLM, llama.cpp,
+                    // OpenAI-compatible -- works for vLLM, llama.cpp,
                     // llama-swap, LM Studio, and any drop-in clone.
                     if let Ok(models) =
                         list_via_openai(&client, &LlmSettings::reaching(&base_url, "models"), None)
@@ -579,16 +579,16 @@ async fn caps_via_ollama(client: &reqwest::Client, base: &str, model: &str) -> R
 ///
 /// llama.cpp's `/v1/models` does NOT include `max_model_len` (it only
 /// returns `id`, `object`, `created`, `owned_by`). The actual runtime
-/// context window — what was passed via `-c` on startup — lives in
+/// context window -- what was passed via `-c` on startup -- lives in
 /// `/props.default_generation_settings.n_ctx`. We hit that first.
 ///
 /// Note: the model file's GGUF metadata can advertise a much larger
 /// architecturally-supported window (e.g. Qwen3 is trained to 128k),
 /// but the SERVER will only accept up to `n_ctx`. So `/props` is the
-/// authoritative number — it's the ceiling that won't cause truncation.
+/// authoritative number -- it's the ceiling that won't cause truncation.
 ///
 /// `/v1/models` is a fallback in case the user pointed a non-standard
-/// build (or a non-llama.cpp server they mislabeled) at this path —
+/// build (or a non-llama.cpp server they mislabeled) at this path --
 /// some forks expose `max_model_len` there.
 async fn caps_via_llamacpp(
     client: &reqwest::Client,
@@ -617,7 +617,7 @@ async fn caps_via_llamacpp(
             }
         }
     }
-    // /props didn't help — try the OpenAI-compat path as a last resort.
+    // /props didn't help -- try the OpenAI-compat path as a last resort.
     caps_via_openai(client, base, api_key, model).await
 }
 
@@ -801,30 +801,30 @@ mod port_coverage_tests {
         // Sanity: stay well under a count that would blow up scan time.
         assert!(
             list.len() < 90,
-            "port set grew to {} — keep it lean (probes = ports × 254 hosts)",
+            "port set grew to {}: keep it lean (probes = ports x 254 hosts)",
             list.len()
         );
         assert!(list.iter().all(|p| p.port > 0));
     }
 }
 
-/// Quick "is this model server answering?" probe — bounded at 1.5s so
+/// Quick "is this model server answering?" probe -- bounded at 1.5s so
 /// menu/status surfaces stay snappy (LAN endpoints answer in <50ms;
 /// connection-refused fails in ms). Provider-aware:
-///   * llamacpp — `GET /health`: returns 503 while a model is loading,
+///   * llamacpp -- `GET /health`: returns 503 while a model is loading,
 ///     200 when ready. Treat only 2xx as alive so "loading" reads as
 ///     not-ready (which is exactly what routing/menus need to know).
-///   * ollama   — `GET /api/tags`: daemon up ⇒ will serve (models load
+///   * ollama   -- `GET /api/tags`: daemon up ⇒ will serve (models load
 ///     on demand; cold load just adds latency).
-///   * others   — `GET /v1/models` (the universal OpenAI-compat surface).
+///   * others   -- `GET /v1/models` (the universal OpenAI-compat surface).
 pub async fn probe_alive(settings: &LlmSettings) -> bool {
-    // 1.5s is a LAN budget — a model server one hop away answers in
+    // 1.5s is a LAN budget -- a model server one hop away answers in
     // well under that, and a longer wait would stall menus. A cloud slot
-    // (https — LAN model servers are plain http) crosses the internet:
+    // (https -- LAN model servers are plain http) crosses the internet:
     // DNS + TCP + TLS + first byte can exceed 1.5s on a slow uplink
     // while the endpoint is perfectly able to serve chat. A false "dead"
     // here is cached 15s, and the known-dead skip would then override an
-    // EXPLICIT `/online` request — so give WAN probes the same 4s the
+    // EXPLICIT `/online` request -- so give WAN probes the same 4s the
     // chat client's connect phase gets.
     let budget = if settings.base_url.trim_start().starts_with("https") {
         Duration::from_millis(4000)
@@ -845,7 +845,7 @@ pub async fn probe_alive(settings: &LlmSettings) -> bool {
             let url = format!("{base}/health");
             match client.get(&url).send().await {
                 Ok(r) if r.status().is_success() => true,
-                // A 404 means an older llama.cpp without /health — fall
+                // A 404 means an older llama.cpp without /health -- fall
                 // back to the OpenAI-compat surface before giving up.
                 Ok(r) if r.status().as_u16() == 404 => list_via_openai(
                     &client,
@@ -859,7 +859,7 @@ pub async fn probe_alive(settings: &LlmSettings) -> bool {
         }
         // Same provider-mismatch tolerance as llamacpp below: a slot
         // labeled "ollama" but pointed at an OpenAI-style server (a cloud
-        // API, vLLM, …) has no /api/tags — chat would work fine, yet the
+        // API, vLLM, …) has no /api/tags -- chat would work fine, yet the
         // probe would call it dead, and the known-dead skip would then
         // refuse to route the user's explicit choice there. Try the
         // OpenAI surface before giving up.

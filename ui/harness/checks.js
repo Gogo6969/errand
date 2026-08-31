@@ -1600,14 +1600,20 @@ export async function aCall() {
   const card = document.querySelector("#messages .asking .choices");
   const yes = [...(card?.querySelectorAll("button") || [])].find((b) => /^yes/i.test(b.textContent));
   check("the question can still be answered in the window", yes, card ? "no yes button" : "no card");
+  // From here on, so that what happens after it does not decide the answer.
+  // Asserting that "start" was the *last* thing heard made this depend on
+  // whether the stand-in's next result and its pause timer landed inside the
+  // wait, which they do on a slow run: it listened again and then sent, and
+  // the check called that a failure to listen.
+  const beforeAnswering = window.__HEARD__.length;
   yes?.click();
   await new Promise((r) => setTimeout(r, 300));
   tell("happened", { conversation: where, seq: 9201, kind: "done" });
   await new Promise((r) => setTimeout(r, 400));
   check(
     "answering it puts the call back to listening",
-    window.__HEARD__.lastIndexOf("start") > window.__HEARD__.lastIndexOf("stop"),
-    window.__HEARD__.join(","),
+    window.__HEARD__.slice(beforeAnswering).includes("start"),
+    window.__HEARD__.slice(beforeAnswering).join(",") || "nothing happened",
   );
 
   // The way out somebody reaches for without looking, in the one state where

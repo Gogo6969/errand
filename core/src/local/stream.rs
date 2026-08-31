@@ -131,11 +131,11 @@ impl HarmonyParser {
         match (self.channel, self.pending_tool.as_mut()) {
             (HarmonyChannel::Thought, _) => out.push(HarmonyEmit::Reasoning(segment)),
             (HarmonyChannel::Commentary, Some(pt)) => {
-                // Inside a tool-call commentary block — buffer the JSON args.
+                // Inside a tool-call commentary block -- buffer the JSON args.
                 pt.args.push_str(&segment);
             }
             (HarmonyChannel::Commentary, None) => {
-                // Plain commentary (no tool target) — surface as reasoning,
+                // Plain commentary (no tool target) -- surface as reasoning,
                 // since it's usually status notes about what the model is
                 // doing rather than the final answer.
                 out.push(HarmonyEmit::Reasoning(segment));
@@ -169,7 +169,7 @@ impl HarmonyParser {
                 self.channel = HarmonyChannel::Default;
             }
             Marker::Skip => {
-                // <|message|>, <|start|>, <|constrain|>… — purely structural.
+                // <|message|>, <|start|>, <|constrain|>… -- purely structural.
             }
         }
     }
@@ -199,11 +199,11 @@ enum Marker {
     CommentaryOpen {
         tool: Option<String>,
     },
-    /// `<|call|>` — only used to close tool-call commentary blocks.
+    /// `<|call|>` -- only used to close tool-call commentary blocks.
     CallClose,
-    /// `<|end|>`, `<|return|>`, `<channel|>` — generic channel close.
+    /// `<|end|>`, `<|return|>`, `<channel|>` -- generic channel close.
     Close,
-    /// `<|message|>`, `<|start|>`, `<|constrain|>…` — structural, skip.
+    /// `<|message|>`, `<|start|>`, `<|constrain|>…` -- structural, skip.
     Skip,
 }
 
@@ -271,7 +271,7 @@ fn next_marker(s: &str) -> Option<MarkerHit> {
                 (Some(_), Some(b)) => (after + b, "<message>".len()),
                 (None, None) => {
                     // The opener exists but its terminator hasn't streamed
-                    // in yet — skip for now, we'll see it on the next feed.
+                    // in yet -- skip for now, we'll see it on the next feed.
                     continue;
                 }
             };
@@ -315,7 +315,7 @@ fn safe_emit_len(s: &str) -> usize {
     let len = s.len();
     let mut tail_start = len.saturating_sub(MAX_MARKER_LEN);
     // Align forward to a UTF-8 char boundary. `len - 64` can land inside a
-    // multi-byte character (emoji/CJK/accented Latin — common in normal
+    // multi-byte character (emoji/CJK/accented Latin -- common in normal
     // model output), and slicing there panics, killing the pump task and
     // silently truncating the reply. Keeping a few extra tail bytes
     // buffered is harmless.
@@ -334,7 +334,7 @@ mod safe_emit_tests {
 
     #[test]
     fn never_slices_inside_a_multibyte_char() {
-        // 40 emoji × 4 bytes = 160 bytes, no '<' — pre-fix this panicked
+        // 40 emoji × 4 bytes = 160 bytes, no '<' -- pre-fix this panicked
         // on the s[len-64..] slice landing mid-character.
         let s = "🎉".repeat(40);
         let n = safe_emit_len(&s);
@@ -408,7 +408,7 @@ pub async fn open_as(
     // Honor cancellation while the initial HTTP send is in flight.
     // Without this select, a stalled LLM (TCP connect succeeded but
     // headers never arrive) leaves `request.send().await` blocked
-    // forever — the Stop button's `cancel.cancel()` would fire,
+    // forever -- the Stop button's `cancel.cancel()` would fire,
     // pump() would never get to see it, and the user is stuck with
     // the "typing…" indicator until they kill the process. The
     // select races the request against the token; first wins.
@@ -535,7 +535,8 @@ async fn pump(
                     Ok(n) => n,
                     Err(_elapsed) => {
                         let _ = tx.send(ChatDelta::Error(
-                            "the model server went silent for 5 minutes — connection treated as stalled".into(),
+                            "the model server went silent for 5 minutes, so the connection is treated as stalled"
+                                .into(),
                         ));
                         return Ok(());
                     }
@@ -671,12 +672,12 @@ struct StreamDelta {
     /// Chain-of-thought trace emitted by reasoning models when the
     /// server surfaces it as a separate field (not inline in content).
     ///
-    /// Field-name zoo across backends — we accept all of them via serde
+    /// Field-name zoo across backends -- we accept all of them via serde
     /// aliases so the reasoning panel lights up regardless of which
     /// server the host points a slot at:
-    ///   * `reasoning`          — vLLM / some OpenAI-compatible servers
-    ///   * `reasoning_content`  — llama.cpp, DeepSeek-R1, Qwen3 (this is
-    ///     what the deep slot's Qwen3.6-35B emits — without the alias
+    ///   * `reasoning`          -- vLLM / some OpenAI-compatible servers
+    ///   * `reasoning_content`  -- llama.cpp, DeepSeek-R1, Qwen3 (this is
+    ///     what the deep slot's Qwen3.6-35B emits -- without the alias
     ///     the entire multi-second thinking phase was silently dropped
     ///     and the user saw dead air under the thinking-dots until the
     ///     final answer finally arrived in `content`)
