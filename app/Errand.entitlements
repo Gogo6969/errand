@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    The hardened runtime refuses these unless they are asked for by name, and
+    notarisation refuses a build without the hardened runtime. So each one here
+    is a thing Errand actually does, and nothing else is listed.
+  -->
+
+  <!-- Dictation and the call. Without it the microphone is refused silently,
+       which looks exactly like a broken button. -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+
+  <!-- Errand's whole job: starting Claude Code and local model servers as
+       child processes. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!-- The engines it starts inherit the sandbox exceptions they need rather
+       than being refused at exec. -->
+  <key>com.apple.security.inherit</key>
+  <true/>
+</dict>
+</plist>
