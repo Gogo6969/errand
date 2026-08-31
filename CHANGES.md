@@ -5,7 +5,7 @@ the last, which is the only way there is: there is no updater, no remote to
 update from, and nothing that signs a build. Each line is something a person
 would notice, not something a commit did.
 
-## 0.1.0
+## 0.2.0
 
 - Answers arrive as they are written, a word at a time, rather than after
   several seconds of nothing followed by a wall of text.
@@ -29,3 +29,9 @@ would notice, not something a commit did.
 - Fixed: the first thing said to a new agent failed with a database error, and
   a routine, watch, goal, name or model chosen for one was accepted and
   quietly kept by nobody.
+
+## 0.1.0
+
+- The first one anybody ran. No notes were written for it, and this line
+  exists so that a version somebody is still running does not answer "what
+  changed" with nothing at all.
