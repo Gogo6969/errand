@@ -68,6 +68,15 @@ pub struct LlmSettings {
     /// Which model, e.g. `qwen2.5-coder:14b`.
     pub model: String,
     /// How much it can hold, in tokens.
+    ///
+    /// Defaulted, because not everything that writes these settings knows it.
+    /// The picker writes what it learned from asking the server -- who is
+    /// serving, where, which model, which protocol -- and nothing about
+    /// sizes. Required, that made every model added from the picker unusable:
+    /// the settings were stored, the agent said "Now on Qwen3.8-27B", and the
+    /// first thing said to it came back "this thread has no model chosen",
+    /// which was not true and pointed nowhere near the fault.
+    #[serde(default = "as_much_as_most_hold")]
     pub context_window: usize,
     /// For endpoints that want one. Most local ones do not.
     pub api_key: Option<String>,
@@ -82,6 +91,7 @@ pub struct LlmSettings {
     #[serde(default)]
     pub temperature: Option<f32>,
     /// The ceiling on one reply.
+    #[serde(default = "enough_for_an_answer")]
     pub max_tokens: usize,
 }
 
@@ -89,6 +99,19 @@ pub struct LlmSettings {
 /// choice must go on meaning.
 fn the_usual_protocol() -> String {
     "openai".to_string()
+}
+
+/// A size that suits nearly everything served locally today.
+///
+/// The same number `Default` uses, named so that settings written without one
+/// mean what settings written with none of them mean.
+fn as_much_as_most_hold() -> usize {
+    32_768
+}
+
+/// Room for an answer rather than for a book.
+fn enough_for_an_answer() -> usize {
+    4_096
 }
 
 impl LlmSettings {
@@ -251,6 +274,40 @@ pub struct ToolDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_the_picker_writes_is_enough_to_use_the_model_it_names() {
+        // Exactly what the "Show in picker" button stores: who is serving,
+        // where, which model, which protocol. Nothing about sizes, because
+        // asking a server what it has does not tell you those.
+        //
+        // Required fields, that made every model added from the picker
+        // unusable. The settings were stored, the header said "Now on
+        // Qwen3.8-27B-Q4_K_M", and the first thing said to it came back "this
+        // thread has no model chosen", which was untrue and pointed nowhere
+        // near the fault.
+        let written = r#"{"provider":"llamacpp","base_url":"http://192.168.1.25:8081","model":"Qwen3.8-27B-Q4_K_M","wire":"openai"}"#;
+        let settings: LlmSettings = serde_json::from_str(written).expect("the picker's own shape");
+
+        assert_eq!(settings.model, "Qwen3.8-27B-Q4_K_M");
+        assert_eq!(settings.base_url, "http://192.168.1.25:8081");
+        // And the two it does not write mean what they mean everywhere else.
+        assert_eq!(
+            settings.context_window,
+            LlmSettings::default().context_window
+        );
+        assert_eq!(settings.max_tokens, LlmSettings::default().max_tokens);
+    }
+
+    #[test]
+    fn settings_stored_before_the_protocol_was_a_choice_still_mean_what_they_meant() {
+        // The oldest shape of all, from before `wire` existed.
+        let old =
+            r#"{"provider":"ollama","base_url":"http://localhost:11434","model":"qwen2.5:7b"}"#;
+        let settings: LlmSettings = serde_json::from_str(old).expect("an older shape");
+        assert_eq!(settings.wire, "openai");
+        assert_eq!(settings.model, "qwen2.5:7b");
+    }
 
     #[test]
     fn each_provider_is_reached_where_it_actually_serves() {

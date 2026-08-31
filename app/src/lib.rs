@@ -377,8 +377,17 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // remembered by anything outside this app, which is the difference
             // between the two: Claude Code holds its own session, and this
             // holds none.
+            // Said with the reason. "No model chosen" was what this reported
+            // for settings that were chosen, stored and shown in the header a
+            // line above, and it sent somebody looking at the picker for a
+            // fault that was in what the picker had written.
             let settings: LlmSettings = serde_json::from_str(&settings.unwrap_or_default())
-                .map_err(|_| "this thread has no model chosen".to_string())?;
+                .map_err(|why| {
+                    format!(
+                        "the model set for this thread could not be read ({why}). \
+                         Choose it again in the picker at the top."
+                    )
+                })?;
             let asks = known.as_ref().map_or("ask", |a| a.asks.as_str());
             // A local model keeps no session at all, so a conversation carried
             // on from another needs what happened told to it, the same way
