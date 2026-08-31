@@ -2120,6 +2120,35 @@ export async function whatElseIsAllowed() {
     /judges harmless/i.test(said),
     said.slice(-90),
   );
+  // Nineteen rules is an ordinary number to have, and this panel is a third of
+  // a short window. What has to survive that is the prose: the list can be
+  // scrolled to, the two sentences explaining it cannot be found by somebody
+  // who does not know they are there.
+  window.__ALSO_MODE__ = {
+    allow: Array.from({ length: 20 }, (_, i) => ({
+      rule: `Bash(thing${i} *)`,
+      whose: "~/.claude/settings.json",
+    })),
+    deny: [],
+    mode: null,
+    mode_says: null,
+  };
+  document.getElementById("granted").click();
+  await new Promise((r) => setTimeout(r, 200));
+  document.getElementById("granted").click();
+  await new Promise((r) => setTimeout(r, 300));
+  {
+    const box = document.getElementById("granting").getBoundingClientRect();
+    const lines = [...document.querySelectorAll("#also-allowed .also-what")];
+    check(
+      "a long list does not push the sentences explaining it out of the panel",
+      lines.length === 2 && lines.every((p) => p.getBoundingClientRect().bottom <= box.bottom + 1),
+      lines
+        .map((p) => `${Math.round(p.getBoundingClientRect().bottom)} of ${Math.round(box.bottom)}`)
+        .join(", "),
+    );
+  }
+
   // A mode set for every session, said the way the app says it. The window
   // does not write this sentence: it does not know what Errand puts on the
   // command line, and when it did write it, it was the one line on the screen

@@ -1824,9 +1824,14 @@ async function drawAlsoAllowed() {
   el.alsoAllowed.hidden = !rows.length && !mode;
   if (el.alsoAllowed.hidden) return;
 
+  // Everything worth reading first, and the list last. Nineteen rules is an
+  // ordinary number to have, and with the list in the middle the sentence under
+  // it was pushed out of a panel that is a third of a short window: three rules
+  // were visible and the rest of the answer was somewhere below the fold.
   const parts = [];
-  const head = note("p", "Claude Code also allows these on its own. Errand cannot take them back here.", "also-what");
-  parts.push(head);
+  parts.push(
+    note("p", "Claude Code also allows these on its own. Errand cannot take them back here.", "also-what"),
+  );
   // The loudest thing first where there is one: a mode that asks nothing makes
   // every list on this screen beside the point, and a list of careful rules
   // above it reads as a boundary that is not there.
@@ -1837,6 +1842,18 @@ async function drawAlsoAllowed() {
     const loud = theirs.mode?.managed === true;
     parts.push(note("p", mode, loud ? "also-mode" : "also-what"));
   }
+  // The other half of what runs without asking, and the half that is not a
+  // list at all. Checked rather than assumed: `echo hello-from-errand` ran in
+  // this app with nothing in either list covering it, and `ls -la /private/tmp`
+  // in the same agent a minute later stopped and asked.
+  parts.push(
+    note(
+      "p",
+      "Some commands the engine judges harmless it runs without asking either list.",
+      "also-what",
+    ),
+  );
+
   const list = document.createElement("ul");
   list.className = "also-list";
   for (const one of rows) {
@@ -1850,17 +1867,6 @@ async function drawAlsoAllowed() {
     list.append(row);
   }
   if (rows.length) parts.push(list);
-  // The other half of what runs without asking, and the half that is not a
-  // list at all. Checked rather than assumed: `echo hello-from-errand` ran in
-  // this app with nothing in either list covering it, and `ls -la /private/tmp`
-  // in the same agent a minute later stopped and asked.
-  parts.push(
-    note(
-      "p",
-      "Some commands the engine judges harmless it runs without asking either list.",
-      "also-what",
-    ),
-  );
   el.alsoAllowed.replaceChildren(...parts);
 }
 
