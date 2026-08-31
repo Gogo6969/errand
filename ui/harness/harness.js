@@ -241,6 +241,8 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
   // What the file in LaunchAgents would say. The real one is read from disk
   // every time the screen opens; this is the same thing without a disk.
   let atLogin = "no";
+  /** What is being watched, once anything has set or stopped it. */
+  let watchedNow = null;
   return {
     core: {
       invoke(name, args) {
@@ -269,8 +271,17 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.whats_running);
           case "brought":
             return Promise.resolve(fixture.brought);
+          // Whatever was last set, rather than the fixture every time. Saving
+          // and stopping a watch are the two things this panel does, and a
+          // stand-in that answers the same thing before and after cannot tell
+          // a panel that works from one that does nothing at all.
           case "watches":
-            return Promise.resolve(fixture.watches);
+            return Promise.resolve(watchedNow ?? fixture.watches);
+          case "watch_it":
+            watchedNow = args.watches
+              ? { ...fixture.watches, watches: args.watches, what: args.what }
+              : { ...fixture.watches, watches: null, what: null, means: null, paused: null };
+            return Promise.resolve(null);
           // The conversation with the live question in it is live; the rest
           // are history. Which is the whole distinction being tested.
           case "still_going":

@@ -52,6 +52,56 @@
   });
   const page = await (await fetch(`../index.html${fresh}`, { cache: "no-store" })).text();
   const real = new DOMParser().parseFromString(page, "text/html");
+  // A clock that keeps time in a tab nobody is looking at.
+  //
+  // Chrome throttles setTimeout in a background tab to once a minute, and this
+  // page is nearly always in a background tab: the run has a little under half
+  // a minute of deliberate waiting in it, which turned into most of an hour and
+  // usually never finished at all. A worker's timers are not throttled that
+  // way, so one ticks and this page drains whatever has come due.
+  //
+  // The delays themselves are kept honestly. Nothing here makes a 1400ms pause
+  // shorter than 1400ms, which matters: one of the checks is about that exact
+  // pause. Only the scheduling changes.
+  (() => {
+    const due = new Map();
+    let next = 1;
+    const tick = new Worker(
+      URL.createObjectURL(new Blob(["setInterval(()=>postMessage(0),20)"], { type: "text/javascript" })),
+    );
+    tick.onmessage = () => {
+      const now = performance.now();
+      for (const [id, one] of [...due]) {
+        if (one.at > now) continue;
+        // A repeating one is put back before it runs, so that clearing it from
+        // inside itself still clears it.
+        if (one.every) one.at = now + one.every;
+        else due.delete(id);
+        try {
+          one.fn(...one.args);
+        } catch (why) {
+          // Thrown where the page can see it, rather than swallowed inside the
+          // tick and reported as nothing happening.
+          queueMicrotask(() => {
+            throw why;
+          });
+        }
+      }
+    };
+    const after = (fn, ms, args, every) => {
+      const id = next++;
+      due.set(id, { fn, args, at: performance.now() + (Number(ms) || 0), every });
+      return id;
+    };
+    window.setTimeout = (fn, ms = 0, ...args) => after(fn, ms, args, 0);
+    window.clearTimeout = (id) => due.delete(id);
+    // Both, or the half that was missed goes on being throttled: the goal panel
+    // and the watch panel both refresh themselves on an interval, and a check
+    // waiting for one of those refreshes waited for a minute that never came.
+    window.setInterval = (fn, ms = 0, ...args) => after(fn, ms, args, Number(ms) || 0);
+    window.clearInterval = (id) => due.delete(id);
+  })();
+
   const report = document.getElementById("report");
   // Its own script tags came with it and would run unstubbed.
   real.body.querySelectorAll("script").forEach((s) => s.remove());

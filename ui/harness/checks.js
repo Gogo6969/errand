@@ -2361,12 +2361,24 @@ export async function theMenuOnAnAgent() {
     labels.join(" | "),
   );
   // Asking about an agent is not asking to go and look at it: switching under
-  // somebody loses whatever they were reading.
+  // somebody loses whatever they were reading. Asked of a different agent than
+  // the open one, since the one just made is open by definition.
+  const openBefore = document.querySelector('#threads li[aria-current="true"]')?.dataset.agent;
+  const another = [...document.querySelectorAll("#threads li")].find(
+    (li) => li.dataset.agent && li.dataset.agent !== openBefore,
+  );
+  another?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 110, clientY: 180 }));
+  await new Promise((r) => setTimeout(r, 120));
   check(
     "right-clicking does not open the agent",
-    document.getElementById("threads").querySelector('li[aria-current="true"]') !== row,
-    "left where it was",
+    document.querySelector('#threads li[aria-current="true"]')?.dataset.agent === openBefore,
+    `${openBefore} still open`,
   );
+  // Back to the one being deleted.
+  document.body.click();
+  await new Promise((r) => setTimeout(r, 80));
+  row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 200 }));
+  await new Promise((r) => setTimeout(r, 120));
 
   // Delete asks before it does it.
   const del = [...menu.querySelectorAll("button")].find((b) => /^Delete/.test(b.textContent));
@@ -2436,6 +2448,14 @@ export async function settingAWatchExplainsItself() {
   document.getElementById("watch").click();
   await new Promise((r) => setTimeout(r, 350));
 
+  // From nothing being watched, whatever an earlier check left behind. The
+  // panel describes a state, so a check about the empty state has to make it.
+  const wasWatching = document.getElementById("watch-stop");
+  if (!wasWatching.hidden) {
+    wasWatching.click();
+    await new Promise((r) => setTimeout(r, 300));
+  }
+
   const at = document.getElementById("watch-at");
   const often = document.getElementById("watch-often");
   const what = document.getElementById("watch-what");
@@ -2451,6 +2471,11 @@ export async function settingAWatchExplainsItself() {
   );
   // Nothing is being watched yet, so there is nothing to stop.
   check("it does not offer to stop something that never started", stop.hidden, `hidden=${stop.hidden}`);
+  at.value = "";
+  at.dispatchEvent(new Event("input"));
+  what.value = "";
+  what.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 100));
   check(
     "an empty panel says what to do rather than nothing",
     /Name a folder/.test(plain.textContent),
@@ -2496,6 +2521,13 @@ export async function settingAWatchExplainsItself() {
     JSON.stringify(sent?.args),
   );
 
+  // Stopped again, so the next check meets the panel in the state this one
+  // met it in.
+  const stopAfter = document.getElementById("watch-stop");
+  if (!stopAfter.hidden) {
+    stopAfter.click();
+    await new Promise((r) => setTimeout(r, 300));
+  }
   document.getElementById("watch").click();
   return found;
 }
