@@ -161,6 +161,12 @@
         <label>When <input id="routine-at" type="text" placeholder="daily 07:00" autocomplete="off" /></label>
         <label>Do this <input id="routine-what" type="text" placeholder="What it should do each time" autocomplete="off" /></label>
         <button id="routine-save" type="button">Save</button>
+        <!--
+          The half of the loop that was missing: you could set a thing to run
+          every morning and had no way to find out what it did until a morning
+          had gone past.
+        -->
+        <button id="routine-try" type="button" title="Say it now, without changing when it next runs">Try it now</button>
         <button id="routine-stop" type="button">Stop repeating</button>
         <!-- What was actually asked here, to take rather than retype. -->
         <div id="routine-said" class="from-here" hidden></div>
@@ -173,6 +179,7 @@
                  autocorrect="off" autocapitalize="off" spellcheck="false" /></label>
         <label>Then say <input id="watch-what" type="text" placeholder="What it should do when it changes" autocomplete="off" /></label>
         <button id="watch-save" type="button">Save</button>
+        <button id="watch-try" type="button" title="Say it now, as if it had just woken">Try it now</button>
         <button id="watch-stop" type="button">Stop watching</button>
         <button id="watch-again" type="button" hidden>Look again</button>
         <div id="watch-said" class="from-here" hidden></div>
@@ -230,6 +237,13 @@
         than no explanation is one that will not go away.
       -->
       <aside id="tour" hidden></aside>
+
+      <!--
+        What changed in this one, for somebody who has just installed it over
+        the top of the last. Shown once after that, and after that only when
+        asked for.
+      -->
+      <aside id="changed" hidden></aside>
 
       <!--
         Everything you can do, in one place you can type at. The header can

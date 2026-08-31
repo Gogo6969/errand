@@ -131,6 +131,7 @@ const el = {
   working: document.getElementById("working"),
   costing: document.getElementById("costing"),
   tour: document.getElementById("tour"),
+  changed: document.getElementById("changed"),
   speak: document.getElementById("speak"),
   call: document.getElementById("call"),
   watch: document.getElementById("watch"),
@@ -144,6 +145,7 @@ const el = {
   watchAt: document.getElementById("watch-at"),
   watchWhat: document.getElementById("watch-what"),
   watchSaid: document.getElementById("watch-said"),
+  watchTry: document.getElementById("watch-try"),
   watchSave: document.getElementById("watch-save"),
   watchStop: document.getElementById("watch-stop"),
   watchAgain: document.getElementById("watch-again"),
@@ -171,6 +173,7 @@ const el = {
   routineAt: document.getElementById("routine-at"),
   routineWhat: document.getElementById("routine-what"),
   routineSaid: document.getElementById("routine-said"),
+  routineTry: document.getElementById("routine-try"),
   routineSave: document.getElementById("routine-save"),
   routineStop: document.getElementById("routine-stop"),
   routineSays: document.getElementById("routine-says"),
@@ -367,6 +370,9 @@ async function catchUp() {
   const known = await invoke("agents");
   for (const a of known) agents.set(a.id, asAgent(a, agents.get(a.id)));
   drawThreads();
+  // A version somebody has not been told about yet, said once. After the tour,
+  // because a brand new copy has nothing to have changed from.
+  if (known.length) await whatChanged(false);
   if (known.length) await openAgent(known[0].id);
   else {
     await start();
@@ -1679,6 +1685,38 @@ el.routineSave.addEventListener("click", async () => {
   drawTalks();
 });
 
+/**
+ * Say it now, without changing when it next runs.
+ *
+ * The missing half of the loop this whole app is for. You could set something
+ * to run every morning and there was no way to find out what it actually did
+ * until a morning had gone past, so the first run of a routine was always in
+ * front of nobody -- which is the one run you would most want to watch.
+ *
+ * What is in the box rather than what was saved, because the point is to try
+ * the version you are about to keep. Nothing is saved by trying, and nothing
+ * about the schedule moves: a trial that counted as the morning's run would
+ * take away the run it was supposed to be rehearsing.
+ *
+ * @param {HTMLInputElement} box where the words are
+ * @param {HTMLElement} says the line under the panel
+ * @param {HTMLElement} panel the panel to put away, so the errand can be seen
+ */
+async function tryItNow(box, says, panel) {
+  const what = box.value.trim();
+  if (!what) {
+    says.textContent = "There is nothing to try yet. Say what it should do first.";
+    return;
+  }
+  panel.hidden = true;
+  await sayIt(what);
+}
+
+el.routineTry.addEventListener("click", () =>
+  tryItNow(el.routineWhat, el.routineSays, el.routine),
+);
+el.watchTry.addEventListener("click", () => tryItNow(el.watchWhat, el.watchSays, el.watching));
+
 el.routineStop.addEventListener("click", async () => {
   const t = talking();
   if (!t) return;
@@ -1898,6 +1936,7 @@ function whatCouldBeDone() {
   add("Make this run on a schedule", "", () => el.repeat.click(), !!showing);
   add("Which models show up", "", () => showModels(), true);
   add("What Errand is", `the whole thing, in ${WHAT_THIS_IS.length} lines`, () => showTheTour(), true);
+  add("What changed in this one", "since the version before it", () => whatChanged(), true);
   add("What it has cost", "today and this month", () => whatItCost(), true);
   add("Check this setup", "what is wrong, and what to do", () => checkup());
   add("What is running", "everywhere, not just here", () => whatsRunning());
@@ -3504,6 +3543,57 @@ function showTheTour() {
     el.what.focus();
   };
   el.tour.replaceChildren(head, ...rows, done);
+}
+
+/**
+ * What changed in this one.
+ *
+ * Every copy of Errand is installed by hand over the top of the last, so the
+ * only moment anybody knows a version has changed is the moment they see
+ * something different and wonder whether they imagined it. Shown once for a
+ * version and then only when asked for: a panel that comes back at every launch
+ * is a panel people learn to close without reading.
+ *
+ * @param {boolean} asked whether somebody went looking for it, in which case it
+ *   opens and closes like every other panel here
+ */
+async function whatChanged(asked = true) {
+  if (asked && !el.changed.hidden) {
+    el.changed.hidden = true;
+    return;
+  }
+  let changed;
+  try {
+    changed = await invoke("what_changed");
+  } catch {
+    // Notes are not worth a red line in a conversation. Somebody who wanted
+    // them and did not get them will ask again; somebody who did not ask
+    // should not be told about it at all.
+    return;
+  }
+  if (!changed.notes || (!asked && !changed.first_time)) return;
+
+  // Written down before it is drawn, so a crash while drawing does not mean
+  // being shown the same notes at every launch from now on.
+  invoke("seen_what_changed").catch(() => {});
+
+  el.changed.hidden = false;
+  const head = note("p", `What changed in ${changed.notes.version}`, "changed-what");
+  const list = document.createElement("ul");
+  list.className = "changed-list";
+  for (const line of changed.notes.lines) {
+    const one = document.createElement("li");
+    one.textContent = line;
+    list.append(one);
+  }
+  const done = document.createElement("button");
+  done.type = "button";
+  done.className = "tour-done";
+  done.textContent = "Got it";
+  done.onclick = () => {
+    el.changed.hidden = true;
+  };
+  el.changed.replaceChildren(head, list, done);
 }
 
 async function whatItCost() {

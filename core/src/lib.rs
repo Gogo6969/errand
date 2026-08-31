@@ -17,6 +17,7 @@
 
 pub mod allowing;
 pub mod atlogin;
+pub mod changes;
 pub mod claude;
 pub mod doctor;
 pub mod doorway;

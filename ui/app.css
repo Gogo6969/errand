@@ -1257,6 +1257,7 @@ body.catching #what { border-color: var(--accent); }
    beside them. Two pixels is enough to read as sloppy, and it was. */
 #routine input, #watching input, #aiming input,
 #routine-save, #watch-save, #goal-save,
+#routine-try, #watch-try,
 #routine-stop, #watch-stop, #watch-again, #goal-stop {
   height: 34px;
   border-radius: 8px;
@@ -1272,6 +1273,7 @@ body.catching #what { border-color: var(--accent); }
   font-weight: 500;
   cursor: pointer;
 }
+#routine-try, #watch-try,
 #routine-stop, #watch-stop, #watch-again, #goal-stop {
   padding: 0 14px;
   border: 1px solid var(--rule);
@@ -1279,6 +1281,7 @@ body.catching #what { border-color: var(--accent); }
   color: var(--ink-soft);
   cursor: pointer;
 }
+#routine-try:hover, #watch-try:hover,
 #routine-stop:hover, #watch-stop:hover, #watch-again:hover, #goal-stop:hover { color: var(--ink); border-color: var(--edge); }
 /* What it says back: when it next runs, or why what was typed is not a time. */
 /* What was actually asked in this conversation, to take rather than retype.
@@ -1623,6 +1626,23 @@ body.catching #what { border-color: var(--accent); }
   cursor: pointer;
 }
 #tour .tour-done:hover { color: var(--ink); border-color: var(--edge); }
+
+/* What changed, in the same shape as what this app is. The two are read the
+   same way and one of them is usually opened straight after the other. */
+#changed[hidden] { display: none; }
+#changed {
+  border-bottom: 1px solid var(--rule);
+  background: var(--side);
+  padding: 14px 18px;
+  max-height: 60vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+#changed .changed-what { margin: 0; font-weight: 500; color: var(--ink); }
+#changed .changed-list { list-style: disc; margin: 0; padding-left: 18px; max-width: 78ch; }
+#changed .changed-list li { color: var(--ink-soft); font-size: 13px; line-height: 1.55; margin-bottom: 4px; }
 
 /* What it has cost, in the same shape as what is running. The two are opened
    the same way and read the same way, and there is no reason for them to look

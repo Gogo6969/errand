@@ -1988,8 +1988,46 @@ export async function repeatingWhatWasAsked() {
     `offered at ${Math.round(row.top)}, boxes end ${Math.round(at.bottom)}`,
   );
 
+  // And the other half of the loop: trying the thing before a morning goes
+  // past. The first run of a routine was always in front of nobody, which is
+  // the one run anybody would most want to watch.
+  const says = document.getElementById("routine-says");
+  const tryIt = document.getElementById("routine-try");
+  check("there is a way to try it before it ever runs", tryIt, "no button");
+
   box.value = "";
-  document.getElementById("repeat").click();
+  tryIt?.click();
+  await new Promise((r) => setTimeout(r, 120));
+  check(
+    "trying nothing says so rather than sending an empty errand",
+    /nothing to try/i.test(says.textContent) && !asked.some((a) => a.name === "say" && !a.args?.text),
+    says.textContent,
+  );
+
+  const before = asked.filter((a) => a.name === "runs").length;
+  box.value = "Give me the overnight numbers";
+  tryIt.click();
+  await new Promise((r) => setTimeout(r, 350));
+  check(
+    "trying it says the thing, now",
+    asked.some((a) => a.name === "say" && a.args?.text === "Give me the overnight numbers"),
+    JSON.stringify(asked.filter((a) => a.name === "say").slice(-1)),
+  );
+  // The two things trying must not do. Saving it would keep a version nobody
+  // agreed to, and moving the schedule would take away the run this was
+  // rehearsing for.
+  check(
+    "and saves nothing by trying",
+    asked.filter((a) => a.name === "runs").length === before,
+    `${asked.filter((a) => a.name === "runs").length - before} saves`,
+  );
+  check(
+    "and puts the panel away so the errand can be watched",
+    document.getElementById("routine").hidden,
+    `hidden=${document.getElementById("routine").hidden}`,
+  );
+
+  box.value = "";
   return found;
 }
 
@@ -2057,6 +2095,78 @@ export async function whatElseIsAllowed() {
 
   document.getElementById("granted").click();
   await openTalk(wasOn);
+  return found;
+}
+
+/**
+ * What changed in this one.
+ *
+ * Every copy of Errand is installed by hand over the top of the last, so the
+ * only moment anybody knows the version changed is the moment they notice
+ * something different and wonder whether they imagined it. The rule that
+ * matters is the second one: once, and then only when asked, because a panel
+ * that returns at every launch is a panel people learn to close unread.
+ */
+export async function whatChangedInThisOne() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const panel = document.getElementById("changed");
+
+  // Shown by itself, without being asked for: this window was opened on a
+  // version nobody had been told about, which is what happens every time a copy
+  // is installed over the top of the last.
+  check(
+    "a version nobody has been told about says what changed, unasked",
+    !panel.hidden,
+    `hidden=${panel.hidden}`,
+  );
+  const said = panel.textContent;
+  check("it says which version they are for", /0\.1\.0/.test(said), said.slice(0, 60));
+  check(
+    "and what a person would notice, rather than what a commit did",
+    /Answers arrive as they are written/.test(said),
+    said.slice(0, 120),
+  );
+  check(
+    "each note is its own line",
+    panel.querySelectorAll(".changed-list li").length === 2,
+    `${panel.querySelectorAll(".changed-list li").length} lines`,
+  );
+  // Told, so it is not told again.
+  check("looking at them counts as having been told", window.__TOLD__ === true, `told=${window.__TOLD__}`);
+
+  const done = panel.querySelector(".tour-done");
+  check("there is a way to be finished with them", done, "no button");
+  done?.click();
+  await new Promise((r) => setTimeout(r, 80));
+  check("and they go away", panel.hidden, `hidden=${panel.hidden}`);
+
+  // And they stay away. A panel that comes back at every launch is one people
+  // learn to close without reading, which is the whole reason for remembering
+  // at all. Asked the same question the window asks on opening: the answer it
+  // would get next time is what decides whether it shows itself.
+  const again = await window.__TAURI__.core.invoke("what_changed");
+  check(
+    "and the next launch is told it has already said this",
+    again && again.first_time === false,
+    JSON.stringify(again?.first_time),
+  );
+
+  // But they can still be asked for.
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  await new Promise((r) => setTimeout(r, 150));
+  const entry = [...document.querySelectorAll("#palette-list li")].find((li) =>
+    /what changed/i.test(li.textContent),
+  );
+  check("there is still a way to ask for them", entry, "not in the palette");
+  entry?.click();
+  await new Promise((r) => setTimeout(r, 250));
+  check(
+    "and asking shows them again",
+    !document.getElementById("changed").hidden,
+    `hidden=${document.getElementById("changed").hidden}`,
+  );
+  document.getElementById("changed").querySelector(".tour-done")?.click();
   return found;
 }
 

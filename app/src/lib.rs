@@ -1251,6 +1251,39 @@ async fn still_going(held: State<'_, Held>, id: String) -> Result<bool, String> 
     Ok(held.live.lock().unwrap().contains_key(&id))
 }
 
+/// What changed in the version somebody is running.
+///
+/// `first_time` is the only part that needs the app rather than the file: every
+/// copy of Errand is installed by hand over the top of the last, so "is this a
+/// version I have already been told about" cannot be worked out from the notes
+/// alone, and being told the same thing at every launch is how somebody learns
+/// to close a panel without reading it.
+#[tauri::command]
+async fn what_changed(app: AppHandle) -> Result<WhatChanged, String> {
+    let here = where_things_live(&app)?;
+    let first_time = !errand_core::changes::already_seen(&here);
+    Ok(WhatChanged {
+        first_time,
+        notes: errand_core::changes::this_one(),
+    })
+}
+
+/// Say that these notes have been put in front of somebody.
+#[tauri::command]
+async fn seen_what_changed(app: AppHandle) -> Result<(), String> {
+    errand_core::changes::seen(&where_things_live(&app)?);
+    Ok(())
+}
+
+/// The notes, and whether this is the first look at them.
+#[derive(serde::Serialize)]
+struct WhatChanged {
+    first_time: bool,
+    /// Nothing where a version has no notes written for it, which a test in
+    /// core refuses to let happen but which should still not be a crash here.
+    notes: Option<errand_core::changes::Notes>,
+}
+
 /// Whether Errand comes back by itself after a restart.
 ///
 /// Read from the file the system obeys rather than from anything remembered
@@ -3287,6 +3320,8 @@ pub fn run() {
             move_it,
             whats_offered,
             opens_at_login,
+            what_changed,
+            seen_what_changed,
             open_at_login,
             still_going,
             already_runs,

@@ -183,6 +183,14 @@ export const FIXTURE = {
     deny: [{ rule: "Read(//etc/**)", whose: "~/.claude/settings.json" }],
     mode: null,
   },
+  // Notes for the version running, as the app compiles them in.
+  what_changed: {
+    version: "0.1.0",
+    lines: [
+      "Answers arrive as they are written, rather than after several seconds of nothing.",
+      "You can talk to it with your hands somewhere else.",
+    ],
+  },
   what_it_cost: {
     today: [{ agent: "agent-bitcoin", who: "Bitcoin Desk", dollars: 0.19, turns: 1, errands: 1 }],
     this_month: [
@@ -260,6 +268,15 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           // the fixture because the switch changes it: what it says has to be
           // what was last set, or the check cannot tell a switch that works
           // from one that only looks like it does.
+          // What changed in this one, and whether anybody has been told yet.
+          case "what_changed":
+            return Promise.resolve({
+              first_time: window.__TOLD__ !== true,
+              notes: fixture.what_changed,
+            });
+          case "seen_what_changed":
+            window.__TOLD__ = true;
+            return Promise.resolve(null);
           case "opens_at_login":
             // A check can put the third answer here, which is the one the app
             // cannot produce by pressing anything: something starts at login
