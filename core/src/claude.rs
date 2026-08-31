@@ -138,6 +138,14 @@ const GRANTED: &[&str] = &[
     "mcp__errand__remember",
     "mcp__errand__recall",
     "mcp__errand__forget",
+    // The two standing jobs, for the same reason and one more. Setting one
+    // happens in the middle of the conversation that asked for it, so somebody
+    // is there; and unlike a note, what it sets is visible afterwards in a
+    // panel of its own, says when it will next run, and stops with one press.
+    // A card asking permission to write down the thing somebody just asked for
+    // out loud is a question about their own sentence.
+    "mcp__errand__every_day",
+    "mcp__errand__keep_an_eye_on",
 ];
 
 /// A thread's conversation with Claude Code.

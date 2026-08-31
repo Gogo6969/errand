@@ -750,7 +750,18 @@ mod tests {
         // whole server, taking the other one with it.
         let tools = offered();
         let named: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(named, ["ask", "remember", "recall", "forget", "who_else"]);
+        assert_eq!(
+            named,
+            [
+                "ask",
+                "remember",
+                "recall",
+                "forget",
+                "every_day",
+                "keep_an_eye_on",
+                "who_else"
+            ]
+        );
         for tool in &tools {
             assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
             assert!(

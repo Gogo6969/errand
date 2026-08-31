@@ -2009,6 +2009,8 @@ fn answer_what_engines_cannot(
                     Some(team::Ours::Remember) => write_it_down(&app, &asked),
                     Some(team::Ours::Recall) => look_it_up(&app, &asked),
                     Some(team::Ours::Forget) => take_it_back(&app, &asked),
+                    Some(team::Ours::EveryDay) => set_it_running(&app, &asked),
+                    Some(team::Ours::KeepAnEyeOn) => keep_an_eye_on(&app, &asked),
                     None => Err(anyhow::anyhow!("there is no {} here", asked.tool)),
                 };
                 let _ = asked.answer.send(said);
@@ -2047,6 +2049,79 @@ fn write_it_down(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String>
     held.store.remember(&agent, &about, &note)?;
     Ok(format!(
         "Written down under `{about}`. Saying that handle again will replace it."
+    ))
+}
+
+/// Set this conversation to run itself, because it was asked to.
+///
+/// The gap this closes is the one anybody comparing Errand with anything else
+/// notices first. Somebody says "check this every day and tell me when it
+/// ships", and an agent that cannot set a schedule has two answers, both bad:
+/// ask questions until somebody sets one by hand, or use the engine's own
+/// scheduler, which this app then has to apologise for because it does not run
+/// it and cannot show it.
+///
+/// The schedule is this conversation's, never another's. An agent that could
+/// put a standing job into somebody else's conversation could put one anywhere,
+/// and the only conversation it has any business changing is the one it is in.
+fn set_it_running(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let said = |k: &str| {
+        asked
+            .args
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+    };
+    let (when, what) = (said("when"), said("what"));
+    if what.is_empty() {
+        anyhow::bail!("say what it should do each time, or there is nothing to run");
+    }
+    // Read before it is stored, so an unreadable schedule is refused here, in a
+    // sentence the model can act on, rather than at seven in the morning by not
+    // happening.
+    let read = When::read(when)?;
+
+    let held: State<Held> = app.state();
+    held.store.runs(&asked.from, Some(when), Some(what))?;
+
+    let next = read
+        .next_after(chrono::Local::now())
+        .map(|at| at.format("%A %-d %B at %H:%M").to_string())
+        .unwrap_or_else(|| "at its next turn".to_string());
+    Ok(format!(
+        "Set. This conversation now runs {}, next on {next}, and says: {what}\n\n\
+         It is under Repeat, where it can be changed or stopped. It runs while Errand is \
+         open; a Mac that is asleep is still asleep.",
+        read.written()
+    ))
+}
+
+/// Wake this conversation when something changes, because it was asked to.
+fn keep_an_eye_on(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let said = |k: &str| {
+        asked
+            .args
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+    };
+    let (watch, often, what) = (said("watch"), said("how_often"), said("what"));
+    if what.is_empty() {
+        anyhow::bail!("say what to do when it changes, or there is nothing to wake for");
+    }
+    // The one line the app stores, put together from the two halves the tool
+    // asks for separately, because "~/Downloads every 10m" is a sentence a
+    // model gets subtly wrong and a person should never have to type either.
+    let together = format!("{watch} every {often}");
+    let read = watch::Watch::read(&together)?;
+
+    let held: State<Held> = app.state();
+    held.store.watch(&asked.from, Some(&together), Some(what))?;
+    Ok(format!(
+        "Set. {}\n\nIt is under Watch, where it can be changed or stopped.",
+        read.in_plain_words("this conversation")
     ))
 }
 

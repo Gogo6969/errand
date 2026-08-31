@@ -158,6 +158,68 @@ pub fn declarations() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "every_day",
+                "description":
+                    "Set this conversation to run itself on a schedule, and say what it should \
+                     do each time. Use it the moment somebody asks for something on a repeating \
+                     basis -- every day, every morning, twice a week -- rather than telling \
+                     them where to set it up. It replaces whatever this conversation was \
+                     already set to do, and it appears under Repeat, where they can see it and \
+                     stop it. Say nothing about it having been set: they will be told.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "when": {
+                            "type": "string",
+                            "description":
+                                "`daily 09:00`, `weekly mon,thu 07:30`, or `every 30m`. \
+                                 Local time, in the 24 hour clock."
+                        },
+                        "what": {
+                            "type": "string",
+                            "description":
+                                "What to do each time, written in full as you would say it to \
+                                 yourself tomorrow. It arrives with no other context."
+                        }
+                    },
+                    "required": ["when", "what"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "keep_an_eye_on",
+                "description":
+                    "Wake this conversation when a folder, a file or a web page changes, and \
+                     say what to do then. Use it for `tell me when this changes` rather than \
+                     checking over and over yourself. It appears under Watch, where they can \
+                     see it and stop it. It only looks while Errand is open.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "watch": {
+                            "type": "string",
+                            "description": "A folder, a file, or a web address beginning http"
+                        },
+                        "how_often": {
+                            "type": "string",
+                            "description":
+                                "`10m`, `1h`, `24h`. A folder may be looked at every 5 minutes \
+                                 at the most often, a web page every 15."
+                        },
+                        "what": {
+                            "type": "string",
+                            "description": "What to do when it has changed, written in full"
+                        }
+                    },
+                    "required": ["watch", "how_often", "what"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "who_else",
                 "description":
                     "List the other agents you can hand work to, with what each one handles. \
@@ -185,6 +247,8 @@ pub enum Ours {
     Remember,
     Recall,
     Forget,
+    EveryDay,
+    KeepAnEyeOn,
 }
 
 impl Ours {
@@ -196,6 +260,8 @@ impl Ours {
             Ours::Remember => "remember",
             Ours::Recall => "recall",
             Ours::Forget => "forget",
+            Ours::EveryDay => "every_day",
+            Ours::KeepAnEyeOn => "keep_an_eye_on",
         }
     }
 }
@@ -208,6 +274,8 @@ pub fn ours(tool: &str) -> Option<Ours> {
         "remember" => Some(Ours::Remember),
         "recall" => Some(Ours::Recall),
         "forget" => Some(Ours::Forget),
+        "every_day" => Some(Ours::EveryDay),
+        "keep_an_eye_on" => Some(Ours::KeepAnEyeOn),
         _ => None,
     }
 }
@@ -250,6 +318,14 @@ pub fn in_plain_words(tool: Ours, args: &Value) -> String {
             who => format!("Asking {who}"),
         },
         Ours::WhoElse => "Looking for somebody to hand this to".to_string(),
+        Ours::EveryDay => match get("when") {
+            "" => "Setting this to run on a schedule".to_string(),
+            when => format!("Setting this to run {when}"),
+        },
+        Ours::KeepAnEyeOn => match get("watch") {
+            "" => "Setting a watch".to_string(),
+            what => format!("Keeping an eye on {what}"),
+        },
         Ours::Remember => match get("about") {
             "" => "Making a note".to_string(),
             about => format!("Making a note about {}", about.replace('_', " ")),
@@ -287,6 +363,19 @@ pub fn the_thing_itself(tool: Ours, args: &Value) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        // The schedule rather than the errand: somebody saying always to this
+        // is agreeing to a thing that runs at a time, and the time is the half
+        // that decides whether they meant it.
+        Ours::EveryDay => args
+            .get("when")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        Ours::KeepAnEyeOn => args
+            .get("watch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         // Nothing, and deliberately: an empty rule in the allowlist means the
         // whole tool, which for a tool that only looks is the right grant.
         Ours::WhoElse => String::new(),
@@ -316,6 +405,14 @@ pub fn asks_first(tool: Ours) -> bool {
         // See GRANTED in claude.rs, which has to agree with this and is checked
         // against it by a test there.
         Ours::WhoElse | Ours::Remember | Ours::Recall | Ours::Forget => false,
+        // Nor these, for the same reason and one more. A standing job is set
+        // in the middle of the conversation that asked for it, so there is
+        // somebody there; and unlike a note, it is visible afterwards in a
+        // panel of its own, says when it will next run, and can be stopped
+        // with one press. A card asking permission to write down a thing the
+        // person just asked for out loud is a question about their own
+        // sentence.
+        Ours::EveryDay | Ours::KeepAnEyeOn => false,
     }
 }
 
@@ -331,6 +428,10 @@ pub fn without_the_app(tool: Ours) -> &'static str {
         Ours::Remember | Ours::Recall | Ours::Forget => {
             "There is nowhere to keep notes here. This is an engine with no app behind it, \
              so anything you learn lasts as long as this conversation."
+        }
+        Ours::EveryDay | Ours::KeepAnEyeOn => {
+            "Nothing here runs on a schedule. This is an engine with no app behind it, so \
+             say what you would have set up and leave it to them."
         }
     }
 }
@@ -379,13 +480,77 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_can_set_a_standing_job_without_stopping_to_ask_for_one() {
+        // The gap anybody comparing this with anything else notices first.
+        // Somebody says "check it every day and tell me when it ships", and an
+        // agent that cannot set a schedule has two answers, both bad: ask
+        // questions until somebody sets one by hand, or use the engine's own
+        // scheduler, which this app then has to apologise for because it does
+        // not run it and cannot show it.
+        assert!(!asks_first(Ours::EveryDay));
+        assert!(!asks_first(Ours::KeepAnEyeOn));
+
+        // What an "always" on one of these would cover is the schedule rather
+        // than the errand: somebody agreeing to this is agreeing to a thing
+        // that runs at a time, and the time is the half that decides whether
+        // they meant it.
+        let setting = json!({ "when": "daily 09:00", "what": "check the order" });
+        assert_eq!(the_thing_itself(Ours::EveryDay, &setting), "daily 09:00");
+        assert_eq!(
+            in_plain_words(Ours::EveryDay, &setting),
+            "Setting this to run daily 09:00"
+        );
+
+        let watching = json!({ "watch": "~/Downloads", "how_often": "10m", "what": "tell me" });
+        assert_eq!(
+            the_thing_itself(Ours::KeepAnEyeOn, &watching),
+            "~/Downloads"
+        );
+        assert_eq!(
+            in_plain_words(Ours::KeepAnEyeOn, &watching),
+            "Keeping an eye on ~/Downloads"
+        );
+    }
+
+    #[test]
+    fn a_standing_job_is_asked_for_in_two_halves_rather_than_in_one_sentence() {
+        // `~/Downloads every 10m` is a sentence a model gets subtly wrong, and
+        // the app can put two right answers together itself.
+        let declared = declarations();
+        let watch = declared
+            .iter()
+            .find(|d| {
+                d.pointer("/function/name").and_then(|n| n.as_str()) == Some("keep_an_eye_on")
+            })
+            .expect("it is declared");
+        let required = watch
+            .pointer("/function/parameters/required")
+            .and_then(|r| r.as_array())
+            .expect("it says what it needs");
+        for half in ["watch", "how_often", "what"] {
+            assert!(required.iter().any(|r| r == half), "{half} is not required");
+        }
+    }
+
+    #[test]
     fn every_tool_the_app_provides_is_declared_the_way_an_engine_expects_it() {
         let declared = declarations();
         let named: Vec<&str> = declared
             .iter()
             .filter_map(|d| d.pointer("/function/name")?.as_str())
             .collect();
-        assert_eq!(named, ["ask", "remember", "recall", "forget", "who_else"]);
+        assert_eq!(
+            named,
+            [
+                "ask",
+                "remember",
+                "recall",
+                "forget",
+                "every_day",
+                "keep_an_eye_on",
+                "who_else"
+            ]
+        );
         assert!(declared.iter().all(|d| d["type"] == "function"));
         assert!(
             ours("ask").is_some() && ours("who_else").is_some() && ours("run_command").is_none()
