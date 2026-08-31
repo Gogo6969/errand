@@ -1881,6 +1881,24 @@ export async function sayingWhatThisIs() {
   // It must be possible to be done with it.
   const done = tour.querySelector(".tour-done");
   check("there is a way to be finished with it", done, "no button");
+  // And it is where somebody can see it. These panels are taller than they
+  // look: eight things ran past the bottom of one that scrolls, and the only
+  // way out was below a fold that does not look like a fold.
+  if (done) {
+    // Measured in a panel the height of one in a real window. The harness is
+    // opened taller than the app usually is, and at that size the notes fit and
+    // the fault is invisible.
+    const wasTall = tour.style.maxHeight;
+    tour.style.maxHeight = "260px";
+    const box = tour.getBoundingClientRect();
+    const button = done.getBoundingClientRect();
+    check(
+      "and it is in view rather than below the fold",
+      button.bottom <= box.bottom + 1 && button.top >= box.top - 1,
+      `panel ${Math.round(box.top)}-${Math.round(box.bottom)}, button ${Math.round(button.top)}-${Math.round(button.bottom)}`,
+    );
+    tour.style.maxHeight = wasTall;
+  }
   done?.click();
   await new Promise((r) => setTimeout(r, 100));
   check("and it goes away", tour.hidden, `hidden=${tour.hidden}`);
@@ -2129,7 +2147,7 @@ export async function whatChangedInThisOne() {
   );
   check(
     "each note is its own line",
-    panel.querySelectorAll(".changed-list li").length === 2,
+    panel.querySelectorAll(".changed-list li").length === 10,
     `${panel.querySelectorAll(".changed-list li").length} lines`,
   );
   // Told, so it is not told again.
@@ -2137,6 +2155,20 @@ export async function whatChangedInThisOne() {
 
   const done = panel.querySelector(".tour-done");
   check("there is a way to be finished with them", done, "no button");
+  if (done) {
+    // The same, and for the same reason: this is the panel the fault was
+    // actually seen in, in a window smaller than the harness runs at.
+    const wasTall = panel.style.maxHeight;
+    panel.style.maxHeight = "260px";
+    const box = panel.getBoundingClientRect();
+    const button = done.getBoundingClientRect();
+    check(
+      "and it is in view rather than below the fold",
+      button.bottom <= box.bottom + 1 && button.top >= box.top - 1,
+      `panel ${Math.round(box.top)}-${Math.round(box.bottom)}, button ${Math.round(button.top)}-${Math.round(button.bottom)}`,
+    );
+    panel.style.maxHeight = wasTall;
+  }
   done?.click();
   await new Promise((r) => setTimeout(r, 80));
   check("and they go away", panel.hidden, `hidden=${panel.hidden}`);

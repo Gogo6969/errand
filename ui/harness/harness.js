@@ -186,9 +186,19 @@ export const FIXTURE = {
   // Notes for the version running, as the app compiles them in.
   what_changed: {
     version: "0.1.0",
+    // As many as the real ones, because two of them never fill the panel and
+    // the fault being guarded against only appears once they do.
     lines: [
       "Answers arrive as they are written, rather than after several seconds of nothing.",
       "You can talk to it with your hands somewhere else.",
+      "Repeat and Watch offer the errands you already asked in that conversation.",
+      "Try it now, in both, so you can see what a routine does before a morning goes past.",
+      "Errand can open when you log in, so standing jobs survive a restart.",
+      "What it may do without asking now includes the rules Claude Code allows on its own.",
+      "A new copy of Errand says what it is, in eight lines, once.",
+      "From a terminal, the answer streams as it is written and a script can ask for JSON.",
+      "Fixed: the first thing said to a new agent failed with a database error.",
+      "Fixed: a routine set on a new agent was accepted and quietly kept by nobody.",
     ],
   },
   what_it_cost: {

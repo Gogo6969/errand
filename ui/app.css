@@ -1614,18 +1614,26 @@ body.catching #what { border-color: var(--accent); }
 }
 #tour .who { font-weight: 500; color: var(--ink); }
 #tour .where { color: var(--ink-soft); font-size: 13px; line-height: 1.5; }
-#tour .tour-done {
+/* Always in view, whatever is above it. These panels are taller than they
+   look: the notes ran past the bottom of a panel that scrolls, and the only
+   way out of them was below a fold that does not look like a fold. */
+#tour .tour-done,
+#changed .tour-done {
+  position: sticky;
+  bottom: 0;
   align-self: flex-start;
   margin-top: 2px;
+  /* Its own ground, or the last line of the list shows through it. */
+  background: var(--side);
   border: 1px solid var(--rule);
   border-radius: 8px;
-  background: transparent;
   color: var(--ink-soft);
   font: inherit;
   padding: 5px 12px;
   cursor: pointer;
 }
-#tour .tour-done:hover { color: var(--ink); border-color: var(--edge); }
+#tour .tour-done:hover,
+#changed .tour-done:hover { color: var(--ink); border-color: var(--edge); }
 
 /* What changed, in the same shape as what this app is. The two are read the
    same way and one of them is usually opened straight after the other. */
