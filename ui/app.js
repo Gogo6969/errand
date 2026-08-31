@@ -381,6 +381,11 @@ async function catchUp() {
     // remembered and shown again: the second time somebody opens this app they
     // have an agent, and this never runs.
     showTheTour();
+    // And this copy has been told what this version is, by being told what the
+    // app is. Without this, somebody who installed Errand today would be shown
+    // "what changed in 0.1.0" tomorrow, having never run anything else, which
+    // is an answer to a question they cannot have asked.
+    invoke("seen_what_changed").catch(() => {});
   }
 }
 

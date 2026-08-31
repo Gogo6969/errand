@@ -1937,6 +1937,20 @@ export function firstRun() {
     document.querySelectorAll("#threads li").length >= 1,
     `${document.querySelectorAll("#threads li").length} agent(s) made for it`,
   );
+  // And it is not told what changed as well. A copy installed today has
+  // nothing to have changed from, and being shown notes for the only version
+  // it has ever run is an answer to a question nobody could have asked.
+  check(
+    "a first run is not also told what changed",
+    document.getElementById("changed").hidden,
+    `hidden=${document.getElementById("changed").hidden}`,
+  );
+  check(
+    "and will not be told at the next launch either",
+    window.__TOLD__ === true,
+    `told=${window.__TOLD__}`,
+  );
+
   const done = tour?.querySelector(".tour-done");
   done?.click();
   check("and it can be put away on the first click", tour && tour.hidden, `hidden=${tour?.hidden}`);
