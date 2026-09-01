@@ -3377,6 +3377,38 @@ struct AlsoAllowed {
     mode_says: Option<String>,
 }
 
+/// Allow something before being asked about it.
+///
+/// Every rule in this app cost an interruption to create: `allow` had exactly
+/// one caller, inside the answer to a question that had already stopped the
+/// work. So somebody who knows perfectly well their research agent should be
+/// free to run `curl` had no way to say so until it had interrupted them twice.
+///
+/// Said back in the same words the button on a card would use, so a rule
+/// written here and a rule granted there are visibly the same kind of thing.
+#[tauri::command]
+async fn allow_in_advance(
+    held: State<'_, Held>,
+    agent: String,
+    tool: String,
+    rule: String,
+) -> Result<String, String> {
+    let tool = tool.trim();
+    let rule = rule.trim();
+    if tool.is_empty() {
+        return Err("say which tool this is about".into());
+    }
+    // Narrowed the same way pressing Always narrows it, so that writing
+    // `curl -s https://x` here means what pressing Always on that command
+    // would have meant, and not something quietly different.
+    let allowing = errand_core::allowing::what_always_means(tool, Some(rule))
+        .ok_or_else(|| "there is nothing to remember in that".to_string())?;
+    held.store
+        .allow(&agent, tool, &allowing.rule)
+        .map_err(|e| e.to_string())?;
+    Ok(allowing.in_words)
+}
+
 /// Everything an agent may do without being asked again.
 #[tauri::command]
 async fn allowances(held: State<'_, Held>, agent: String) -> Result<Vec<Allowed>, String> {
@@ -4289,6 +4321,7 @@ pub fn run() {
             runs,
             routines,
             allowances,
+            allow_in_advance,
             also_allowed,
             revoke,
             asks,

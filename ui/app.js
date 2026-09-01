@@ -174,6 +174,10 @@ const el = {
   granting: document.getElementById("granting"),
   asks: document.getElementById("asks"),
   allowed: document.getElementById("allowed"),
+  allowAhead: document.getElementById("allow-ahead"),
+  allowWhat: document.getElementById("allow-what"),
+  allowTool: document.getElementById("allow-tool"),
+  allowSays: document.getElementById("allow-says"),
   alsoAllowed: document.getElementById("also-allowed"),
   asksMeans: document.getElementById("asks-means"),
   routine: document.getElementById("routine"),
@@ -1342,6 +1346,33 @@ function handItOver(m) {
   return card;
 }
 
+/**
+ * How often this same program has already been approved here.
+ *
+ * By the program rather than by the whole command line, because that is what
+ * Always would allow and the thing somebody is actually tired of being asked
+ * about: `curl -s one` and `curl -s another` are two questions and one
+ * decision.
+ */
+function saidYesToThisBefore(m) {
+  const program = (said) => String(said || "").trim().split(/\s+/)[0] || "";
+  const mine = program(m.detail);
+  const said = (one) =>
+    one.kind === "asking" && one.answered && one !== m && !/^You said no/i.test(one.answered);
+  return (talking()?.messages || []).filter((one) => {
+    if (!said(one)) return false;
+    // The command where both have one, which is the sharper answer: `curl -s a`
+    // and `curl -s b` are two questions and one decision.
+    //
+    // The tool otherwise. A question read back off disk has no command against
+    // it -- only a live one does -- so comparing commands alone would count
+    // nothing the moment a conversation is reopened, which is exactly when
+    // somebody has been asked the same thing often enough to be tired of it.
+    const theirs = program(one.detail);
+    return mine && theirs ? theirs === mine : one.tool === m.tool;
+  }).length;
+}
+
 function asks(m) {
   const li = document.createElement("li");
   li.className = "asking";
@@ -1378,17 +1409,46 @@ function asks(m) {
       b.onclick = () => answer(m, said, label);
       return b;
     };
-    choices.append(say("Yes", "yes", "yes"));
+    // How many times this same program has already been approved here. The
+    // whole complaint, in one number: somebody who has said yes to curl three
+    // times is not weighing the fourth question, and the button that would end
+    // it was the plain one beside the accented one they keep pressing.
+    const overAndOver = m.can_remember ? saidYesToThisBefore(m) : 0;
+
     if (m.can_remember) {
       // What it will allow, on the button. "Always" on its own is not a choice
       // anybody can make: for a shell command it now allows every use of that
       // program, which is a real widening and has to be visible before it is
       // pressed rather than discoverable afterwards in a list.
-      const always = say(m.allows ? `Always · ${m.allows}` : "Always", "always", "always");
+      const always = say(
+        m.allows ? `Always · ${m.allows}` : "Always",
+        "always",
+        // Made the obvious button once the same thing has been approved before.
+        // First time round, Yes leading is right: nobody should be nudged into
+        // a standing grant they have not thought about. By the second, the app
+        // has watched somebody answer the same question twice and going on
+        // pointing at Yes is the app knowing better and saying nothing.
+        overAndOver > 0 ? "always leading" : "always",
+      );
       always.title = m.allows
         ? `From now on this agent may do ${m.allows} without asking. You can take it back under Allowed.`
         : "";
       choices.append(always);
+      choices.append(say("Just this once", "yes", overAndOver > 0 ? "yes plain" : "yes"));
+    } else {
+      choices.append(say("Yes", "yes", "yes"));
+    }
+
+    // Said, not just implied by a button changing colour. A number somebody can
+    // check is the difference between an offer and a nag.
+    if (overAndOver > 0) {
+      const already = document.createElement("p");
+      already.className = "over-and-over";
+      already.textContent =
+        overAndOver === 1
+          ? `You allowed this once already in this conversation.`
+          : `You have allowed this ${overAndOver} times already in this conversation.`;
+      body.append(already);
     }
 
     // Where the friction actually is. Somebody who has answered this three
@@ -2706,6 +2766,38 @@ el.granted.addEventListener("click", async () => {
   }
   await drawGranted();
   el.granting.hidden = false;
+});
+
+/**
+ * Allow something before it has interrupted anybody.
+ *
+ * Narrowed by the app in exactly the way pressing Always narrows it, and said
+ * back in the same words, so that a rule written here and one granted on a
+ * card are visibly the same kind of thing rather than two systems that happen
+ * to share a table.
+ */
+el.allowAhead?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const a = whose();
+  const what = el.allowWhat.value.trim();
+  if (!a || !what) {
+    el.allowSays.textContent = "Say what it may do, like `curl` or `git status`.";
+    return;
+  }
+  try {
+    const covers = await invoke("allow_in_advance", {
+      agent: a.id,
+      tool: el.allowTool.value,
+      rule: what,
+    });
+    // What it actually allows, not what was typed. `git status` becomes any
+    // git command, and somebody has to be told that rather than find out.
+    el.allowSays.textContent = `Allowed: ${covers}.`;
+    el.allowWhat.value = "";
+    drawGranted();
+  } catch (why) {
+    el.allowSays.textContent = String(why);
+  }
 });
 
 async function drawGranted() {

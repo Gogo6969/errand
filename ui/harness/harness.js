@@ -68,6 +68,7 @@ export const FIXTURE = {
       { id: "talk-4", agent: "agent-bitcoin", name: "Answered a few", opened: true },
       { id: "talk-overnight", agent: "agent-bitcoin", name: "Ran overnight", opened: true },
       { id: "talk-cut-off", agent: "agent-bitcoin", name: "Cut off", opened: true },
+      { id: "talk-tired", agent: "agent-bitcoin", name: "Asked over and over", opened: true },
     ],
   },
   // How a routine has been going: one good morning, one failed, and one that
@@ -113,6 +114,16 @@ export const FIXTURE = {
         pictures: ["5-0.png", "gone.png"] },
       { seq: 2, at: 2, kind: "said", text: "**BTC** is around $77,700.", call: null, tool: null, outcome: null },
     ],
+    // Three of the same question answered, and a fourth still open. Its own
+    // conversation rather than borrowing talk-4: a check that reads an open
+    // question is a check another group can answer out from under it, and one
+    // did.
+    "talk-tired": [
+      { seq: 1, at: 1, kind: "asking", text: "Fetch the price", call: "t1", tool: "Bash", outcome: "yes" },
+      { seq: 2, at: 2, kind: "asking", text: "Fetch it again", call: "t2", tool: "Bash", outcome: "yes" },
+      { seq: 3, at: 3, kind: "asking", text: "And again", call: "t3", tool: "Bash", outcome: "yes" },
+      { seq: 4, at: 4, kind: "asking", text: "Fetch the price once more", call: "t4", tool: "Bash", outcome: null },
+    ],
     // A turn the app was closed during: a question, and an ending that says so.
     // What made this worth a fixture is that there is no answer to hang the
     // ordinary "Ask again" on -- never getting one is the whole of what
@@ -152,7 +163,12 @@ export const FIXTURE = {
     ],
   },
   /** Which conversation still has an engine behind it. */
-  liveConversation: "talk-3",
+  // Which conversations still have an engine behind them. More than one,
+  // because whether a question can still be answered depends on it and there
+  // is more than one thing worth asking about a question: this was a single
+  // value, so any second check needing a live conversation had to borrow the
+  // first one's and answer its question out from under it.
+  liveConversations: ["talk-3", "talk-tired"],
   engines: [
     { engine: "claude", name: "Claude · your default", settings: null },
     { engine: "claude", name: "Claude · Opus", settings: "opus" },
@@ -389,7 +405,7 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           // The conversation with the live question in it is live; the rest
           // are history. Which is the whole distinction being tested.
           case "still_going":
-            return Promise.resolve(args.id === fixture.liveConversation);
+            return Promise.resolve((fixture.liveConversations || []).includes(args.id));
           case "whats_offered":
             return Promise.resolve(fixture.offered);
           // Whether the app starts itself at login. Kept here rather than in
@@ -439,6 +455,16 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           case "forget_conversation":
           case "looking_at":
             return Promise.resolve(null);
+          // Narrowed by the app, exactly as pressing Always narrows it, and
+          // said back in those words. `git status` becomes any git command,
+          // and somebody has to be told that rather than find out.
+          case "allow_in_advance": {
+            const first = String(args.rule || "").trim().split(/\s+/)[0];
+            if (!first) return Promise.reject("there is nothing to remember in that");
+            return Promise.resolve(
+              args.tool === "Bash" ? `any ${first} command` : `anything starting ${args.rule}`,
+            );
+          }
           // A real picture, small enough to sit in a fixture: one grey pixel.
           // A stub string would draw a broken image and the check would pass
           // on markup that shows nothing.

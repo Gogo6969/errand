@@ -923,6 +923,30 @@ main > aside, main > #title, main > #composer { flex: none; }
   font-weight: 500;
 }
 .choices .yes:hover { background: var(--accent-lit); border-color: var(--accent-lit); }
+
+/* Once the same thing has been approved before, the button that ends the
+   interruption is the one that leads, and the one that brings the question
+   back next time is the plain one. It was the other way round, which is how
+   somebody says yes to curl four times and never finds Always. */
+.choices .always.leading {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 500;
+}
+.choices .always.leading:hover { background: var(--accent-lit); border-color: var(--accent-lit); }
+.choices .yes.plain {
+  background: transparent;
+  border-color: var(--rule);
+  color: var(--ink);
+  font-weight: 400;
+}
+.choices .yes.plain:hover { background: var(--hover); border-color: var(--edge); }
+.over-and-over {
+  margin: 6px 0 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
 .choices .no { color: var(--ink-soft); }
 
 /* Answered, and kept. What you allowed is worth being able to look back at. */
@@ -2078,4 +2102,28 @@ a.on-disk {
   text-decoration-style: dotted;
   text-underline-offset: 3px;
   cursor: pointer;
+}
+
+/* Saying it before being asked. Laid out like the panels above it, because it
+   is the same kind of thing: a setting, not a question. */
+#allow-ahead {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+  margin: 10px 0 12px;
+}
+#allow-ahead label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+#allow-ahead input { min-width: 190px; }
+#allow-says {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
 }

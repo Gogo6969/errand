@@ -79,6 +79,13 @@ would notice, not something a commit did.
   means quitting that app, so the one permission you are most likely to be
   asked for was the one that killed the agent waiting for your answer. The
   card keeps its buttons and picks the errand up where it left off.
+- Allowing something for good is now the button that leads, once you have
+  allowed the same thing before. It was the plain one beside the accented one
+  people keep pressing, so you could say yes to curl four times and never find
+  the way to stop being asked. The card also says how many times you have
+  already allowed it.
+- You can write a rule before being asked, under Allowed. Every rule used to
+  cost an interruption to create.
 - Pictures an agent makes or fetches are shown in its answer, instead of a path
   you cannot click. Agents had started apologising for this in prose: "both are
   downloaded locally if the images don't render for you".

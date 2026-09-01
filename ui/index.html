@@ -289,6 +289,30 @@
           </select>
         </label>
         <p id="asks-means"></p>
+        <!--
+          Somewhere to say it before being asked. Every rule here used to cost
+          an interruption to create: the only way to make one was to press
+          Always on a card that had already stopped the work, so somebody who
+          knew their research agent should be free to run curl had no way to
+          say so until it had interrupted them twice.
+        -->
+        <form id="allow-ahead">
+          <label>Let it
+            <input id="allow-what" type="text" placeholder="curl" autocomplete="off"
+                   autocorrect="off" autocapitalize="off" spellcheck="false" />
+          </label>
+          <label>Using
+            <select id="allow-tool">
+              <option value="Bash">the terminal</option>
+              <option value="Read">reading files</option>
+              <option value="Edit">changing files</option>
+              <option value="Write">writing files</option>
+              <option value="WebFetch">fetching a page</option>
+            </select>
+          </label>
+          <button id="allow-save" type="submit">Allow it</button>
+          <p id="allow-says"></p>
+        </form>
         <ul id="allowed"></ul>
         <!--
           And what the engine allows on its own, which this app can show and

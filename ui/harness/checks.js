@@ -1645,8 +1645,15 @@ export async function aCall() {
 
   // Answered, and the call picks the conversation back up.
   const card = document.querySelector("#messages .asking .choices");
-  const yes = [...(card?.querySelectorAll("button") || [])].find((b) => /^yes/i.test(b.textContent));
-  check("the question can still be answered in the window", yes, card ? "no yes button" : "no card");
+  // By what the button does, not by what it says. It reads "Yes" the first
+  // time and "Just this once" once there is an Always beside it worth telling
+  // it apart from, and this check is about a question being answerable at all.
+  const yes = card?.querySelector("button.yes");
+  check(
+    "the question can still be answered in the window",
+    yes,
+    card ? [...card.querySelectorAll("button")].map((b) => b.textContent).join(" | ") : "no card",
+  );
   // From here on, so that what happens after it does not decide the answer.
   // Asserting that "start" was the *last* thing heard made this depend on
   // whether the stand-in's next result and its pause timer landed inside the
@@ -3499,5 +3506,97 @@ export async function aPictureAnAgentMade() {
     !nasty.querySelector("a") && nasty.textContent.includes("javascript:"),
     nasty.textContent,
   );
+  return found;
+}
+
+/**
+ * Saying yes once, instead of four times.
+ *
+ * The complaint that started this: allowing the same `curl` over and over and
+ * never finding where to make it stop. The button that ends it was there all
+ * along and was the plain one beside the accented one people keep pressing --
+ * so the app watched somebody answer the same question three times and went on
+ * pointing at the answer that brings it back.
+ */
+export async function allowingSomethingOnce() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  // Its own conversation: three of the same question already answered, so the
+  // app has watched somebody say yes to curl three times. Borrowing talk-4
+  // meant another group answered its open question first.
+  await openTalk("talk-tired");
+  // The fourth arrives live, which is the only way it carries what pressing
+  // Always would allow: a question read back off disk has the words but not
+  // the rule behind them.
+  tell("happened", {
+    conversation: "talk-tired",
+    seq: 5,
+    kind: "needs_you",
+    asking: "Fetch the price once more",
+    detail: "curl -s https://example.com/price",
+    tool: "Bash",
+    call: "t5",
+    step: "t5",
+    can_remember: true,
+    rule: "curl",
+    allows: "any curl command",
+  });
+  await new Promise((r) => setTimeout(r, 350));
+  const card = [...document.querySelectorAll("#messages li.asking .choices")].pop();
+  check("the open question still offers a way through", card, String(!!card));
+  if (!card) return found;
+
+  const labels = [...card.querySelectorAll("button")].map((b) => b.textContent);
+  const always = [...card.querySelectorAll("button")].find((b) => /^Always/.test(b.textContent));
+  check("it offers to allow this from now on", always, JSON.stringify(labels));
+  check(
+    "and says what that would allow before it is pressed",
+    /Always · /.test(always?.textContent || ""),
+    always?.textContent,
+  );
+  // The whole fix: after saying yes before, the standing answer leads and the
+  // one-off is the plain one.
+  check(
+    "having said yes before, allowing it is the button that leads",
+    always?.classList.contains("leading"),
+    always?.className,
+  );
+  const once = [...card.querySelectorAll("button")].find((b) => /Just this once/.test(b.textContent));
+  check("and saying yes once is still offered, plainly", once && once.classList.contains("plain"), once?.className);
+  check(
+    "the count is said rather than left to be felt",
+    /allowed this \d+ times already|allowed this once already/.test(
+      [...document.querySelectorAll("#messages li.asking")].pop()?.textContent || "",
+    ),
+    [...document.querySelectorAll("#messages li.asking .over-and-over")].pop()?.textContent,
+  );
+
+  // And a rule can be written without waiting to be interrupted at all.
+  document.getElementById("allowed-open")?.click();
+  const panel = document.getElementById("granting");
+  panel.hidden = false;
+  const what = document.getElementById("allow-what");
+  const says = document.getElementById("allow-says");
+  check("there is somewhere to say it before being asked", what, String(!!what));
+  if (!what) return found;
+
+  what.value = "git status";
+  document.getElementById("allow-ahead").dispatchEvent(new Event("submit"));
+  await new Promise((r) => setTimeout(r, 350));
+  check(
+    "writing one tells the app",
+    asked.some((a) => a.name === "allow_in_advance" && a.args?.rule === "git status"),
+    JSON.stringify(asked.filter((a) => a.name === "allow_in_advance").slice(-1)),
+  );
+  // What it actually allows, not what was typed: `git status` becomes any git
+  // command, which is wider than it looks and has to be said.
+  check(
+    "and says what it really allows, which is wider than what was typed",
+    /any git command/.test(says?.textContent || ""),
+    says?.textContent,
+  );
+  check("the box is cleared, so it cannot be sent twice", what.value === "", what.value);
+  panel.hidden = true;
   return found;
 }
