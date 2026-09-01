@@ -818,7 +818,13 @@ pub fn read(line: &str) -> Vec<Event> {
                 vec![Event::NeedsYou(NeedsYou {
                     asking: match plain {
                         Some(name) => team::in_plain_words(name, &ours),
-                        None => in_plain_words(&tool, input),
+                        // A connector reads somebody's mail or somebody's
+                        // diary, and a card about it should say which rather
+                        // than naming a tool.
+                        None => match crate::connectors::which(&tool) {
+                            Some(job) => crate::connectors::in_plain_words(job, &ours),
+                            None => in_plain_words(&tool, input),
+                        },
                     },
                     detail: match plain {
                         Some(name) => team::the_thing_itself(name, &ours),
@@ -1051,7 +1057,13 @@ fn block(b: &serde_json::Value) -> Option<Event> {
                         name,
                         b.get("input").unwrap_or(&serde_json::Value::Null),
                     ),
-                    None => in_plain_words(&tool, b.get("input")),
+                    None => match crate::connectors::which(&tool) {
+                        Some(job) => crate::connectors::in_plain_words(
+                            job,
+                            b.get("input").unwrap_or(&serde_json::Value::Null),
+                        ),
+                        None => in_plain_words(&tool, b.get("input")),
+                    },
                 },
                 tool: plain.map_or(tool, |mine| mine.name().to_string()),
                 // Every tool_use block carries one, and the tool_result that
@@ -1610,6 +1622,26 @@ mod tests {
                 GRANTED.contains(&prefixed.as_str()),
                 !team::asks_first(tool),
                 "`{name}` is granted up front on one engine and asked about on the other"
+            );
+        }
+    }
+
+    #[test]
+    fn reaching_outside_this_app_is_never_granted_up_front() {
+        // The app's own tools reach one agent's own records and nothing else,
+        // which is what makes granting them safe. A connector reaches somebody's
+        // mail or somebody's diary, and it is run by the app rather than by the
+        // walled engine, so the wall does not decide it either. Left off this
+        // list, an agent that is set to ask has to ask.
+        for declared in crate::connectors::declarations() {
+            let name = declared
+                .pointer("/function/name")
+                .and_then(|n| n.as_str())
+                .expect("a declared tool has a name");
+            let prefixed = format!("mcp__{}__{name}", team::DOORWAY);
+            assert!(
+                !GRANTED.contains(&prefixed.as_str()),
+                "`{name}` reaches outside this app and is granted without asking"
             );
         }
     }

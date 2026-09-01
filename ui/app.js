@@ -113,6 +113,7 @@ const el = {
   setup: document.getElementById("setup"),
   models: document.getElementById("models"),
   modelsDone: document.getElementById("models-done"),
+  reachableList: document.getElementById("reachable-list"),
   atLogin: document.getElementById("at-login"),
   atLoginSays: document.getElementById("at-login-says"),
   lookHere: document.getElementById("look-here"),
@@ -3373,7 +3374,60 @@ async function showModels() {
       return b;
     }),
   );
-  await Promise.all([drawChosen(), drawKept(), drawAtLogin()]);
+  await Promise.all([drawChosen(), drawKept(), drawAtLogin(), drawReachable()]);
+}
+
+/**
+ * What agents can be let at, and whether they are.
+ *
+ * The switch is the whole of the permission, so what it says beside it has to
+ * be enough to decide on: these run in the app rather than in the walled
+ * engine, which means confining an agent to its own folder does not decide
+ * whether it can read somebody's mail. Turning one on does.
+ */
+async function drawReachable() {
+  let all;
+  try {
+    all = await invoke("connectors");
+  } catch (why) {
+    el.reachableList.replaceChildren(note("li", String(why), "nothing"));
+    return;
+  }
+  el.reachableList.replaceChildren(
+    ...all.map((one) => {
+      const row = document.createElement("li");
+      const label = document.createElement("label");
+      label.className = "switch";
+
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = one.on;
+      box.onchange = async () => {
+        const wanted = box.checked;
+        try {
+          await invoke("connect", { id: one.id, on: wanted });
+          one.on = wanted;
+        } catch (why) {
+          // Put back, because a switch showing one thing while the app holds
+          // another is worse than the thing not working.
+          box.checked = !wanted;
+          say(String(why), true);
+        }
+      };
+
+      const words = document.createElement("span");
+      const name = document.createElement("span");
+      name.className = "who";
+      name.textContent = one.name;
+      const sees = document.createElement("span");
+      sees.className = "where";
+      sees.textContent = one.sees;
+      words.append(name, sees);
+      label.append(box, words);
+      row.append(label);
+      return row;
+    }),
+  );
 }
 
 /**

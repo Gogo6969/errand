@@ -296,9 +296,13 @@ async fn errand(
                 .filter(|t| loaded.contains(&t.called))
                 .map(&with_schemas),
         );
-        // What only the app can do, offered when there is an app to do it.
+        // What only the app can do, and what this Mac can be let at, offered
+        // when there is an app to do either.
         if host.is_some() {
-            defs.extend(team::declarations().into_iter().map(|schema| {
+            let both = team::declarations()
+                .into_iter()
+                .chain(crate::connectors::declarations());
+            defs.extend(both.map(|schema| {
                 ToolDef {
                     name: schema
                         .pointer("/function/name")

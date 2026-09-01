@@ -234,6 +234,21 @@ export const FIXTURE = {
       "Fixed: a routine set on a new agent was accepted and quietly kept by nobody.",
     ],
   },
+  // What this Mac can be let at. Off until something turns one on.
+  connectors: [
+    {
+      id: "mail",
+      name: "Mail",
+      sees: "Reads your mail: who wrote, when, the subject, and the first part of the message. It never sends anything and never deletes anything.",
+      on: false,
+    },
+    {
+      id: "calendar",
+      name: "Calendar",
+      sees: "Reads what is in your calendars: what, when, where, and which calendar. It never adds, moves or cancels anything.",
+      on: false,
+    },
+  ],
   what_it_cost: {
     today: [{ agent: "agent-bitcoin", who: "Bitcoin Desk", dollars: 0.19, turns: 1, errands: 1 }],
     this_month: [
@@ -273,6 +288,8 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
   let atLogin = "no";
   /** What is being watched, once anything has set or stopped it. */
   let watchedNow = null;
+  /** Which connectors are switched on, once anything has switched one. */
+  const connected = new Set();
   return {
     core: {
       invoke(name, args) {
@@ -345,6 +362,18 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           // say, so the window asks.
           case "waiting_on_you":
             return Promise.resolve(fixture.waiting_on_you || ["still-waiting"]);
+          // What agents can be let at, and whether they are. Kept here rather
+          // than in the fixture because the switch changes it: a stand-in that
+          // answers the same thing before and after cannot tell a switch that
+          // works from one that only looks like it does.
+          case "connectors":
+            return Promise.resolve(
+              (fixture.connectors || []).map((one) => ({ ...one, on: connected.has(one.id) })),
+            );
+          case "connect":
+            if (args.on) connected.add(args.id);
+            else connected.delete(args.id);
+            return Promise.resolve(null);
           case "opens_at_login":
             // A check can put the third answer here, which is the one the app
             // cannot produce by pressing anything: something starts at login

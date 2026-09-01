@@ -2019,7 +2019,12 @@ fn answer_what_engines_cannot(
                     Some(team::Ours::EveryDay) => set_it_running(&app, &asked),
                     Some(team::Ours::KeepAnEyeOn) => keep_an_eye_on(&app, &asked),
                     Some(team::Ours::OverToYou) => over_to_you(&app, &asked).await,
-                    None => Err(anyhow::anyhow!("there is no {} here", asked.tool)),
+                    // Not one of the app's own, so it may be one of the things
+                    // this Mac can be let at.
+                    None => match errand_core::connectors::which(&asked.tool) {
+                        Some(job) => reach_for_it(&app, job, &asked.args),
+                        None => Err(anyhow::anyhow!("there is no {} here", asked.tool)),
+                    },
                 };
                 let _ = asked.answer.send(said);
             });
@@ -2103,6 +2108,71 @@ fn set_it_running(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
          open; a Mac that is asleep is still asleep.",
         read.written()
     ))
+}
+
+/// Do one of the things this Mac can be let at, if it has been.
+///
+/// The switch is the whole of the permission here, and it has to be, because
+/// this runs in the app rather than in the walled engine: an agent set never to
+/// ask is confined to its own folder, and this reaches outside it on purpose.
+/// So an unconnected one is refused in a sentence rather than answered, and the
+/// sentence says where the switch is.
+fn reach_for_it(
+    app: &AppHandle,
+    job: &'static str,
+    args: &serde_json::Value,
+) -> anyhow::Result<String> {
+    let wanted = errand_core::connectors::needs(job);
+    let on = {
+        let held: State<Held> = app.state();
+        held.store.connected()?.iter().any(|one| one == wanted)
+    };
+    if !on {
+        let named = errand_core::connectors::KNOWN
+            .iter()
+            .find(|c| c.id == wanted)
+            .map_or(wanted, |c| c.name);
+        anyhow::bail!(
+            "{named} is not connected, so there is nothing to read. Say so: they can turn it \
+             on under Settings, and it takes effect at once."
+        );
+    }
+    errand_core::connectors::run(job, args)
+}
+
+/// Everything this Mac can be let at, and what is switched on.
+#[tauri::command]
+async fn connectors(held: State<'_, Held>) -> Result<Vec<Connected>, String> {
+    let on = held.store.connected().map_err(|e| e.to_string())?;
+    Ok(errand_core::connectors::KNOWN
+        .iter()
+        .map(|one| Connected {
+            id: one.id.to_string(),
+            name: one.name.to_string(),
+            sees: one.sees.to_string(),
+            on: on.iter().any(|which| which == one.id),
+        })
+        .collect())
+}
+
+/// One thing agents can be let at, and whether they are.
+#[derive(Serialize)]
+struct Connected {
+    id: String,
+    name: String,
+    sees: String,
+    on: bool,
+}
+
+/// Let agents reach one, or stop letting them.
+#[tauri::command]
+async fn connect(held: State<'_, Held>, id: String, on: bool) -> Result<(), String> {
+    // Only something Errand knows how to reach. A row in that table naming
+    // anything else would be a switch for a thing that does not exist.
+    if !errand_core::connectors::KNOWN.iter().any(|c| c.id == id) {
+        return Err(format!("there is nothing called {id} to connect to"));
+    }
+    held.store.connect(&id, on).map_err(|e| e.to_string())
 }
 
 /// Hand the keyboard over for one step, and wait to be handed it back.
@@ -3587,6 +3657,8 @@ pub fn run() {
             what_changed,
             handed_back,
             waiting_on_you,
+            connectors,
+            connect,
             seen_what_changed,
             open_at_login,
             still_going,

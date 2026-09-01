@@ -2621,6 +2621,73 @@ export async function handingItOver() {
   return found;
 }
 
+/**
+ * What agents can be let at.
+ *
+ * Everywhere else a connector begins with an account and an OAuth screen. The
+ * things people actually ask about on a Mac -- their mail, their diary -- are
+ * already here, and the only permission needed is the one macOS asks for
+ * itself. What that costs is honesty about the boundary: these run in the app
+ * rather than in the walled engine, so confining an agent to its own folder
+ * does not decide whether it can read somebody's mail. The switch does, which
+ * makes the sentence beside the switch part of the feature.
+ */
+export async function whatAgentsCanReach() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  document.getElementById("setup").click();
+  await new Promise((r) => setTimeout(r, 300));
+  const list = document.getElementById("reachable-list");
+  const rows = [...list.querySelectorAll("li")];
+  check("the things it can be let at are listed", rows.length >= 2, `${rows.length} listed`);
+
+  const boxes = [...list.querySelectorAll("input[type=checkbox]")];
+  check("nothing is on until somebody turns it on", boxes.every((b) => !b.checked), boxes.map((b) => b.checked).join(","));
+  // The switch is the whole of the permission, so it has to say what it lets in.
+  const said = list.textContent;
+  check(
+    "each says what an agent would be able to see",
+    /Reads your mail/.test(said) && /Reads what is in your calendars/.test(said),
+    said.slice(0, 100),
+  );
+  check(
+    "and what it will never do",
+    /never sends anything/.test(said) && /never adds, moves or cancels/.test(said),
+    said.slice(0, 140),
+  );
+
+  boxes[0].checked = true;
+  boxes[0].dispatchEvent(new Event("change"));
+  await new Promise((r) => setTimeout(r, 250));
+  check(
+    "turning one on tells the app which",
+    asked.some((a) => a.name === "connect" && a.args?.id === "mail" && a.args?.on === true),
+    JSON.stringify(asked.filter((a) => a.name === "connect")),
+  );
+
+  // Read back from the app rather than remembered by the page: a switch showing
+  // what it last did rather than what is true is one somebody finds out about
+  // when an agent cannot read the thing they connected.
+  document.getElementById("models-done").click();
+  document.getElementById("setup").click();
+  await new Promise((r) => setTimeout(r, 300));
+  const again = [...document.querySelectorAll("#reachable-list input[type=checkbox]")];
+  check("and it is still on when the screen is opened again", again[0]?.checked, `checked=${again[0]?.checked}`);
+
+  again[0].checked = false;
+  again[0].dispatchEvent(new Event("change"));
+  await new Promise((r) => setTimeout(r, 250));
+  check(
+    "turning it off tells the app that too",
+    asked.some((a) => a.name === "connect" && a.args?.id === "mail" && a.args?.on === false),
+    JSON.stringify(asked.filter((a) => a.name === "connect").slice(-1)),
+  );
+
+  document.getElementById("models-done").click();
+  return found;
+}
+
 export function headerFitsOnOneRow() {
   // A media query reads the viewport, not the element, so this cannot be
   // judged by widening anything on the page: run narrow, it measures a header
@@ -2648,3 +2715,4 @@ export function headerFitsOnOneRow() {
     toolsInside: tools.width > 0 && tools.right <= bar.right - 17,
   };
 }
+

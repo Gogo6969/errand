@@ -690,6 +690,16 @@ const CHANGES: &[&str] = &[
          turns        INTEGER NOT NULL DEFAULT 1
      );
      CREATE INDEX IF NOT EXISTS spending_when ON spending(at);",
+    // 16
+    //
+    // What an agent may reach outside its own folder. Nothing is in here until
+    // somebody puts it there, one at a time, which is what protects a person's
+    // mail: these are run by the app rather than by the walled engine, so the
+    // wall is not what decides.
+    "CREATE TABLE IF NOT EXISTS connected (
+         id TEXT PRIMARY KEY,
+         at INTEGER NOT NULL
+     );",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -736,6 +746,22 @@ fn beside_it(at: &Path, suffix: &str) -> std::path::PathBuf {
     named.push(suffix);
     std::path::PathBuf::from(named)
 }
+
+/// What a new agent does about permission, before anybody changes it.
+///
+/// "Never", which is not what it sounds like. Asking and a wall are the two
+/// mechanisms there are, and turning one off is exactly when the other has to
+/// be on: an agent that never asks is confined to its own folder and the usual
+/// temporary places, and can touch nothing else on the machine.
+///
+/// It was "ask", and the cost of that was watching somebody give the same
+/// errand to this and to something else. Half of these errands run at seven in
+/// the morning with nobody at the window, where a card is not a question but a
+/// refusal; and even at the keyboard, an errand that stops four times before it
+/// reaches the thing it was asked to do is one nobody finishes. Every question
+/// it does not ask is still visible afterwards: what it did is in the
+/// conversation, line by line.
+pub const HOW_A_NEW_AGENT_ASKS: &str = "auto";
 
 impl Store {
     /// Open the store, making it if it is not there yet.
@@ -857,6 +883,32 @@ impl Store {
         }
     }
 
+    /// Which connectors are switched on.
+    pub fn connected(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut ask = conn.prepare("SELECT id FROM connected ORDER BY at")?;
+        let found = ask
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(found)
+    }
+
+    /// Let agents reach one, or stop letting them.
+    ///
+    /// Never partly: a connector is on or it is not, and being on is a thing
+    /// somebody did rather than a thing that accumulated.
+    pub fn connect(&self, id: &str, on: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        match on {
+            true => conn.execute(
+                "INSERT OR REPLACE INTO connected (id, at) VALUES (?, ?)",
+                params![id, now()],
+            )?,
+            false => conn.execute("DELETE FROM connected WHERE id = ?", [id])?,
+        };
+        Ok(())
+    }
+
     /// Everything a new agent needs to exist, before anything points at it.
     ///
     /// An agent made in the window is not written down until there is something
@@ -881,9 +933,16 @@ impl Store {
     pub fn begin(&self, id: &str, name: &str, cwd: &Path) -> Result<()> {
         let now = now();
         self.conn.lock().unwrap().execute(
-            "INSERT OR IGNORE INTO agents (id, name, cwd, opened, started_at, spoke_at)
-             VALUES (?, ?, ?, 0, ?, ?)",
-            params![id, name, cwd.to_string_lossy(), now, now],
+            "INSERT OR IGNORE INTO agents (id, name, cwd, opened, started_at, spoke_at, asks)
+             VALUES (?, ?, ?, 0, ?, ?, ?)",
+            params![
+                id,
+                name,
+                cwd.to_string_lossy(),
+                now,
+                now,
+                HOW_A_NEW_AGENT_ASKS
+            ],
         )?;
         Ok(())
     }
@@ -2197,6 +2256,47 @@ mod tests {
         );
         // And what was said is still there, once.
         assert_eq!(s.lines("new-one").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn nothing_is_connected_until_somebody_connects_it() {
+        // The switch is what protects a person's mail, not the wall: these are
+        // run by the app rather than by the walled engine. So the starting
+        // state has to be off, and being on has to be something somebody did.
+        let s = Store::in_memory().unwrap();
+        assert!(s.connected().unwrap().is_empty());
+
+        s.connect("mail", true).unwrap();
+        assert_eq!(s.connected().unwrap(), vec!["mail".to_string()]);
+        // Twice is once. A switch that counts presses is a switch that can be
+        // half on.
+        s.connect("mail", true).unwrap();
+        assert_eq!(s.connected().unwrap(), vec!["mail".to_string()]);
+
+        s.connect("mail", false).unwrap();
+        assert!(s.connected().unwrap().is_empty());
+        // And turning off something already off is the state being asked for.
+        s.connect("mail", false).unwrap();
+    }
+
+    #[test]
+    fn a_new_agent_is_walled_in_rather_than_asking_about_everything() {
+        // The cost of asking, watched: somebody gave the same errand to this
+        // and to something else, and this one stopped four times before it
+        // reached the thing it was asked to do. Half of these run at seven in
+        // the morning with nobody at the window, where a card is not a question
+        // but a refusal.
+        //
+        // Not "no permission model": asking and a wall are the two mechanisms,
+        // and turning one off is exactly when the other has to be on.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("new", NOT_YET_NAMED, Path::new("/tmp/new"))
+            .unwrap();
+        assert_eq!(s.agent("new").unwrap().expect("an agent").asks, "auto");
+
+        // And it is still somebody's to change afterwards.
+        s.asks("new", "ask").unwrap();
+        assert_eq!(s.agent("new").unwrap().expect("an agent").asks, "ask");
     }
 
     #[test]

@@ -186,7 +186,15 @@ fn hello(params: &Value) -> Value {
 /// wording an agent reads cannot drift between the engine that gets them as
 /// function schemas and the engine that gets them through here.
 fn offered() -> Vec<Value> {
+    // The app's own tools and whatever this Mac can be let at, in one list,
+    // because to an engine they are all just tools. Which of the second sort
+    // actually answer depends on what somebody has switched on, and the ones
+    // that are off say so when they are called: an agent that cannot see a tool
+    // cannot tell anybody the thing they asked for is one switch away.
     team::declarations()
+        .into_iter()
+        .chain(crate::connectors::declarations())
+        .collect::<Vec<_>>()
         .iter()
         .filter_map(|declared| {
             let f = declared.get("function")?;
@@ -760,7 +768,13 @@ mod tests {
                 "every_day",
                 "keep_an_eye_on",
                 "over_to_you",
-                "who_else"
+                "who_else",
+                // What this Mac can be let at, which is offered whether or not
+                // anything is switched on: a tool nobody can see is a tool
+                // nobody can be told about.
+                "unread_mail",
+                "search_mail",
+                "what_is_on"
             ]
         );
         for tool in &tools {
@@ -774,11 +788,13 @@ mod tests {
 
     #[test]
     fn what_a_tool_is_called_here_is_what_it_is_called_to_the_other_engine() {
-        // Two lists of the same two tools would drift, and the day they did,
-        // an "always allow" would stop meaning the same thing on both engines.
+        // Two lists of the same tools would drift, and the day they did, an
+        // "always allow" would stop meaning the same thing on both engines.
         for tool in offered() {
             let name = tool["name"].as_str().expect("a name");
-            assert_eq!(team::which_of_ours(name).map(team::Ours::name), Some(name));
+            let known = team::which_of_ours(name).map(team::Ours::name).is_some()
+                || crate::connectors::which(name).is_some();
+            assert!(known, "`{name}` is offered here and answered nowhere");
         }
     }
 
