@@ -30,6 +30,7 @@ pub mod keeping;
 pub mod keys;
 pub mod only_one;
 pub mod store;
+pub mod trouble;
 pub mod wall;
 
 pub mod local;

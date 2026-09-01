@@ -79,6 +79,13 @@ would notice, not something a commit did.
   means quitting that app, so the one permission you are most likely to be
   asked for was the one that killed the agent waiting for your answer. The
   card keeps its buttons and picks the errand up where it left off.
+- A picture you paste or drop is shown in the box, rather than named. A pasted
+  screenshot is called "image.png" by the system, so two of them looked
+  identical and there was no way to notice the wrong one until it had been sent.
+- When something is stopping errands from working, Errand says so above the box
+  before you type, and says what to do about it. A login that has expired now
+  reads as a login that has expired, not as "401 OAuth access token has been
+  revoked" under a message you had already spent ten minutes writing.
 - Fixed: an agent on a model on this machine forgot everything the moment
   Errand was closed. Reopening one of its conversations handed it nothing,
   while the window went on showing the whole thread -- so a follow-up the next

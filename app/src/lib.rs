@@ -104,6 +104,13 @@ struct Held {
     /// arriving while the first is still on screen must not be ended by the
     /// first card being pressed.
     handovers: Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>,
+    /// What is stopping errands from working, if anything is.
+    ///
+    /// Only the kind that goes on happening until somebody does something: a
+    /// login that has expired fails identically every time, and saying so
+    /// before the next errand is the difference between losing a sentence and
+    /// losing a paragraph, a screenshot and a routine.
+    trouble: Mutex<Option<errand_core::trouble::Trouble>>,
     /// When each model was last asked how much it holds, by mark.
     ///
     /// In memory rather than in the store: it is a thing about this run of the
@@ -801,6 +808,42 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 let _ = waiting.send(event.clone());
             }
 
+            // What the failure actually means, in the app's own words, before it
+            // is written down or put on screen. The provider's sentence is
+            // accurate and says nothing somebody can act on: "401 OAuth access
+            // token has been revoked" is a login that has expired and a
+            // terminal command away from working, and nothing in those words
+            // says so.
+            let event = match &event {
+                Event::Failed { why } => match errand_core::trouble::what_it_means(why) {
+                    Some(trouble) => {
+                        // Remembered, so the next errand is warned before it is
+                        // typed rather than after. The one that prompted this
+                        // cost somebody a paragraph and a screenshot.
+                        let held: State<Held> = app.state();
+                        *held.trouble.lock().unwrap() = match trouble.until_somebody_acts {
+                            true => Some(trouble.clone()),
+                            false => None,
+                        };
+                        let _ = app.emit("trouble", trouble.clone());
+                        Event::Failed {
+                            why: errand_core::trouble::as_a_line(&trouble),
+                        }
+                    }
+                    None => event.clone(),
+                },
+                // Anything that got through means whatever was wrong is not
+                // wrong any more, so the warning goes away on its own.
+                Event::Done { .. } | Event::Said { .. } => {
+                    let held: State<Held> = app.state();
+                    if held.trouble.lock().unwrap().take().is_some() {
+                        let _ = app.emit("trouble_over", ());
+                    }
+                    event.clone()
+                }
+                _ => event.clone(),
+            };
+
             // How this run went, for the routine's own record. Only for runs
             // something other than a person started: a conversation somebody
             // is sitting in front of has its whole history on screen.
@@ -1047,6 +1090,48 @@ fn somewhere_an_agent_works(app: &AppHandle, real: &std::path::Path) -> bool {
         .into_iter()
         .filter_map(|one| one.canonicalize().ok())
         .any(|one| real.starts_with(one))
+}
+
+/// A picture somebody has just dropped on the window, so they can see it.
+///
+/// Separate from `a_local_picture`, which draws a picture an agent named and is
+/// bounded to the places agents work -- a model can write any path it likes and
+/// that one must not become a way to read the disk. This is the other
+/// direction: a file the person chose themselves, a moment before the app reads
+/// exactly the same bytes to send it. So the rules here are the ones `send`
+/// already applies, and nothing wider: it has to be a picture, and it has to be
+/// small enough to be one.
+#[tauri::command]
+async fn a_picture_to_send(path: String) -> Result<String, String> {
+    use base64::Engine as _;
+    let at = std::path::Path::new(&path);
+    let kind = match at
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => return Err("that is not a picture".to_string()),
+    };
+    let how_big = std::fs::metadata(at)
+        .map_err(|_| "there is nothing there".to_string())?
+        .len();
+    if how_big > A_PICTURE_AT_MOST {
+        return Err(format!(
+            "that is {}MB, and a picture has to be under {}MB",
+            how_big / 1024 / 1024,
+            A_PICTURE_AT_MOST / 1024 / 1024
+        ));
+    }
+    let bytes = std::fs::read(at).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "data:{kind};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
 }
 
 /// Show a file in Finder, without opening it.
@@ -2687,6 +2772,17 @@ async fn conversation_agent(held: State<'_, Held>, id: String) -> Result<Option<
         .map_err(|e| e.to_string())
 }
 
+/// What is stopping errands from working, if anything is.
+///
+/// Asked by the window when it opens and whenever a conversation is shown, so
+/// that somebody about to type a paragraph is told first rather than after.
+#[tauri::command]
+async fn whats_wrong(
+    held: State<'_, Held>,
+) -> Result<Option<errand_core::trouble::Trouble>, String> {
+    Ok(held.trouble.lock().unwrap().clone())
+}
+
 /// Say which conversation is on screen, or that none is.
 ///
 /// So that a notification can be held back for the one being read and shown for
@@ -4296,6 +4392,7 @@ pub fn run() {
                 looking: Arc::default(),
                 doorways: Mutex::new(HashMap::new()),
                 handovers: Mutex::new(HashMap::new()),
+                trouble: Mutex::new(None),
                 sized: Mutex::new(HashMap::new()),
                 mid_run: Mutex::new(HashMap::new()),
                 looking_at: Mutex::new(None),
@@ -4324,9 +4421,11 @@ pub fn run() {
             call_it,
             forget_conversation,
             looking_at,
+            whats_wrong,
             conversation_agent,
             a_picture,
             a_local_picture,
+            a_picture_to_send,
             show_in_finder,
             hits,
             routine_off,

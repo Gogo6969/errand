@@ -3600,3 +3600,80 @@ export async function allowingSomethingOnce() {
   panel.hidden = true;
   return found;
 }
+
+/**
+ * A picture you can see before you send it, and a warning before you type.
+ *
+ * Two failures with the same shape: the app knew something and showed the least
+ * useful version of it. A pasted screenshot is called `image.png` by the
+ * system, so the composer said "image.png" and there was no way to tell two
+ * apart or notice the wrong one had been pasted until it was sent. And a login
+ * that had expired was reported after a paragraph, a screenshot and a request
+ * for a daily errand had already been written.
+ */
+export async function seeingItBeforeYouSendIt() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const strip = document.getElementById("attached");
+
+  await openTalk("talk-1");
+  // A pasted picture arrives as a data URL and needs nothing from the app.
+  const pasted = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  window.__ATTACH__({ name: "image.png", url: pasted });
+  await new Promise((r) => setTimeout(r, 250));
+  const shown = strip.querySelector(".attached-one img");
+  check("a pasted picture is shown, not named", shown, strip.textContent || "nothing");
+  check("and it is the picture itself", shown?.src === pasted, String(shown?.src || "").slice(0, 22));
+  check(
+    "its name is still there for a screen reader",
+    shown?.alt === "image.png",
+    shown?.alt,
+  );
+
+  // Taking it off is its own control: clicking a picture means "show me it"
+  // everywhere else, and removing something is not a thing to do by accident.
+  const off = strip.querySelector(".attached-one .take-off");
+  check("taking it off again is its own control", off, strip.innerHTML.slice(0, 80));
+  off?.click();
+  await new Promise((r) => setTimeout(r, 200));
+  check("and pressing it takes it off", strip.hidden, `hidden=${strip.hidden}`);
+
+  // A dropped one is a path, which the window cannot read: the app does.
+  window.__ATTACH__({ name: "shot.png", url: "/tmp/shot.png" });
+  await new Promise((r) => setTimeout(r, 350));
+  check(
+    "a dropped picture is read by the app and shown too",
+    strip.querySelector(".attached-one img")?.src?.startsWith("data:image/"),
+    String(strip.querySelector(".attached-one img")?.src || "").slice(0, 22),
+  );
+  strip.querySelector(".attached-one .take-off")?.click();
+
+  // And the warning, which has to be there before anything is typed.
+  const trouble = document.getElementById("trouble");
+  check("nothing is warned about when nothing is wrong", trouble.hidden, `hidden=${trouble.hidden}`);
+  await tell("trouble", {
+    said: "Claude Code is signed out.",
+    fix: "Run `claude` in a terminal and sign in.",
+    until_somebody_acts: true,
+  });
+  await new Promise((r) => setTimeout(r, 200));
+  check("a login that has expired is said above the box", !trouble.hidden, `hidden=${trouble.hidden}`);
+  check(
+    "and it says what to do rather than only what went wrong",
+    /sign in/i.test(trouble.querySelector(".fix")?.textContent || ""),
+    trouble.querySelector(".fix")?.textContent,
+  );
+
+  // Something that clears on its own must not put a standing warning up.
+  await tell("trouble_over", {});
+  await new Promise((r) => setTimeout(r, 150));
+  check("and it goes away once something gets through", trouble.hidden, `hidden=${trouble.hidden}`);
+  await tell("trouble", { said: "The model server is busy.", fix: "It usually clears.", until_somebody_acts: false });
+  await new Promise((r) => setTimeout(r, 200));
+  check(
+    "a busy server is not turned into a standing warning",
+    trouble.hidden,
+    `hidden=${trouble.hidden}`,
+  );
+  return found;
+}

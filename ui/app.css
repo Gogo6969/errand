@@ -2127,3 +2127,60 @@ a.on-disk {
   font-size: 12px;
   color: var(--ink-soft);
 }
+
+/* What is waiting to go with the next message, shown rather than named. A
+   pasted screenshot is called image.png by the system, so a row of chips is
+   the app knowing what was attached and showing the least useful fact. */
+.attached-one {
+  position: relative;
+  margin: 0;
+  line-height: 0;
+}
+.attached-one img {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--edge);
+  cursor: zoom-in;
+  display: block;
+}
+.attached-one.unshown {
+  line-height: 1.3;
+  padding: 6px 9px;
+  border: 1px dashed var(--edge);
+  border-radius: 8px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+.attached-one .take-off {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--edge);
+  background: var(--card);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.attached-one .take-off:hover { background: var(--wrong); border-color: var(--wrong); color: var(--on-accent); }
+
+/* What is stopping errands working, above the box. Said before anything is
+   typed: the failure that put this here arrived after a paragraph, a
+   screenshot and a request for a daily routine, all of it already spent. */
+#trouble[hidden] { display: none; }
+#trouble {
+  margin: 8px 18px 0;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--wrong) 45%, var(--rule));
+  border-left: 3px solid var(--wrong);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--wrong) 8%, transparent);
+}
+#trouble .what { margin: 0; color: var(--ink); font-weight: 500; font-size: 13px; }
+#trouble .fix { margin: 4px 0 0; color: var(--ink-soft); font-size: 13px; }

@@ -71,6 +71,10 @@ export const FIXTURE = {
       { id: "talk-tired", agent: "agent-bitcoin", name: "Asked over and over", opened: true },
     ],
   },
+  // What is stopping errands working. Nothing by default: the check that needs
+  // one sets it, because a warning standing over every other check would be a
+  // window nobody is testing in its ordinary state.
+  whats_wrong: null,
   // How a routine has been going: one good morning, one failed, and one that
   // never came back because the machine slept. The three states the panel has
   // to be able to tell apart.
@@ -455,6 +459,14 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           case "forget_conversation":
           case "looking_at":
             return Promise.resolve(null);
+          case "whats_wrong":
+            return Promise.resolve(fixture.whats_wrong || null);
+          case "a_picture_to_send":
+            // A real one-pixel PNG, so a check that looks for a drawn picture
+            // fails on a broken image rather than passing on a stub string.
+            return Promise.resolve(
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+            );
           // Narrowed by the app, exactly as pressing Always narrows it, and
           // said back in those words. `git status` becomes any git command,
           // and somebody has to be told that rather than find out.

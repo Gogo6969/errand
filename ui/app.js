@@ -158,6 +158,7 @@ const el = {
   watchAgain: document.getElementById("watch-again"),
   watchSays: document.getElementById("watch-says"),
   attached: document.getElementById("attached"),
+  trouble: document.getElementById("trouble"),
   palette: document.getElementById("palette"),
   paletteWhat: document.getElementById("palette-what"),
   paletteList: document.getElementById("palette-list"),
@@ -517,6 +518,7 @@ async function catchUp() {
   const known = await invoke("agents");
   for (const a of known) agents.set(a.id, asAgent(a, agents.get(a.id)));
   await whatIsNew();
+  drawTrouble();
   drawThreads();
   // A version somebody has not been told about yet, said once. After the tour,
   // because a brand new copy has nothing to have changed from.
@@ -613,6 +615,7 @@ async function show(id) {
   // held back for this one and shown for the thirty-nine that are not. The app
   // knows what is running; only the window knows what is being looked at.
   invoke("looking_at", { id }).catch(() => {});
+  drawTrouble();
   // Read, now that it is on screen. Not before: `show` is called for the
   // window's own reasons as well as somebody's, and marking a briefing read
   // that nobody has looked at is the one way this feature can do harm.
@@ -1815,20 +1818,106 @@ function doneWith(m) {
  */
 let attached = [];
 
+/**
+ * What is waiting to go with the next message.
+ *
+ * The picture, not its name. A pasted screenshot is called `image.png` by the
+ * system, so a row of chips reading "image.png, image.png" is the app knowing
+ * exactly what somebody attached and showing them the least useful fact about
+ * it -- and there is no way to tell two of them apart, or to notice that the
+ * wrong one was pasted, until after it has been sent.
+ */
+/**
+ * What is stopping errands from working, above the box.
+ *
+ * Asked of the app rather than remembered here, because the window is not
+ * present for most of the ways it is discovered: a routine failing at seven, a
+ * watch waking something at lunchtime. Shown before anything is typed, which is
+ * the whole point -- the failure that put this here arrived after somebody had
+ * written a paragraph, attached a screenshot and asked for a daily errand, all
+ * of which was spent before the app admitted it could not sign in.
+ */
+async function drawTrouble() {
+  let wrong = null;
+  try {
+    wrong = await invoke("whats_wrong");
+  } catch {
+    // Nothing said is better than a warning the app cannot stand behind.
+  }
+  if (!wrong) {
+    el.trouble.hidden = true;
+    el.trouble.replaceChildren();
+    return;
+  }
+  el.trouble.replaceChildren(note("p", wrong.said, "what"), note("p", wrong.fix, "fix"));
+  el.trouble.hidden = false;
+}
+
+listen("trouble", ({ payload }) => {
+  if (!payload?.until_somebody_acts) return;
+  el.trouble.replaceChildren(note("p", payload.said, "what"), note("p", payload.fix, "fix"));
+  el.trouble.hidden = false;
+});
+
+// Anything getting through means whatever was wrong is not wrong any more.
+listen("trouble_over", () => {
+  el.trouble.hidden = true;
+  el.trouble.replaceChildren();
+});
+
+// A way in for the window harness, which cannot paste or drop. Named like the
+// other stand-in seams so it reads as one: the alternative is a check that
+// tests a function rather than the strip somebody looks at.
+window.__ATTACH__ = (one) => {
+  attached.push(one);
+  drawAttached();
+};
+
 function drawAttached() {
   el.attached.hidden = attached.length === 0;
   el.attached.replaceChildren(
     ...attached.map((one, at) => {
-      const chip = document.createElement("button");
-      chip.type = "button";
-      chip.className = "chip";
-      chip.textContent = one.name;
-      chip.title = "Take this off again";
-      chip.onclick = () => {
+      const held = document.createElement("figure");
+      held.className = "attached-one";
+
+      const img = document.createElement("img");
+      img.alt = one.name || "a picture";
+      // A pasted picture is already a data URL and needs nothing. A dropped one
+      // is a path, and the window cannot read a file: the app does, under the
+      // same rules it applies a moment later when it sends the same bytes.
+      if (/^data:/.test(one.url)) {
+        img.src = one.url;
+      } else {
+        invoke("a_picture_to_send", { path: one.url })
+          .then((url) => {
+            img.src = url;
+          })
+          .catch((why) => {
+            // Named instead, which is where this started. Better than an empty
+            // box, and it says why rather than looking broken.
+            held.classList.add("unshown");
+            img.replaceWith(note("span", one.name || "a picture", "what"));
+            held.title = String(why);
+          });
+      }
+      img.onclick = () => img.src && lookCloser(img.src, one.name);
+      held.append(img);
+
+      // Its own control rather than the picture itself, because clicking a
+      // picture means "show me it" everywhere else and taking something away
+      // is not a thing to do by accident.
+      const off = document.createElement("button");
+      off.type = "button";
+      off.className = "take-off";
+      off.textContent = "\u{00d7}";
+      off.title = `Take ${one.name || "this"} off again`;
+      off.setAttribute("aria-label", off.title);
+      off.onclick = () => {
         attached.splice(at, 1);
         drawAttached();
       };
-      return chip;
+      held.append(off);
+      return held;
     }),
   );
 }
