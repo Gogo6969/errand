@@ -60,6 +60,10 @@ would notice, not something a commit did.
   32k for everything. A 200k model was losing its history four times sooner
   than it needed to, and an 8k model was refusing every request. The picker
   now says what each one holds.
+- And it asks again as it goes, so a server you restart with a bigger window
+  is noticed the same day rather than never. It asks behind whatever you are
+  doing, never in front of it, and corrects every agent on that model at once
+  rather than only the line in the picker.
 - A write the wall stopped says it was the wall, instead of "operation not
   permitted", which sends people to change permissions on a folder that was
   never the problem.

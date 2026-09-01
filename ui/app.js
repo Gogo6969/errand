@@ -1369,6 +1369,20 @@ function thinking() {
  * forward, and finding the conversation it was about was left to the person who
  * had just been told about it, which is the errand they were trying not to run.
  */
+/**
+ * A model turned out to hold something other than what was written down.
+ *
+ * Rare, and worth acting on when it happens: somebody restarted a server with
+ * a bigger window, and until the picker is read again the Settings screen is
+ * showing last week's number while the app has already stopped believing it.
+ */
+listen("models_changed", () => {
+  thePickerHasChanged();
+  // Only where somebody is looking at it. Redrawing a screen that is closed is
+  // work nobody asked for, and the list is read fresh the next time it opens.
+  if (!document.getElementById("models")?.hidden) drawChosen();
+});
+
 listen("go_to", async ({ payload }) => {
   const id = String(payload || "");
   if (!id) return;

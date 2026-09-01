@@ -110,6 +110,17 @@ fn as_much_as_most_hold() -> usize {
     32_768
 }
 
+/// How long a reply a model of a given size should be allowed to write.
+///
+/// A quarter of what it holds, because the rest of the window is the
+/// conversation that got it there, and never past a sensible ceiling: a reply
+/// longer than that is a runaway rather than a long answer. Here rather than in
+/// the app because two places work it out now -- adding a model to the picker,
+/// and finding out later that it holds something different.
+pub fn room_for_an_answer(holds: usize) -> usize {
+    (holds / 4).clamp(4_096, 32_768)
+}
+
 /// Room for an answer rather than for a book.
 fn enough_for_an_answer() -> usize {
     4_096

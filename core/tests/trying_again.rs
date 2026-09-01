@@ -120,3 +120,56 @@ async fn a_server_that_is_not_there_at_all_is_worth_one_more_try() {
         "{why}"
     );
 }
+
+/// What a real llama.cpp box says it holds, read back from its own answer.
+///
+/// The number Errand writes down comes from a server's own reply, and the shape
+/// of that reply differs between Ollama, llama.cpp and everything speaking the
+/// OpenAI protocol. A parser that is wrong here is wrong silently: the symptom
+/// is a conversation dropped early, or a request refused, with nothing anywhere
+/// saying which number was to blame.
+///
+/// The payload beside this file is the real thing, taken from the llama.cpp
+/// server on this network on the day the parser was written -- twelve kilobytes
+/// of it, of which one number matters and seventeen sibling keys do not. Kept
+/// rather than hand-written, because a hand-written fixture only ever contains
+/// what its author already knew the parser would look for.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_real_llama_cpp_answer_is_read_the_way_the_box_meant_it() {
+    let real = include_str!("from-the-box/llamacpp-props.json");
+    let listening = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let at = format!("http://{}", listening.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((mut them, _)) = listening.accept().await {
+            let mut got = vec![0u8; 8 * 1024];
+            let _ = them.read(&mut got).await;
+            let said = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{real}",
+                real.len()
+            );
+            let _ = them.write_all(said.as_bytes()).await;
+            let _ = them.flush().await;
+        }
+    });
+
+    let caps =
+        errand_core::local::find::query_model_caps("llamacpp", &at, None, "Qwen3.8-27B-Q4_K_M")
+            .await
+            .expect("it answered");
+
+    // The number that box is actually serving, and not the one this app used to
+    // assume for every model there is.
+    assert_eq!(caps.context_length, Some(49_152));
+    assert_ne!(
+        caps.context_length,
+        Some(32_768),
+        "this would pass by matching the old assumption rather than by reading"
+    );
+
+    // And what that means for the reply ceiling, which is the half that cut
+    // long answers off in the middle with nothing saying so.
+    assert_eq!(errand_core::local::room_for_an_answer(49_152), 12_288);
+}

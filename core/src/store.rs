@@ -1355,6 +1355,61 @@ impl Store {
         Ok(())
     }
 
+    /// Write down that a model turns out to hold a different amount.
+    ///
+    /// Everywhere at once, and that is the whole point of it being here rather
+    /// than at the two call sites. An agent's settings are a copy taken when
+    /// the model was chosen, and nothing has ever gone back to correct one: so
+    /// changing the line in the picker leaves every agent already on that model
+    /// still sending the old number, which is the same silence this is meant to
+    /// end, moved one table over.
+    ///
+    /// Returns how many rows it changed, so the caller can say nothing at all
+    /// when nothing needed saying.
+    pub fn it_holds(&self, mark: &str, holds: usize) -> Result<usize> {
+        let wants = crate::local::room_for_an_answer(holds);
+        let corrected = |settings: Option<&str>| -> Option<String> {
+            let mut kept: serde_json::Value = serde_json::from_str(settings?).ok()?;
+            // Already right is not a change. Saying so would put a line in
+            // front of somebody every time an app starts.
+            if kept.get("context_window").and_then(|v| v.as_u64()) == Some(holds as u64) {
+                return None;
+            }
+            kept["context_window"] = serde_json::json!(holds);
+            kept["max_tokens"] = serde_json::json!(wants);
+            Some(kept.to_string())
+        };
+
+        let mut changed = 0;
+        for one in self.offered()? {
+            if what_makes_it_the_same(&one.engine, one.settings.as_deref()) != mark {
+                continue;
+            }
+            let Some(now) = corrected(one.settings.as_deref()) else {
+                continue;
+            };
+            self.conn.lock().unwrap().execute(
+                "UPDATE offered SET settings = ? WHERE id = ?",
+                params![now, one.id],
+            )?;
+            changed += 1;
+        }
+        for who in self.agents()? {
+            if what_makes_it_the_same(&who.engine, who.engine_settings.as_deref()) != mark {
+                continue;
+            }
+            let Some(now) = corrected(who.engine_settings.as_deref()) else {
+                continue;
+            };
+            self.conn.lock().unwrap().execute(
+                "UPDATE agents SET engine_settings = ? WHERE id = ?",
+                params![now, who.id],
+            )?;
+            changed += 1;
+        }
+        Ok(changed)
+    }
+
     /// Give a line in the picker a name somebody chose.
     pub fn call_it_something(&self, id: &str, label: &str) -> Result<()> {
         self.conn.lock().unwrap().execute(
@@ -2681,6 +2736,118 @@ mod tests {
             "{:?}",
             hits[0].snippet
         );
+    }
+
+    #[test]
+    fn a_model_that_turns_out_to_hold_more_is_corrected_everywhere_it_was_written_down() {
+        // An agent's settings are a copy taken when the model was chosen, and
+        // nothing has ever gone back to correct one. So fixing the line in the
+        // picker alone leaves every agent already on that model still sending
+        // the old number, which is the same silence moved one table over.
+        let s = Store::in_memory().unwrap();
+        let was = r#"{"provider":"llamacpp","base_url":"http://192.168.1.25:8081","model":"qwen","context_window":32768,"max_tokens":4096}"#;
+        s.offer(&Offered {
+            id: "o1".into(),
+            engine: "local".into(),
+            label: "Qwen on the box".into(),
+            settings: Some(was.into()),
+            backend: None,
+            sort: 1,
+            mark: String::new(),
+        })
+        .unwrap();
+        s.make_sure_it_exists("who", NOT_YET_NAMED, Path::new("/tmp/who"))
+            .unwrap();
+        s.use_engine("who", "local", Some(was)).unwrap();
+
+        let mark = what_makes_it_the_same("local", Some(was));
+        assert_eq!(s.it_holds(&mark, 65_536).unwrap(), 2, "not both rows");
+
+        // Found by its mark rather than by position: a fresh store already has
+        // the Claude lines in the picker, and those have no settings at all.
+        let mine = s
+            .offered()
+            .unwrap()
+            .into_iter()
+            .find(|o| what_makes_it_the_same(&o.engine, o.settings.as_deref()) == mark)
+            .expect("the line is still in the picker");
+        let picker: serde_json::Value =
+            serde_json::from_str(mine.settings.as_deref().unwrap()).unwrap();
+        assert_eq!(picker["context_window"], 65_536);
+        // And the reply ceiling with it, which is the half that silently cut
+        // long answers off in the middle.
+        assert_eq!(picker["max_tokens"], 16_384);
+        // Nothing else about it was touched.
+        assert_eq!(picker["base_url"], "http://192.168.1.25:8081");
+        assert_eq!(picker["provider"], "llamacpp");
+
+        let theirs: serde_json::Value = serde_json::from_str(
+            s.agent("who")
+                .unwrap()
+                .unwrap()
+                .engine_settings
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(theirs["context_window"], 65_536);
+
+        // Saying the same thing again changes nothing, so nothing is said. An
+        // app that announced this at every start would be worse than one that
+        // never noticed.
+        assert_eq!(s.it_holds(&mark, 65_536).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_model_that_turns_out_to_hold_less_is_corrected_the_same_way() {
+        // The direction that fails loudly rather than quietly: too large is
+        // refused outright and reads as a broken model.
+        let s = Store::in_memory().unwrap();
+        let was = r#"{"base_url":"http://box:8081","model":"m","context_window":65536,"max_tokens":16384}"#;
+        s.make_sure_it_exists("who", NOT_YET_NAMED, Path::new("/tmp/who"))
+            .unwrap();
+        s.use_engine("who", "local", Some(was)).unwrap();
+        let mark = what_makes_it_the_same("local", Some(was));
+        assert_eq!(s.it_holds(&mark, 8_192).unwrap(), 1);
+        let theirs: serde_json::Value = serde_json::from_str(
+            s.agent("who")
+                .unwrap()
+                .unwrap()
+                .engine_settings
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(theirs["context_window"], 8_192);
+        assert_eq!(theirs["max_tokens"], 4_096, "the floor is the floor");
+    }
+
+    #[test]
+    fn correcting_one_model_leaves_every_other_model_alone() {
+        // Marks are how two settings are known to be the same model, and a
+        // careless match here would resize somebody's whole picker.
+        let s = Store::in_memory().unwrap();
+        let mine = r#"{"base_url":"http://a:1","model":"one","context_window":32768}"#;
+        let yours = r#"{"base_url":"http://b:2","model":"two","context_window":32768}"#;
+        s.make_sure_it_exists("a", NOT_YET_NAMED, Path::new("/tmp/a"))
+            .unwrap();
+        s.make_sure_it_exists("b", NOT_YET_NAMED, Path::new("/tmp/b"))
+            .unwrap();
+        s.use_engine("a", "local", Some(mine)).unwrap();
+        s.use_engine("b", "local", Some(yours)).unwrap();
+
+        s.it_holds(&what_makes_it_the_same("local", Some(mine)), 65_536)
+            .unwrap();
+        let untouched: serde_json::Value = serde_json::from_str(
+            s.agent("b")
+                .unwrap()
+                .unwrap()
+                .engine_settings
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(untouched["context_window"], 32_768, "the other model moved");
     }
 
     #[test]

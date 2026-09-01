@@ -104,6 +104,13 @@ struct Held {
     /// arriving while the first is still on screen must not be ended by the
     /// first card being pressed.
     handovers: Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>,
+    /// When each model was last asked how much it holds, by mark.
+    ///
+    /// In memory rather than in the store: it is a thing about this run of the
+    /// app, not about the model, and putting it in the settings would mean a
+    /// migration and a number somebody reads in Settings that means nothing to
+    /// them.
+    sized: Mutex<HashMap<String, std::time::Instant>>,
     /// The run each conversation is in the middle of, for the ones started by
     /// something other than a person typing.
     ///
@@ -438,13 +445,20 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // for settings that were chosen, stored and shown in the header a
             // line above, and it sent somebody looking at the picker for a
             // fault that was in what the picker had written.
-            let settings: LlmSettings = serde_json::from_str(&settings.unwrap_or_default())
-                .map_err(|why| {
-                    format!(
-                        "the model set for this thread could not be read ({why}). \
-                         Choose it again in the picker at the top."
-                    )
-                })?;
+            let said = settings.unwrap_or_default();
+            let settings: LlmSettings = serde_json::from_str(&said).map_err(|why| {
+                format!(
+                    "the model set for this thread could not be read ({why}). \
+                     Choose it again in the picker at the top."
+                )
+            })?;
+            // Ask again, behind this, whether it still holds what it did. Not
+            // in front of it: the asking takes seconds against a server that is
+            // slow and five against one that is off, and paying that before
+            // every turn to catch a setting that changes twice a year would be
+            // a poor trade. So this turn uses what is written down, the answer
+            // lands while it is running, and the next turn uses the truth.
+            ask_again_how_much_it_holds(&app, &said);
             let asks = known.as_ref().map_or("ask", |a| a.asks.as_str());
             // A local model keeps no session at all, so a conversation carried
             // on from another needs what happened told to it, the same way
@@ -1205,6 +1219,94 @@ async fn remember_backend(
     })
 }
 
+/// How often a model is asked again how much it holds.
+///
+/// A self-hosted model's window changes when somebody restarts the server with
+/// a different flag, which is a thing that happens and not a thing that happens
+/// often. Often enough to catch it the same day, rare enough that the asking is
+/// invisible.
+const HOW_OFTEN_TO_ASK: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+/// Find out again, in the background, how much a model holds.
+///
+/// The one number in a model's settings that can go stale on its own. Errand
+/// asks when the model is added to the picker and wrote the answer down, and
+/// until now never asked again: a server restarted with a bigger window went on
+/// being sent a third of it, with the conversation dropped early and nothing
+/// anywhere saying why. Not an error, which is what makes it worth chasing --
+/// the opposite direction announces itself with a refused request.
+///
+/// Nothing waits on this. Not the turn that triggered it, and not the window.
+fn ask_again_how_much_it_holds(app: &AppHandle, said: &str) {
+    let Ok(kept) = serde_json::from_str::<serde_json::Value>(said) else {
+        return;
+    };
+    let at = |k: &str| {
+        kept.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let (provider, base_url, model) = (at("provider"), at("base_url"), at("model"));
+    if base_url.is_empty() || model.is_empty() {
+        return;
+    }
+    let mark = errand_core::store::what_makes_it_the_same("local", Some(said));
+
+    {
+        // Once every few hours per model, however many agents are on it and
+        // however many turns they take. Kept in memory rather than in the
+        // settings, so this leaves no trace in what somebody reads and nothing
+        // to migrate.
+        let held: State<Held> = app.state();
+        let mut asked = held.sized.lock().unwrap();
+        let now = std::time::Instant::now();
+        if asked
+            .get(&mark)
+            .is_some_and(|then: &std::time::Instant| now.duration_since(*then) < HOW_OFTEN_TO_ASK)
+        {
+            return;
+        }
+        asked.insert(mark.clone(), now);
+    }
+
+    let key = kept
+        .get("api_key")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Ok(caps) = errand_core::local::find::query_model_caps(
+            &provider,
+            &base_url,
+            key.as_deref(),
+            &model,
+        )
+        .await
+        else {
+            return;
+        };
+        let Some(holds) = caps.context_length else {
+            return;
+        };
+        let held: State<Held> = app.state();
+        match held.store.it_holds(&mark, holds as usize) {
+            // Nothing to say when nothing changed, which is almost always.
+            Ok(0) => {}
+            Ok(rows) => {
+                eprintln!(
+                    "{model} holds {holds}, not what was written down; corrected {rows} rows"
+                );
+                // The picker is the one place this is visible, so it is the one
+                // place that has to be redrawn. Somebody looking at Settings
+                // while this lands should not be reading last week's number.
+                let _ = app.emit("models_changed", ());
+            }
+            Err(why) => eprintln!("could not write down what {model} holds: {why}"),
+        }
+    });
+}
+
 /// The settings for a model, with its real context window in them.
 ///
 /// Returned unchanged when the server will not say, or when somebody has
@@ -1247,21 +1349,10 @@ async fn with_its_real_size(said: String) -> String {
     // though it held a sixth of that.
     settings["context_window"] = serde_json::json!(holds);
     if settings.get("max_tokens").is_none() {
-        settings["max_tokens"] = serde_json::json!(room_for_an_answer(holds as usize));
+        settings["max_tokens"] =
+            serde_json::json!(errand_core::local::room_for_an_answer(holds as usize));
     }
     settings.to_string()
-}
-
-/// How long a reply a model this size should be allowed to write.
-///
-/// The sharper half of the same fault. Every model was capped at 4,096 tokens
-/// out, so an errand asked to write anything long was cut off in the middle
-/// with nothing saying so, on a model that would happily have written four
-/// times as much. A quarter of what it holds, because the rest of the window is
-/// the conversation that got it there, and never past a sensible ceiling: a
-/// reply longer than this is a runaway rather than a long answer.
-fn room_for_an_answer(holds: usize) -> usize {
-    (holds / 4).clamp(4_096, 32_768)
 }
 
 /// Forget somewhere, its key, and everything it was offering.
@@ -3912,6 +4003,7 @@ pub fn run() {
                 looking: Arc::default(),
                 doorways: Mutex::new(HashMap::new()),
                 handovers: Mutex::new(HashMap::new()),
+                sized: Mutex::new(HashMap::new()),
                 mid_run: Mutex::new(HashMap::new()),
                 looking_at: Mutex::new(None),
                 store: Arc::new(store),
