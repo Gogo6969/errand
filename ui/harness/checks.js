@@ -808,6 +808,12 @@ export async function whichModels() {
   // it is on afterwards -- and the true reason it is not there. The old words
   // said "not running", which would send somebody to go and check a server
   // that is perfectly well.
+  //
+  // Opened here rather than assumed. This used to read whichever agent an
+  // earlier group happened to leave on screen, so adding a check anywhere
+  // above it broke this one, which is a test failing at another test rather
+  // than at the app.
+  await openTalk("talk-1");
   document.getElementById("setup").click();
   await new Promise((r) => setTimeout(r, 250));
   const kept = FIXTURE.offered;
@@ -2970,6 +2976,178 @@ export async function aNotificationThatLeadsSomewhere() {
     "one about a conversation that is gone leaves the window where it was",
     document.getElementById("talks").value === "talk-waiting",
     document.getElementById("talks").value,
+  );
+  return found;
+}
+
+/**
+ * A routine you can switch off, and a list of what it actually did.
+ *
+ * The only stop there was cleared the schedule, what it says and when it last
+ * ran, in one statement: going away for a week and coming back meant setting
+ * the whole thing up again from memory. And the question people ask about a
+ * standing job is not when it is next but whether it has been working, which
+ * nothing in the app could answer -- three failed mornings left a conversation
+ * looking merely quiet.
+ */
+export async function pausingARoutineAndSeeingHowItWent() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  await openTalk("talk-2");
+  document.getElementById("repeat").click();
+  await new Promise((r) => setTimeout(r, 350));
+  const says = document.getElementById("routine-says");
+  const pause = document.getElementById("routine-pause");
+
+  check("a conversation with a routine offers to pause it", !pause.hidden, String(pause.hidden));
+  check("and the button says pause while it is running", pause.textContent === "Pause", pause.textContent);
+  check("the line says when it is next", /Next /.test(says.textContent), says.textContent);
+
+  // What it actually did, told apart three ways.
+  const went = [...document.querySelectorAll("#routine-went-list li")];
+  check("what it did is listed", went.length === 3, String(went.length));
+  check(
+    "a failed run reads as failed rather than as quiet",
+    went.some((li) => li.classList.contains("wrong") && /not answering/.test(li.textContent)),
+    went.map((li) => li.className).join(" | "),
+  );
+  check(
+    "and a run that never came back is neither done nor failed",
+    went.some((li) => li.classList.contains("unfinished") && /did not finish/.test(li.textContent)),
+    went.map((li) => li.textContent.slice(-30)).join(" | "),
+  );
+
+  // Pausing keeps the schedule, which is the whole point.
+  pause.click();
+  await new Promise((r) => setTimeout(r, 250));
+  check(
+    "pausing tells the app to switch it off rather than clear it",
+    asked.some((a) => a.name === "routine_off" && a.args?.off === true) &&
+      !asked.some((a) => a.name === "runs" && a.args?.at === null),
+    JSON.stringify(asked.filter((a) => a.name === "routine_off" || a.name === "runs").slice(-2)),
+  );
+  check(
+    "the line says it is paused, and does not promise a next run",
+    /Paused/.test(says.textContent) && !/Next /.test(says.textContent),
+    says.textContent,
+  );
+  check("and what it would run is still there", /daily 07:00/.test(says.textContent), says.textContent);
+  check("the button now offers to start it again", pause.textContent === "Start again", pause.textContent);
+
+  // And reopening reads it back from the app rather than from the page.
+  document.getElementById("repeat").click();
+  document.getElementById("repeat").click();
+  await new Promise((r) => setTimeout(r, 350));
+  check(
+    "it is still paused when the panel is opened again",
+    /Paused/.test(document.getElementById("routine-says").textContent),
+    document.getElementById("routine-says").textContent,
+  );
+
+  document.getElementById("routine-pause").click();
+  await new Promise((r) => setTimeout(r, 250));
+  check(
+    "and starting it again says so",
+    asked.some((a) => a.name === "routine_off" && a.args?.off === false),
+    JSON.stringify(asked.filter((a) => a.name === "routine_off").slice(-1)),
+  );
+  document.getElementById("repeat").click();
+  return found;
+}
+
+/**
+ * A search that lands on the line, and a Cmd-F that does something.
+ *
+ * The expensive half of a search was already being done and thrown away: the
+ * query finds the exact line, inside a subquery, and returned the agent. So
+ * somebody searching for a phrase they remember was dropped into whichever of
+ * that agent's conversations spoke most recently, with no highlight, and
+ * scrolled for it by hand -- and it gets worse the more the app is used as
+ * intended. Cmd-F was separately ignored altogether.
+ */
+export async function findingWhereTheWordsAre() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const box = document.getElementById("find");
+
+  // Start somewhere the words are not, so arriving is a real move. The phrase
+  // is in an older conversation of the same agent, which is the case the whole
+  // thing exists for: the newest one is where you used to be dropped.
+  await openTalk("talk-1");
+  box.value = "Yesterday: BTC up";
+  box.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 400));
+
+  const rows = [...document.querySelectorAll("#threads li")];
+  const row = rows.find((li) => li.dataset.agent === "agent-bitcoin");
+  check("the agent that said it is in the narrowed list", row, rows.map((r) => r.dataset.agent).join(","));
+  check(
+    "and the row shows the line rather than what the agent is for",
+    /Yesterday: BTC up/.test(row?.querySelector(".last")?.textContent || ""),
+    row?.querySelector(".last")?.textContent,
+  );
+
+  row?.click();
+  await new Promise((r) => setTimeout(r, 600));
+  check(
+    "clicking it opens the conversation the words are in",
+    document.getElementById("talks").value === "talk-overnight",
+    document.getElementById("talks").value,
+  );
+  const marked = document.querySelector("#messages li.found");
+  check("and the line itself is marked", marked, String(!!marked));
+  check(
+    "the marked line is the one that matched, not the one beside it",
+    /Yesterday: BTC up/.test(marked?.textContent || ""),
+    marked?.textContent?.slice(0, 60),
+  );
+
+  box.value = "";
+  box.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 300));
+
+  // And finding words in what is already open, which is a different question.
+  const bar = document.getElementById("finding");
+  check("the find bar starts closed", bar.hidden, String(bar.hidden));
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "f", metaKey: true, bubbles: true }));
+  await new Promise((r) => setTimeout(r, 200));
+  check("Cmd-F opens it", !bar.hidden, String(bar.hidden));
+
+  const what = document.getElementById("finding-what");
+  what.value = "BTC";
+  what.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 200));
+  check(
+    "it says how many there are rather than leaving them to be counted",
+    /\d+ of \d+/.test(document.getElementById("finding-count").textContent),
+    document.getElementById("finding-count").textContent,
+  );
+  const firstOne = document.getElementById("finding-count").textContent;
+  what.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await new Promise((r) => setTimeout(r, 150));
+  check(
+    "Enter steps to the next one",
+    document.getElementById("finding-count").textContent !== firstOne,
+    `${firstOne} then ${document.getElementById("finding-count").textContent}`,
+  );
+
+  what.value = "nothing like this is in here";
+  what.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 150));
+  check(
+    "and words that are not there say so rather than nothing",
+    document.getElementById("finding-count").textContent === "none",
+    document.getElementById("finding-count").textContent,
+  );
+
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "f", metaKey: true, bubbles: true }));
+  await new Promise((r) => setTimeout(r, 150));
+  check("Cmd-F again puts it away", bar.hidden, String(bar.hidden));
+  check(
+    "and nothing is left marked behind it",
+    !document.querySelector("#messages li.found"),
+    String(!!document.querySelector("#messages li.found")),
   );
   return found;
 }

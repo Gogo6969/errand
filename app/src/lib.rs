@@ -104,6 +104,13 @@ struct Held {
     /// arriving while the first is still on screen must not be ended by the
     /// first card being pressed.
     handovers: Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>,
+    /// The run each conversation is in the middle of, for the ones started by
+    /// something other than a person typing.
+    ///
+    /// Kept here because the two halves happen in different places: the clock
+    /// starts a run and the engine's event pump is where it ends, and nothing
+    /// travels between them but the conversation id.
+    mid_run: Mutex<HashMap<String, i64>>,
     /// The one conversation somebody is actually looking at, if any.
     ///
     /// A notification used to be held back whenever the main window had focus,
@@ -758,6 +765,21 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // agent, sitting in a tool call, expecting an answer.
             if let Some(waiting) = watching.lock().unwrap().get(&id) {
                 let _ = waiting.send(event.clone());
+            }
+
+            // How this run went, for the routine's own record. Only for runs
+            // something other than a person started: a conversation somebody
+            // is sitting in front of has its whole history on screen.
+            if let Some(outcome) = match &event {
+                Event::Done { .. } => Some("done".to_string()),
+                Event::Failed { why } => Some(why.clone()),
+                _ => None,
+            } {
+                let held: State<Held> = app.state();
+                let run = held.mid_run.lock().unwrap().remove(&id);
+                if let Some(run) = run {
+                    let _ = store.a_run_ended(run, &outcome);
+                }
             }
 
             tell_them(&app, &store, &id, &event);
@@ -1714,6 +1736,14 @@ async fn look_once(
                 held.store
                     .woke(conversation, &seen.mark, &seen.note, today)
                     .map_err(|e| e.to_string())?;
+                // A watch waking somebody is a run like any other, and the same
+                // question is asked of it: has this been working.
+                if let Ok(run) = held.store.a_run_began(conversation, "watch") {
+                    held.mid_run
+                        .lock()
+                        .unwrap()
+                        .insert(conversation.to_string(), run);
+                }
                 Turn::claim(held.running.clone(), conversation.to_string())
             };
             say(
@@ -2181,6 +2211,42 @@ fn reach_for_it(
         );
     }
     errand_core::connectors::run(job, args)
+}
+
+/// Where some words were actually found, line by line.
+///
+/// The other half of a search. `matching` narrows the list of agents, which is
+/// the right first answer to "which errand was that"; this says which line in
+/// which conversation, so going there means arriving at it rather than at
+/// whichever of that agent's conversations spoke most recently.
+#[tauri::command]
+async fn hits(
+    held: State<'_, Held>,
+    looking_for: String,
+) -> Result<Vec<errand_core::store::Hit>, String> {
+    held.store.hits(&looking_for).map_err(|e| e.to_string())
+}
+
+/// Switch a routine off, or back on, without throwing it away.
+#[tauri::command]
+async fn routine_off(held: State<'_, Held>, id: String, off: bool) -> Result<(), String> {
+    held.store.routine_off(&id, off).map_err(|e| e.to_string())
+}
+
+/// How a routine has actually been going.
+///
+/// The question people ask about a standing job is not when it is next but
+/// whether it has been working, and until this there was nothing in the app
+/// that could answer it: three failed mornings left a conversation looking
+/// merely quiet.
+#[tauri::command]
+async fn how_it_has_been_going(
+    held: State<'_, Held>,
+    id: String,
+) -> Result<Vec<errand_core::store::Run>, String> {
+    held.store
+        .how_it_has_been_going(&id, 20)
+        .map_err(|e| e.to_string())
 }
 
 /// Which agent a conversation belongs to.
@@ -2794,6 +2860,15 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
             held.store
                 .ran(&conversation, now.timestamp_millis())
                 .map_err(|e| e.to_string())?;
+            // And a row of its own, so "has it been working" has an answer.
+            // One column holding only the last run cannot tell three good
+            // mornings from three failed ones.
+            if let Ok(run) = held.store.a_run_began(&conversation, "clock") {
+                held.mid_run
+                    .lock()
+                    .unwrap()
+                    .insert(conversation.clone(), run);
+            }
         }
 
         let turn = {
@@ -2994,14 +3069,19 @@ struct Routine {
     /// Unix millis, or nothing when the schedule cannot say.
     due: Option<i64>,
     ran: Option<i64>,
+    /// Switched off without being thrown away. The clock walks past it.
+    off: bool,
 }
 
 #[tauri::command]
 async fn routines(held: State<'_, Held>) -> Result<Vec<Routine>, String> {
     let now = chrono::Local::now();
+    // Switched-off ones included. The clock must not see them; the panel must,
+    // or a paused routine reads as no routine and there is nowhere to switch it
+    // back on from.
     Ok(held
         .store
-        .routines()
+        .every_routine()
         .map_err(|e| e.to_string())?
         .into_iter()
         .filter_map(|c| {
@@ -3017,6 +3097,7 @@ async fn routines(held: State<'_, Held>) -> Result<Vec<Routine>, String> {
                 at,
                 what: c.runs_what.unwrap_or_default(),
                 ran: c.ran_at,
+                off: c.routine_off,
             })
         })
         .collect())
@@ -3706,6 +3787,7 @@ pub fn run() {
                 looking: Arc::default(),
                 doorways: Mutex::new(HashMap::new()),
                 handovers: Mutex::new(HashMap::new()),
+                mid_run: Mutex::new(HashMap::new()),
                 looking_at: Mutex::new(None),
                 store: Arc::new(store),
             });
@@ -3732,6 +3814,9 @@ pub fn run() {
             forget_conversation,
             looking_at,
             conversation_agent,
+            hits,
+            routine_off,
+            how_it_has_been_going,
             say,
             answer,
             engines,

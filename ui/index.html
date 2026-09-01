@@ -181,6 +181,20 @@
         <button id="whois-save" type="button">Save</button>
       </aside>
 
+      <!--
+        Finding words in the conversation that is open, which is a different
+        question from finding which conversation had them. Cmd-F is the reflex
+        every other Mac app answers and this one silently ignored, which is the
+        worst outcome for a keystroke: it looks broken rather than absent.
+      -->
+      <div id="finding" hidden>
+        <input id="finding-what" type="search" placeholder="Find in this conversation" autocomplete="off" />
+        <span id="finding-count"></span>
+        <button id="finding-prev" type="button" title="Previous (Shift-Enter)">↑</button>
+        <button id="finding-next" type="button" title="Next (Enter)">↓</button>
+        <button id="finding-done" type="button" title="Close (Escape)">Done</button>
+      </div>
+
       <!-- A conversation that runs itself. -->
       <aside id="routine" hidden>
         <label>When <input id="routine-at" type="text" placeholder="daily 07:00" autocomplete="off" /></label>
@@ -192,10 +206,25 @@
           had gone past.
         -->
         <button id="routine-try" type="button" title="Say it now, without changing when it next runs">Try it now</button>
-        <button id="routine-stop" type="button">Stop repeating</button>
+        <!--
+          Off, not gone. The only stop there was cleared the schedule, what it
+          says and when it last ran in one statement, so going away for a week
+          and coming back meant setting the whole thing up again from memory.
+        -->
+        <button id="routine-pause" type="button">Pause</button>
+        <button id="routine-stop" type="button">Forget this routine</button>
         <!-- What was actually asked here, to take rather than retype. -->
         <div id="routine-said" class="from-here" hidden></div>
         <p id="routine-says"></p>
+        <!--
+          What it actually did. The question about a standing job is not when it
+          is next but whether it has been working, and three failed mornings
+          leave a conversation looking merely quiet.
+        -->
+        <details id="routine-went" hidden>
+          <summary>How it has been going</summary>
+          <ul id="routine-went-list"></ul>
+        </details>
       </aside>
 
       <!-- A conversation woken by something changing. -->

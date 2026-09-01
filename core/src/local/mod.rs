@@ -20,6 +20,7 @@
 //! A local model running a shell command is exactly as capable of ruining your
 //! afternoon as a hosted one, and it goes through the same card.
 
+pub mod again;
 pub mod anthropic;
 pub mod find;
 pub mod ready;

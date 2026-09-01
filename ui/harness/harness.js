@@ -69,6 +69,14 @@ export const FIXTURE = {
       { id: "talk-overnight", agent: "agent-bitcoin", name: "Ran overnight", opened: true },
     ],
   },
+  // How a routine has been going: one good morning, one failed, and one that
+  // never came back because the machine slept. The three states the panel has
+  // to be able to tell apart.
+  went: [
+    { at: Date.now() - 3600000, why: "clock", outcome: null },
+    { at: Date.now() - 90000000, why: "clock", outcome: "the model server is not answering" },
+    { at: Date.now() - 176400000, why: "clock", outcome: "done" },
+  ],
   lines: {
     // Somebody is being asked to do something, and the agent is still sitting
     // there: `waiting_on_you` names this one.
@@ -307,6 +315,8 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
    * tell a mark that clears from one that was never drawn.
    */
   const unread = new Map([["agent-bitcoin", { lines: 2, at: Date.now() - 3600000 }]]);
+  /** Whether the routine under test has been switched off. */
+  let routineOff = false;
   return {
     /**
      * Put an agent back to having something nobody has read.
@@ -409,6 +419,35 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           case "forget_conversation":
           case "looking_at":
             return Promise.resolve(null);
+          // A routine switched off rather than thrown away, and what it did.
+          case "routine_off":
+            routineOff = !!args.off;
+            return Promise.resolve(null);
+          case "how_it_has_been_going":
+            return Promise.resolve(fixture.went || []);
+          // Where the words actually are, rather than only which agent has
+          // them. Matched against the fixture's own lines so the answer and
+          // what the page can show cannot drift apart.
+          case "hits": {
+            const needle = String(args.lookingFor || "").toLowerCase();
+            const out = [];
+            for (const [conversation, lines] of Object.entries(fixture.lines)) {
+              const owner = Object.entries(fixture.conversations).find(([, talks]) =>
+                talks.some((t) => t.id === conversation),
+              )?.[0];
+              const hit = [...lines].reverse().find((l) => l.text.toLowerCase().includes(needle));
+              if (owner && hit) {
+                out.push({
+                  agent: owner,
+                  conversation,
+                  seq: hit.seq,
+                  kind: hit.kind,
+                  snippet: hit.text.slice(0, 120),
+                });
+              }
+            }
+            return Promise.resolve(out);
+          }
           case "conversation_agent":
             return Promise.resolve(
               Object.entries(fixture.conversations).find(([, talks]) =>
@@ -460,7 +499,22 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
                 : null,
             );
           case "__never":
+          // One routine, on the conversation the checks open, so that pausing
+          // has something to pause. Answered live rather than from a constant,
+          // because the behaviour under test is that the switch sticks.
           case "routines":
+            return Promise.resolve([
+              {
+                conversation: "talk-2",
+                agent: "agent-bitcoin",
+                name: "First",
+                at: "daily 07:00",
+                what: "What moved overnight",
+                due: Date.now() + 3600000,
+                ran: Date.now() - 82800000,
+                off: routineOff,
+              },
+            ]);
           case "runs":
             return Promise.resolve([]);
           // Everything else is a thing done rather than asked, and the window

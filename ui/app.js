@@ -179,7 +179,16 @@ const el = {
   routineSaid: document.getElementById("routine-said"),
   routineTry: document.getElementById("routine-try"),
   routineSave: document.getElementById("routine-save"),
+  finding: document.getElementById("finding"),
+  findingWhat: document.getElementById("finding-what"),
+  findingCount: document.getElementById("finding-count"),
+  findingPrev: document.getElementById("finding-prev"),
+  findingNext: document.getElementById("finding-next"),
+  findingDone: document.getElementById("finding-done"),
+  routinePause: document.getElementById("routine-pause"),
   routineStop: document.getElementById("routine-stop"),
+  routineWent: document.getElementById("routine-went"),
+  routineWentList: document.getElementById("routine-went-list"),
   routineSays: document.getElementById("routine-says"),
   pin: document.getElementById("pin"),
   hide: document.getElementById("hide"),
@@ -382,6 +391,62 @@ function pickItBackUp(id) {
   el.what.style.height = "auto";
   el.what.style.height =
     Math.min(el.what.scrollHeight, window.innerHeight * 0.4) + "px";
+}
+
+/**
+ * Go to one line, opening whatever has to be opened to reach it.
+ *
+ * The end of a search. Its agent, then its conversation, then the line itself,
+ * scrolled to and marked, because a conversation opened at the bottom with the
+ * words somewhere above is the same amount of scrolling somebody was doing
+ * before they searched.
+ */
+async function goToTheLine(hit) {
+  if (!talks.has(hit.conversation)) await openAgent(hit.agent);
+  if (talks.has(hit.conversation)) await show(hit.conversation);
+  markTheLine(hit.seq);
+}
+
+/**
+ * Mark one line and put it on screen.
+ *
+ * Marked rather than only scrolled to. A conversation scrolled to the middle
+ * with nothing picked out is a conversation somebody now has to read to find
+ * out why they are there.
+ */
+function markTheLine(seq) {
+  const t = talking();
+  if (!t) return;
+  const at = t.messages.findIndex((m) => m.seq === seq);
+  if (at < 0) return;
+  const drawn = el.messages.children[theRowFor(at)];
+  if (!drawn) return;
+  for (const was of el.messages.querySelectorAll(".found")) was.classList.remove("found");
+  drawn.classList.add("found");
+  drawn.scrollIntoView({ block: "center" });
+}
+
+/**
+ * Which row on screen belongs to the nth message.
+ *
+ * They are not the same number: the day separators are rows of their own, and
+ * counting past them lands on the line above or below the one somebody
+ * searched for, which is worse than not scrolling at all.
+ */
+function theRowFor(nth) {
+  let row = 0;
+  const t = talking();
+  let day = null;
+  for (let i = 0; i <= nth && i < t.messages.length; i++) {
+    const m = t.messages[i];
+    if (m.at) {
+      const its = whichDay(m.at);
+      if (day !== null && its !== day) row += 1;
+      day = its;
+    }
+    if (i < nth) row += 1;
+  }
+  return row;
 }
 
 function waitingOn(agent) {
@@ -899,7 +964,13 @@ function drawThreads() {
       // to close over it, which is fine for a click and no use at all to
       // anything asking the list what it is showing.
       li.dataset.agent = a.id;
-      li.onclick = () => openAgent(a.id);
+      li.onclick = () => {
+        const found = hitsByAgent.get(a.id);
+        // Arriving at the line rather than near it. Without this, a search hit
+        // in a conversation from March opens whichever conversation this agent
+        // spoke in most recently, which is the one place the words are not.
+        return found ? goToTheLine(found) : openAgent(a.id);
+      };
       li.oncontextmenu = (e) => {
         e.preventDefault();
         // Not opening it. Somebody asking what can be done to an agent has not
@@ -931,17 +1002,24 @@ function drawThreads() {
       const last = document.createElement("span");
       last.className = "last";
       const news = fresh.get(a.id);
-      last.textContent = waitingOn(a.id)
+      const hit = hitsByAgent.get(a.id);
+      // While a search is on, the useful line under the name is the line that
+      // matched. Everything else about the agent is still true and is not what
+      // was asked.
+      last.textContent = hit
+        ? hit.snippet
+        : waitingOn(a.id)
         ? "Waiting on you"
-        : busy(a.id)
-          ? "Working…"
-          : // Something happened here and nobody has seen it. This takes the
+          : busy(a.id)
+            ? "Working…"
+            : // Something happened here and nobody has seen it. This takes the
             // line for as long as that is true, because it is the one thing
             // about an agent somebody cannot work out by looking at the list,
             // and it is the whole reason to leave errands running.
-            news
-            ? `${news.lines} new · ${howLongAgo(news.at)}`
-            : a.about || "Nothing said yet";
+              news
+              ? `${news.lines} new · ${howLongAgo(news.at)}`
+              : a.about || "Nothing said yet";
+      if (hit) last.classList.add("hit");
       if (waitingOn(a.id)) last.classList.add("waiting");
       if (news && !waitingOn(a.id) && !busy(a.id)) last.classList.add("new");
 
@@ -1750,6 +1828,15 @@ el.messages.addEventListener("click", (e) => {
  * though it had matched.
  */
 let narrowedTo = null;
+/**
+ * The best line found in each agent, while a search is on.
+ *
+ * One per agent, because the row is what somebody clicks: showing four lines
+ * under one name makes the list a result page rather than a list of agents.
+ * The conversation and line number on it are what turn a click into arriving
+ * at the line instead of near it.
+ */
+let hitsByAgent = new Map();
 
 let searchingAfter = null;
 el.find.addEventListener("input", () => {
@@ -1763,6 +1850,7 @@ async function look() {
   const lookingFor = el.find.value.trim();
   if (!lookingFor) {
     narrowedTo = null;
+    hitsByAgent = new Map();
     drawThreads();
     return;
   }
@@ -1770,8 +1858,19 @@ async function look() {
   // renames it. Every other command here has single-word arguments, so this is
   // the first place it could show up, and it showed up as a red line in a
   // thread rather than as anything a stub would have caught.
-  const found = await invoke("matching", { lookingFor });
+  const [found, where] = await Promise.all([
+    invoke("matching", { lookingFor }),
+    // Where the words actually are. The expensive half of this was already
+    // being done and thrown away: the query finds the exact line and returned
+    // the agent, so somebody searching for a phrase they remember was dropped
+    // into whichever conversation spoke most recently and scrolled by hand.
+    invoke("hits", { lookingFor }).catch(() => []),
+  ]);
   narrowedTo = new Set(found.map((t) => t.id));
+  hitsByAgent = new Map();
+  for (const hit of where) {
+    if (!hitsByAgent.has(hit.agent)) hitsByAgent.set(hit.agent, hit);
+  }
   // A thread that has never been opened is not in the page's list yet, and a
   // search that finds one has to be able to show it.
   // An agent that has never been opened is not in the page's list yet, and a
@@ -2142,8 +2241,11 @@ el.repeat.addEventListener("click", async () => {
   el.routineAt.value = mine?.at || "";
   el.routineWhat.value = mine?.what || "";
   el.routineSays.textContent = sayWhen(mine);
+  el.routinePause.textContent = mine?.off ? "Start again" : "Pause";
+  el.routinePause.hidden = !mine;
   offerWhatWasAskedHere(el.routineSaid, el.routineWhat);
   el.routine.hidden = false;
+  drawHowItWent(t.id);
   el.routineAt.focus();
 });
 
@@ -2247,10 +2349,63 @@ el.routineWhat.addEventListener("input", sayIfSomethingElseAlreadyDoesThis);
 /** When it next runs, in words, or what is wrong with what was typed. */
 function sayWhen(routine) {
   if (!routine) return "This runs only when you ask it to.";
+  // Off is not gone, and the line has to say which. A paused routine that read
+  // as "next Tuesday" would be a promise the app has no intention of keeping.
+  if (routine.off) {
+    return `Paused. It would run ${routine.at}, and will again when you start it.`;
+  }
   if (!routine.due) return `${routine.at} · nothing due`;
   const due = new Date(routine.due);
   const ran = routine.ran ? ` · last ran ${new Date(routine.ran).toLocaleString()}` : " · never run";
   return `Next ${due.toLocaleString()}${ran}`;
+}
+
+/**
+ * How a routine has actually been going.
+ *
+ * The question people ask about a standing job is not when it is next but
+ * whether it has been working. Failures do land in the conversation as red
+ * lines, so the record existed; what did not was any way to see three of them
+ * in a row without scrolling back through three mornings of transcript.
+ */
+async function drawHowItWent(id) {
+  el.routineWent.hidden = true;
+  el.routineWentList.replaceChildren();
+  let went = [];
+  try {
+    went = await invoke("how_it_has_been_going", { id });
+  } catch {
+    return;
+  }
+  if (!went.length) return;
+  el.routineWentList.replaceChildren(
+    ...went.map((run) => {
+      const li = document.createElement("li");
+      // A run with nothing against it never came back: the app was quit, or
+      // the machine slept. That is its own outcome and not a failure.
+      li.className = !run.outcome ? "went unfinished" : run.outcome === "done" ? "went" : "went wrong";
+      const when = document.createElement("span");
+      when.className = "went-when";
+      when.textContent = new Date(run.at).toLocaleString();
+      const what = document.createElement("span");
+      what.className = "went-what";
+      what.textContent = !run.outcome
+        ? "did not finish"
+        : run.outcome === "done"
+          ? startedBy(run.why)
+          : run.outcome;
+      li.append(when, what);
+      return li;
+    }),
+  );
+  el.routineWent.hidden = false;
+}
+
+/** What started a run, in a word somebody would use. */
+function startedBy(why) {
+  if (why === "watch") return "woken by a change";
+  if (why === "hand") return "you asked";
+  return "ran";
 }
 
 el.routineSave.addEventListener("click", async () => {
@@ -2317,10 +2472,31 @@ el.watchTry.addEventListener("click", () => tryItNow(el.watchWhat, el.watchSays,
 // to receive, and it turned up in this list as an errand to repeat.
 const NOT_ASKED_BY_ANYBODY = "This conversation has a goal";
 
+el.routinePause.addEventListener("click", async () => {
+  const t = talking();
+  if (!t || !theRoutineShown) return;
+  const off = !theRoutineShown.off;
+  try {
+    await invoke("routine_off", { id: t.id, off });
+  } catch (why) {
+    el.routineSays.textContent = String(why);
+    return;
+  }
+  theRoutineShown = { ...theRoutineShown, off };
+  el.routinePause.textContent = off ? "Start again" : "Pause";
+  el.routineSays.textContent = sayWhen(theRoutineShown);
+  // The clock on the conversation goes with it: a paused routine is not one
+  // the picker should still be advertising as scheduled.
+  t.repeats = !off;
+  drawTalks();
+});
+
 el.routineStop.addEventListener("click", async () => {
   const t = talking();
   if (!t) return;
   await invoke("runs", { id: t.id, at: null, what: null });
+  theRoutineShown = null;
+  el.routinePause.hidden = true;
   el.routineAt.value = "";
   el.routineWhat.value = "";
   el.routineSays.textContent = sayWhen(null);
@@ -2657,7 +2833,81 @@ el.palette.addEventListener("mousedown", (e) => {
   if (e.target === el.palette) closePalette();
 });
 
+/**
+ * Finding words in the conversation that is open.
+ *
+ * A different question from the search in the corner, which finds which
+ * conversation had them. This one is the reflex every other Mac app answers
+ * and this one silently ignored, which is the worst thing a keystroke can do:
+ * nothing happening reads as broken rather than as absent.
+ */
+let foundHere = [];
+let atHit = -1;
+
+function findInHere() {
+  const what = el.findingWhat.value.trim().toLowerCase();
+  foundHere = [];
+  atHit = -1;
+  for (const was of el.messages.querySelectorAll(".found")) was.classList.remove("found");
+  if (!what) {
+    el.findingCount.textContent = "";
+    return;
+  }
+  foundHere = [...el.messages.children].filter(
+    (li) => !li.classList.contains("day") && li.textContent.toLowerCase().includes(what),
+  );
+  // Said as a count rather than left to be counted. "No matches" and "one of
+  // forty" are different situations and only one of them is worth stepping
+  // through.
+  el.findingCount.textContent = foundHere.length ? `1 of ${foundHere.length}` : "none";
+  if (foundHere.length) stepTo(0);
+}
+
+function stepTo(nth) {
+  if (!foundHere.length) return;
+  const at = (nth + foundHere.length) % foundHere.length;
+  for (const was of el.messages.querySelectorAll(".found")) was.classList.remove("found");
+  atHit = at;
+  foundHere[at].classList.add("found");
+  foundHere[at].scrollIntoView({ block: "center" });
+  el.findingCount.textContent = `${at + 1} of ${foundHere.length}`;
+}
+
+function openFinding() {
+  el.finding.hidden = false;
+  el.findingWhat.focus();
+  el.findingWhat.select();
+  findInHere();
+}
+
+function closeFinding() {
+  el.finding.hidden = true;
+  foundHere = [];
+  atHit = -1;
+  for (const was of el.messages.querySelectorAll(".found")) was.classList.remove("found");
+  el.what?.focus();
+}
+
+el.findingWhat.addEventListener("input", findInHere);
+el.findingNext.addEventListener("click", () => stepTo(atHit + 1));
+el.findingPrev.addEventListener("click", () => stepTo(atHit - 1));
+el.findingDone.addEventListener("click", closeFinding);
+el.findingWhat.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    stepTo(atHit + (e.shiftKey ? -1 : 1));
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    closeFinding();
+  }
+});
+
 window.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    el.finding.hidden ? openFinding() : closeFinding();
+    return;
+  }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
     el.palette.hidden ? openPalette() : closePalette();

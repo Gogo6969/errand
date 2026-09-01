@@ -66,6 +66,29 @@ pub struct Allowance {
 /// under it. So a conversation id is never reused and never regenerated once
 /// anything has been said, or the conversation becomes unreachable while its
 /// transcript sits on disk under a name nothing will ask for again.
+/// Where some words were found, and in which conversation.
+#[derive(Debug, Clone, Serialize)]
+pub struct Hit {
+    pub agent: String,
+    pub conversation: String,
+    /// Which line, so the window can scroll to it and mark it.
+    pub seq: i64,
+    pub kind: String,
+    /// Enough of the line to recognise it by, around the match.
+    pub snippet: String,
+}
+
+/// One time a routine ran, and what came of it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Run {
+    pub at: i64,
+    /// What started it: the clock, a watch, or somebody pressing Try it now.
+    pub why: String,
+    /// How it ended. Nothing means it never came back, which is its own
+    /// outcome: the app was quit, or the machine went to sleep.
+    pub outcome: Option<String>,
+}
+
 /// What one agent has said that has not been read.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct Fresh {
@@ -98,6 +121,9 @@ pub struct Conversation {
     pub runs_what: Option<String>,
     /// When it last ran, which is what the next run is counted from.
     pub ran_at: Option<i64>,
+    /// Switched off without being thrown away. The schedule and what it says
+    /// are still here, and the clock walks past it.
+    pub routine_off: bool,
     /// The conversation that asked for this one, if it was delegated.
     pub asked_by: Option<String>,
     /// The conversation this one carries on from, if it does. Kept for ever,
@@ -725,6 +751,33 @@ const CHANGES: &[&str] = &[
     // the moment anything is opened, and the alternative is an app that has
     // just learnt to say "something happened" and never does.
     "ALTER TABLE conversations ADD COLUMN seen INTEGER NOT NULL DEFAULT 0;",
+    // 18
+    //
+    // A routine switched off rather than thrown away. The only stop there was
+    // cleared the schedule, what it says and when it last ran, in one
+    // statement, so going away for a week and coming back meant setting the
+    // whole thing up again from memory. The pattern is one struct over: a
+    // watch has had `paused` since it was written.
+    "ALTER TABLE conversations ADD COLUMN routine_off INTEGER NOT NULL DEFAULT 0;",
+    // 19
+    //
+    // A row for every time a routine ran, rather than one column holding only
+    // the last one. "When is it next" is not the question people ask about a
+    // standing job; "has it been working" is, and a single `ran_at` cannot
+    // answer it. Three failed mornings leave a conversation looking merely
+    // quiet.
+    // Keyed by the row rather than by the clock. Two runs can share a
+    // millisecond -- a routine and somebody pressing Try it now, or two
+    // triggers landing together -- and a key of (conversation, at) quietly
+    // makes those one run, which is the kind of loss a history exists to stop.
+    "CREATE TABLE IF NOT EXISTS runs (
+         id           INTEGER PRIMARY KEY,
+         conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+         at           INTEGER NOT NULL,
+         why          TEXT NOT NULL,
+         outcome      TEXT
+     );",
+    "CREATE INDEX IF NOT EXISTS runs_by_conversation ON runs(conversation, at DESC);",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -1554,7 +1607,7 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off
                FROM conversations",
         )?;
         let rows = q.query_map([], read_conversation)?;
@@ -1613,7 +1666,7 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off
                FROM conversations WHERE agent = ? ORDER BY spoke_at DESC",
         )?;
         let rows = q.query_map([agent], read_conversation)?;
@@ -1629,7 +1682,7 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off
                FROM conversations WHERE id = ?",
         )?;
         let mut rows = q.query_map([id], read_conversation)?;
@@ -1717,6 +1770,71 @@ impl Store {
         Ok(())
     }
 
+    /// Switch a routine off, or back on, without throwing it away.
+    ///
+    /// The only stop there was cleared the schedule, what it says and when it
+    /// last ran in one statement, so going away for a week and coming back
+    /// meant setting the whole thing up again from memory. Nothing about a
+    /// routine is destroyed here: the clock simply walks past it.
+    pub fn routine_off(&self, conversation: &str, off: bool) -> Result<()> {
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE conversations SET routine_off = ? WHERE id = ?",
+            params![i64::from(off), conversation],
+        )?;
+        Self::only_if_it_is_there(changed, "conversation")
+    }
+
+    /// Write down that a run has started, and what started it.
+    ///
+    /// Returns which run it is, so the caller can say how that one ended. Not
+    /// the time: two runs can share a millisecond, and a history that turns
+    /// those into one run is losing exactly what it exists to keep.
+    pub fn a_run_began(&self, conversation: &str, why: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO runs (conversation, at, why, outcome) VALUES (?, ?, ?, NULL)",
+            params![conversation, now(), why],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Write down how a run ended.
+    ///
+    /// A row left with nothing against it is a run that never came back, which
+    /// is a real outcome and a different one from failing: the app was quit, or
+    /// the machine slept. Saying nothing about it is more honest than inventing
+    /// a reason at the next launch.
+    pub fn a_run_ended(&self, run: i64, outcome: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE runs SET outcome = ? WHERE id = ?",
+            params![outcome, run],
+        )?;
+        Ok(())
+    }
+
+    /// How a routine has actually been going, newest first.
+    ///
+    /// The question people ask about a standing job is not when it is next but
+    /// whether it has been working, and one `ran_at` column cannot answer it.
+    /// Three failed mornings leave a conversation looking merely quiet.
+    pub fn how_it_has_been_going(&self, conversation: &str, at_most: i64) -> Result<Vec<Run>> {
+        let conn = self.conn.lock().unwrap();
+        // By id within the same millisecond, so two runs that landed together
+        // still come back in the order they happened.
+        let mut q = conn.prepare(
+            "SELECT at, why, outcome FROM runs
+              WHERE conversation = ? ORDER BY at DESC, id DESC LIMIT ?",
+        )?;
+        let rows = q.query_map(params![conversation, at_most], |r| {
+            Ok(Run {
+                at: r.get(0)?,
+                why: r.get(1)?,
+                outcome: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Every conversation with a schedule on it, whichever agent it belongs to.
     pub fn routines(&self) -> Result<Vec<Conversation>> {
         let conn = self.conn.lock().unwrap();
@@ -1726,7 +1844,30 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off
+               FROM conversations
+              WHERE runs_at IS NOT NULL AND runs_what IS NOT NULL AND routine_off = 0
+              ORDER BY spoke_at DESC",
+        )?;
+        let rows = q.query_map([], read_conversation)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Every conversation with a schedule on it, switched off ones included.
+    ///
+    /// Separate from `routines` on purpose. The clock must not see a routine
+    /// that is switched off, and the panel must, or there is nowhere to switch
+    /// it back on from: it would read as having no routine at all, which is
+    /// exactly the state pausing exists to avoid.
+    pub fn every_routine(&self) -> Result<Vec<Conversation>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT id, agent, name, opened, started_at, spoke_at,
+                    runs_at, runs_what, ran_at, asked_by,
+                    came_from, carries_on, carries_on_at,
+                    watches, watches_what, saw, saw_note, seeing, looked_at,
+                    woke_at, woke_today, woke_on, unsettled, misses, paused,
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off
                FROM conversations
               WHERE runs_at IS NOT NULL AND runs_what IS NOT NULL
               ORDER BY spoke_at DESC",
@@ -2105,18 +2246,52 @@ impl Store {
     /// is instant and it is one fewer thing that can be out of step with the
     /// table it describes; the day a thread has a novel in it, FTS5 is the
     /// upgrade and this is the thing to replace.
+    /// Where in a conversation the words were actually found.
+    ///
+    /// The expensive half of a search was already being done and then thrown
+    /// away: the query below finds the exact line, inside a subquery, and
+    /// selects agent columns only. So somebody searching for a phrase they
+    /// remember was dropped into whichever of that agent's conversations spoke
+    /// most recently, with no highlight, and scrolled for it by hand. It gets
+    /// worse the more the app is used as intended.
+    ///
+    /// One hit per conversation, the most recent. A conversation that says a
+    /// word forty times is one place to go and look, not forty.
+    pub fn hits(&self, looking_for: &str) -> Result<Vec<Hit>> {
+        let looking_for = looking_for.trim();
+        if looking_for.is_empty() {
+            return Ok(Vec::new());
+        }
+        let like = like_for(looking_for);
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT c.agent, l.conversation, l.seq, l.kind, l.text
+               FROM lines l JOIN conversations c ON c.id = l.conversation
+              WHERE l.text LIKE ?1 ESCAPE '\\'
+                AND l.seq = (SELECT max(seq) FROM lines
+                              WHERE conversation = l.conversation
+                                AND text LIKE ?1 ESCAPE '\\')
+              ORDER BY l.at DESC
+              LIMIT 200",
+        )?;
+        let rows = q.query_map([&like], |r| {
+            Ok(Hit {
+                agent: r.get(0)?,
+                conversation: r.get(1)?,
+                seq: r.get(2)?,
+                kind: r.get(3)?,
+                snippet: around(&r.get::<_, String>(4)?, looking_for),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn matching(&self, looking_for: &str) -> Result<Vec<Agent>> {
         let looking_for = looking_for.trim();
         if looking_for.is_empty() {
             return self.agents();
         }
-        let like = format!(
-            "%{}%",
-            looking_for
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        );
+        let like = like_for(looking_for);
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
             "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
@@ -2276,6 +2451,7 @@ fn read_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
         runs_at: r.get(6)?,
         runs_what: r.get(7)?,
         ran_at: r.get(8)?,
+        routine_off: r.get::<_, i64>(30).unwrap_or(0) != 0,
         asked_by: r.get(9)?,
         came_from: r.get(10)?,
         carries_on: r.get::<_, i64>(11)? != 0,
@@ -2298,6 +2474,56 @@ fn read_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
         goal_left: r.get(28)?,
         goal_over: r.get(29)?,
     })
+}
+
+/// What somebody typed, as a LIKE pattern that means only what they typed.
+///
+/// A search for `50%` or `a_b` is somebody looking for those characters, not
+/// writing a pattern. Unescaped, the first matches everything.
+fn like_for(looking_for: &str) -> String {
+    format!(
+        "%{}%",
+        looking_for
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
+}
+
+/// Enough of a line to recognise it by, centred on what was found.
+///
+/// A whole answer in a search result is a wall to read; the first forty
+/// characters of one are usually "Here is what I found:" for every hit. What
+/// somebody needs is the words they searched for with enough either side to
+/// know which of their conversations this was.
+fn around(line: &str, looking_for: &str) -> String {
+    const EITHER_SIDE: usize = 60;
+    let found = line
+        .to_lowercase()
+        .find(&looking_for.to_lowercase())
+        .unwrap_or(0);
+    // Cut on character boundaries, not bytes. A conversation with an em dash or
+    // an emoji in it is ordinary, and slicing one in half panics.
+    let start = line
+        .char_indices()
+        .map(|(at, _)| at)
+        .take_while(|at| *at <= found.saturating_sub(EITHER_SIDE))
+        .last()
+        .unwrap_or(0);
+    let end = line
+        .char_indices()
+        .map(|(at, _)| at)
+        .find(|at| *at >= found + looking_for.len() + EITHER_SIDE)
+        .unwrap_or(line.len());
+    let mut said = String::new();
+    if start > 0 {
+        said.push('\u{2026}');
+    }
+    said.push_str(line[start..end].trim());
+    if end < line.len() {
+        said.push('\u{2026}');
+    }
+    said
 }
 
 /// An id for a row nobody else names.
@@ -2365,6 +2591,162 @@ mod tests {
         );
         // And what was said is still there, once.
         assert_eq!(s.lines("new-one").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_search_says_which_line_it_found_and_not_only_which_agent() {
+        // The expensive half was already being done and thrown away: the query
+        // finds the exact line, inside a subquery, and selected agent columns
+        // only. Somebody searching for a phrase they remember was dropped into
+        // whichever conversation spoke most recently, with no highlight.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("a", NOT_YET_NAMED, Path::new("/tmp/a"))
+            .unwrap();
+        let first = s.conversations("a").unwrap()[0].id.clone();
+        s.begin_conversation("second", "a", "Again").unwrap();
+        s.the_app_says_about(&first, "said", "The rent receipt is filed.", "")
+            .unwrap();
+        s.the_app_says_about("second", "said", "Nothing about money here.", "")
+            .unwrap();
+
+        let hits = s.hits("rent receipt").unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].conversation, first, "the wrong conversation");
+        assert!(hits[0].seq > 0, "{hits:?}");
+        assert!(hits[0].snippet.contains("rent receipt"), "{hits:?}");
+    }
+
+    #[test]
+    fn a_conversation_that_says_a_word_forty_times_is_one_place_to_go_and_look() {
+        // Forty rows for one conversation is a result list nobody reads. The
+        // most recent is the one somebody means.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("a", NOT_YET_NAMED, Path::new("/tmp/a"))
+            .unwrap();
+        let id = s.conversations("a").unwrap()[0].id.clone();
+        for n in 1..=5 {
+            s.the_app_says_about(&id, "said", &format!("bitcoin, number {n}"), "")
+                .unwrap();
+        }
+        let hits = s.hits("bitcoin").unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(
+            hits[0].snippet.contains("number 5"),
+            "not the latest: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn searching_for_a_percent_sign_looks_for_a_percent_sign() {
+        // Unescaped, `%` in LIKE matches everything, so a search for "50%"
+        // returns every conversation there is and reads as the search being
+        // broken in the other direction.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("a", NOT_YET_NAMED, Path::new("/tmp/a"))
+            .unwrap();
+        let id = s.conversations("a").unwrap()[0].id.clone();
+        s.the_app_says_about(&id, "said", "It is up 50% today.", "")
+            .unwrap();
+        s.the_app_says_about(&id, "said", "Nothing else to report.", "")
+            .unwrap();
+        assert_eq!(s.hits("50%").unwrap().len(), 1);
+        assert!(s.hits("99%").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_snippet_is_cut_on_a_letter_rather_than_a_byte() {
+        // A conversation with an em dash or an emoji in it is ordinary, and
+        // slicing one in half panics rather than looking wrong.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("a", NOT_YET_NAMED, Path::new("/tmp/a"))
+            .unwrap();
+        let id = s.conversations("a").unwrap()[0].id.clone();
+        let long = format!(
+            "{} needle {}",
+            "\u{2014}".repeat(80),
+            "\u{1f680}".repeat(80)
+        );
+        s.the_app_says_about(&id, "said", &long, "").unwrap();
+        let hits = s.hits("needle").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.contains("needle"), "{hits:?}");
+        // Cut at both ends, and said to be cut.
+        assert!(
+            hits[0].snippet.starts_with('\u{2026}'),
+            "{:?}",
+            hits[0].snippet
+        );
+        assert!(
+            hits[0].snippet.ends_with('\u{2026}'),
+            "{:?}",
+            hits[0].snippet
+        );
+    }
+
+    #[test]
+    fn a_routine_switched_off_is_still_there_when_it_is_switched_back_on() {
+        // Going away for a week used to destroy the routine: the only stop
+        // there was cleared the schedule, what it says and when it last ran, in
+        // one statement, so coming back meant setting it up again from memory.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("brief", NOT_YET_NAMED, Path::new("/tmp/brief"))
+            .unwrap();
+        let id = s.conversations("brief").unwrap()[0].id.clone();
+        s.runs(&id, Some("daily 07:00"), Some("What moved overnight"))
+            .unwrap();
+        assert_eq!(s.routines().unwrap().len(), 1);
+
+        s.routine_off(&id, true).unwrap();
+        // The clock walks past it.
+        assert!(
+            s.routines().unwrap().is_empty(),
+            "a paused routine still ran"
+        );
+        // And nothing about it was thrown away.
+        let still = s.conversations("brief").unwrap()[0].clone();
+        assert_eq!(still.runs_at.as_deref(), Some("daily 07:00"));
+        assert_eq!(still.runs_what.as_deref(), Some("What moved overnight"));
+        assert!(still.routine_off);
+
+        s.routine_off(&id, false).unwrap();
+        assert_eq!(s.routines().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_routine_keeps_a_record_of_what_it_actually_did() {
+        // The question about a standing job is not when it is next but whether
+        // it has been working, and one `ran_at` column cannot answer it. Three
+        // failed mornings leave a conversation looking merely quiet.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("brief", NOT_YET_NAMED, Path::new("/tmp/brief"))
+            .unwrap();
+        let id = s.conversations("brief").unwrap()[0].id.clone();
+        assert!(s.how_it_has_been_going(&id, 10).unwrap().is_empty());
+
+        let monday = s.a_run_began(&id, "clock").unwrap();
+        s.a_run_ended(monday, "done").unwrap();
+        let tuesday = s.a_run_began(&id, "clock").unwrap();
+        s.a_run_ended(tuesday, "the model server is not answering")
+            .unwrap();
+        // Started and never finished, which is its own outcome: the app was
+        // quit, or the machine slept.
+        s.a_run_began(&id, "hand").unwrap();
+
+        let went = s.how_it_has_been_going(&id, 10).unwrap();
+        // Three, not one. All three landed in the same millisecond here, which
+        // is the case a key made out of the clock quietly turns into one run.
+        assert_eq!(went.len(), 3, "{went:?}");
+        // Newest first, because that is the one being asked about.
+        assert_eq!(went[0].why, "hand");
+        assert_eq!(went[0].outcome, None);
+        assert_eq!(
+            went[1].outcome.as_deref(),
+            Some("the model server is not answering")
+        );
+        assert_eq!(went[2].outcome.as_deref(), Some("done"));
+
+        // And it does not grow without bound in front of somebody.
+        assert_eq!(s.how_it_has_been_going(&id, 2).unwrap().len(), 2);
     }
 
     #[test]

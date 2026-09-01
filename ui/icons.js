@@ -131,7 +131,9 @@ export function forTool(tool) {
     ToolSearch: "search",
   };
   if (known[name]) return known[name];
-  if (/cron|schedul/i.test(name)) return "clock";
+  // A turn that is waiting out a busy server is the one step here that is
+  // not doing anything, and a clock says that where a spark says the opposite.
+  if (/cron|schedul|waiting/i.test(name)) return "clock";
   if (/mail/i.test(name)) return "mail";
   if (/message|imessage|slack/i.test(name)) return "chat";
   if (/note/i.test(name)) return "pen";

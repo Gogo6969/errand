@@ -29,6 +29,68 @@ use crate::engine::{Answer, Engine, Event, NeedsYou, Step};
 use crate::mcp;
 use crate::team;
 
+/// Ask the model, and try exactly once more if the answer was "not now".
+///
+/// The failure this exists for belongs to standing jobs. A briefing that meets
+/// a busy provider for ten seconds at seven in the morning does not run late,
+/// it does not run: the conversation gets a red line nobody is awake to read.
+/// At the keyboard the same failure costs a retyped sentence.
+///
+/// Once, not a loop. The clock marks a routine as having run before its turn
+/// is claimed, so a failure does not immediately become another attempt, and
+/// that ordering is what stops a provider outage becoming a hot loop. This
+/// lives inside the one attempt rather than around it, so that guard is
+/// untouched: two requests where there was one, and then the failure is
+/// reported exactly as it always was.
+async fn ask_it(
+    client: &LlmClient,
+    asking: &[ChatMessage],
+    defs: &[ToolDef],
+    cancel: &CancellationToken,
+    out: &std::sync::mpsc::Sender<Event>,
+) -> anyhow::Result<crate::local::stream::StreamHandle> {
+    let why = match client.stream(asking, defs, None, cancel.clone()).await {
+        Ok(stream) => return Ok(stream),
+        Err(why) => why,
+    };
+    let Some(waiting) = crate::local::again::worth_another_go(&why.to_string()) else {
+        return Err(why);
+    };
+
+    // Said out loud rather than waited out quietly. Twenty seconds of nothing
+    // on screen cannot be told apart from a hang, and somebody watching one
+    // presses Stop.
+    let call = format!("again-{}", waiting.as_millis());
+    let _ = out.send(Event::Doing(crate::engine::Step {
+        what: crate::local::again::in_plain_words(&why.to_string(), waiting),
+        tool: "waiting".into(),
+        call: call.clone(),
+    }));
+    tokio::select! {
+        _ = cancel.cancelled() => return Err(why),
+        _ = tokio::time::sleep(waiting) => {}
+    }
+
+    match client.stream(asking, defs, None, cancel.clone()).await {
+        Ok(stream) => {
+            let _ = out.send(Event::Did {
+                call,
+                outcome: "It answered this time.".into(),
+            });
+            Ok(stream)
+        }
+        // The second failure is the one reported, because it is the current
+        // state of the world rather than the one from three seconds ago.
+        Err(again) => {
+            let _ = out.send(Event::Did {
+                call,
+                outcome: "Still not answering.".into(),
+            });
+            Err(again)
+        }
+    }
+}
+
 /// How many times round the loop before something is wrong.
 ///
 /// Not a budget, a tripwire. A model that has called the same tool twenty times
@@ -390,7 +452,7 @@ async fn errand(
         }
 
         let cancel = CancellationToken::new();
-        let mut stream = client.stream(&asking, &defs, None, cancel).await?;
+        let mut stream = ask_it(client, &asking, &defs, &cancel, out).await?;
 
         let mut wrote = String::new();
         // What a thinking model showed of its working. Kept rather than

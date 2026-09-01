@@ -420,8 +420,19 @@ pub async fn open_as(
     };
     let status = resp.status();
     if !status.is_success() {
+        // Carried through in words rather than as a header, so that whether to
+        // try again is decided in one place from one string instead of being
+        // threaded through every transport. A number the provider gave is
+        // always better than one this app would invent.
+        let asked_for = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|secs| format!(" (retry after {secs}s)"))
+            .unwrap_or_default();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("LLM error {status}: {body}"));
+        return Err(anyhow!("LLM error {status}{asked_for}: {body}"));
     }
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel_for_task = cancel.clone();

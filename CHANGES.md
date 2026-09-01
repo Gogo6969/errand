@@ -32,6 +32,19 @@ would notice, not something a commit did.
   number it had stopped at rather than the number there was. It now looks only
   where Mail says there is something, stops out loud, and always says what it
   did not reach.
+- A briefing that meets a busy provider no longer simply does not happen. A
+  request refused because the server was overloaded, still loading a model or
+  briefly unreachable is tried once more, waiting as long as the server asked
+  for. A wrong key is not tried again, because it would be wrong again.
+- Repeat has a Pause. Going away for a week used to mean pressing the only stop
+  there was, which threw the schedule and what it says away together.
+- Repeat says how it has actually been going: every run, what started it, and
+  whether it worked. Three failed mornings used to leave a conversation looking
+  merely quiet.
+- Searching now says which line it found, and takes you to it and marks it,
+  rather than opening whichever conversation that agent spoke in most recently.
+- Cmd-F finds words in the conversation on screen, counts them, and steps
+  through with Enter and Shift-Enter.
 - Fixed: searching your mail never worked. It reported that you had no
   mailboxes.
 

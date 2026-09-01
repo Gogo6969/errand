@@ -1910,3 +1910,61 @@ body.in-a-call #what {
 #threads li .last.new {
   color: var(--ink-soft);
 }
+
+/* How a routine has actually been going. Three failed mornings should read as
+   three failed mornings, not as a quiet conversation. */
+#routine-went { margin-top: 10px; font-size: 13px; }
+#routine-went summary { color: var(--ink-soft); cursor: pointer; }
+#routine-went ul { list-style: none; margin: 8px 0 0; padding: 0; }
+.went {
+  display: flex;
+  gap: 10px;
+  padding: 4px 0;
+  border-top: 1px solid var(--rule);
+}
+.went-when { color: var(--faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.went-what { color: var(--ink-soft); min-width: 0; overflow-wrap: anywhere; }
+.went.wrong .went-what { color: var(--wrong-soft); }
+.went.unfinished .went-what { color: var(--faint); }
+
+/* The line a search was looking for, once you have arrived at it. Marked
+   rather than only scrolled to: a conversation scrolled to the middle with
+   nothing picked out is one somebody now has to read to find out why they are
+   there. */
+#messages li.found {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 8px;
+}
+/* The line a search matched, on the row that would otherwise say what the
+   agent is for. */
+#threads li .last.hit { color: var(--ink-soft); font-style: italic; }
+
+/* Finding words in the conversation that is open. Sits over the top of it,
+   because it is about what is on screen rather than about the app. */
+#finding {
+  /* Over the conversation rather than in the flow of it: `main` is a grid with
+     a counted number of rows, and a new child of it takes the row meant for
+     the messages. Below the header, not across it, because covering Pin, Hide
+     and Repeat to offer a search is taking away three things to give one. */
+  position: absolute;
+  top: 80px;
+  right: 16px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--card);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  box-shadow: var(--cast);
+}
+#finding[hidden] { display: none; }
+#finding input { width: 200px; }
+#finding-count {
+  color: var(--faint);
+  font-size: 12px;
+  min-width: 62px;
+  font-variant-numeric: tabular-nums;
+}
