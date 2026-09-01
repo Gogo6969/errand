@@ -2765,3 +2765,211 @@ export async function whenThingsHappened() {
   );
   return found;
 }
+
+/**
+ * An agent that says it has something you have not read.
+ *
+ * The reason to leave errands running is that they run while you are somewhere
+ * else, and until now the list of agents could not say so. A row that had
+ * produced a briefing at seven read exactly like one that had not run in a
+ * month, because the line under the name is what the agent is for -- which is
+ * the right line to have there, and not an answer to "did anything happen".
+ */
+export async function somethingYouHaveNotRead() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const rowFor = (agent) =>
+    [...document.querySelectorAll("#threads li")].find((li) => li.dataset.agent === agent);
+
+  // Put it back to unread first. The starting state cannot be relied on here,
+  // because reading a conversation is what every group before this one does on
+  // its way past, and reading is the thing being tested.
+  window.__TAURI__.nowUnread("agent-bitcoin", 2);
+  // Opening somebody else's conversation is what makes the window ask again,
+  // without touching the agent under test.
+  await openTalk("talk-waiting");
+
+  const bitcoin = rowFor("agent-bitcoin");
+  check(
+    "the agent with something new is marked on the row",
+    bitcoin?.classList.contains("has-new"),
+    bitcoin?.className,
+  );
+  check(
+    "and says how much and how long ago, rather than what it is for",
+    /2 new · .+ago/.test(bitcoin?.querySelector(".last")?.textContent || ""),
+    bitcoin?.querySelector(".last")?.textContent,
+  );
+
+  const quiet = rowFor("agent-unnamed");
+  check(
+    "an agent with nothing new still says what it is for",
+    quiet && !quiet.classList.contains("has-new"),
+    quiet?.querySelector(".last")?.textContent,
+  );
+
+  // And reading it clears it, which is the half a fixture answering the same
+  // thing twice could never show.
+  await openTalk("talk-2");
+  const after = rowFor("agent-bitcoin");
+  check(
+    "opening it clears the mark",
+    after && !after.classList.contains("has-new"),
+    after?.className,
+  );
+  check(
+    "and the line goes back to what the agent is for",
+    !/new ·/.test(after?.querySelector(".last")?.textContent || ""),
+    after?.querySelector(".last")?.textContent,
+  );
+  return found;
+}
+
+/**
+ * What you typed stays with the thread you typed it in.
+ *
+ * This app encourages switching mid-thought: the sidebar row, the conversation
+ * picker and "New conversation with this agent" are all one click. Every one of
+ * them used to carry an unsent errand into a different agent's composer, where
+ * Enter sends it. The only way the window could lose work rather than merely
+ * fail to show something.
+ */
+export async function whatYouTypedStaysPut() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const box = document.getElementById("what");
+
+  await openTalk("talk-1");
+  box.value = "Sort the Downloads folder";
+  box.dispatchEvent(new Event("input"));
+
+  // Another conversation of the same agent, which is the one click away.
+  await openTalk("talk-2");
+  check("switching conversation does not carry it across", box.value === "", box.value);
+
+  // And another agent entirely, which is where sending it would be worst.
+  await openTalk("talk-waiting");
+  check("nor does switching agent", box.value === "", box.value);
+
+  await openTalk("talk-1");
+  check(
+    "and it is still there when you come back to where you wrote it",
+    box.value === "Sort the Downloads folder",
+    box.value,
+  );
+
+  // Sent is not half typed: without clearing it, the draft comes back next
+  // time under the message it already became.
+  document.getElementById("composer").dispatchEvent(new Event("submit"));
+  await new Promise((r) => setTimeout(r, 300));
+  await openTalk("talk-2");
+  await openTalk("talk-1");
+  check("sending it does not leave a copy behind", box.value === "", box.value);
+  return found;
+}
+
+/**
+ * Conversations you can name, and delete on their own.
+ *
+ * Errand shipped the better model, several conversations to an agent in a
+ * picker, and then gave the picker nothing to tell its entries apart. The three
+ * names the app invents are "First", "New conversation" and "{name}, again",
+ * none of them chosen by a person, so after a week the list repeats one word
+ * and the only way to find the right one is to open each of them.
+ */
+export async function namingAndDeletingAConversation() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const menu = document.getElementById("menu");
+  const picker = document.getElementById("talks");
+
+  await openTalk("talk-2");
+  picker.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 300, clientY: 300 }));
+  const labels = [...menu.querySelectorAll("button")].map((b) => b.textContent);
+  check("right-clicking the picker offers what can be done to it", !menu.hidden, String(menu.hidden));
+  check("renaming is one of them", labels.some((l) => /Rename/.test(l)), JSON.stringify(labels));
+  check("and deleting just this conversation is another", labels.some((l) => /^Delete this/.test(l)), JSON.stringify(labels));
+
+  // Naming it puts the name in the picker, so the entries can be told apart.
+  const was = window.prompt;
+  window.prompt = () => "Rent receipts";
+  await menu.querySelector("button").click();
+  await new Promise((r) => setTimeout(r, 300));
+  window.prompt = was;
+  check(
+    "the name it was given is the one in the picker",
+    [...picker.options].some((o) => o.textContent.includes("Rent receipts")),
+    [...picker.options].map((o) => o.textContent).join(" | "),
+  );
+  check(
+    "and the app was told, rather than only the window",
+    asked.some((a) => a.name === "call_it" && a.args?.name === "Rent receipts"),
+    JSON.stringify(asked.filter((a) => a.name === "call_it").slice(-1)),
+  );
+
+  // Deleting asks once, on the button, the same way deleting an agent does.
+  picker.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 300, clientY: 300 }));
+  const remove = [...menu.querySelectorAll("button")].find((b) => /^Delete this/.test(b.textContent));
+  remove.click();
+  await new Promise((r) => setTimeout(r, 120));
+  check(
+    "deleting asks first, in the button rather than over it",
+    /Delete .*\?/.test(remove.textContent) && !asked.some((a) => a.name === "forget_conversation"),
+    remove.textContent,
+  );
+
+  remove.click();
+  await new Promise((r) => setTimeout(r, 350));
+  check(
+    "and the second press does it",
+    asked.some((a) => a.name === "forget_conversation"),
+    JSON.stringify(asked.filter((a) => a.name === "forget_conversation")),
+  );
+  check("the menu closes behind it", menu.hidden, String(menu.hidden));
+  return found;
+}
+
+/**
+ * A notification that finds its way back.
+ *
+ * The whole payoff of handing over something worth walking away from. Before
+ * this a click only brought the app forward: you read the notification, and
+ * then went and found the conversation yourself, which is the errand you were
+ * trying not to run.
+ */
+export async function aNotificationThatLeadsSomewhere() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  // Start somewhere else, so arriving is a real move.
+  await openTalk("talk-1");
+  check("something else is open to begin with", document.getElementById("talks").value === "talk-1", document.getElementById("talks").value);
+
+  // The app says which conversation somebody is reading, so a notification can
+  // be held back for that one and shown for the rest.
+  check(
+    "the window says which conversation is on screen",
+    asked.some((a) => a.name === "looking_at" && a.args?.id === "talk-1"),
+    JSON.stringify(asked.filter((a) => a.name === "looking_at").slice(-1)),
+  );
+
+  // A click on one about a conversation of another agent entirely.
+  await tell("go_to", "talk-waiting");
+  await new Promise((r) => setTimeout(r, 500));
+  check(
+    "clicking a notification opens the conversation it was about",
+    document.getElementById("talks").value === "talk-waiting",
+    document.getElementById("talks").value,
+  );
+
+  // And one about something that no longer exists leaves the window alone
+  // rather than jumping somewhere arbitrary.
+  await tell("go_to", "talk-that-was-deleted");
+  await new Promise((r) => setTimeout(r, 400));
+  check(
+    "one about a conversation that is gone leaves the window where it was",
+    document.getElementById("talks").value === "talk-waiting",
+    document.getElementById("talks").value,
+  );
+  return found;
+}

@@ -18,13 +18,35 @@
 //! and it refuses. That is a property of the operating system rather than
 //! something to work around, so the failure says so in as many words.
 
+use std::sync::Mutex;
+
 use block2::RcBlock;
+use objc2::rc::Retained;
 use objc2::runtime::Bool;
-use objc2_foundation::{NSError, NSString};
+use objc2::runtime::ProtocolObject;
+use objc2::{define_class, msg_send, AnyThread};
+use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_user_notifications::{
-    UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
-    UNUserNotificationCenter,
+    UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+    UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
+    UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
+
+/// What to do when somebody clicks one of these.
+///
+/// A notification that only brings the app forward is a dead end: you read it,
+/// and then go and find the conversation yourself, which is the errand you were
+/// trying not to run. The identifier on the notification is the conversation
+/// id, so the click has everything it needs; it only ever lacked somewhere to
+/// send it.
+type WhatToDo = Box<dyn Fn(String) + Send + 'static>;
+
+static WHEN_CLICKED: Mutex<Option<WhatToDo>> = Mutex::new(None);
+
+/// Say what should happen when one of these is clicked.
+pub fn on_click(go: impl Fn(String) + Send + 'static) {
+    *WHEN_CLICKED.lock().unwrap() = Some(Box::new(go));
+}
 
 /// Ask, once, whether this app may put things on screen.
 ///
@@ -48,12 +70,29 @@ pub fn ask() {
             eprintln!("notifications: not allowed, so errands will finish quietly");
         }
     });
-    // Alert and sound only. A badge would count things nobody asked to have
-    // counted, and this app has nothing to put a number on.
+    // The badge was declined once, on the grounds that this app has nothing to
+    // put a number on. It has: the number of agents stopped waiting on
+    // somebody. That is the one count here that is a claim on their attention
+    // rather than a tally of things that happened.
     center.requestAuthorizationWithOptions_completionHandler(
-        UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+        UNAuthorizationOptions::Alert
+            | UNAuthorizationOptions::Sound
+            | UNAuthorizationOptions::Badge,
         &heard,
     );
+}
+
+/// How many agents are stopped waiting on somebody, on the dock icon.
+///
+/// Nought clears it, which is the case that matters: a badge that is right when
+/// it appears and wrong for the rest of the day is worse than none.
+pub fn waiting(how_many: i64) {
+    let Some(center) = center() else { return };
+    let done = RcBlock::new(|_error: *mut NSError| {});
+    unsafe {
+        let _: () = msg_send![&*center, setBadgeCount: how_many as isize,
+                              withCompletionHandler: &*done];
+    }
 }
 
 /// Put one line on screen.
@@ -78,6 +117,60 @@ pub fn show(about: &str, title: &str, body: &str) {
         }
     });
     center.addNotificationRequest_withCompletionHandler(&request, Some(&landed));
+}
+
+define_class!(
+    /// The object macOS talks to about these.
+    ///
+    /// Two things only. A notification that arrives while the app is in front
+    /// is still shown, because the whole reason one is posted at all is that
+    /// the conversation it belongs to is not the one being looked at. And a
+    /// click hands the conversation id back to whoever asked for it.
+    #[unsafe(super(NSObject))]
+    #[name = "ErrandNotificationDelegate"]
+    #[ivars = ()]
+    struct Delegate;
+
+    unsafe impl NSObjectProtocol for Delegate {}
+
+    unsafe impl UNUserNotificationCenterDelegate for Delegate {
+        #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+        fn will_present(
+            &self,
+            _center: &UNUserNotificationCenter,
+            _notification: &UNNotification,
+            handler: &block2::Block<dyn Fn(UNNotificationPresentationOptions)>,
+        ) {
+            handler.call((UNNotificationPresentationOptions::Banner
+                | UNNotificationPresentationOptions::Sound,));
+        }
+
+        #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+        fn did_receive(
+            &self,
+            _center: &UNUserNotificationCenter,
+            response: &UNNotificationResponse,
+            handler: &block2::Block<dyn Fn()>,
+        ) {
+            let which = response.notification().request().identifier().to_string();
+            if let Some(go) = WHEN_CLICKED.lock().unwrap().as_ref() {
+                go(which);
+            }
+            handler.call(());
+        }
+    }
+);
+
+/// Start listening for clicks.
+///
+/// Held for the life of the process on purpose. The centre keeps only a weak
+/// reference to its delegate, so one that is dropped leaves clicks going
+/// nowhere, silently, which is exactly the failure this is here to end.
+pub fn listen() {
+    let Some(center) = center() else { return };
+    let delegate: Retained<Delegate> = unsafe { msg_send![Delegate::alloc(), init] };
+    center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    std::mem::forget(delegate);
 }
 
 /// The system's notification centre, if there is one to be had.

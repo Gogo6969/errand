@@ -104,6 +104,14 @@ struct Held {
     /// arriving while the first is still on screen must not be ended by the
     /// first card being pressed.
     handovers: Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>,
+    /// The one conversation somebody is actually looking at, if any.
+    ///
+    /// A notification used to be held back whenever the main window had focus,
+    /// which is the right instinct pointed at the wrong thing: a routine fires
+    /// in a conversation nobody is reading, and that is precisely when the
+    /// window being in front should not silence it. Focus says the app is on
+    /// screen; this says which of forty conversations is.
+    looking_at: Mutex<Option<String>>,
     store: Arc<Store>,
 }
 
@@ -168,7 +176,22 @@ fn beside_everything_else() -> Option<std::path::PathBuf> {
 fn tell_them(app: &AppHandle, store: &Store, id: &str, event: &Event) {
     let (title, body) = match event {
         Event::Done { said, .. } => (called(store, id), gist(said)),
-        Event::Failed { why } => (format!("{} stopped", called(store, id)), gist(why)),
+        // "Stopped" alone reads as something somebody was watching. A routine
+        // stopping is a different fact: nobody was there, and it will not have
+        // done the thing it does every morning.
+        Event::Failed { why } => {
+            let by_the_clock = store
+                .conversation(id)
+                .ok()
+                .flatten()
+                .and_then(|c| c.runs_at)
+                .is_some();
+            let what = match by_the_clock {
+                true => format!("{} stopped, and it was a routine", called(store, id)),
+                false => format!("{} stopped", called(store, id)),
+            };
+            (what, gist(why))
+        }
         // An agent that has stopped to ask is the one thing here that is
         // actually waiting on somebody. Finishing can be read whenever; a
         // question holds the whole errand until it is answered, and a routine
@@ -180,14 +203,34 @@ fn tell_them(app: &AppHandle, store: &Store, id: &str, event: &Event) {
         ),
         _ => return,
     };
-    let watching = app
+    // Held back only for the conversation actually on screen. Both halves are
+    // needed: the window can be in front with something else open, and it can
+    // have this open while sitting behind a browser.
+    let in_front = app
         .get_webview_window("main")
         .and_then(|w| w.is_focused().ok())
         .unwrap_or(false);
-    if watching {
+    let held: State<Held> = app.state();
+    let this_one = held.looking_at.lock().unwrap().as_deref() == Some(id);
+    if in_front && this_one {
         return;
     }
     onscreen::show(id, &title, &body);
+    onscreen::waiting(how_many_are_waiting(&held));
+}
+
+/// How many agents are stopped waiting on somebody, for the dock icon.
+///
+/// The one count in this app that is a claim on somebody's attention rather
+/// than a tally of things that happened, which is why it is the one worth
+/// putting on the icon.
+fn how_many_are_waiting(held: &Held) -> i64 {
+    held.doing
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|what| what.starts_with("Waiting on you"))
+        .count() as i64
 }
 
 /// What a thread is called, or something honest if it is not called anything.
@@ -2140,6 +2183,63 @@ fn reach_for_it(
     errand_core::connectors::run(job, args)
 }
 
+/// Which agent a conversation belongs to.
+///
+/// For arriving at one from outside the window: a notification names the
+/// conversation, and opening it means opening its agent first, which the window
+/// cannot know for an agent it has never loaded.
+#[tauri::command]
+async fn conversation_agent(held: State<'_, Held>, id: String) -> Result<Option<String>, String> {
+    held.store
+        .conversation(&id)
+        .map(|c| c.map(|c| c.agent))
+        .map_err(|e| e.to_string())
+}
+
+/// Say which conversation is on screen, or that none is.
+///
+/// So that a notification can be held back for the one being read and shown for
+/// the thirty-nine that are not. The app cannot work this out: it knows what is
+/// running, and the window knows what somebody is looking at.
+#[tauri::command]
+async fn looking_at(held: State<'_, Held>, id: Option<String>) -> Result<(), String> {
+    *held.looking_at.lock().unwrap() = id;
+    Ok(())
+}
+
+/// Forget one conversation, and everything said in it.
+///
+/// Never the last one an agent has: the store refuses, and the refusal says
+/// what to do instead rather than only that it would not.
+#[tauri::command]
+async fn forget_conversation(held: State<'_, Held>, id: String) -> Result<(), String> {
+    held.store
+        .forget_conversation(&id)
+        .map_err(|e| e.to_string())
+}
+
+/// What each agent has said that nobody has read.
+///
+/// Asked for by the window whenever the list is drawn, rather than pushed at
+/// it, because the answer changes for reasons the window is not present for:
+/// a routine firing, a watch waking something, a delegated errand coming back.
+#[tauri::command]
+async fn what_is_new(
+    held: State<'_, Held>,
+) -> Result<std::collections::HashMap<String, errand_core::store::Fresh>, String> {
+    held.store.what_is_new().map_err(|e| e.to_string())
+}
+
+/// Say that a conversation has now been read.
+///
+/// Separate from opening it. Opening is what the window does to draw a thread,
+/// including for its own reasons, and marking read is a claim that somebody
+/// looked -- which is only true when the window is actually in front of them.
+#[tauri::command]
+async fn seen(held: State<'_, Held>, conversation: String) -> Result<(), String> {
+    held.store.seen(&conversation).map_err(|e| e.to_string())
+}
+
 /// Everything this Mac can be let at, and what is switched on.
 #[tauri::command]
 async fn connectors(held: State<'_, Held>) -> Result<Vec<Connected>, String> {
@@ -3606,6 +3706,7 @@ pub fn run() {
                 looking: Arc::default(),
                 doorways: Mutex::new(HashMap::new()),
                 handovers: Mutex::new(HashMap::new()),
+                looking_at: Mutex::new(None),
                 store: Arc::new(store),
             });
             // The receiving end is parked here and started on Ready, for the
@@ -3628,6 +3729,9 @@ pub fn run() {
             conversations,
             start_conversation,
             call_it,
+            forget_conversation,
+            looking_at,
+            conversation_agent,
             say,
             answer,
             engines,
@@ -3658,6 +3762,8 @@ pub fn run() {
             handed_back,
             waiting_on_you,
             connectors,
+            what_is_new,
+            seen,
             connect,
             seen_what_changed,
             open_at_login,
@@ -3749,6 +3855,18 @@ fn nothing_here_is_worth_the_whole_app(doing: impl FnOnce()) -> Option<String> {
 /// that is outside the net.
 fn everything_that_waits_for_the_app(app: &AppHandle) {
     onscreen::ask();
+    // A notification that only brings the app forward is a dead end: you read
+    // it, then go and find the conversation yourself, which is the errand you
+    // were trying not to run.
+    onscreen::listen();
+    let go = app.clone();
+    onscreen::on_click(move |conversation| {
+        if let Some(window) = go.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        let _ = go.emit("go_to", conversation);
+    });
     // Started here rather than in setup, so neither looks at the
     // store before it is in place, and neither is spawned into an
     // app that is still being built.

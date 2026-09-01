@@ -20,6 +20,7 @@
 //! originate in the window, and if those two can interleave badly the stored
 //! conversation is not the one anybody had.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -65,6 +66,17 @@ pub struct Allowance {
 /// under it. So a conversation id is never reused and never regenerated once
 /// anything has been said, or the conversation becomes unreachable while its
 /// transcript sits on disk under a name nothing will ask for again.
+/// What one agent has said that has not been read.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct Fresh {
+    /// How many lines, so a row can say "3 new" rather than only that there is
+    /// something.
+    pub lines: i64,
+    /// When the newest of them arrived, so a row can say when rather than only
+    /// that it happened.
+    pub at: i64,
+}
+
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     pub id: String,
@@ -700,6 +712,19 @@ const CHANGES: &[&str] = &[
          id TEXT PRIMARY KEY,
          at INTEGER NOT NULL
      );",
+    // 17
+    //
+    // How far down this conversation somebody has read, as a line number rather
+    // than a time. Two lines can share a millisecond, and they do: an agent
+    // answering and the app writing a note about it land on the same one often
+    // enough that a clock here loses the second of them for good.
+    //
+    // Nought rather than the end, deliberately. A store upgrading has
+    // conversations full of lines somebody has already read, and nought marks
+    // all of them new at once -- which is right, because the window clears it
+    // the moment anything is opened, and the alternative is an app that has
+    // just learnt to say "something happened" and never does.
+    "ALTER TABLE conversations ADD COLUMN seen INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -907,6 +932,55 @@ impl Store {
             false => conn.execute("DELETE FROM connected WHERE id = ?", [id])?,
         };
         Ok(())
+    }
+
+    /// What an agent has said that nobody has read yet.
+    ///
+    /// The whole point of this app is errands that run while nobody is looking,
+    /// and until this the window had no way to say that one had. An agent that
+    /// produced a briefing at seven this morning looked exactly like one that
+    /// had not run in a month: the row said what the agent is for, which is the
+    /// right line to have there and not an answer to "did anything happen".
+    ///
+    /// Lines somebody typed themselves are never new. They read them as they
+    /// wrote them, and counting them would mean a conversation somebody just
+    /// finished having is unread the moment they close it.
+    pub fn what_is_new(&self) -> Result<HashMap<String, Fresh>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT c.agent, count(*), max(l.at)
+               FROM lines l JOIN conversations c ON c.id = l.conversation
+              WHERE l.seq > c.seen AND l.kind <> 'mine'
+              GROUP BY c.agent",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                Fresh {
+                    lines: r.get(1)?,
+                    at: r.get(2)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
+
+    /// Say that everything in this conversation has now been seen.
+    ///
+    /// Marked from the last line there is rather than from the clock, and never
+    /// backwards. Between reading a conversation and writing this down an agent
+    /// can say something else, and a time here would mark that line read
+    /// without anybody having laid eyes on it.
+    pub fn seen(&self, conversation: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE conversations
+                SET seen = max(seen, coalesce(
+                      (SELECT max(seq) FROM lines WHERE conversation = ?1), 0))
+              WHERE id = ?1",
+            [conversation],
+        )?;
+        Self::only_if_it_is_there(changed, "conversation")
     }
 
     /// Everything a new agent needs to exist, before anything points at it.
@@ -1907,6 +1981,41 @@ impl Store {
         Ok(())
     }
 
+    /// Forget one conversation, and everything said in it.
+    ///
+    /// Never the last one an agent has. A conversation is where an engine
+    /// session lives and where the picker points, and an agent with none is a
+    /// row the window cannot open: it would have to invent one to show, which
+    /// is the app quietly replacing something somebody just deleted.
+    ///
+    /// The transcript on disk is left alone, as with an agent. It is filed
+    /// under the session id and it is somebody's work, not the app's to throw
+    /// away on the strength of a menu click.
+    pub fn forget_conversation(&self, conversation: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let agent: String = conn
+            .query_row(
+                "SELECT agent FROM conversations WHERE id = ?",
+                [conversation],
+                |r| r.get(0),
+            )
+            .map_err(|_| anyhow::anyhow!("there is no conversation here to delete"))?;
+        let left: i64 = conn.query_row(
+            "SELECT count(*) FROM conversations WHERE agent = ?",
+            [&agent],
+            |r| r.get(0),
+        )?;
+        if left <= 1 {
+            anyhow::bail!(
+                "this is the only conversation this agent has, and an agent with none is one \
+                 the window cannot open. Delete the agent instead, or start another conversation \
+                 first."
+            );
+        }
+        let changed = conn.execute("DELETE FROM conversations WHERE id = ?", [conversation])?;
+        Self::only_if_it_is_there(changed, "conversation")
+    }
+
     /// The one place a line is written, so the one place a position is decided.
     /// A line the app itself puts into a conversation.
     ///
@@ -2256,6 +2365,98 @@ mod tests {
         );
         // And what was said is still there, once.
         assert_eq!(s.lines("new-one").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_only_conversation_an_agent_has_cannot_be_deleted_out_from_under_it() {
+        // An agent with no conversation is a row the window cannot open: it
+        // would have to invent one to show, which is the app quietly replacing
+        // the thing somebody just deleted.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("solo", NOT_YET_NAMED, Path::new("/tmp/solo"))
+            .unwrap();
+        let only = s.conversations("solo").unwrap();
+        assert_eq!(only.len(), 1);
+        assert!(
+            s.forget_conversation(&only[0].id).is_err(),
+            "the last conversation was deleted"
+        );
+
+        // With a second one, either can go, and what was said in it goes too.
+        s.begin_conversation("second", "solo", "Again").unwrap();
+        s.the_app_says_about("second", "said", "Something.", "")
+            .unwrap();
+        s.forget_conversation("second").unwrap();
+        assert_eq!(s.conversations("solo").unwrap().len(), 1);
+        assert!(s.lines("second").unwrap().is_empty());
+
+        // And one that is not there is said so rather than passing quietly.
+        assert!(s.forget_conversation("second").is_err());
+    }
+
+    #[test]
+    fn an_answer_that_arrived_while_nobody_was_looking_is_new_until_it_is_read() {
+        // The whole point of this app is errands that run while nobody is
+        // looking, and the window had no way at all to say that one had. An
+        // agent that produced a briefing at seven this morning looked exactly
+        // like one that had not run in a month.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("morning", NOT_YET_NAMED, Path::new("/tmp/morning"))
+            .unwrap();
+        assert!(
+            s.what_is_new().unwrap().is_empty(),
+            "new before anything happened"
+        );
+
+        // What somebody typed is never new. They read it as they wrote it, and
+        // counting it means a conversation just finished is unread on closing.
+        s.asked("morning", "Every morning, tell me what moved")
+            .unwrap();
+        assert!(
+            s.what_is_new().unwrap().is_empty(),
+            "somebody's own words came back as something they had not read"
+        );
+
+        s.the_app_says_about("morning", "said", "BTC is flat.", "")
+            .unwrap();
+        s.the_app_says_about("morning", "said", "And gold is up.", "")
+            .unwrap();
+        let new = s.what_is_new().unwrap();
+        assert_eq!(new.get("morning").map(|f| f.lines), Some(2), "{new:?}");
+        assert!(new["morning"].at > 0, "{new:?}");
+
+        s.seen("morning").unwrap();
+        assert!(
+            s.what_is_new().unwrap().is_empty(),
+            "reading it did not clear it"
+        );
+
+        // And the next one is new again, which is the state that matters most:
+        // an agent that keeps working after somebody has looked away.
+        s.the_app_says_about("morning", "said", "Silver moved too.", "")
+            .unwrap();
+        assert_eq!(s.what_is_new().unwrap()["morning"].lines, 1);
+    }
+
+    #[test]
+    fn nothing_in_a_conversation_nobody_has_opened_counts_as_read() {
+        // Marked from the newest line rather than from the clock. Between
+        // reading a conversation and writing this down an agent can say
+        // something else, and dating it now would mark that line read without
+        // anybody having laid eyes on it.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("late", NOT_YET_NAMED, Path::new("/tmp/late"))
+            .unwrap();
+        s.the_app_says_about("late", "said", "One.", "").unwrap();
+        s.seen("late").unwrap();
+
+        s.the_app_says_about("late", "said", "Two, after you looked away.", "")
+            .unwrap();
+        assert_eq!(
+            s.what_is_new().unwrap()["late"].lines,
+            1,
+            "a line said after the last look was counted as read"
+        );
     }
 
     #[test]

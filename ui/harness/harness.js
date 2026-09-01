@@ -300,7 +300,24 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
   let watchedNow = null;
   /** Which connectors are switched on, once anything has switched one. */
   const connected = new Set();
+  /**
+   * What each agent has said that nobody has read, which a check clears by
+   * opening the conversation it is in. Mutable, because the behaviour under
+   * test is that it goes away: a fixture answering the same thing twice cannot
+   * tell a mark that clears from one that was never drawn.
+   */
+  const unread = new Map([["agent-bitcoin", { lines: 2, at: Date.now() - 3600000 }]]);
   return {
+    /**
+     * Put an agent back to having something nobody has read.
+     *
+     * A check cannot rely on the starting state here, because reading a
+     * conversation is what every other group does on its way past, and the
+     * whole behaviour under test is that reading clears this.
+     */
+    nowUnread(agent, lines = 2, at = Date.now() - 3600000) {
+      unread.set(agent, { lines, at });
+    },
     core: {
       invoke(name, args) {
         asked.push({ name, args });
@@ -376,6 +393,28 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           // than in the fixture because the switch changes it: a stand-in that
           // answers the same thing before and after cannot tell a switch that
           // works from one that only looks like it does.
+          // What each agent has said that nobody has read. Mutable, because
+          // the whole behaviour under test is that opening a conversation
+          // clears it: a fixture that answers the same thing twice cannot tell
+          // a mark that goes away from one that was never drawn.
+          case "what_is_new":
+            return Promise.resolve(Object.fromEntries(unread));
+          case "seen": {
+            const owner = Object.entries(fixture.conversations).find(([, talks]) =>
+              talks.some((t) => t.id === args.conversation),
+            )?.[0];
+            if (owner) unread.delete(owner);
+            return Promise.resolve(null);
+          }
+          case "forget_conversation":
+          case "looking_at":
+            return Promise.resolve(null);
+          case "conversation_agent":
+            return Promise.resolve(
+              Object.entries(fixture.conversations).find(([, talks]) =>
+                talks.some((t) => t.id === args.id),
+              )?.[0] || null,
+            );
           case "connectors":
             return Promise.resolve(
               (fixture.connectors || []).map((one) => ({ ...one, on: connected.has(one.id) })),

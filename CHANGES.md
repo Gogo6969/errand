@@ -5,6 +5,36 @@ the last, which is the only way there is: there is no updater, no remote to
 update from, and nothing that signs a build. Each line is something a person
 would notice, not something a commit did.
 
+## 0.3.0
+
+- Your agents can read your Mail and your Calendar, once you switch each one
+  on under Settings. Nothing signs in to anything: these read the apps already
+  on this Mac, so there is no account, no token and nothing that expires. Both
+  are read-only, and each says what it lets an agent see before you turn it on.
+- New agents start at "never ask", which is what a standing job needs: an
+  errand nobody is sitting in front of cannot answer a permission card. Agents
+  you already have keep the posture they had.
+- A conversation says what day it was. Yesterday's briefing and this morning's
+  no longer sit one under the other with nothing between them.
+- The list of agents says when one has said something you have not read, how
+  much, and how long ago.
+- Clicking a notification opens the conversation it was about, rather than
+  only bringing the window forward. One about a routine says it was a routine.
+  The dock icon counts the agents stopped waiting on you.
+- A notification is now held back only for the conversation you are actually
+  reading, rather than whenever the window happens to be in front.
+- Half a typed message stays with the conversation you were typing it into.
+  It used to follow you to the next agent, where Enter would send it.
+- Right-click the conversation picker to name a conversation or delete just
+  that one. The three names Errand invents are "First", "New conversation" and
+  "{name}, again", which after a week is a list that repeats one word.
+- Fixed: asking what was unread took eight minutes and answered with the
+  number it had stopped at rather than the number there was. It now looks only
+  where Mail says there is something, stops out loud, and always says what it
+  did not reach.
+- Fixed: searching your mail never worked. It reported that you had no
+  mailboxes.
+
 ## 0.2.0
 
 - Answers arrive as they are written, a word at a time, rather than after

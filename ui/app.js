@@ -313,6 +313,77 @@ function busy(agent) {
 }
 
 /** Is any of them waiting on somebody? */
+/**
+ * What each agent has said that nobody has read yet, by agent id.
+ *
+ * Asked of the app rather than worked out here. The window is not present for
+ * most of the reasons this changes: a routine fires at seven, a watch wakes
+ * something at lunchtime, a delegated errand comes back. All of them write into
+ * conversations this window has never loaded.
+ */
+let fresh = new Map();
+
+async function whatIsNew() {
+  try {
+    fresh = new Map(Object.entries(await invoke("what_is_new")));
+  } catch {
+    // A count that could not be fetched is no count. Saying "3 new" from a
+    // stale answer is worse than saying nothing, because somebody clicks it.
+    fresh = new Map();
+  }
+  drawThreads();
+}
+
+/**
+ * Say that what is on screen has been read.
+ *
+ * Only for the conversation actually in front of somebody, and only once it is
+ * drawn. Marking every conversation of an agent read because one of them was
+ * opened is how an unread briefing disappears without being seen.
+ */
+async function nowSeen(id) {
+  if (!id) return;
+  await invoke("seen", { conversation: id }).catch(() => {});
+  await whatIsNew();
+}
+
+/** How long ago, in the fewest words that are still true. */
+function howLongAgo(at) {
+  const secs = Math.max(0, (Date.now() - at) / 1000);
+  if (secs < 90) return "just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(at).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
+/**
+ * What was half typed in each conversation, kept for coming back to.
+ *
+ * In memory only, and deliberately. A draft is a thought somebody has not
+ * finished having; writing it to disk makes it a thing that survives them
+ * closing the app, which is a different promise and one nobody asked for.
+ */
+const halfTyped = new Map();
+
+function putItDown(id) {
+  if (!id || !el.what) return;
+  const said = el.what.value;
+  if (said.trim()) halfTyped.set(id, said);
+  else halfTyped.delete(id);
+}
+
+function pickItBackUp(id) {
+  if (!el.what) return;
+  el.what.value = halfTyped.get(id) || "";
+  el.what.style.height = "auto";
+  el.what.style.height =
+    Math.min(el.what.scrollHeight, window.innerHeight * 0.4) + "px";
+}
+
 function waitingOn(agent) {
   return [...talks.values()].some(
     (t) => t.agent === agent && t.messages.some((m) => m.kind === "asking" && !m.answered),
@@ -373,6 +444,7 @@ async function alsoAsk() {
 async function catchUp() {
   const known = await invoke("agents");
   for (const a of known) agents.set(a.id, asAgent(a, agents.get(a.id)));
+  await whatIsNew();
   drawThreads();
   // A version somebody has not been told about yet, said once. After the tour,
   // because a brand new copy has nothing to have changed from.
@@ -414,6 +486,13 @@ async function openAgent(agent) {
 async function show(id) {
   const t = talks.get(id);
   if (!t) return;
+  // Half a sentence belongs to the conversation it was being written into. It
+  // used to follow whoever switched, which this app encourages constantly: the
+  // sidebar row, the conversation picker and "New conversation with this agent"
+  // are all one click, and every one of them carried an unsent errand into
+  // somebody else's composer where Enter would send it. The only item on this
+  // list that could lose work rather than merely fail to show it.
+  putItDown(showing);
   showing = id;
   showingAgent = t.agent;
 
@@ -457,6 +536,15 @@ async function show(id) {
   drawTalks();
   drawThreads();
   drawMessages();
+  pickItBackUp(id);
+  // Which conversation somebody is actually reading, so a notification can be
+  // held back for this one and shown for the thirty-nine that are not. The app
+  // knows what is running; only the window knows what is being looked at.
+  invoke("looking_at", { id }).catch(() => {});
+  // Read, now that it is on screen. Not before: `show` is called for the
+  // window's own reasons as well as somebody's, and marking a briefing read
+  // that nobody has looked at is the one way this feature can do harm.
+  nowSeen(id);
 
   // Nothing is started by looking. The engine is handed back its own memory of
   // this conversation when there is something to say to it, which is the first
@@ -842,15 +930,26 @@ function drawThreads() {
       // message belongs to one of its conversations, not to it.
       const last = document.createElement("span");
       last.className = "last";
+      const news = fresh.get(a.id);
       last.textContent = waitingOn(a.id)
         ? "Waiting on you"
         : busy(a.id)
           ? "Working…"
-          : a.about || "Nothing said yet";
+          : // Something happened here and nobody has seen it. This takes the
+            // line for as long as that is true, because it is the one thing
+            // about an agent somebody cannot work out by looking at the list,
+            // and it is the whole reason to leave errands running.
+            news
+            ? `${news.lines} new · ${howLongAgo(news.at)}`
+            : a.about || "Nothing said yet";
       if (waitingOn(a.id)) last.classList.add("waiting");
+      if (news && !waitingOn(a.id) && !busy(a.id)) last.classList.add("new");
 
       words.append(name, last);
       li.append(words);
+      // A mark on the row itself, not only in the line under the name, so a
+      // list of forty can be skimmed rather than read.
+      if (news && !waitingOn(a.id)) li.classList.add("has-new");
       return li;
     }),
   );
@@ -1185,6 +1284,31 @@ function thinking() {
 // An agent that has worked out what it is for. Arrives once, some seconds
 // after its first errand ends, and changes its name under the pointer -- which
 // is the intended effect: it is the moment it stops being "New errand".
+/**
+ * Somebody clicked a notification.
+ *
+ * Which is the whole point of posting one. Before this it only brought the app
+ * forward, and finding the conversation it was about was left to the person who
+ * had just been told about it, which is the errand they were trying not to run.
+ */
+listen("go_to", async ({ payload }) => {
+  const id = String(payload || "");
+  if (!id) return;
+  // It may belong to an agent this window has never loaded, which is the usual
+  // case: a routine fired on one nobody has opened.
+  if (!talks.has(id)) {
+    try {
+      const owner = await invoke("conversation_agent", { id });
+      if (owner) await openAgent(owner);
+    } catch {
+      // Nothing to go to. Better to leave the window where it is than to jump
+      // somewhere arbitrary on the strength of a notification.
+      return;
+    }
+  }
+  if (talks.has(id)) await show(id);
+});
+
 listen("settled", ({ payload }) => {
   const [id, on] = payload;
   const t = agents.get(id);
@@ -1454,6 +1578,9 @@ function drawAttached() {
 el.form.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = el.what.value.trim();
+  // Sent is not half typed. Without this the draft comes back the next time
+  // this conversation is opened, under the message it already became.
+  halfTyped.delete(showing);
   // A picture on its own is a question: "what is this". So something has to be
   // said, but it does not have to be typed.
   if (!text && !attached.length) return;
@@ -1896,6 +2023,99 @@ function drawPinned(t) {
   el.pin.setAttribute("aria-pressed", String(t.pinned));
   el.hide.textContent = t.hidden ? "Hidden" : "Hide";
   el.hide.setAttribute("aria-pressed", String(t.hidden));
+}
+
+/**
+ * What can be done to the conversation on screen.
+ *
+ * Errand shipped the better model -- several conversations to an agent, in a
+ * picker -- and then gave the picker nothing to tell its entries apart. The
+ * three names the app invents are "First", "New conversation" and "{name},
+ * again", none of them chosen by a person, so after a week the list repeats one
+ * word and the only way to find the right conversation is to open each of them.
+ *
+ * On the picker rather than in the header, because the picker is where somebody
+ * is already looking when they cannot find the one they want.
+ */
+el.talks.addEventListener("contextmenu", (e) => {
+  const t = talks.get(showing);
+  if (!t) return;
+  e.preventDefault();
+  openTheTalkMenu(t, e.clientX, e.clientY);
+});
+
+function openTheTalkMenu(t, x, y) {
+  menuIsFor = t.id;
+  const items = [];
+  const item = (label, run, how = "") => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    if (how) b.className = how;
+    b.textContent = label;
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      await run(b);
+    };
+    items.push(b);
+    return b;
+  };
+
+  item("Rename this conversation…", async () => {
+    closeTheMenu();
+    const called = prompt("What is this conversation about?", t.name);
+    // Cancelled is not "call it nothing". An empty name would leave a blank
+    // row in the picker, which is worse than the name it already had.
+    if (called === null || !called.trim()) return;
+    t.name = called.trim();
+    drawTalks();
+    try {
+      await invoke("call_it", { id: t.id, name: t.name });
+    } catch (why) {
+      complain(String(why));
+    }
+  });
+
+  const remove = item(
+    "Delete this conversation",
+    async (b) => {
+      // The second press answers the question the first press asked, the same
+      // way an agent is deleted. A dialog over the menu would be a different
+      // gesture for the same decision.
+      if (b.dataset.sure !== "true") {
+        b.dataset.sure = "true";
+        b.textContent = `Delete ${t.name}? Everything said in it goes too`;
+        return;
+      }
+      closeTheMenu();
+      try {
+        await invoke("forget_conversation", { id: t.id });
+      } catch (why) {
+        // The store refuses to delete the only conversation an agent has, and
+        // says what to do instead. Worth showing rather than swallowing.
+        complain(String(why));
+        return;
+      }
+      const agent = t.agent;
+      talks.delete(t.id);
+      const left = [...talks.values()].find((other) => other.agent === agent);
+      if (left) await show(left.id);
+      else await openAgent(agent);
+      drawTalks();
+    },
+    "danger",
+  );
+  remove.dataset.sure = "false";
+
+  el.menu.replaceChildren(...items);
+  el.menu.hidden = false;
+  const box = el.menu.getBoundingClientRect();
+  const room = {
+    x: window.innerWidth - box.width - 8,
+    y: window.innerHeight - box.height - 8,
+  };
+  el.menu.style.left = `${Math.max(8, Math.min(x, room.x))}px`;
+  el.menu.style.top = `${Math.max(8, Math.min(y, room.y))}px`;
 }
 
 el.talks.addEventListener("change", async () => {

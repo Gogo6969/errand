@@ -1893,3 +1893,20 @@ body.in-a-call #what {
   height: 1px;
   background: var(--rule);
 }
+
+/* An agent that has said something nobody has read. The dot is on the row so a
+   list of forty can be skimmed; the words under the name say how much and how
+   long ago, because "something happened" is only half an answer. */
+#threads li.has-new .name::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+  align-self: center;
+  margin-left: 2px;
+}
+#threads li .last.new {
+  color: var(--ink-soft);
+}
