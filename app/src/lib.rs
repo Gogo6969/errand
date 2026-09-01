@@ -1205,6 +1205,65 @@ async fn remember_backend(
     })
 }
 
+/// The settings for a model, with its real context window in them.
+///
+/// Returned unchanged when the server will not say, or when somebody has
+/// already put a number in by hand: a size asked for on purpose beats one
+/// discovered, because the person asking is usually working around a server
+/// that is lying about what it can hold.
+async fn with_its_real_size(said: String) -> String {
+    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&said) else {
+        return said;
+    };
+    if settings.get("context_window").is_some() {
+        return said;
+    }
+    let at = |k: &str| {
+        settings
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let (provider, base_url, model) = (at("provider"), at("base_url"), at("model"));
+    if base_url.is_empty() || model.is_empty() {
+        return said;
+    }
+    let key = settings
+        .get("api_key")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let Ok(caps) =
+        errand_core::local::find::query_model_caps(&provider, &base_url, key.as_deref(), &model)
+            .await
+    else {
+        return said;
+    };
+    let Some(holds) = caps.context_length else {
+        return said;
+    };
+    // Its own answer, not a guess from it. A model that says it holds 8,192 is
+    // sent 8,192 and no more, and one that says 200,000 stops being treated as
+    // though it held a sixth of that.
+    settings["context_window"] = serde_json::json!(holds);
+    if settings.get("max_tokens").is_none() {
+        settings["max_tokens"] = serde_json::json!(room_for_an_answer(holds as usize));
+    }
+    settings.to_string()
+}
+
+/// How long a reply a model this size should be allowed to write.
+///
+/// The sharper half of the same fault. Every model was capped at 4,096 tokens
+/// out, so an errand asked to write anything long was cut off in the middle
+/// with nothing saying so, on a model that would happily have written four
+/// times as much. A quarter of what it holds, because the rest of the window is
+/// the conversation that got it there, and never past a sensible ceiling: a
+/// reply longer than this is a runaway rather than a long answer.
+fn room_for_an_answer(holds: usize) -> usize {
+    (holds / 4).clamp(4_096, 32_768)
+}
+
 /// Forget somewhere, its key, and everything it was offering.
 #[tauri::command]
 async fn forget_backend(held: State<'_, Held>, id: String) -> Result<(), String> {
@@ -1215,6 +1274,19 @@ async fn forget_backend(held: State<'_, Held>, id: String) -> Result<(), String>
 }
 
 /// Put a model in the picker.
+///
+/// This is where a model's real size is worked out and written down. Errand
+/// already knew how to ask -- `query_model_caps` reads the context length out
+/// of Ollama's model info and out of GGUF metadata -- and nothing outside its
+/// own tests ever called it, so every model local or hosted was assumed to hold
+/// 32,768 tokens. Wrong in both directions and both hurt: a 200k model had its
+/// history dropped four times sooner than it needed to be, and an 8k model was
+/// sent 32k and refused the request outright, which reads as a broken model
+/// rather than a wrong setting.
+///
+/// Asked here rather than at every turn because it takes seconds and this is
+/// somebody pressing a button on the settings screen. A server that will not
+/// say is left at the usual number rather than guessed at.
 #[tauri::command]
 async fn offer_this(
     held: State<'_, Held>,
@@ -1223,6 +1295,10 @@ async fn offer_this(
     settings: Option<String>,
     backend: Option<String>,
 ) -> Result<(), String> {
+    let settings = match settings {
+        Some(said) => Some(with_its_real_size(said).await),
+        None => None,
+    };
     let next = held
         .store
         .offered()
@@ -1993,6 +2069,25 @@ fn read_what_it_settled_on(said: &str) -> Option<Settled> {
             .unwrap_or(&"amber")
             .to_string(),
     })
+}
+
+/// Put one sentence on screen, before there is a window to put it in.
+///
+/// Through the system rather than through a dialog plugin, which would be a
+/// dependency for one message. The same route the connectors take, and the
+/// only one available at the moment this is needed: this runs before the app
+/// has finished being built, which is exactly when something can go wrong that
+/// leaves it with no window at all.
+fn say_it_out_loud(title: &str, said: &str) {
+    let quoted = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(format!(
+            "display alert \"{}\" message \"{}\" as critical",
+            quoted(title),
+            quoted(said)
+        ))
+        .status();
 }
 
 /// Sockets left behind by an app that did not get to tidy up.
@@ -3186,6 +3281,14 @@ struct Working {
     /// Set when this is a command left running rather than a turn, in which
     /// case it can be stopped on its own without stopping the conversation.
     command: Option<String>,
+    /// The last few lines a running command has printed.
+    ///
+    /// Until this, only the model could see what a long command was doing --
+    /// it reaches the kept output through check_command and nothing else did --
+    /// which is the wrong way round for the one person who can decide to stop
+    /// it. Read without taking, so watching a build does not steal the output
+    /// the model is about to be given.
+    tail: Option<String>,
 }
 
 /// Everything that is working right now, across every agent.
@@ -3209,6 +3312,8 @@ async fn whats_running(held: State<'_, Held>) -> Result<Vec<Working>, String> {
             .map_or_else(|| "an agent".to_string(), |a| a.name);
         going.push(Working {
             waiting: what.starts_with("Waiting on you"),
+            // A turn is not a command, so it has nothing printing.
+            tail: None,
             conversation,
             agent: talk.agent,
             who,
@@ -3241,6 +3346,7 @@ async fn whats_running(held: State<'_, Held>) -> Result<Vec<Working>, String> {
             what: job.what.clone(),
             waiting: false,
             command: Some(job.handle.clone()),
+            tail: (!job.tail.trim().is_empty()).then(|| job.tail.clone()),
         });
     }
     // Anything stopped for somebody first: it is the only kind that will not
@@ -3773,6 +3879,25 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let here = where_things_live(&app.handle().clone())?;
+            // Before the store is opened and before anything is swept up. Two
+            // copies of this app share one SQLite store and both run the
+            // routines in it, and the sweep below deletes MCP sockets that a
+            // copy already running is using this second. Errand is installed by
+            // hand over the top of the last one, which makes a second copy far
+            // likelier here than in an app that updates itself.
+            match errand_core::only_one::take(&here) {
+                Ok(lock) => {
+                    app.manage(lock);
+                }
+                Err(why) => {
+                    // Said where somebody will see it. A second copy that exits
+                    // in silence looks exactly like one that crashed, and the
+                    // next thing anybody tries is opening it again.
+                    say_it_out_loud("Errand is already open", &why);
+                    eprintln!("{why}");
+                    std::process::exit(0);
+                }
+            }
             let store = Store::open(&errand_core::store::beside(&here))?;
             let (wants, asked) = tokio::sync::mpsc::unbounded_channel();
             let (goals, ended) = tokio::sync::mpsc::unbounded_channel();

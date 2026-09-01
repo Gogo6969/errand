@@ -45,6 +45,26 @@ would notice, not something a commit did.
   rather than opening whichever conversation that agent spoke in most recently.
 - Cmd-F finds words in the conversation on screen, counts them, and steps
   through with Enter and Shift-Enter.
+- A long command that overruns no longer throws away everything it did. A
+  build, an install or a download that passes two minutes keeps running, and
+  the agent is handed a way to watch it and stop it instead of being told to
+  start over.
+- What a long command is printing is now on screen in What Is Running, for the
+  person who can decide to stop it. Only the agent could see it before.
+- An agent can answer a running command that is waiting for a y/N. Nothing
+  could type at one, which made the commonest prompt there is a dead end.
+- Agents on a local model can now search inside files, find files by name, and
+  change one piece of a file instead of rewriting the whole thing. They had
+  none of these and had to shell out to grep, which stops to ask.
+- Errand asks each model how much it can actually hold, instead of assuming
+  32k for everything. A 200k model was losing its history four times sooner
+  than it needed to, and an 8k model was refusing every request. The picker
+  now says what each one holds.
+- A write the wall stopped says it was the wall, instead of "operation not
+  permitted", which sends people to change permissions on a folder that was
+  never the problem.
+- Opening a second copy of Errand says so rather than quietly sharing one set
+  of conversations and running your routines twice.
 - Fixed: searching your mail never worked. It reported that you had no
   mailboxes.
 

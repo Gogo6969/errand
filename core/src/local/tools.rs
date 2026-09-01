@@ -108,6 +108,56 @@ pub fn all() -> Vec<Tool> {
             &["handle"],
             true,
         ),
+        tool(
+            "search_files",
+            "Search the text of files for words, like grep. Returns matching lines with their \
+             file and line number. Use this before reading whole files: it is how you find \
+             where something is. Plain text, not a regular expression.",
+            json!({
+                "pattern": { "type": "string", "description": "The words to look for. Plain text." },
+                "path": { "type": "string", "description": "Where to look. The working folder if you do not say" },
+                "named": { "type": "string", "description": "Only files whose name matches this, like *.rs" }
+            }),
+            &["pattern"],
+            false,
+        ),
+        tool(
+            "find_files",
+            "List files whose names match a pattern, like *.md or src/**/*.rs. Use this to find \
+             out what is there before reading anything.",
+            json!({
+                "pattern": { "type": "string", "description": "A glob, like *.txt or **/*.rs" },
+                "path": { "type": "string", "description": "Where to look. The working folder if you do not say" }
+            }),
+            &["pattern"],
+            false,
+        ),
+        tool(
+            "change_file",
+            "Replace one exact piece of text in a file with another, leaving the rest alone. \
+             Prefer this over write_file for anything that already exists: write_file replaces \
+             the whole file, which is how a small model loses the parts it was not thinking \
+             about.",
+            json!({
+                "path": { "type": "string", "description": "The file to change" },
+                "from": { "type": "string", "description": "The exact text to replace. Must appear once." },
+                "to": { "type": "string", "description": "What to put there instead" }
+            }),
+            &["path", "from", "to"],
+            true,
+        ),
+        tool(
+            "say_to_command",
+            "Type a line at a running command that is waiting for input. Use this when \
+             check_command shows it asking something, such as a y/N confirmation. A newline is \
+             added for you.",
+            json!({
+                "handle": { "type": "string", "description": "The handle of the running command" },
+                "line": { "type": "string", "description": "What to type, without the newline" }
+            }),
+            &["handle", "line"],
+            true,
+        ),
     ]
 }
 
@@ -165,6 +215,13 @@ pub fn in_plain_words(name: &str, args: &serde_json::Value) -> String {
             said => format!("{said}, which keeps running"),
         },
         "check_command" => format!("Checking on {}", get("handle")),
+        "search_files" => match get("path") {
+            "" => format!("Searching for {}", one_line(get("pattern"))),
+            where_ => format!("Searching {where_} for {}", one_line(get("pattern"))),
+        },
+        "find_files" => format!("Looking for files matching {}", get("pattern")),
+        "change_file" => format!("Changing {}", get("path")),
+        "say_to_command" => format!("Answering {} with {}", get("handle"), one_line(get("line"))),
         "stop_command" => format!("Stopping {}", get("handle")),
         "find_tools" => format!("Looking for a tool to {}", get("needing")),
         "read_file" => format!("Reading {}", get("path")),
@@ -190,7 +247,7 @@ pub fn the_thing_itself(name: &str, args: &serde_json::Value) -> String {
         "find_tools" => get("needing"),
         "run_command" | "start_command" => get("command"),
         "check_command" | "stop_command" => get("handle"),
-        "write_file" => get("path"),
+        "write_file" | "change_file" => get("path"),
         "fetch_url" => get("url"),
         "read_file" => get("path"),
         _ => args.to_string(),
@@ -272,6 +329,172 @@ use crate::wall::shell as walled_in;
 /// an errand has business writing. That is now enforced twice: paths are
 /// checked before they are used, and a shell command runs inside a sandbox that
 /// refuses writes anywhere else.
+/// Why a write failed, in words that point at the real reason.
+///
+/// `wall.rs` has known how to say this since it was written and nothing has
+/// ever called it. The system says "operation not permitted", and everything
+/// above that invents its own explanation: npm decides the directory has the
+/// wrong owner and tells somebody to fix it with `sudo`, which sends them to
+/// change the permissions on a folder that was never the problem, by a wall
+/// that would not let them write there anyway.
+fn why_that_failed(why: std::io::Error, where_to: &Path, home: &Path) -> anyhow::Error {
+    match why.kind() {
+        std::io::ErrorKind::PermissionDenied => {
+            anyhow::anyhow!(crate::wall::why_it_could_not_write(where_to, home))
+        }
+        // Everything else is an ordinary failure and says so better than this
+        // would: no such file, no space left, read-only disk.
+        _ => anyhow::Error::new(why).context(format!("writing {}", where_to.display())),
+    }
+}
+
+/// How many matches are worth handing to a model at once.
+///
+/// A search that returns nine hundred lines has spent the conversation on a
+/// search. What is cut is said, because output that vanishes silently is worse
+/// than output that is missing loudly.
+const MOST_WORTH_LISTING: usize = 200;
+
+/// Folders never worth walking into.
+///
+/// Not a preference: a single `node_modules` is more files than everything a
+/// person wrote, and a search that spends its two hundred matches inside one
+/// has answered a question nobody asked.
+const NOT_WORTH_LOOKING_IN: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".next",
+    "dist",
+    "build",
+    ".DS_Store",
+];
+
+/// Every file under here, one at a time.
+fn walk(at: &Path, each: &mut impl FnMut(&Path)) {
+    let Ok(here) = std::fs::read_dir(at) else {
+        return;
+    };
+    let mut entries: Vec<_> = here.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for one in entries {
+        let name = one.file_name().to_string_lossy().to_string();
+        if NOT_WORTH_LOOKING_IN.contains(&name.as_str()) {
+            continue;
+        }
+        let path = one.path();
+        match one.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            // Symlinks are not followed: a link pointing at the root of the
+            // disk turns a search of one folder into a search of everything,
+            // and one pointing back up its own tree never ends.
+            true if !path.is_symlink() => walk(&path, each),
+            true => {}
+            false => each(&path),
+        }
+    }
+}
+
+/// A path as it should be said back, relative to where the agent works.
+fn said_from(home: &Path, file: &Path) -> String {
+    file.strip_prefix(home)
+        .unwrap_or(file)
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Whether a name matches a glob.
+///
+/// `*` for anything within one name, `**` for anything across folders, `?` for
+/// one character. Written here rather than taken as a dependency, because it is
+/// thirty lines and this crate takes dependencies sparingly.
+fn matches(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    fn go(p: &[char], n: &[char]) -> bool {
+        match p.first() {
+            None => n.is_empty(),
+            Some('*') => {
+                // `**` crosses folder boundaries; a single `*` does not, which
+                // is what makes `*.rs` mean this folder and `**/*.rs` mean all
+                // of them.
+                let across = p.get(1) == Some(&'*');
+                let rest = &p[if across { 2 } else { 1 }..];
+                // Skip a separator straight after `**`, so `**/x` matches `x`.
+                let rest = match across && rest.first() == Some(&'/') {
+                    true => &rest[1..],
+                    false => rest,
+                };
+                if go(rest, n) {
+                    return true;
+                }
+                for at in 0..n.len() {
+                    if !across && n[at] == '/' {
+                        return false;
+                    }
+                    if go(rest, &n[at + 1..]) {
+                        return true;
+                    }
+                }
+                false
+            }
+            Some('?') if !n.is_empty() && n[0] != '/' => go(&p[1..], &n[1..]),
+            Some(c) if !n.is_empty() && *c == n[0] => go(&p[1..], &n[1..]),
+            _ => false,
+        }
+    }
+    go(&p, &n)
+}
+
+/// Look through the text of files for some words.
+fn searching(at: &Path, home: &Path, looking_for: &str, named: &str) -> String {
+    if looking_for.is_empty() {
+        return "Say what to look for.".to_string();
+    }
+    let mut found: Vec<String> = Vec::new();
+    let mut more = 0usize;
+    walk(at, &mut |file| {
+        if !named.is_empty()
+            && !matches(
+                named,
+                &file.file_name().unwrap_or_default().to_string_lossy(),
+            )
+        {
+            return;
+        }
+        // Read as text or not at all. A binary read as UTF-8 is either lost or
+        // a screen of replacement characters, and neither is an answer.
+        let Ok(text) = std::fs::read_to_string(file) else {
+            return;
+        };
+        let shown = said_from(home, file);
+        for (at, line) in text.lines().enumerate() {
+            if !line.contains(looking_for) {
+                continue;
+            }
+            if found.len() >= MOST_WORTH_LISTING {
+                more += 1;
+                continue;
+            }
+            found.push(format!("{shown}:{}: {}", at + 1, line.trim()));
+        }
+    });
+    if found.is_empty() {
+        return format!("Nothing contains {looking_for}.");
+    }
+    match more {
+        0 => found.join("\n"),
+        // Said rather than swallowed: a list that stops without saying so reads
+        // as the whole answer.
+        _ => format!(
+            "{}\n\n({more} more matches, not listed. Search for something narrower.)",
+            found.join("\n")
+        ),
+    }
+}
+
 /// How long an ordinary command may take before it is stopped.
 ///
 /// There was no limit, and a command that never ended meant an errand that
@@ -345,38 +568,121 @@ pub async fn run(
             if let Some(parent) = at.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
-            std::fs::write(&at, get("contents"))
-                .with_context(|| format!("writing {}", at.display()))?;
+            std::fs::write(&at, get("contents")).map_err(|why| why_that_failed(why, &at, home))?;
             Ok(format!("Written: {}", at.display()))
         }
 
+        "search_files" => {
+            let at = match get("path").as_str() {
+                "" => home.to_path_buf(),
+                p => inside(home, p)?,
+            };
+            Ok(searching(&at, home, &get("pattern"), &get("named")))
+        }
+
+        "find_files" => {
+            let at = match get("path").as_str() {
+                "" => home.to_path_buf(),
+                p => inside(home, p)?,
+            };
+            let pattern = get("pattern");
+            let mut found: Vec<String> = Vec::new();
+            walk(&at, &mut |file| {
+                if found.len() >= MOST_WORTH_LISTING {
+                    return;
+                }
+                let shown = said_from(home, file);
+                if matches(&pattern, &shown)
+                    || matches(
+                        &pattern,
+                        &file.file_name().unwrap_or_default().to_string_lossy(),
+                    )
+                {
+                    found.push(shown);
+                }
+            });
+            found.sort();
+            Ok(match found.is_empty() {
+                true => format!("Nothing matches {pattern}."),
+                false => found.join("\n"),
+            })
+        }
+
+        "change_file" => {
+            let at = inside(home, &get("path"))?;
+            let was = std::fs::read_to_string(&at)
+                .with_context(|| format!("reading {}", at.display()))?;
+            let from = get("from");
+            anyhow::ensure!(!from.is_empty(), "say what text to replace");
+            // Once, or not at all. Replacing the first of several is how an
+            // edit lands in the wrong place and reads afterwards as the model
+            // having misunderstood; saying how many there are lets it add
+            // enough surrounding text to be unambiguous.
+            let how_many = was.matches(&from).count();
+            anyhow::ensure!(
+                how_many != 0,
+                "that text is not in {}. Read it first: what is there has to match exactly, \
+                 including spaces and line breaks.",
+                at.display()
+            );
+            anyhow::ensure!(
+                how_many == 1,
+                "that text appears {how_many} times in {}. Include more of the lines around \
+                 it so there is only one place it can mean.",
+                at.display()
+            );
+            std::fs::write(&at, was.replacen(&from, &get("to"), 1))
+                .map_err(|why| why_that_failed(why, &at, home))?;
+            Ok(format!("Changed: {}", at.display()))
+        }
+
+        "say_to_command" => {
+            crate::jobs::say_to(&get("handle"), &get("line")).await?;
+            Ok(format!(
+                "Typed. Use check_command with {} to see what it did next.",
+                get("handle")
+            ))
+        }
+
         "run_command" => {
-            let running = walled_in(home, &get("command")).output();
-            let Ok(out) = tokio::time::timeout(LONG_ENOUGH_TO_WAIT, running).await else {
-                // Said as a result rather than an error, and said as a next step
-                // rather than a refusal, because there is one and the model
-                // should take it.
+            // Started rather than run, and waited on. The two are the same
+            // thing from outside for anything that finishes in time, and for
+            // anything that does not they are the whole difference: this used
+            // to wait two minutes on `.output()`, drop the process, and tell
+            // the model to start over with a different tool -- where it hit the
+            // same wall at the same place, having thrown away everything the
+            // first attempt did. A build, an install and a long download are
+            // all longer than two minutes, which made the commonest slow thing
+            // the commonest bad failure.
+            let command = get("command");
+            let started = crate::jobs::start(
+                walled_in(home, &command),
+                &command,
+                &in_plain_words(name, args),
+                whose,
+                chrono::Local::now().timestamp_millis(),
+            )?;
+            let Some(ended) = crate::jobs::wait_up_to(&started.handle, LONG_ENOUGH_TO_WAIT).await
+            else {
                 return Ok(format!(
-                    "Stopped after {} seconds, because nothing was waiting on it any more. \
-                     If this is meant to take a long time, start it again with start_command \
-                     instead: that returns a handle straight away and keeps running.",
-                    LONG_ENOUGH_TO_WAIT.as_secs()
+                    "Still going after {} seconds, so it was left running rather than thrown \
+                     away. Its handle is {}. Everything it has done so far is still being done. \
+                     Use check_command with that handle to see what it has printed since, and \
+                     stop_command to stop it.",
+                    LONG_ENOUGH_TO_WAIT.as_secs(),
+                    started.handle
                 ));
             };
-            let out = out.context("running the command")?;
-            let said = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
+            crate::jobs::forget(&started.handle);
+            let said = ended.said;
             // A command that failed has to say so in the result rather than as
             // an error, or the model treats the step as impossible instead of
             // as a thing that went wrong and can be tried differently.
-            Ok(match out.status.success() {
+            Ok(match ended.code == 0 {
                 true => cut_to_something_readable(&said),
                 false => format!(
                     "exited {}\n{}",
-                    out.status.code().unwrap_or(-1),
+                    ended.code,
                     cut_to_something_readable(&said)
                 ),
             })
@@ -601,8 +907,65 @@ mod tests {
         );
         assert!(said.is_err(), "two minutes is no longer the ceiling");
 
-        let message = format!("Stopped after {} seconds", LONG_ENOUGH_TO_WAIT.as_secs());
-        assert_eq!(message, "Stopped after 120 seconds");
+        assert_eq!(LONG_ENOUGH_TO_WAIT.as_secs(), 120);
+        // And what it started is still running, because that is the point now.
+        // Left going, it is a `sleep 600` outliving the whole test run.
+        crate::jobs::stop_everything();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_command_that_overruns_keeps_running_rather_than_being_thrown_away() {
+        // The commonest way a real errand failed badly rather than cleanly. A
+        // build, an install or a long download reached the ceiling, everything
+        // it had done was dropped on the floor, and the model was told to start
+        // again with a different tool -- where it hit the same wall at the same
+        // place. What it does now is hand back a handle to the thing that is
+        // still running.
+        let handle = {
+            let mut sh = tokio::process::Command::new("/bin/sh");
+            sh.arg("-c").arg("echo begun; sleep 30");
+            crate::jobs::start(sh, "echo begun; sleep 30", "a slow thing", "c1", 0)
+                .expect("it started")
+                .handle
+        };
+        let over = crate::jobs::wait_up_to(&handle, std::time::Duration::from_millis(400)).await;
+        assert!(over.is_none(), "it claimed to have finished");
+
+        // Still there, still running, and what it has already printed is still
+        // there to be read. That is the whole difference.
+        let so_far = crate::jobs::look(&handle).expect("the job is still known");
+        assert!(so_far.over.is_none(), "it was reported as over");
+        assert!(
+            so_far.said.contains("begun"),
+            "what it did was lost: {so_far:?}"
+        );
+        crate::jobs::stop(&handle);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_command_that_finishes_in_time_is_not_left_in_the_running_list() {
+        // It was never a background job as far as anybody was concerned, and a
+        // finished thing in a panel headed "what is happening now" is worse
+        // than not showing it at all.
+        let home = std::env::temp_dir();
+        // Its own conversation. The table of running commands is one table for
+        // the whole process, so a test that shares a name with another test is
+        // reading somebody else's job.
+        let said = run(
+            "run_command",
+            &json!({ "command": "echo quick" }),
+            &home,
+            "quick-one",
+        )
+        .await
+        .expect("it ran");
+        assert!(said.contains("quick"), "{said}");
+        assert!(
+            crate::jobs::running()
+                .iter()
+                .all(|r| r.conversation != "quick-one"),
+            "a finished command was left in the running list"
+        );
     }
 
     #[tokio::test]
@@ -619,5 +982,200 @@ mod tests {
         .await
         .expect("a failed command is still an answer");
         assert!(said.starts_with("exited 3"), "got {said:?}");
+    }
+
+    #[test]
+    fn a_glob_tells_one_folder_from_all_of_them() {
+        // The difference that makes `*.rs` mean this folder and `**/*.rs` mean
+        // every folder. Getting it wrong in the generous direction turns a look
+        // at one directory into a walk of the whole tree.
+        assert!(matches("*.rs", "main.rs"));
+        assert!(!matches("*.rs", "src/main.rs"));
+        assert!(matches("**/*.rs", "src/local/tools.rs"));
+        // `**/` matches nothing at all as well as several folders.
+        assert!(matches("**/*.rs", "main.rs"));
+        assert!(matches("src/**/*.rs", "src/local/tools.rs"));
+        assert!(!matches("src/**/*.rs", "core/local/tools.rs"));
+        assert!(matches("?.txt", "a.txt"));
+        assert!(!matches("?.txt", "ab.txt"));
+        assert!(!matches("*.rs", "notes.md"));
+    }
+
+    #[tokio::test]
+    async fn searching_says_where_it_found_something_rather_than_only_that_it_did() {
+        // A local model without this shells out to grep, which is the one tool
+        // that stops to ask -- so the model looks worse than it is and the
+        // person is interrupted for a search.
+        let home = std::env::temp_dir().join("errand-search-test");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("src")).expect("somewhere to look");
+        std::fs::write(
+            home.join("src/one.txt"),
+            "nothing here\nthe needle is here\n",
+        )
+        .unwrap();
+        std::fs::write(home.join("src/two.txt"), "nor here\n").unwrap();
+
+        let said = run("search_files", &json!({ "pattern": "needle" }), &home, "c")
+            .await
+            .expect("it searched");
+        // File, line number and the line, because "it is somewhere in there" is
+        // not an answer anybody can act on.
+        assert!(said.contains("src/one.txt:2:"), "{said}");
+        assert!(said.contains("the needle is here"), "{said}");
+        assert!(!said.contains("nor here"), "{said}");
+
+        // And narrowing by name works, which is what stops a search of a whole
+        // project coming back with a thousand lines.
+        let narrowed = run(
+            "search_files",
+            &json!({ "pattern": "here", "named": "two.*" }),
+            &home,
+            "c",
+        )
+        .await
+        .expect("it searched");
+        assert!(narrowed.contains("two.txt"), "{narrowed}");
+        assert!(!narrowed.contains("one.txt"), "{narrowed}");
+
+        let nothing = run(
+            "search_files",
+            &json!({ "pattern": "haystack" }),
+            &home,
+            "c",
+        )
+        .await
+        .expect("it searched");
+        assert!(nothing.contains("Nothing contains"), "{nothing}");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[tokio::test]
+    async fn a_change_that_could_mean_two_places_is_refused_rather_than_guessed_at() {
+        // Replacing the first of several is how an edit lands somewhere nobody
+        // meant, and afterwards reads as the model having misunderstood.
+        let home = std::env::temp_dir().join("errand-change-test");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("somewhere to work");
+        std::fs::write(home.join("notes.txt"), "keep\nchange me\nkeep\nchange me\n").unwrap();
+
+        let why = run(
+            "change_file",
+            &json!({ "path": "notes.txt", "from": "change me", "to": "changed" }),
+            &home,
+            "c",
+        )
+        .await
+        .map(|_| ())
+        .expect_err("it changed one of two");
+        assert!(why.to_string().contains("2 times"), "{why}");
+        // Nothing was written, which is the half that matters.
+        let still = std::fs::read_to_string(home.join("notes.txt")).unwrap();
+        assert_eq!(still.matches("change me").count(), 2, "{still}");
+
+        // With enough around it to be unambiguous, it lands.
+        run(
+            "change_file",
+            &json!({ "path": "notes.txt", "from": "keep\nchange me\nkeep", "to": "keep\nchanged\nkeep" }),
+            &home,
+            "c",
+        )
+        .await
+        .expect("it changed the one place");
+        let now = std::fs::read_to_string(home.join("notes.txt")).unwrap();
+        assert!(now.contains("changed\nkeep\nchange me"), "{now}");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[tokio::test]
+    async fn changing_text_that_is_not_there_says_to_go_and_read_it() {
+        let home = std::env::temp_dir().join("errand-change-missing");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("somewhere to work");
+        std::fs::write(home.join("a.txt"), "one\n").unwrap();
+        let why = run(
+            "change_file",
+            &json!({ "path": "a.txt", "from": "two", "to": "three" }),
+            &home,
+            "c",
+        )
+        .await
+        .map(|_| ())
+        .expect_err("it claimed to have changed nothing into something");
+        assert!(why.to_string().contains("Read it first"), "{why}");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[tokio::test]
+    async fn a_search_never_climbs_out_of_the_working_directory() {
+        // The same wall everything else here is behind. A search is a read, and
+        // a read of somebody's whole disk is the thing the wall is for.
+        let home = std::env::temp_dir().join("errand-search-wall");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("somewhere to work");
+        for out in ["../..", "/etc"] {
+            assert!(
+                run(
+                    "search_files",
+                    &json!({ "pattern": "x", "path": out }),
+                    &home,
+                    "c"
+                )
+                .await
+                .is_err(),
+                "a search reached {out}"
+            );
+            assert!(
+                run(
+                    "find_files",
+                    &json!({ "pattern": "*", "path": out }),
+                    &home,
+                    "c"
+                )
+                .await
+                .is_err(),
+                "a listing reached {out}"
+            );
+        }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[tokio::test]
+    async fn a_write_the_wall_stopped_says_it_was_the_wall() {
+        // The system says "operation not permitted" and everything above it
+        // invents a reason: npm decides the folder has the wrong owner and
+        // sends somebody to fix it with sudo, which changes the permissions on
+        // a folder that was never the problem. wall.rs has known how to say
+        // this since it was written and nothing called it.
+        let home = std::env::temp_dir().join("errand-wall-words");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("shut")).expect("somewhere to work");
+        std::fs::write(home.join("shut/a.txt"), "one\n").unwrap();
+
+        // Taking the permission away is the only way to make the real write
+        // fail the way the wall makes it fail.
+        let mut how = std::fs::metadata(home.join("shut")).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut how, 0o500);
+        std::fs::set_permissions(home.join("shut"), how).unwrap();
+
+        let why = run(
+            "write_file",
+            &json!({ "path": "shut/new.txt", "contents": "x" }),
+            &home,
+            "c",
+        )
+        .await
+        .map(|_| ())
+        .expect_err("it wrote where it could not");
+        let said = why.to_string();
+        assert!(said.contains("walled in"), "{said}");
+        assert!(said.contains("asking first"), "{said}");
+        // And not the system's own words, which are what sends people wrong.
+        assert!(!said.contains("Permission denied"), "{said}");
+
+        let mut back = std::fs::metadata(home.join("shut")).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut back, 0o700);
+        std::fs::set_permissions(home.join("shut"), back).ok();
+        std::fs::remove_dir_all(&home).ok();
     }
 }

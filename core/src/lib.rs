@@ -28,6 +28,7 @@ pub mod goal;
 pub mod jobs;
 pub mod keeping;
 pub mod keys;
+pub mod only_one;
 pub mod store;
 pub mod wall;
 

@@ -3151,3 +3151,52 @@ export async function findingWhereTheWordsAre() {
   );
   return found;
 }
+
+/**
+ * What a long command is actually printing.
+ *
+ * Until now only the model could see this: it reaches the kept output through
+ * check_command and nothing else did, which is the wrong way round for the one
+ * person who can decide to stop it. A build that has been going for ten minutes
+ * and a build that is stuck look identical from outside.
+ */
+export async function whatALongCommandIsPrinting() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  const panel = document.getElementById("working");
+  // Closed first. The palette entry toggles, so a group before this one that
+  // left it open would have this check close it and report the panel missing.
+  panel.hidden = true;
+  // Then opened the way somebody would: through the palette, which is where
+  // everything the header cannot hold now lives.
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  const typing = document.getElementById("palette-what");
+  typing.value = "what is running";
+  typing.dispatchEvent(new Event("input"));
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await new Promise((r) => setTimeout(r, 450));
+  check("the panel opens", !panel.hidden, String(panel.hidden));
+
+  const rows = [...panel.querySelectorAll(".one")];
+  const command = rows.find((r) => r.dataset.command);
+  check("the command left running is in it", command, rows.length + " rows");
+  const printing = command?.querySelector(".tail");
+  check("and it shows what that command is printing", printing, String(!!printing));
+  check(
+    "which is the end of the output rather than a summary of it",
+    /Compiling errand-app/.test(printing?.textContent || ""),
+    printing?.textContent,
+  );
+
+  // A turn is not a command and has nothing printing, so it shows nothing.
+  const turn = rows.find((r) => !r.dataset.command);
+  check(
+    "a turn that is not a command shows no output",
+    turn && !turn.querySelector(".tail"),
+    String(!!turn?.querySelector(".tail")),
+  );
+
+  panel.hidden = true;
+  return found;
+}

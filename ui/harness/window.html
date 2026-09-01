@@ -205,7 +205,7 @@
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
 
-  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut, aCall, stepsDoNotOverlap, openingAtLogin, sayingWhatThisIs, repeatingWhatWasAsked, whatElseIsAllowed, whatChangedInThisOne, theMenuOnAnAgent, settingAWatchExplainsItself, handingItOver, whatAgentsCanReach, whenThingsHappened, somethingYouHaveNotRead, whatYouTypedStaysPut, namingAndDeletingAConversation, aNotificationThatLeadsSomewhere, pausingARoutineAndSeeingHowItWent, findingWhereTheWordsAre, firstRun } =
+  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut, aCall, stepsDoNotOverlap, openingAtLogin, sayingWhatThisIs, repeatingWhatWasAsked, whatElseIsAllowed, whatChangedInThisOne, theMenuOnAnAgent, settingAWatchExplainsItself, handingItOver, whatAgentsCanReach, whenThingsHappened, somethingYouHaveNotRead, whatYouTypedStaysPut, namingAndDeletingAConversation, aNotificationThatLeadsSomewhere, pausingARoutineAndSeeingHowItWent, findingWhereTheWordsAre, whatALongCommandIsPrinting, firstRun } =
     await import(`./checks.js${fresh}`);
   // A first run is looked at on its own, because there is nothing else in it.
   if (brandNew) {
@@ -218,43 +218,65 @@
     throw new Error("first run only");
   }
 
-  const found = checks().concat(
-    carryingOn(),
-    palette(),
-    await setupCheck(),
-    await running(),
-    await stopping(),
-    await postures(),
-    await whatItCanReach(),
-    await dictation(),
-    await watching(),
-    await writingItOut(),
-    await aCall(),
-    await stepsDoNotOverlap(),
-    await openingAtLogin(),
-    await sayingWhatThisIs(),
-    await repeatingWhatWasAsked(),
-    await whatElseIsAllowed(),
-    await whatChangedInThisOne(),
-    await theMenuOnAnAgent(),
-    await settingAWatchExplainsItself(),
-    await handingItOver(),
-    await whatAgentsCanReach(),
-    await whenThingsHappened(),
-    await somethingYouHaveNotRead(),
-    await whatYouTypedStaysPut(),
-    await namingAndDeletingAConversation(),
-    await aNotificationThatLeadsSomewhere(),
-    await pausingARoutineAndSeeingHowItWent(),
-    await findingWhereTheWordsAre(),
-    await aiming(),
-    await whichModels(),
-    await questionsStillOpen(),
-    await everythingLinesUp(),
-    await alreadyRunning(),
-    await whatItCost(),
-    themes(),
-  );
+  // Run one at a time, saying which one is being run.
+  //
+  // Chained `.concat(await a(), await b(), ...)` reads well and hides the one
+  // thing that matters when it goes wrong: which of thirty groups it is in. A
+  // group that throws leaves the report saying "running..." for ever with no
+  // way to tell whether it is slow or stuck, and one that hangs looks exactly
+  // the same. Now the report says where it got to while it is getting there.
+  const groups = [
+    ["checks", checks],
+    ["carryingOn", carryingOn],
+    ["palette", palette],
+    ["setupCheck", setupCheck],
+    ["running", running],
+    ["stopping", stopping],
+    ["postures", postures],
+    ["whatItCanReach", whatItCanReach],
+    ["dictation", dictation],
+    ["watching", watching],
+    ["writingItOut", writingItOut],
+    ["aCall", aCall],
+    ["stepsDoNotOverlap", stepsDoNotOverlap],
+    ["openingAtLogin", openingAtLogin],
+    ["sayingWhatThisIs", sayingWhatThisIs],
+    ["repeatingWhatWasAsked", repeatingWhatWasAsked],
+    ["whatElseIsAllowed", whatElseIsAllowed],
+    ["whatChangedInThisOne", whatChangedInThisOne],
+    ["theMenuOnAnAgent", theMenuOnAnAgent],
+    ["settingAWatchExplainsItself", settingAWatchExplainsItself],
+    ["handingItOver", handingItOver],
+    ["whatAgentsCanReach", whatAgentsCanReach],
+    ["whenThingsHappened", whenThingsHappened],
+    ["somethingYouHaveNotRead", somethingYouHaveNotRead],
+    ["whatYouTypedStaysPut", whatYouTypedStaysPut],
+    ["namingAndDeletingAConversation", namingAndDeletingAConversation],
+    ["aNotificationThatLeadsSomewhere", aNotificationThatLeadsSomewhere],
+    ["pausingARoutineAndSeeingHowItWent", pausingARoutineAndSeeingHowItWent],
+    ["findingWhereTheWordsAre", findingWhereTheWordsAre],
+    ["whatALongCommandIsPrinting", whatALongCommandIsPrinting],
+    ["aiming", aiming],
+    ["whichModels", whichModels],
+    ["questionsStillOpen", questionsStillOpen],
+    ["everythingLinesUp", everythingLinesUp],
+    ["alreadyRunning", alreadyRunning],
+    ["whatItCost", whatItCost],
+    ["themes", themes],
+  ];
+  const found = [];
+  for (const [named, group] of groups) {
+    report.textContent = `running ${named}...`;
+    window.__AT__ = named;
+    try {
+      found.push(...((await group()) || []));
+    } catch (why) {
+      // Reported as a failed check rather than thrown away. A group that dies
+      // used to take the whole report with it, so one broken check hid the
+      // twenty-nine that were fine.
+      found.push({ what: `${named} ran to the end`, ok: false, saw: String(why) });
+    }
+  }
   const header = headerFitsOnOneRow();
   found.push({
     what: "everything in the header is on one row",

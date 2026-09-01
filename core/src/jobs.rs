@@ -44,6 +44,10 @@ struct Job {
     over: Arc<Mutex<Option<i32>>>,
     /// Held so it can be killed. Taken when it ends.
     child: Arc<Mutex<Option<tokio::process::Child>>>,
+    /// Held so something can be typed at it. A y/N is the commonest
+    /// interactive prompt there is, and with nothing able to answer it the
+    /// symptom is indistinguishable from an agent that stopped thinking.
+    typing: Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
 }
 
 /// What a command has printed, and what had to be let go.
@@ -70,6 +74,23 @@ impl Kept {
         self.text.drain(..cut);
         self.given = self.given.saturating_sub(cut);
         self.lost += cut;
+    }
+
+    /// The end of what it has printed, without taking any of it.
+    ///
+    /// Deliberately not `whats_new`. That advances how much has been handed
+    /// over, so a panel calling it would eat the output the model is about to
+    /// be given, and the model calling it would blank the panel.
+    fn last_few(&self) -> String {
+        const A_GLANCE: usize = 600;
+        if self.text.len() <= A_GLANCE {
+            return self.text.clone();
+        }
+        let over = self.text.len() - A_GLANCE;
+        let cut = (over..self.text.len())
+            .find(|i| self.text.is_char_boundary(*i))
+            .unwrap_or(self.text.len());
+        self.text[cut..].to_string()
     }
 
     fn whats_new(&mut self) -> (String, usize) {
@@ -107,6 +128,14 @@ pub struct Running {
     pub command: String,
     pub conversation: String,
     pub started: i64,
+    /// The last few lines it has printed.
+    ///
+    /// Read without taking, unlike `look`. Somebody watching a build should not
+    /// be able to steal the output the model is about to be given, and the
+    /// model asking should not blank the panel. Until this, only the model
+    /// could see what a long command was doing, which is the wrong way round
+    /// for the one person who can decide to stop it.
+    pub tail: String,
 }
 
 fn table() -> &'static Mutex<HashMap<String, Job>> {
@@ -137,9 +166,13 @@ pub fn start(
     let mut child = walled
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // Nothing is going to type at it, and a command that waits for input it
-        // will never get is a command that hangs until somebody kills it.
-        .stdin(Stdio::null())
+        // Kept open, so a y/N can be answered. It used to be closed on the
+        // grounds that nothing would type at it, which was true and made the
+        // commonest interactive prompt there is into an automatic dead end
+        // whose symptom is indistinguishable from an agent that stopped
+        // thinking. A command that waits for input nobody sends still hangs,
+        // but now there is something to send.
+        .stdin(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .context("starting the command")?;
@@ -158,6 +191,9 @@ pub fn start(
     }
 
     let handle = next_handle();
+    // Taken before the child is put away, because after that the only thing
+    // holding it is the thing that kills it.
+    let typing = Arc::new(tokio::sync::Mutex::new(child.stdin.take()));
     let waiting = Arc::new(Mutex::new(Some(child)));
     {
         let over = over.clone();
@@ -202,12 +238,55 @@ pub fn start(
             said,
             over,
             child: waiting,
+            typing,
         },
     );
     Ok(Started {
         handle,
         what: what.to_string(),
     })
+}
+
+/// Wait for a job, up to a point. Nothing if it is still going.
+///
+/// For a command started as an ordinary one that turned out to be a long one.
+/// Waiting on `.output()` and throwing the process away at a deadline is what
+/// this replaces: a build, an install or a long download reached two minutes,
+/// everything it had done was discarded, and the model was told to start again
+/// with a different tool -- where it hit the same wall at the same place.
+pub async fn wait_up_to(handle: &str, patience: std::time::Duration) -> Option<Ended> {
+    let until = std::time::Instant::now() + patience;
+    loop {
+        // Read without taking, so a command that ends is still here for
+        // whatever asks about it next.
+        let ended = {
+            let jobs = table().lock().unwrap();
+            // Gone from the table means somebody stopped it while this was
+            // waiting, which is an answer: there is nothing left to wait for.
+            let job = jobs.get(handle)?;
+            let over = *job.over.lock().unwrap();
+            over.map(|code| {
+                let (said, lost) = job.said.lock().unwrap().whats_new();
+                Ended { code, said, lost }
+            })
+        };
+        if let Some(ended) = ended {
+            return Some(ended);
+        }
+        if std::time::Instant::now() >= until {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    }
+}
+
+/// A command that finished while somebody was still waiting for it.
+#[derive(Debug, Clone)]
+pub struct Ended {
+    pub code: i32,
+    pub said: String,
+    /// Bytes of older output that had to be let go, if any.
+    pub lost: usize,
 }
 
 /// Read a pipe until it closes, keeping what comes out of it.
@@ -254,6 +333,7 @@ pub fn running() -> Vec<Running> {
             command: j.command.clone(),
             conversation: j.conversation.clone(),
             started: j.started,
+            tail: j.said.lock().unwrap().last_few(),
         })
         .collect();
     found.sort_by_key(|r| r.started);
@@ -261,6 +341,52 @@ pub fn running() -> Vec<Running> {
 }
 
 /// Stop one. True if there was something to stop.
+/// Type at a running command.
+///
+/// Every stdin used to be closed, on the grounds that nothing was going to type
+/// at one. That was true, and it made "Continue? [y/N]" -- the commonest
+/// interactive prompt there is -- into an automatic dead end: the command sits
+/// there for ever, and from outside it is indistinguishable from an agent that
+/// stopped thinking.
+///
+/// A newline is added unless one is already there. A prompt waiting on a line
+/// is not answered by a `y` with nothing after it, and that is a mistake that
+/// looks exactly like the tool not working.
+pub async fn say_to(handle: &str, said: &str) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let typing = {
+        let jobs = table().lock().unwrap();
+        let job = jobs
+            .get(handle)
+            .with_context(|| format!("there is nothing running under {handle}"))?;
+        job.typing.clone()
+    };
+    let mut held = typing.lock().await;
+    let writing = held
+        .as_mut()
+        .context("that command is not taking anything typed at it")?;
+    let line = match said.ends_with('\n') {
+        true => said.to_string(),
+        false => format!("{said}\n"),
+    };
+    writing
+        .write_all(line.as_bytes())
+        .await
+        .context("typing at the command")?;
+    writing.flush().await.context("typing at the command")?;
+    Ok(())
+}
+
+/// Take a finished job out of the table.
+///
+/// For one that was started as an ordinary command and finished in time: it
+/// was never a background job as far as anybody was concerned, and leaving it
+/// in the list of what is running would put a finished thing in a panel headed
+/// with what is happening now.
+pub fn forget(handle: &str) {
+    table().lock().unwrap().remove(handle);
+}
+
 pub fn stop(handle: &str) -> bool {
     let jobs = table().lock().unwrap();
     let Some(job) = jobs.get(handle) else {
@@ -413,5 +539,102 @@ mod tests {
     fn asking_about_a_command_that_was_never_started_says_nothing_rather_than_lying() {
         assert!(look("job-nonesuch").is_none());
         assert!(!stop("job-nonesuch"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_command_waiting_on_a_y_or_n_can_be_answered() {
+        // Every stdin used to be closed, on the grounds that nothing would type
+        // at one. That was true, and it made the commonest interactive prompt
+        // there is into an automatic dead end whose symptom is exactly the same
+        // as an agent that stopped thinking.
+        let started = start(
+            shell("read answer; echo \"you said $answer\""),
+            "read answer",
+            "asking something",
+            "c-typing",
+            0,
+        )
+        .expect("it started");
+
+        say_to(&started.handle, "yes").await.expect("it took it");
+        let over = wait_up_to(&started.handle, std::time::Duration::from_secs(5))
+            .await
+            .expect("it finished once it had an answer");
+        assert_eq!(over.code, 0, "{over:?}");
+        assert!(over.said.contains("you said yes"), "{over:?}");
+        forget(&started.handle);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_newline_is_added_because_a_prompt_is_waiting_on_a_line() {
+        // A prompt waiting on a line is not answered by a `y` with nothing
+        // after it, and that mistake looks exactly like the tool not working.
+        let started = start(
+            shell("read a; read b; echo \"[$a][$b]\""),
+            "read twice",
+            "asking twice",
+            "c-newline",
+            0,
+        )
+        .expect("it started");
+        say_to(&started.handle, "one").await.expect("typed");
+        // Already ending in one, which must not become two.
+        say_to(&started.handle, "two\n").await.expect("typed");
+        let over = wait_up_to(&started.handle, std::time::Duration::from_secs(5))
+            .await
+            .expect("it finished");
+        assert!(over.said.contains("[one][two]"), "{over:?}");
+        forget(&started.handle);
+    }
+
+    #[tokio::test]
+    async fn typing_at_something_that_is_not_running_says_so() {
+        let why = say_to("nothing-here", "yes")
+            .await
+            .map(|_| ())
+            .expect_err("it claimed to have typed at nothing");
+        assert!(why.to_string().contains("nothing running"), "{why}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn waiting_on_a_command_that_finishes_hands_back_what_it_printed() {
+        let started = start(
+            shell("echo done and dusted"),
+            "echo",
+            "a quick thing",
+            "c-fast",
+            0,
+        )
+        .expect("it started");
+        let over = wait_up_to(&started.handle, std::time::Duration::from_secs(5))
+            .await
+            .expect("it finished inside the time given");
+        assert_eq!(over.code, 0);
+        assert!(over.said.contains("done and dusted"), "{over:?}");
+        forget(&started.handle);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn waiting_on_one_that_does_not_finish_leaves_it_running() {
+        // The whole repair: what it has already done is still being done, and
+        // still readable, rather than dropped on the floor.
+        let started = start(
+            shell("echo begun; sleep 30"),
+            "sleep 30",
+            "a slow thing",
+            "c-slow",
+            0,
+        )
+        .expect("it started");
+        assert!(
+            wait_up_to(&started.handle, std::time::Duration::from_millis(400))
+                .await
+                .is_none(),
+            "it claimed to have finished"
+        );
+        let so_far = look(&started.handle).expect("still known");
+        assert!(so_far.over.is_none());
+        assert!(so_far.said.contains("begun"), "{so_far:?}");
+        stop(&started.handle);
     }
 }

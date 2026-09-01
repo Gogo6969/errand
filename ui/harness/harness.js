@@ -157,8 +157,13 @@ export const FIXTURE = {
       what: "Waiting on you: Running a command", waiting: true },
     { conversation: "talk-2", agent: "agent-bitcoin", who: "Bitcoin Desk", talk: "First",
       what: "Looking something up on the web", waiting: false },
+    // A command left running, with what it is printing. Until this, only the
+    // model could see that -- it reaches the kept output through check_command
+    // and nothing else did -- which is the wrong way round for the one person
+    // who can decide to stop it.
     { conversation: "talk-2", agent: "", who: "Bitcoin Desk", talk: "First",
-      what: "Building the thing", waiting: false, command: "job-1" },
+      what: "Building the thing", waiting: false, command: "job-1",
+      tail: "Compiling errand-core v0.3.0\nCompiling errand-app v0.3.0\n" },
   ],
   brought: {
     skills: ["pdf", "docx", "artifact-design"],

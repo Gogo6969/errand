@@ -1968,3 +1968,21 @@ body.in-a-call #what {
   min-width: 62px;
   font-variant-numeric: tabular-nums;
 }
+
+/* What a long command is printing, for the person who can stop it. Small and
+   scrollable: this is a glance at a build log, not a place to read one. */
+#working .tail {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  max-height: 88px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ink-soft);
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

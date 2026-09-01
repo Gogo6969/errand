@@ -3101,6 +3101,18 @@ async function whatsRunning() {
       what.textContent = one.what;
       row.append(who, where, what);
 
+      // What it is actually printing. Until now only the model could see this:
+      // it reaches the kept output through check_command and nothing else did,
+      // which is the wrong way round for the one person who can decide to stop
+      // it. Shown here rather than taken, so watching a build does not steal
+      // the lines the model is about to be given.
+      if (one.tail) {
+        const printing = document.createElement("pre");
+        printing.className = "tail";
+        printing.textContent = one.tail.trimEnd();
+        row.append(printing);
+      }
+
       // A command left running is the one kind of work here that can be stopped
       // on its own, so it is the one kind that offers to be.
       if (one.command) {
@@ -4054,7 +4066,16 @@ async function drawChosen() {
         const where = document.createElement("span");
         where.className = "where";
         try {
-          where.textContent = JSON.parse(one.settings).base_url || "";
+          const kept = JSON.parse(one.settings);
+          // How much it holds, said out loud. Errand asks every model this and
+          // writes down the answer, and being wrong about it is expensive in
+          // both directions: too small drops the conversation four times sooner
+          // than it needs to, too large has the request refused outright and
+          // reads as a broken model. Neither is visible anywhere else.
+          const holds = kept.context_window
+            ? ` · holds ${Math.round(kept.context_window / 1000)}k`
+            : " · size unknown, assuming 32k";
+          where.textContent = `${kept.base_url || ""}${holds}`;
         } catch {
           where.textContent = "";
         }
