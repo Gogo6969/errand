@@ -829,21 +829,35 @@ async fn say(
         .transpose()?
         .unwrap_or_default();
 
-    // Written down first. If the agent cannot be reached, what was said is
-    // still what was said, and it will be there when the thread is reopened.
-    // The pictures are not written down: the store holds a conversation, not
-    // an album, and a base64 image in a transcript line would be read back
-    // into the window on every reopen.
-    let said = match pictures.len() {
-        0 => text.clone(),
-        1 => format!("{text}\n\n(with a picture)"),
-        n => format!("{text}\n\n(with {n} pictures)"),
-    };
     // Before the line, because the line points at it. An agent made in the
     // window is not written down until there is something to write, and this is
     // that moment.
     write_it_down_if_new(&app, &held, &id)?;
-    let written = held.store.asked(&id, &said).map_err(|e| e.to_string())?;
+    let written = held.store.asked(&id, &text).map_err(|e| e.to_string())?;
+
+    // Kept, beside the store rather than in it. The bytes used to reach the
+    // engine and be thrown away, and the line said "(with a picture)" -- so a
+    // conversation that had been about a picture read afterwards as a
+    // conversation about nothing, and you could never see the one you sent.
+    //
+    // Beside rather than in, because a base64 image in a transcript line is
+    // read back into the window on every reopen and a store that holds a
+    // conversation should not also be an album. And beside the thread's own
+    // folder rather than inside it, because that folder is where the agent
+    // works: a picture kept there is one an errand can overwrite or tidy away.
+    if !pictures.is_empty() {
+        match keep_the_pictures(&app, &id, written.seq, &pictures) {
+            Ok(named) => held
+                .store
+                .pictures_with(&id, written.seq, &named)
+                .map_err(|e| e.to_string())?,
+            // Not fatal. What somebody said is still said, and the errand still
+            // runs with the picture in front of the model; what is lost is
+            // being able to look at it again afterwards, which is worth a line
+            // on stderr rather than a refused message.
+            Err(why) => eprintln!("that picture could not be kept: {why}"),
+        }
+    }
 
     // Started here, because saying something is the first moment there is
     // anything for an engine to do. Looking at a conversation used to start
@@ -863,6 +877,83 @@ async fn say(
         .ok_or_else(|| "that conversation is not open".to_string())?;
     thread.say(&text, &pictures).map_err(|e| e.to_string())?;
     Ok(Some(written.seq))
+}
+
+/// Where the pictures somebody sent are kept.
+///
+/// Beside the thread's own folder rather than inside it. That folder is the
+/// agent's working directory, and a picture kept there is one an errand can
+/// overwrite, tidy away, or list back to itself as though it were its own work.
+fn where_the_pictures_are(
+    app: &AppHandle,
+    conversation: &str,
+) -> Result<std::path::PathBuf, String> {
+    let at = where_things_live(app)?.join("pictures").join(conversation);
+    std::fs::create_dir_all(&at).map_err(|e| e.to_string())?;
+    Ok(at)
+}
+
+/// Write the pictures down, and say what they were called.
+///
+/// Named after the line they belong to, so that what is on disk can be read
+/// back to a particular thing somebody said without a second table saying so.
+fn keep_the_pictures(
+    app: &AppHandle,
+    conversation: &str,
+    seq: i64,
+    pictures: &[errand_core::Picture],
+) -> Result<Vec<String>, String> {
+    use base64::Engine as _;
+    let at = where_the_pictures_are(app, conversation)?;
+    let mut named = Vec::new();
+    for (n, one) in pictures.iter().enumerate() {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&one.base64)
+            .map_err(|why| why.to_string())?;
+        let name = format!("{seq}-{n}.{}", ending_for(&one.kind));
+        std::fs::write(at.join(&name), bytes).map_err(|e| e.to_string())?;
+        named.push(name);
+    }
+    Ok(named)
+}
+
+/// The file ending for a kind of picture.
+fn ending_for(kind: &str) -> &'static str {
+    match kind {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "png",
+    }
+}
+
+/// One picture back, as the window can draw it.
+///
+/// Read when the line is drawn rather than handed over with the transcript, so
+/// opening a conversation with forty screenshots in it does not put forty
+/// screenshots into memory before a word of it is on screen.
+///
+/// The name is checked rather than trusted. It comes back from the store, but a
+/// name is a path, and a path with `..` in it is a way to read anything on the
+/// disk through a command whose whole job is handing bytes to the window.
+#[tauri::command]
+async fn a_picture(app: AppHandle, conversation: String, name: String) -> Result<String, String> {
+    use base64::Engine as _;
+    if name.contains('/') || name.contains("..") || name.is_empty() {
+        return Err("that is not a picture in this conversation".to_string());
+    }
+    let at = where_the_pictures_are(&app, &conversation)?.join(&name);
+    let bytes = std::fs::read(&at).map_err(|_| "that picture is not here any more".to_string())?;
+    let kind = match at.extension().and_then(|e| e.to_str()) {
+        Some("jpg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    };
+    Ok(format!(
+        "data:{kind};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
 }
 
 /// The most an attached picture may be, before base64.
@@ -2557,11 +2648,19 @@ async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Str
     // Only an address, and only one that goes to a browser. A tool that opens
     // whatever it is handed is a tool that opens `file:///` and worse, at the
     // asking of a model reading somebody else's web page.
-    let a_web_address =
-        where_at.is_empty() || where_at.starts_with("https://") || where_at.starts_with("http://");
-    if !a_web_address {
-        anyhow::bail!("only a web address can be opened, and that one is not one");
-    }
+    //
+    // Not opening it is the refusal. Refusing the whole handover was, and it
+    // was wrong: the commonest handover there is has no page at all -- "go into
+    // System Settings and switch this on" -- and a model that writes where it
+    // has to be done rather than a URL had the entire request thrown back at
+    // it, so the person was never asked. What is dropped is the opening; what
+    // is said is still said.
+    let can_be_opened = where_at.starts_with("https://") || where_at.starts_with("http://");
+    let where_at = match can_be_opened {
+        true => where_at,
+        false => "",
+    };
+    let nothing_to_open = !can_be_opened && !said("where").is_empty();
 
     let handover = uuid::Uuid::new_v4().to_string();
     let (tell_me, answered) = tokio::sync::oneshot::channel();
@@ -2615,8 +2714,14 @@ async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Str
     }
     match back {
         Ok(Ok(word)) if word == "done" => Ok(format!(
-            "They say they have done it: {what}. Whatever they signed into is signed into \
-             now, so try again rather than asking them how it went."
+            "{}They say they have done it: {what}. Whatever they signed into is signed into \
+             now, so try again rather than asking them how it went.",
+            match nothing_to_open {
+                true =>
+                    "(`where` was not a web address, so nothing was opened; they were \
+                         asked anyway.) ",
+                false => "",
+            }
         )),
         Ok(Ok(_)) => Ok(format!(
             "They have skipped it: {what}. Do not ask again. Carry on with whatever can be \
@@ -4031,6 +4136,7 @@ pub fn run() {
             forget_conversation,
             looking_at,
             conversation_agent,
+            a_picture,
             hits,
             routine_off,
             how_it_has_been_going,

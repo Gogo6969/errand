@@ -780,7 +780,19 @@ main > aside, main > #title, main > #composer { flex: none; }
 #menu button:hover { background: var(--side); }
 /* The one that cannot be undone, coloured like the one thing on this screen
    that cannot be undone. */
-#menu button.danger { color: var(--wrong); }
+/* Readable rather than merely red. The question it asks is the one thing in
+   this menu somebody has to read all of, so it wraps instead of being cut off
+   with an ellipsis, and it is given a weight that carries on a dark card. */
+#menu button.danger {
+  color: var(--wrong);
+  font-weight: 500;
+}
+#menu button.danger[data-sure="true"] {
+  white-space: normal;
+  line-height: 1.35;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--wrong) 12%, transparent);
+}
 #menu button.danger:hover { background: color-mix(in srgb, var(--wrong) 14%, transparent); }
 /* Once it is asking rather than offering, it is a sentence and not a label. */
 #menu button.danger[data-sure="true"] {
@@ -1985,4 +1997,48 @@ body.in-a-call #what {
   border-radius: 6px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* Pictures somebody sent, in the line they sent them with. Small enough that a
+   message is still a message, big enough to recognise a screenshot by. */
+.pictures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.pictures img {
+  max-width: 180px;
+  max-height: 140px;
+  border-radius: 8px;
+  border: 1px solid var(--edge);
+  cursor: zoom-in;
+  display: block;
+  object-fit: cover;
+}
+.picture-gone {
+  color: var(--faint);
+  font-size: 12px;
+  font-style: italic;
+  align-self: center;
+}
+
+/* And one of them as big as the window will allow. A thumbnail is enough to
+   recognise a screenshot and not enough to read one. */
+.closer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: var(--behind);
+  cursor: zoom-out;
+}
+.closer img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 10px;
+  box-shadow: var(--cast);
 }

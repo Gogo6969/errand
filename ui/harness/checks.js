@@ -3200,3 +3200,130 @@ export async function whatALongCommandIsPrinting() {
   panel.hidden = true;
   return found;
 }
+
+/**
+ * The one line in a menu somebody has to read all of.
+ *
+ * Deleting asks first, in the button. The menu was placed once, before the
+ * label changed, so pressing Delete grew it downwards and pushed the sentence
+ * saying what was about to be destroyed off the bottom of the window. And the
+ * name it puts in that sentence is, for an agent that has not named itself,
+ * the whole of the first thing anybody said to it.
+ */
+export async function theQuestionBeforeDeletingIsReadable() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const menu = document.getElementById("menu");
+
+  // An agent whose name is a whole sentence, which is what an unnamed one is
+  // called: after the first thing anybody said to it.
+  const rows = [...document.querySelectorAll("#threads li")];
+  const row = rows[rows.length - 1] || rows[0];
+  // Opened low down, which is where the clipping happened: near the bottom
+  // there is no room below for the label to grow into.
+  row.dispatchEvent(
+    new MouseEvent("contextmenu", {
+      bubbles: true,
+      clientX: 40,
+      clientY: window.innerHeight - 40,
+    }),
+  );
+  await new Promise((r) => setTimeout(r, 150));
+
+  const remove = [...menu.querySelectorAll("button")].find((b) => /^Delete/.test(b.textContent));
+  check("deleting is offered", remove, [...menu.querySelectorAll("button")].map((b) => b.textContent).join(" | "));
+  if (!remove) return found;
+
+  remove.click();
+  await new Promise((r) => setTimeout(r, 200));
+  check("it asks first", /\?/.test(remove.textContent), remove.textContent);
+
+  const box = menu.getBoundingClientRect();
+  check(
+    "and the whole menu is still on screen once it has asked",
+    box.bottom <= window.innerHeight && box.top >= 0,
+    `top ${Math.round(box.top)}, bottom ${Math.round(box.bottom)}, window ${window.innerHeight}`,
+  );
+  const asking = remove.getBoundingClientRect();
+  check(
+    "the question itself is not cut off",
+    asking.bottom <= box.bottom + 1 && asking.height > 0,
+    `question ends ${Math.round(asking.bottom)}, menu ends ${Math.round(box.bottom)}`,
+  );
+  // A name that is a whole request is shortened rather than pasted in whole,
+  // and the full stop on the end of it does not become "hello.?".
+  check(
+    "a long name is cut down rather than pasted in whole",
+    remove.textContent.length < 70,
+    `${remove.textContent.length} characters: ${remove.textContent}`,
+  );
+  check("and it does not read as a full stop followed by a question mark", !/\.\?/.test(remove.textContent), remove.textContent);
+
+  closeTheMenuFromOutside();
+  return found;
+}
+
+function closeTheMenuFromOutside() {
+  document.body.click();
+  const menu = document.getElementById("menu");
+  if (menu) menu.hidden = true;
+}
+
+/**
+ * Pictures you can actually see.
+ *
+ * A picture reached the engine and was thrown away, and the line said "(with a
+ * picture)". So you could send a screenshot and never see the one you sent, and
+ * a conversation that had been about a picture read afterwards as a
+ * conversation about nothing.
+ */
+export async function picturesYouCanSee() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  await openTalk("talk-1");
+  await new Promise((r) => setTimeout(r, 400));
+
+  const withThem = [...document.querySelectorAll("#messages li.mine")].find((li) =>
+    li.textContent.includes("What is wrong with this screen?"),
+  );
+  check("the message with pictures on it is drawn", withThem, String(!!withThem));
+
+  const shown = withThem?.querySelectorAll(".pictures img") || [];
+  check("the picture itself is shown, not a note about one", shown.length === 1, `${shown.length} images`);
+  check(
+    "and it is a real picture rather than an empty box",
+    shown[0]?.src?.startsWith("data:image/"),
+    String(shown[0]?.src || "").slice(0, 24),
+  );
+  // The old behaviour, which must not come back: the count glued onto the words.
+  check(
+    "the words are the words, with no count glued on the end",
+    !withThem?.textContent.includes("with a picture"),
+    withThem?.querySelector(".mine-words")?.textContent,
+  );
+  check(
+    "a picture whose file has gone says so rather than leaving a gap",
+    withThem?.querySelector(".picture-gone"),
+    withThem?.querySelector(".picture-gone")?.textContent,
+  );
+
+  // Bigger, in the window. Not handed to the system: show_in_browser takes
+  // http and https and is right to refuse a data URL.
+  shown[0]?.click();
+  await new Promise((r) => setTimeout(r, 150));
+  const closer = document.querySelector(".closer");
+  check("clicking one shows it larger", closer, String(!!closer));
+  check(
+    "and it did not try to hand a data URL to the system",
+    !asked.some((a) => a.name === "show_in_browser" && String(a.args?.url).startsWith("data:")),
+    JSON.stringify(asked.filter((a) => a.name === "show_in_browser").slice(-1)),
+  );
+
+  // Escape as well as a click, because an overlay with no visible way out is
+  // the one kind people get stuck in.
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await new Promise((r) => setTimeout(r, 150));
+  check("Escape puts it away", !document.querySelector(".closer"), String(!!document.querySelector(".closer")));
+  return found;
+}

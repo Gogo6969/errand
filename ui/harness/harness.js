@@ -105,6 +105,11 @@ export const FIXTURE = {
     ],
     "talk-1": [
       { seq: 1, at: 1, kind: "mine", text: "Show me the latest Bitcoin news", call: null, tool: null, outcome: null },
+      // A message with pictures on it, and one whose file has gone. Both are
+      // states somebody will see: the second is what a tidied folder looks
+      // like, and an empty gap there reads as the window being broken.
+      { seq: 5, at: 5, kind: "mine", text: "What is wrong with this screen?", call: null, tool: null, outcome: null,
+        pictures: ["5-0.png", "gone.png"] },
       { seq: 2, at: 2, kind: "said", text: "**BTC** is around $77,700.", call: null, tool: null, outcome: null },
     ],
     // A conversation an agent carried on while nobody was looking: yesterday's
@@ -424,6 +429,15 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           case "forget_conversation":
           case "looking_at":
             return Promise.resolve(null);
+          // A real picture, small enough to sit in a fixture: one grey pixel.
+          // A stub string would draw a broken image and the check would pass
+          // on markup that shows nothing.
+          case "a_picture":
+            return args.name === "gone.png"
+              ? Promise.reject("that picture is not here any more")
+              : Promise.resolve(
+                  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+                );
           // A routine switched off rather than thrown away, and what it did.
           case "routine_off":
             routineOff = !!args.off;

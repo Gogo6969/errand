@@ -741,7 +741,15 @@ function fromStoreLine(line, live = false) {
   switch (line.kind) {
     case "mine":
     case "said":
-      return { kind: line.kind, text: line.text, seq: line.seq };
+      return {
+        kind: line.kind,
+        text: line.text,
+        seq: line.seq,
+        // Names, not bytes. The picture itself is fetched when the line is
+        // drawn, so opening a conversation with forty screenshots in it does
+        // not put forty screenshots in memory before a word is on screen.
+        pictures: line.pictures || [],
+      };
     case "asking":
       // A question that was answered is settled history. One that was not is
       // either still being waited on, or one nobody will ever answer because
@@ -777,7 +785,12 @@ function fromStoreLine(line, live = false) {
         what,
         why: rest.filter((one) => one !== where).join(" "),
         where,
-        answered: still ? null : "That was while this was open. It is not waiting now.",
+        // Not answered, and not a dead end either. Nobody is parked on it any
+        // more, but the thing it asked for is still a thing somebody can go
+        // and do, so the card keeps its buttons and they say it into the
+        // conversation instead of into a call that is gone.
+        answered: null,
+        stillThere: still,
       };
     }
     case "doing":
@@ -818,6 +831,19 @@ function closeTheMenu() {
  * @param {number} x where the pointer was
  * @param {number} y
  */
+/**
+ * A name short enough to put inside a sentence.
+ *
+ * An agent that has not named itself is called after the first thing anybody
+ * said to it, which is a whole request and sometimes a paragraph. Dropped into
+ * "Delete X? Everything it said goes too" that made a button three lines long
+ * ending in "hello.?", which is neither readable nor a question.
+ */
+function inAFewWords(name) {
+  const said = String(name || "").trim().replace(/[.!?,;:]+$/, "");
+  return said.length > 28 ? `${said.slice(0, 27).trimEnd()}\u{2026}` : said;
+}
+
 function openTheMenu(a, x, y) {
   menuIsFor = a.id;
   const items = [];
@@ -884,7 +910,11 @@ function openTheMenu(a, x, y) {
     // the button becomes the question rather than a dialog appearing over it.
     if (b.dataset.sure !== "true") {
       b.dataset.sure = "true";
-      b.textContent = `Delete ${a.name}? Everything it said goes too`;
+      b.textContent = `Delete ${inAFewWords(a.name)}? Everything it said goes too`;
+      // The label just grew. Without this the menu keeps the height it was
+      // measured at and the sentence saying what is about to be destroyed
+      // hangs off the bottom of the window.
+      placeTheMenu();
       return;
     }
     closeTheMenu();
@@ -894,11 +924,29 @@ function openTheMenu(a, x, y) {
 
   el.menu.replaceChildren(...items);
   el.menu.hidden = false;
-  // Placed after it is shown, because where it fits depends on how big it is.
+  placeTheMenu(x, y);
+}
+
+/**
+ * Put the menu where it fits.
+ *
+ * Called again whenever anything in it changes size, which is not a nicety:
+ * pressing Delete turns a short label into a long one, the menu grows
+ * downwards, and the sentence saying what is about to be destroyed goes off
+ * the bottom of the window. So the one line somebody most needs to read is the
+ * one they cannot.
+ */
+let theMenuIsAt = { x: 0, y: 0 };
+
+function placeTheMenu(x, y) {
+  if (x !== undefined) theMenuIsAt = { x, y };
   const box = el.menu.getBoundingClientRect();
-  const room = { x: window.innerWidth - box.width - 8, y: window.innerHeight - box.height - 8 };
-  el.menu.style.left = `${Math.max(8, Math.min(x, room.x))}px`;
-  el.menu.style.top = `${Math.max(8, Math.min(y, room.y))}px`;
+  const room = {
+    x: window.innerWidth - box.width - 8,
+    y: window.innerHeight - box.height - 8,
+  };
+  el.menu.style.left = `${Math.max(8, Math.min(theMenuIsAt.x, room.x))}px`;
+  el.menu.style.top = `${Math.max(8, Math.min(theMenuIsAt.y, room.y))}px`;
 }
 
 /**
@@ -1125,7 +1173,12 @@ function draw(m) {
       const words = document.createElement("span");
       words.className = "mine-words";
       words.textContent = m.text;
-      node.append(words, doneWith(m));
+      node.append(words);
+      // The pictures themselves, rather than a note saying there were some.
+      // A conversation that was about a picture used to read afterwards as a
+      // conversation about nothing, and you could never see the one you sent.
+      if (m.pictures?.length || m.showing?.length) showThePictures(node, m);
+      node.append(doneWith(m));
       return node;
     }
     case "doing": {
@@ -1206,9 +1259,24 @@ function handItOver(m) {
   if (m.answered) {
     words.append(note("p", m.answered, "answered"));
   } else {
+    // Whether the agent is still parked on this, or gave up while somebody was
+    // away doing it. The second is not rare and used to be the end of the
+    // errand: granting an app Full Disk Access means quitting that app, so the
+    // one permission somebody is most likely to be asked for is the one that
+    // takes the waiting agent down with it.
+    const waiting = m.stillThere !== false;
+    if (!waiting) {
+      words.append(
+        note(
+          "p",
+          "It stopped waiting while you were away. Answer anyway and it will pick up where it left off.",
+          "answered",
+        ),
+      );
+    }
     const choices = document.createElement("div");
     choices.className = "choices";
-    const press = (label, how, said) => {
+    const press = (label, how, said, carryOn) => {
       const b = document.createElement("button");
       b.type = "button";
       b.textContent = label;
@@ -1216,6 +1284,10 @@ function handItOver(m) {
         m.answered = said;
         stillWaiting.delete(m.handover);
         drawMessages();
+        // Into the call that is waiting, or into the conversation when there is
+        // none. Said rather than dropped: the agent has the whole transcript
+        // and knows what it asked for, so a sentence is enough to carry on.
+        if (!waiting) return sayIt(carryOn);
         try {
           await invoke("handed_back", { handover: m.handover, how });
         } catch (why) {
@@ -1226,8 +1298,13 @@ function handItOver(m) {
       return b;
     };
     choices.append(
-      press("I have done it", "done", "You said you had done it"),
-      press("Skip this", "skipped", "You skipped it"),
+      press(
+        waiting ? "I have done it" : "I have done it, carry on",
+        "done",
+        "You said you had done it",
+        "I have done what you asked. Carry on.",
+      ),
+      press("Skip this", "skipped", "You skipped it", "Skip that, and carry on without it."),
     );
     words.append(choices);
   }
@@ -1706,17 +1783,88 @@ el.what.addEventListener("paste", (e) => {
   }
 });
 
+/**
+ * One picture, as big as the window will allow.
+ *
+ * A thumbnail in a thread is enough to recognise a screenshot and not enough to
+ * read one, and the thread is the wrong shape for reading one anyway.
+ */
+function lookCloser(url, name) {
+  const over = document.createElement("div");
+  over.className = "closer";
+  const img = document.createElement("img");
+  img.src = url;
+  img.alt = name || "a picture you sent";
+  over.append(img);
+  const away = () => {
+    over.remove();
+    window.removeEventListener("keydown", onKey);
+  };
+  // Escape as well as a click, because a thing covering the window with no
+  // visible way out is the one kind of overlay people get stuck in.
+  const onKey = (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      away();
+    }
+  };
+  over.onclick = away;
+  window.addEventListener("keydown", onKey);
+  document.body.append(over);
+}
+
+/**
+ * The pictures on one line, drawn into it.
+ *
+ * `showing` is what was just sent and is already in hand as data URLs;
+ * `pictures` is what was read back off disk and has to be asked for. Both end
+ * up as the same row of thumbnails, so a message looks the same the moment it
+ * is sent and a week later.
+ */
+function showThePictures(node, m) {
+  const row = document.createElement("div");
+  row.className = "pictures";
+  node.append(row);
+
+  const show = (url, name) => {
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = name || "a picture you sent";
+    img.loading = "lazy";
+    // Bigger, here. Not handed to the system: `show_in_browser` takes http and
+    // https and is right to refuse a data URL, and writing the bytes to a
+    // temporary file to open in Preview would leave somebody's screenshot lying
+    // about on disk for the sake of a click.
+    img.onclick = () => lookCloser(url, img.alt);
+    row.append(img);
+  };
+
+  for (const url of m.showing || []) show(url);
+  for (const name of m.pictures || []) {
+    invoke("a_picture", { conversation: showing, name })
+      .then((url) => show(url, name))
+      .catch(() => {
+        // A picture that is no longer on disk is said rather than left as a
+        // gap: an empty space where one used to be reads as the window being
+        // broken, not as a file having gone.
+        const gone = document.createElement("span");
+        gone.className = "picture-gone";
+        gone.textContent = "a picture that is no longer here";
+        row.append(gone);
+      });
+  }
+}
+
 /** Say something to the thread that is open, from wherever it was typed. */
 async function sayIt(text) {
   const t = talking();
   if (!t) return;
   const going = attached.map((one) => one.url);
-  const withThem = going.length
-    ? `${text}\n\n(with ${going.length === 1 ? "a picture" : `${going.length} pictures`})`
-    : text;
   attached = [];
   drawAttached();
-  const mine = { kind: "mine", text: withThem };
+  // Shown from the moment it is sent, out of what is already in hand, rather
+  // than waiting for a round trip to disk and back to see what was attached.
+  const mine = { kind: "mine", text, showing: going };
   t.messages.push(mine);
   // Working from the moment it is sent, not from the moment something comes
   // back: the gap between the two is exactly when a person wonders whether the
@@ -2197,7 +2345,8 @@ function openTheTalkMenu(t, x, y) {
       // gesture for the same decision.
       if (b.dataset.sure !== "true") {
         b.dataset.sure = "true";
-        b.textContent = `Delete ${t.name}? Everything said in it goes too`;
+        b.textContent = `Delete ${inAFewWords(t.name)}? Everything said in it goes too`;
+        placeTheMenu();
         return;
       }
       closeTheMenu();
@@ -2222,13 +2371,7 @@ function openTheTalkMenu(t, x, y) {
 
   el.menu.replaceChildren(...items);
   el.menu.hidden = false;
-  const box = el.menu.getBoundingClientRect();
-  const room = {
-    x: window.innerWidth - box.width - 8,
-    y: window.innerHeight - box.height - 8,
-  };
-  el.menu.style.left = `${Math.max(8, Math.min(x, room.x))}px`;
-  el.menu.style.top = `${Math.max(8, Math.min(y, room.y))}px`;
+  placeTheMenu(x, y);
 }
 
 el.talks.addEventListener("change", async () => {

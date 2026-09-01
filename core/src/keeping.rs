@@ -164,6 +164,7 @@ mod tests {
             tool: None,
             outcome: outcome.map(str::to_string),
             anchor: None,
+            pictures: Vec::new(),
         }
     }
 

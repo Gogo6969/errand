@@ -305,6 +305,14 @@ pub struct Line {
     /// one. Claude Code names every message it writes and will carry a
     /// conversation on from any of them; a local model names nothing.
     pub anchor: Option<String>,
+    /// Pictures attached to this line, by file name.
+    ///
+    /// The bytes are beside the store rather than in it. A picture somebody
+    /// sent used to reach the engine and be thrown away, so the thread said
+    /// "(with a picture)" and a conversation that had been about a picture
+    /// read afterwards as a conversation about nothing.
+    #[serde(default)]
+    pub pictures: Vec<String>,
 }
 
 pub struct Store {
@@ -778,6 +786,14 @@ const CHANGES: &[&str] = &[
          outcome      TEXT
      );",
     "CREATE INDEX IF NOT EXISTS runs_by_conversation ON runs(conversation, at DESC);",
+    // 21
+    //
+    // The pictures attached to a line, by file name, as a JSON array. Names
+    // rather than bytes: a base64 image in a transcript line is read back into
+    // the window on every reopen, and a store that holds a conversation should
+    // not also be an album. The files sit beside the store, and this says which
+    // of them belong to which thing somebody said.
+    "ALTER TABLE lines ADD COLUMN pictures TEXT;",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -1978,7 +1994,7 @@ impl Store {
     pub fn lines(&self, conversation: &str) -> Result<Vec<Line>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
-            "SELECT seq, at, kind, text, call, tool, outcome, anchor
+            "SELECT seq, at, kind, text, call, tool, outcome, anchor, pictures
                FROM lines WHERE conversation = ? ORDER BY seq",
         )?;
         let rows = q.query_map([conversation], |r| {
@@ -1991,6 +2007,7 @@ impl Store {
                 tool: r.get(5)?,
                 outcome: r.get(6)?,
                 anchor: r.get(7)?,
+                pictures: named(r.get::<_, Option<String>>(8)?),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2003,6 +2020,19 @@ impl Store {
     /// exactly where it was before this file existed.
     pub fn asked(&self, conversation: &str, text: &str) -> Result<Line> {
         self.append(conversation, "mine", text, None, None)
+    }
+
+    /// Say that a line somebody wrote has pictures with it.
+    ///
+    /// Written after the line rather than with it, because the file names carry
+    /// the line's own number: a picture belongs to a particular thing somebody
+    /// said, and the number is not known until the line exists.
+    pub fn pictures_with(&self, conversation: &str, seq: i64, named: &[String]) -> Result<()> {
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE lines SET pictures = ? WHERE conversation = ? AND seq = ?",
+            params![serde_json::to_string(named)?, conversation, seq],
+        )?;
+        Self::only_if_it_is_there(changed, "line")
     }
 
     /// Write down what happened, if it is the sort of thing worth keeping.
@@ -2284,6 +2314,7 @@ impl Store {
             tool: tool.map(str::to_string),
             outcome: None,
             anchor: None,
+            pictures: Vec::new(),
         })
     }
 }
@@ -2581,6 +2612,16 @@ fn around(line: &str, looking_for: &str) -> String {
     said
 }
 
+/// The picture names on a line, from what was written down.
+///
+/// Nothing at all where there is nothing, and where the column holds something
+/// this cannot read. A line whose pictures cannot be parsed is a line with no
+/// pictures, not a conversation that refuses to open.
+fn named(said: Option<String>) -> Vec<String> {
+    said.and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
 /// An id for a row nobody else names.
 fn uuid() -> String {
     uuid::Uuid::new_v4().to_string()
@@ -2736,6 +2777,62 @@ mod tests {
             "{:?}",
             hits[0].snippet
         );
+    }
+
+    #[test]
+    fn a_picture_somebody_sent_is_still_on_the_line_when_it_is_read_back() {
+        // It used to reach the engine and be thrown away, so the line said
+        // "(with a picture)" and a conversation that had been about a picture
+        // read afterwards as a conversation about nothing.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("who", NOT_YET_NAMED, Path::new("/tmp/who"))
+            .unwrap();
+        let line = s.asked("who", "What is wrong with this screen?").unwrap();
+        assert!(
+            line.pictures.is_empty(),
+            "pictures before any were attached"
+        );
+
+        s.pictures_with("who", line.seq, &["1-0.png".into(), "1-1.jpg".into()])
+            .unwrap();
+        let back = s.lines("who").unwrap();
+        assert_eq!(back[0].pictures, vec!["1-0.png", "1-1.jpg"]);
+        // And the words are the words. The count used to be glued onto the end
+        // of what somebody typed, which is then what the transcript says they
+        // said.
+        assert_eq!(back[0].text, "What is wrong with this screen?");
+        assert!(!back[0].text.contains("with a picture"));
+    }
+
+    #[test]
+    fn a_line_with_nothing_readable_in_its_pictures_is_a_line_with_no_pictures() {
+        // A conversation that refuses to open because one column holds
+        // something odd is a far worse failure than a picture not showing.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("who", NOT_YET_NAMED, Path::new("/tmp/who"))
+            .unwrap();
+        let line = s.asked("who", "hello").unwrap();
+        s.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE lines SET pictures = 'not json at all' WHERE conversation = 'who' AND seq = ?",
+                params![line.seq],
+            )
+            .unwrap();
+        let back = s.lines("who").unwrap();
+        assert_eq!(back.len(), 1);
+        assert!(back[0].pictures.is_empty());
+    }
+
+    #[test]
+    fn saying_a_picture_belongs_to_a_line_that_is_not_there_is_an_error() {
+        // Quietly updating no rows is how a picture ends up on disk with
+        // nothing pointing at it and nobody the wiser.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("who", NOT_YET_NAMED, Path::new("/tmp/who"))
+            .unwrap();
+        assert!(s.pictures_with("who", 999, &["1-0.png".into()]).is_err());
     }
 
     #[test]

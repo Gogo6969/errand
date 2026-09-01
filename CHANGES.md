@@ -69,6 +69,19 @@ would notice, not something a commit did.
   never the problem.
 - Opening a second copy of Errand says so rather than quietly sharing one set
   of conversations and running your routines twice.
+- Pictures you send are shown in the thread, and stay there. They used to reach
+  the agent and be thrown away, so the line said "(with a picture)" and you
+  could never see the one you sent. Click one to see it larger.
+- Handing over now works when there is no page to open. "Go into System
+  Settings and switch this on" is the commonest thing to be asked, and it was
+  being refused outright because it had no web address in it.
+- A handover you answer late still counts. Granting an app Full Disk Access
+  means quitting that app, so the one permission you are most likely to be
+  asked for was the one that killed the agent waiting for your answer. The
+  card keeps its buttons and picks the errand up where it left off.
+- Fixed: the question before deleting an agent could be pushed off the bottom
+  of the screen by its own length, so the one line you had to read was the one
+  you could not.
 - Fixed: searching your mail never worked. It reported that you had no
   mailboxes.
 
