@@ -1873,3 +1873,23 @@ body.in-a-call #what {
 #goal-says[data-over="true"] { color: var(--ink); }
 #watch-again[hidden] { display: none; }
 
+/* The seam between a conversation you had and one your agent had while you
+   were asleep. Quiet enough to skim past when a thread is all one day, and
+   unmissable when it is not. */
+.day {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 6px;
+  color: var(--faint);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.day::before,
+.day::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}

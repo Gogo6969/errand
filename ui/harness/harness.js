@@ -66,6 +66,7 @@ export const FIXTURE = {
       { id: "talk-2", agent: "agent-bitcoin", name: "First", opened: true },
       { id: "talk-3", agent: "agent-bitcoin", name: "Asked by Day Check", opened: true },
       { id: "talk-4", agent: "agent-bitcoin", name: "Answered a few", opened: true },
+      { id: "talk-overnight", agent: "agent-bitcoin", name: "Ran overnight", opened: true },
     ],
   },
   lines: {
@@ -97,6 +98,15 @@ export const FIXTURE = {
     "talk-1": [
       { seq: 1, at: 1, kind: "mine", text: "Show me the latest Bitcoin news", call: null, tool: null, outcome: null },
       { seq: 2, at: 2, kind: "said", text: "**BTC** is around $77,700.", call: null, tool: null, outcome: null },
+    ],
+    // A conversation an agent carried on while nobody was looking: yesterday's
+    // briefing and today's, one under the other. Dated rather than numbered,
+    // because the whole point of the separators is the real clock.
+    "talk-overnight": [
+      { seq: 1, at: Date.now() - 2 * 86400000, kind: "mine", text: "Every morning, tell me what moved", call: null, tool: null, outcome: null },
+      { seq: 2, at: Date.now() - 2 * 86400000 + 60000, kind: "said", text: "Set. I will look at seven.", call: null, tool: null, outcome: null },
+      { seq: 3, at: Date.now() - 86400000, kind: "said", text: "Yesterday: BTC up two per cent.", call: null, tool: null, outcome: null },
+      { seq: 4, at: Date.now(), kind: "said", text: "This morning: BTC flat.", call: null, tool: null, outcome: null },
     ],
     // Three answered questions and a fourth still open, which is the shape that
     // makes the way out of being asked worth offering: somebody on their fourth

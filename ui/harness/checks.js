@@ -2716,3 +2716,52 @@ export function headerFitsOnOneRow() {
   };
 }
 
+/**
+ * A thread that says when things happened.
+ *
+ * The four ways an errand starts -- you type it, the clock, a watch, a goal --
+ * all write into a conversation nobody is looking at, and until now the window
+ * had no way to say which lines were from this morning and which from a week
+ * ago. Yesterday's briefing sat directly above today's with nothing between
+ * them, which is the exact shape this app is for.
+ */
+export async function whenThingsHappened() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  await openTalk("talk-overnight");
+  const days = [...document.querySelectorAll("#messages .day")].map((d) =>
+    d.textContent.trim(),
+  );
+  // Three days of lines, so two seams: nothing above the first thing said, and
+  // one wherever the day turns over. A separator above the first line would be
+  // a label on a conversation rather than a break in one.
+  check(
+    "the day is said where it changes, and only there",
+    days.length === 2,
+    JSON.stringify(days),
+  );
+  check("today is called today rather than dated", days.includes("Today"), JSON.stringify(days));
+  check(
+    "and the day before it is called yesterday",
+    days.includes("Yesterday"),
+    JSON.stringify(days),
+  );
+
+  const first = document.querySelector("#messages > li");
+  check(
+    "nothing is announced above the first thing said",
+    first && !first.classList.contains("day"),
+    first?.className,
+  );
+
+  // The other half of the same rule: a separator on every message is noise, so
+  // a conversation that happened in one sitting says nothing at all.
+  await openTalk("talk-1");
+  check(
+    "a conversation that happened in one sitting says no dates",
+    document.querySelectorAll("#messages .day").length === 0,
+    String(document.querySelectorAll("#messages .day").length),
+  );
+  return found;
+}

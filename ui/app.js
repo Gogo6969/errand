@@ -575,6 +575,16 @@ async function whatIsStillWaiting() {
 }
 
 function fromStore(line, live = false) {
+  // Every branch below used to drop `at`, and the whole of a thread's sense of
+  // when is in it. A conversation an agent works in overnight reads as one
+  // unbroken block: yesterday's briefing sits directly above this morning's
+  // with nothing between them, which is the shape this app is for and the one
+  // it could not show.
+  const one = fromStoreLine(line, live);
+  return one && { ...one, at: line.at };
+}
+
+function fromStoreLine(line, live = false) {
   switch (line.kind) {
     case "mine":
     case "said":
@@ -848,10 +858,63 @@ function drawThreads() {
 
 // ------------------------------------------------------------ messages --
 
+/**
+ * The day a line was said, as somebody would say it.
+ *
+ * Today and yesterday by name, because those are the two that matter and a
+ * date beside them reads as older than it is. Everything before that is dated,
+ * with the year only once it is a different year: "12 March" is unambiguous
+ * within a year and misleading across one.
+ */
+function whichDay(at) {
+  const then = new Date(at);
+  const midnight = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const days = Math.round((midnight(new Date()) - midnight(then)) / 86400000);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  const sameYear = then.getFullYear() === new Date().getFullYear();
+  return then.toLocaleDateString(undefined, {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: sameYear ? undefined : "numeric",
+  });
+}
+
+/**
+ * A line saying what day the next thing happened on.
+ *
+ * Only where the day changes. A separator on every message would be noise; the
+ * one place it is worth an entire row of the window is the seam between a
+ * conversation you had and one your agent had while you were asleep.
+ */
+function theDayChanged(day) {
+  const li = document.createElement("li");
+  li.className = "day";
+  const said = document.createElement("span");
+  said.textContent = day;
+  li.append(said);
+  return li;
+}
+
 function drawMessages() {
   const t = talking();
   if (!t) return;
-  el.messages.replaceChildren(...t.messages.map(draw).filter(Boolean));
+  const drawn = [];
+  let day = null;
+  for (const m of t.messages) {
+    const node = draw(m);
+    if (!node) continue;
+    // A line with no time is one that arrived this second and has not been
+    // written down yet, which is today by definition and needs no announcing.
+    if (m.at) {
+      const its = whichDay(m.at);
+      if (day !== null && its !== day) drawn.push(theDayChanged(its));
+      day = its;
+    }
+    drawn.push(node);
+  }
+  el.messages.replaceChildren(...drawn);
   // What is being written this second, under everything already said. Dots
   // while there are no words yet, because dots say "working" and an empty box
   // says nothing.
