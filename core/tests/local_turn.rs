@@ -26,6 +26,8 @@ async fn one_turn_with_every_event_it_produces() {
         home,
         "ask",
         "",
+        // No store behind this, so nothing was said before now.
+        Vec::new(),
         None,
     )
     .expect("opening");

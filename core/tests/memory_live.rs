@@ -44,6 +44,8 @@ async fn a_model_writes_down_what_it_is_told_and_looks_it_up_again() {
         home,
         "auto",
         "",
+        // No store behind this, so nothing was said before now.
+        Vec::new(),
         Some(("live".to_string(), wants)),
     )
     .expect("opening");

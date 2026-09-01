@@ -149,6 +149,12 @@ impl Local {
         asks: &str,
         // What this agent has already been told about its job, if anything.
         remembers: &str,
+        // What was said in this conversation before now.
+        //
+        // A local model keeps no session of its own, so this is the only way it
+        // knows anything about a conversation it is being reopened into. Empty
+        // for a brand new one.
+        so_far: Vec<ChatMessage>,
         // Where to send the things only the app can do, and which conversation
         // is asking. Nothing here means an engine on its own, which is what the
         // terminal harness is.
@@ -165,9 +171,12 @@ impl Local {
 
         tokio::runtime::Handle::current().spawn(conversation(
             LlmClient::new(settings),
-            home,
-            asks.to_string(),
-            remembers,
+            Opening {
+                home,
+                asks: asks.to_string(),
+                remembers,
+                so_far,
+            },
             host,
             asked,
             tx,
@@ -201,16 +210,37 @@ impl Engine for Local {
     }
 }
 
+/// Everything a conversation needs to know before its first turn.
+///
+/// Grouped rather than passed one by one, because they are one thing: this is
+/// the state a conversation opens in, and three of the four exist only because
+/// a local model keeps no session of its own and has to be told.
+struct Opening {
+    /// The thread's own directory, which is where every path a tool is given is
+    /// resolved from and the only place it has business writing.
+    home: PathBuf,
+    /// How much it asks before acting.
+    asks: String,
+    /// What this agent has already been told about its job.
+    remembers: String,
+    /// What was said in this conversation before now. Empty for a new one.
+    so_far: Vec<ChatMessage>,
+}
+
 /// The whole conversation, for as long as anybody is having it.
 async fn conversation(
     client: LlmClient,
-    home: PathBuf,
-    asks: String,
-    remembers: String,
+    opening: Opening,
     host: Option<(String, tokio::sync::mpsc::UnboundedSender<team::Wants>)>,
     mut asked: UnboundedReceiver<Turn>,
     out: std::sync::mpsc::Sender<Event>,
 ) {
+    let Opening {
+        home,
+        asks,
+        remembers,
+        so_far,
+    } = opening;
     // Started once for the conversation rather than once per turn. Several of
     // these are `npx` and take seconds to come up; paying that on every message
     // would make the thread feel broken.
@@ -225,6 +255,11 @@ async fn conversation(
     let mut history = vec![ChatMessage::System {
         content: opening_instructions(&home, &outside, &remembers, &asks),
     }];
+    // And what was already said here, if this conversation has been had before.
+    // Trimmed by the same rule as everything else the moment it does not fit,
+    // so a very long thread reopens as its most recent part rather than
+    // refusing to open at all.
+    history.extend(so_far);
     // Tools somebody has said yes to for good, this conversation. Deliberately
     // not saved anywhere: a permission that outlives the thread it was granted
     // in is a permission nobody remembers granting.

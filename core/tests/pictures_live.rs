@@ -105,7 +105,8 @@ async fn a_local_model_can_see_a_picture_that_was_attached() {
     if let Ok(kind) = std::env::var("ERRAND_PROVIDER") {
         settings.provider = kind;
     }
-    let (mut it, events) = Local::open(settings, here.clone(), "auto", "", None).expect("opening");
+    let (mut it, events) =
+        Local::open(settings, here.clone(), "auto", "", Vec::new(), None).expect("opening");
 
     it.say(
         "What single colour fills this image? Answer with one word.",

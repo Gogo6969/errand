@@ -460,6 +460,22 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // lands while it is running, and the next turn uses the truth.
             ask_again_how_much_it_holds(&app, &said);
             let asks = known.as_ref().map_or("ask", |a| a.asks.as_str());
+            // What was already said here. A local model keeps no session of
+            // its own, so this is the only way a conversation survives the app
+            // being closed -- and until this nothing did it: reopening one
+            // handed the model its instructions and nothing else while the
+            // window went on showing the whole thread, so a follow-up the next
+            // morning was answered by an agent that had never read what it was
+            // following up on.
+            let so_far = match again {
+                true => held
+                    .store
+                    .lines(&id)
+                    .map(|lines| keeping::as_turns(&lines))
+                    .unwrap_or_default(),
+                // Nothing has been said here yet, so there is nothing to carry.
+                false => Vec::new(),
+            };
             // A local model keeps no session at all, so a conversation carried
             // on from another needs what happened told to it, the same way
             // Claude does when it cannot fork its own.
@@ -480,6 +496,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 home,
                 asks,
                 &remembers,
+                so_far,
                 Some((id.clone(), held.wants.clone())),
             )
             .map_err(|e| e.to_string())?;

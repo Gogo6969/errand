@@ -10,6 +10,7 @@
 //! of taking something out is that it is readable somewhere else. A file only
 //! this app can open is not an export, it is a second copy of the problem.
 
+use crate::local::ChatMessage;
 use crate::store::{Agent, Conversation, Line};
 
 /// A conversation, written out the way somebody would want to read it.
@@ -113,6 +114,62 @@ pub fn as_filename(agent: &str, talk: &str) -> String {
 /// step keeps the sentence and not the arguments, so a faithful call cannot be
 /// reconstructed from it, and a result with no call to pair with is a message
 /// most endpoints refuse outright.
+/// What was said in a conversation, as turns a model can be handed back.
+///
+/// A local model keeps no session of its own, so everything it knows about a
+/// conversation has to be told to it every time the app starts. Nothing did:
+/// reopening one handed the model its standing instructions and nothing else,
+/// while the window went on showing the whole thread. So somebody would come
+/// back the next morning, ask a follow-up about something three messages up,
+/// and be answered by an agent that had never read it -- with nothing anywhere
+/// saying that had happened. Worse than forgetting, which this app announces
+/// when it makes room: the window was showing what the model could not see.
+///
+/// Real turns rather than the prose `as_a_reminder` produces, and the
+/// difference matters. A summary saying "they said X and you said Y" is
+/// something to be told about; a User message and an Assistant message are the
+/// conversation, and a model answers a follow-up to them the way it would have
+/// answered at the time.
+///
+/// Steps are deliberately left out. A tool call and its result are a matched
+/// pair with an id, and several providers refuse a request outright when a
+/// result does not follow a call they recognise -- so inventing ids for calls
+/// made by a process that no longer exists trades a silent gap for a 400. What
+/// a step actually established is almost always in the answer that followed it,
+/// which is kept.
+pub fn as_turns(lines: &[Line]) -> Vec<ChatMessage> {
+    lines
+        .iter()
+        .filter_map(|line| match line.kind.as_str() {
+            "mine" => Some(ChatMessage::User {
+                content: line.text.trim().to_string(),
+                name: None,
+                // The picture itself is not carried back. It is on disk and the
+                // window shows it, but re-sending megabytes of base64 on every
+                // reopen is how a conversation stops fitting.
+                image_data_urls: Vec::new(),
+            }),
+            "said" => Some(ChatMessage::Assistant {
+                content: line.text.trim().to_string(),
+                tool_calls: Vec::new(),
+                reasoning: None,
+            }),
+            _ => None,
+        })
+        .filter(|one| !said_nothing(one))
+        .collect()
+}
+
+/// Whether a turn is empty, and so worth nothing but tokens.
+fn said_nothing(one: &ChatMessage) -> bool {
+    match one {
+        ChatMessage::User { content, .. } | ChatMessage::Assistant { content, .. } => {
+            content.is_empty()
+        }
+        _ => false,
+    }
+}
+
 pub fn as_a_reminder(lines: &[Line]) -> String {
     if lines.is_empty() {
         return String::new();
@@ -297,5 +354,75 @@ mod tests {
         let lines: Vec<Line> = (1..=5).map(|n| line(n, "said", "x", None)).collect();
         let kept = up_to(&lines, 3);
         assert_eq!(kept.iter().map(|l| l.seq).collect::<Vec<_>>(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_conversation_comes_back_as_turns_a_model_can_answer_a_follow_up_to() {
+        // The fault this repairs: reopening a local conversation handed the
+        // model its standing instructions and nothing else, while the window
+        // went on showing the whole thread. So a follow-up the next morning was
+        // answered by an agent that had never read what it followed up on, and
+        // nothing anywhere said so.
+        let lines = vec![
+            line(1, "mine", "What is 17 times 23?", None),
+            line(2, "said", "391.", None),
+            line(3, "mine", "And halve it?", None),
+        ];
+        let back = as_turns(&lines);
+        assert_eq!(back.len(), 3, "{back:?}");
+        // Real turns, not a paragraph about them. A summary is something to be
+        // told about; these are the conversation.
+        assert!(
+            matches!(&back[0], ChatMessage::User { content, .. } if content == "What is 17 times 23?")
+        );
+        assert!(matches!(&back[1], ChatMessage::Assistant { content, .. } if content == "391."));
+        assert!(
+            matches!(&back[2], ChatMessage::User { content, .. } if content == "And halve it?")
+        );
+    }
+
+    #[test]
+    fn a_step_is_left_out_rather_than_given_an_invented_id() {
+        // A tool call and its result are a matched pair with an id, and several
+        // providers refuse a request outright when a result does not follow a
+        // call they recognise. Inventing ids for calls made by a process that
+        // no longer exists trades a silent gap for a 400.
+        let lines = vec![
+            line(1, "mine", "Check the price", None),
+            line(2, "doing", "Fetching the page", Some("200 OK")),
+            line(3, "asking", "Run curl", Some("yes")),
+            line(4, "ended", "The agent stopped without saying why", None),
+            line(5, "said", "It is 391.", None),
+        ];
+        let back = as_turns(&lines);
+        assert_eq!(back.len(), 2, "{back:?}");
+        assert!(matches!(&back[0], ChatMessage::User { .. }));
+        // What a step established is almost always in the answer that followed
+        // it, and that is kept.
+        assert!(
+            matches!(&back[1], ChatMessage::Assistant { content, .. } if content == "It is 391.")
+        );
+    }
+
+    #[test]
+    fn a_conversation_nobody_has_said_anything_in_carries_nothing() {
+        // A brand new conversation must not open with a turn in it: an empty
+        // user message is a turn the model has to answer.
+        assert!(as_turns(&[]).is_empty());
+        assert!(as_turns(&[line(1, "mine", "   ", None)]).is_empty());
+        assert!(as_turns(&[line(1, "said", "", None)]).is_empty());
+    }
+
+    #[test]
+    fn a_picture_is_not_sent_again_every_time_the_app_opens() {
+        // The bytes are on disk and the window draws them. Re-sending megabytes
+        // of base64 on every reopen is how a conversation stops fitting.
+        let mut with_one = line(1, "mine", "What is wrong with this screen?", None);
+        with_one.pictures = vec!["1-0.png".into()];
+        let back = as_turns(&[with_one]);
+        assert_eq!(back.len(), 1);
+        assert!(
+            matches!(&back[0], ChatMessage::User { image_data_urls, .. } if image_data_urls.is_empty())
+        );
     }
 }

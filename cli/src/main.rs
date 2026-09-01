@@ -36,6 +36,9 @@ async fn main() -> anyhow::Result<()> {
             "ask",
             // No app behind it, so no notebook either.
             "",
+            // And no store, so nothing said before now: the harness starts a
+            // fresh conversation every time by design.
+            Vec::new(),
             // No app behind it, so nobody to hand work to.
             None,
         )?;
