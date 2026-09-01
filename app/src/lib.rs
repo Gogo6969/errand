@@ -97,6 +97,13 @@ struct Held {
     /// answering and takes the file away, so a conversation that has been
     /// closed cannot be reached by a process that outlived it.
     doorways: Mutex<HashMap<String, doorway::Doorway>>,
+    /// Agents parked waiting for somebody to do something at the keyboard.
+    ///
+    /// Keyed by the handover rather than by the conversation, because the
+    /// answer has to reach the exact call that is waiting: a second handover
+    /// arriving while the first is still on screen must not be ended by the
+    /// first card being pressed.
+    handovers: Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>,
     store: Arc<Store>,
 }
 
@@ -2011,6 +2018,7 @@ fn answer_what_engines_cannot(
                     Some(team::Ours::Forget) => take_it_back(&app, &asked),
                     Some(team::Ours::EveryDay) => set_it_running(&app, &asked),
                     Some(team::Ours::KeepAnEyeOn) => keep_an_eye_on(&app, &asked),
+                    Some(team::Ours::OverToYou) => over_to_you(&app, &asked).await,
                     None => Err(anyhow::anyhow!("there is no {} here", asked.tool)),
                 };
                 let _ = asked.answer.send(said);
@@ -2095,6 +2103,149 @@ fn set_it_running(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
          open; a Mac that is asleep is still asleep.",
         read.written()
     ))
+}
+
+/// Hand the keyboard over for one step, and wait to be handed it back.
+///
+/// The end of the road that is not really the end of one. An agent that hits a
+/// sign-in, a two-factor code or a card number has to stop, and until now
+/// stopping was all it could do: it wrote a sentence about what somebody would
+/// have to go and do, the errand ended, and whatever it had set up half way
+/// through was left half way through. What was missing is not the ability to
+/// sign in -- it must never have that -- but the ability to stop, be helped,
+/// and carry on in the same breath.
+///
+/// The page is opened in the person's own browser, signed into with their own
+/// hands, in a window this app is not driving and cannot read. Errand never
+/// sees the password, the code, or the session. What it gets back is one word:
+/// they are done, or they are not going to.
+async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let said = |k: &str| {
+        asked
+            .args
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+    };
+    let (what, where_at, why) = (said("what"), said("where"), said("why"));
+    if what.is_empty() {
+        anyhow::bail!("say what they need to do, or there is nothing to hand over");
+    }
+    // Only an address, and only one that goes to a browser. A tool that opens
+    // whatever it is handed is a tool that opens `file:///` and worse, at the
+    // asking of a model reading somebody else's web page.
+    let a_web_address =
+        where_at.is_empty() || where_at.starts_with("https://") || where_at.starts_with("http://");
+    if !a_web_address {
+        anyhow::bail!("only a web address can be opened, and that one is not one");
+    }
+
+    let handover = uuid::Uuid::new_v4().to_string();
+    let (tell_me, answered) = tokio::sync::oneshot::channel();
+    {
+        let held: State<Held> = app.state();
+        held.handovers
+            .lock()
+            .unwrap()
+            .insert(handover.clone(), tell_me);
+    }
+
+    // Opened before the card is shown, so that by the time somebody reads what
+    // to do, the thing to do it in is already in front of them.
+    if !where_at.is_empty() {
+        let _ = std::process::Command::new("open").arg(where_at).spawn();
+    }
+
+    {
+        let held: State<Held> = app.state();
+        let line = held.store.the_app_says_about(
+            &asked.from,
+            "over_to_you",
+            &match (why.is_empty(), where_at.is_empty()) {
+                (true, true) => what.to_string(),
+                (true, false) => format!("{what}\n{where_at}"),
+                (false, true) => format!("{what}\n{why}"),
+                (false, false) => format!("{what}\n{why}\n{where_at}"),
+            },
+            &handover,
+        )?;
+        let _ = app.emit(
+            "handing_over",
+            HandingOver {
+                conversation: asked.from.clone(),
+                seq: line.seq,
+                handover: handover.clone(),
+                what: what.to_string(),
+                why: why.to_string(),
+                where_at: where_at.to_string(),
+            },
+        );
+    }
+
+    // Ten minutes, the same as everything else here waits, and for the same
+    // reason: an errand that ran at seven in the morning with nobody at the
+    // window should end saying so rather than sitting open for ever.
+    let back = tokio::time::timeout(std::time::Duration::from_secs(600), answered).await;
+    {
+        let held: State<Held> = app.state();
+        held.handovers.lock().unwrap().remove(&handover);
+    }
+    match back {
+        Ok(Ok(word)) if word == "done" => Ok(format!(
+            "They say they have done it: {what}. Whatever they signed into is signed into \
+             now, so try again rather than asking them how it went."
+        )),
+        Ok(Ok(_)) => Ok(format!(
+            "They have skipped it: {what}. Do not ask again. Carry on with whatever can be \
+             done without it, and say plainly what cannot."
+        )),
+        // The window went away, or nobody was there.
+        _ => Ok(format!(
+            "Nobody came back about it: {what}. Say what is still waiting on them and stop \
+             there."
+        )),
+    }
+}
+
+/// Somebody is being asked to come and do something.
+#[derive(Clone, Serialize)]
+struct HandingOver {
+    conversation: String,
+    seq: i64,
+    /// Which handover, so the answer reaches the call that is waiting.
+    handover: String,
+    what: String,
+    why: String,
+    #[serde(rename = "where")]
+    where_at: String,
+}
+
+/// Which handovers are still being waited on.
+///
+/// Asked when a conversation is read back, because a line on disk cannot say
+/// whether the agent that wrote it is still sitting there. Without this,
+/// switching away from a conversation and back turned a question somebody was
+/// being asked into a note about a question, and left the agent waiting with
+/// nothing on screen to answer it.
+#[tauri::command]
+async fn waiting_on_you(held: State<'_, Held>) -> Result<Vec<String>, String> {
+    Ok(held.handovers.lock().unwrap().keys().cloned().collect())
+}
+
+/// Say they have done it, or that they are not going to.
+#[tauri::command]
+async fn handed_back(held: State<'_, Held>, handover: String, how: String) -> Result<(), String> {
+    let waiting = held.handovers.lock().unwrap().remove(&handover);
+    match waiting {
+        Some(tell) => {
+            let _ = tell.send(how);
+            Ok(())
+        }
+        // Answered twice, or answered after it gave up. Neither is worth an
+        // error in front of somebody who just pressed a button.
+        None => Ok(()),
+    }
 }
 
 /// Wake this conversation when something changes, because it was asked to.
@@ -3384,6 +3535,7 @@ pub fn run() {
                 doing: Arc::default(),
                 looking: Arc::default(),
                 doorways: Mutex::new(HashMap::new()),
+                handovers: Mutex::new(HashMap::new()),
                 store: Arc::new(store),
             });
             // The receiving end is parked here and started on Ready, for the
@@ -3433,6 +3585,8 @@ pub fn run() {
             whats_offered,
             opens_at_login,
             what_changed,
+            handed_back,
+            waiting_on_you,
             seen_what_changed,
             open_at_login,
             still_going,

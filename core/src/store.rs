@@ -1859,6 +1859,23 @@ impl Store {
         self.append(conversation, kind, text, None, None)
     }
 
+    /// The same, for a line an answer will arrive against later.
+    ///
+    /// `about` is what the answer will name. A line asking somebody to go and
+    /// do something has to be recognisable when the conversation is read back,
+    /// or reopening it turns a question still being waited on into a note about
+    /// something that used to be waited on -- with the agent still sitting
+    /// there, and nothing on screen to answer it with.
+    pub fn the_app_says_about(
+        &self,
+        conversation: &str,
+        kind: &str,
+        text: &str,
+        about: &str,
+    ) -> Result<Line> {
+        self.append(conversation, kind, text, Some(about), None)
+    }
+
     fn append(
         &self,
         conversation: &str,

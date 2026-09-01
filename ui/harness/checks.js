@@ -928,14 +928,17 @@ export async function everythingLinesUp() {
     };
   };
 
-  // A goal is one long sentence and its buttons belong under it, so that panel
-  // is two lines on purpose. Every control in it is still the same height, and
-  // the ones sharing a line still share a line -- what is not true of it is
-  // that the whole panel is one row, and asserting that would be asserting
-  // something nobody wants.
+  // None of these is one row any more, and none of them should be. A goal is
+  // one long sentence with its buttons under it; Repeat and Watch each ask
+  // three questions and offer three answers, and Watch asks a third since
+  // "every 10m" stopped being something somebody had to know how to type.
+  //
+  // What is worth holding is what somebody complained about: every control the
+  // same height, and the ones sharing a line sharing it exactly. Asserting the
+  // whole panel is one row would now be asserting something nobody wants.
   const panels = [
-    ["repeat", "#routine", { oneLine: true }],
-    ["watch", "#watching", { oneLine: true }],
+    ["repeat", "#routine", { oneLine: false }],
+    ["watch", "#watching", { oneLine: false }],
     ["goal", "#aiming", { oneLine: false }],
   ];
   for (const [button, panel, how] of panels) {
@@ -2529,6 +2532,92 @@ export async function settingAWatchExplainsItself() {
     await new Promise((r) => setTimeout(r, 300));
   }
   document.getElementById("watch").click();
+  return found;
+}
+
+/**
+ * Being asked to come and do one thing, and handing it back.
+ *
+ * The end of the road that was not really the end of one. An agent meeting a
+ * sign-in could only stop: it wrote a sentence about what somebody would have
+ * to go and do, the errand ended, and whatever it had arranged half way through
+ * stayed half arranged. What was missing was never the ability to sign in, and
+ * must not be. It is the ability to stop, be helped, and carry on.
+ */
+export async function handingItOver() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const where = document.getElementById("talks").value;
+
+  const heard = tell("handing_over", {
+    conversation: where,
+    seq: 9600,
+    handover: "h-1",
+    what: "Sign in to your Apple Account",
+    why: "The order page will not show a guest order without the email on it.",
+    where: "https://secure.store.apple.com/shop/order/list",
+  });
+  await new Promise((r) => setTimeout(r, 200));
+  check("the window is listening for somebody being wanted", heard > 0, `${heard} listener(s)`);
+
+  const card = document.querySelector("#messages .handover");
+  check("it draws a card of its own rather than a line of text", card, "no card");
+  const said = card?.textContent || "";
+  check("it says what to do", said.includes("Sign in to your Apple Account"), said.slice(0, 60));
+  check("and why it cannot be done for them", /will not show a guest order/.test(said), said.slice(0, 120));
+
+  // The page itself, as a link rather than as a thing this app types into.
+  const link = card?.querySelector("a.detail");
+  check("the page is offered as a link they open", link && link.textContent.startsWith("https://"), link?.textContent);
+
+  const buttons = [...(card?.querySelectorAll(".choices button") || [])].map((b) => b.textContent);
+  check(
+    "there is a way to say it is done and a way to refuse",
+    buttons.length === 2 && /done/i.test(buttons[0]) && /skip/i.test(buttons[1]),
+    buttons.join(" | "),
+  );
+
+  card.querySelector(".choices button").click();
+  await new Promise((r) => setTimeout(r, 250));
+  check(
+    "saying it is done tells the agent that is waiting",
+    asked.some((a) => a.name === "handed_back" && a.args?.handover === "h-1" && a.args?.how === "done"),
+    JSON.stringify(asked.filter((a) => a.name === "handed_back")),
+  );
+  check(
+    "and the card stops offering, since it has been answered",
+    !document.querySelector("#messages .handover .choices"),
+    document.querySelector("#messages .handover")?.textContent.slice(-40),
+  );
+
+  // Read back off disk while the agent is still sitting there. Without asking
+  // the app, opening the conversation turned a question somebody was being
+  // asked into a note about one, with the agent still waiting and nothing on
+  // screen to answer it with.
+  //
+  // Two conversations rather than one opened twice: a conversation is read
+  // back exactly once and kept, so opening the same one again proves nothing.
+  await openTalk("talk-waiting");
+  await new Promise((r) => setTimeout(r, 300));
+  const again = document.querySelector("#messages .handover");
+  check(
+    "one still being waited on keeps its buttons when it is read back",
+    again?.querySelector(".choices"),
+    again ? again.textContent.slice(0, 60) : "no card",
+  );
+
+  // And one nobody is waiting on offers nothing, rather than a button that
+  // would tell nobody.
+  await openTalk("talk-over");
+  await new Promise((r) => setTimeout(r, 300));
+  const stale = document.querySelector("#messages .handover");
+  check(
+    "one nobody is waiting on offers nothing, and says why",
+    stale && !stale.querySelector(".choices") && /not waiting now/.test(stale.textContent),
+    stale?.textContent.slice(-50) || "no card",
+  );
+
+  await openTalk("talk-1");
   return found;
 }
 

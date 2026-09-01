@@ -146,6 +146,10 @@ const GRANTED: &[&str] = &[
     // out loud is a question about their own sentence.
     "mcp__errand__every_day",
     "mcp__errand__keep_an_eye_on",
+    // Asking somebody to come and do something is the one tool here that is
+    // entirely a question. Putting a permission card in front of it would be
+    // asking whether it may ask.
+    "mcp__errand__over_to_you",
 ];
 
 /// A thread's conversation with Claude Code.

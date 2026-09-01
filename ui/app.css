@@ -815,6 +815,31 @@ main > aside, main > #title, main > #composer { flex: none; }
 }
 #send:disabled { opacity: 0.35; cursor: default; }
 
+/* Somebody being asked to come and do one thing. A cousin of the question
+   card, and deliberately not the same: that one asks whether an agent may do
+   something, this one asks somebody to do something themselves. */
+.handover {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  max-width: 74ch;
+  padding: 12px 13px;
+  border-radius: 14px;
+  background: var(--card);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--rule));
+}
+.handover.done { border-color: var(--rule); }
+.handover .tile { margin-top: 1px; }
+.handover a.detail {
+  display: block;
+  margin: 7px 0 0;
+  color: var(--accent);
+  font-size: 12.5px;
+  word-break: break-all;
+  text-decoration: none;
+}
+.handover a.detail:hover { text-decoration: underline; }
+
 /* ------------------------------------------------------------ asking -- */
 
 /*

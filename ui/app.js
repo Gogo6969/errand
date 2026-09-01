@@ -426,6 +426,9 @@ async function show(id) {
     const [lines, live] = await Promise.all([
       invoke("lines", { id }),
       invoke("still_going", { id }).catch(() => false),
+      // Before the lines are read, since reading one asks whether it is still
+      // being waited on.
+      whatIsStillWaiting(),
     ]);
     t.messages = lines.map((line) => fromStore(line, live));
     t.loaded = true;
@@ -551,6 +554,25 @@ function talking() {
  * `live` says whether the engine behind this conversation is still there, which
  * decides what an unanswered question means.
  */
+/**
+ * The handovers still being waited on, as of the last time anything asked.
+ *
+ * Read before a conversation is drawn rather than per line, because it is one
+ * question about the app rather than a question about each line.
+ */
+let stillWaiting = new Set();
+
+async function whatIsStillWaiting() {
+  try {
+    stillWaiting = new Set(await invoke("waiting_on_you"));
+  } catch {
+    // Nothing waiting is the safe answer: a card drawn without its buttons
+    // says so plainly, where one drawn with buttons that answer nobody does
+    // not.
+    stillWaiting = new Set();
+  }
+}
+
 function fromStore(line, live = false) {
   switch (line.kind) {
     case "mine":
@@ -571,6 +593,29 @@ function fromStore(line, live = false) {
           line.outcome ||
           (live ? "" : "That question expired when the thread closed."),
       };
+    // What somebody was asked to come and do. Read back without its buttons:
+    // the agent that was waiting is long gone, so offering to tell it you are
+    // finished would be offering to tell nobody.
+    // Whether it still has its buttons depends on whether the agent that asked
+    // is still sitting there, which a line on disk cannot say. `stillWaiting`
+    // is what the app answered when this conversation was read back. Without
+    // it, opening the conversation turned a question somebody was being asked
+    // into a note about one, with the agent still waiting and nothing on
+    // screen to answer it with.
+    case "over_to_you": {
+      const [what, ...rest] = String(line.text).split("\n");
+      const where = rest.find((one) => /^https?:\/\//.test(one)) || "";
+      const still = stillWaiting.has(line.call);
+      return {
+        kind: "over_to_you",
+        seq: line.seq,
+        handover: line.call || "",
+        what,
+        why: rest.filter((one) => one !== where).join(" "),
+        where,
+        answered: still ? null : "That was while this was open. It is not waiting now.",
+      };
+    }
     case "doing":
       return {
         kind: "doing",
@@ -862,6 +907,8 @@ function draw(m) {
     }
     case "asking":
       return asks(m);
+    case "over_to_you":
+      return handItOver(m);
     case "ended":
       node.className = m.failed ? "ended failed" : "ended";
       node.textContent = m.text;
@@ -881,6 +928,73 @@ function draw(m) {
  * Once answered the card becomes a line of history rather than disappearing.
  * What you allowed is worth being able to look back at.
  */
+/**
+ * Somebody is being asked to come and do one thing.
+ *
+ * The end of the road that is not really the end of one. An agent that meets a
+ * sign-in, a code sent to a phone, or a card number has to stop, and stopping
+ * used to be all it could do: it wrote a sentence about what somebody would
+ * have to go and do, the errand ended, and whatever it had arranged half way
+ * through stayed half arranged.
+ *
+ * What it never does is the thing itself. The page opens in their own browser
+ * and they type into the real site, in a window this app is not driving and
+ * cannot read.
+ */
+function handItOver(m) {
+  const card = document.createElement("li");
+  card.className = m.answered ? "handover done" : "handover";
+  card.dataset.handover = m.handover || "";
+
+  const words = document.createElement("div");
+  words.className = "question";
+  words.append(note("p", m.what, "wants"));
+  if (m.why) words.append(note("p", m.why, "doing"));
+  if (m.where) {
+    const link = document.createElement("a");
+    link.className = "detail";
+    link.href = m.where;
+    link.textContent = m.where;
+    link.onclick = (e) => {
+      e.preventDefault();
+      invoke("show_in_browser", { url: m.where }).catch(() => {});
+    };
+    words.append(link);
+  }
+
+  if (m.answered) {
+    words.append(note("p", m.answered, "answered"));
+  } else {
+    const choices = document.createElement("div");
+    choices.className = "choices";
+    const press = (label, how, said) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.onclick = async () => {
+        m.answered = said;
+        stillWaiting.delete(m.handover);
+        drawMessages();
+        try {
+          await invoke("handed_back", { handover: m.handover, how });
+        } catch (why) {
+          m.answered = String(why);
+          drawMessages();
+        }
+      };
+      return b;
+    };
+    choices.append(
+      press("I have done it", "done", "You said you had done it"),
+      press("Skip this", "skipped", "You skipped it"),
+    );
+    words.append(choices);
+  }
+
+  card.append(tile("person", true), words);
+  return card;
+}
+
 function asks(m) {
   const li = document.createElement("li");
   li.className = "asking";
@@ -1038,6 +1152,27 @@ listen("noted", ({ payload }) => {
   // as its own kind, it drew as nothing at all live and drew fine after a
   // reload, which is the worst way round.
   t.messages.push(fromStore(payload));
+  if (showing === payload.conversation) drawMessages();
+  drawThreads();
+});
+
+// Somebody is wanted at the keyboard. Its own listener rather than a kind
+// inside `happened`, because it is the app asking rather than an engine
+// saying: nothing about it came from the conversation's own stream.
+listen("handing_over", ({ payload }) => {
+  const t = talks.get(payload.conversation);
+  if (!t) return;
+  stillWaiting.add(payload.handover);
+  t.working = false;
+  t.messages.push({
+    kind: "over_to_you",
+    seq: payload.seq,
+    handover: payload.handover,
+    what: payload.what,
+    why: payload.why,
+    where: payload.where,
+    answered: null,
+  });
   if (showing === payload.conversation) drawMessages();
   drawThreads();
 });

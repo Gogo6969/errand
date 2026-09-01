@@ -220,6 +220,46 @@ pub fn declarations() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "over_to_you",
+                "description":
+                    "Hand the person the keyboard for one step you must not do yourself, then \
+                     carry on where they left off. Use it for a sign-in, a two-factor code, a \
+                     card number, a cookie banner, a captcha: the real ends of the road. Open \
+                     the page first if there is one to open, say plainly what they are looking \
+                     at and what to do, and wait. They press a button when they are finished. \
+                     Whatever they signed into stays signed in, so try the thing again \
+                     afterwards rather than asking them how it went. Never use it to get them \
+                     to do work you could do, and never ask them to type a password anywhere \
+                     but the real site.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "what": {
+                            "type": "string",
+                            "description":
+                                "What they need to do, in one line, as you would say it \
+                                 standing next to them: `Sign in to your Apple Account`"
+                        },
+                        "where": {
+                            "type": "string",
+                            "description":
+                                "The address to open for them, where there is one. Left out \
+                                 if what they need to do is not in a browser."
+                        },
+                        "why": {
+                            "type": "string",
+                            "description":
+                                "Why you cannot do it yourself, in one line, so they can \
+                                 judge whether to."
+                        }
+                    },
+                    "required": ["what"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "who_else",
                 "description":
                     "List the other agents you can hand work to, with what each one handles. \
@@ -249,6 +289,7 @@ pub enum Ours {
     Forget,
     EveryDay,
     KeepAnEyeOn,
+    OverToYou,
 }
 
 impl Ours {
@@ -262,6 +303,7 @@ impl Ours {
             Ours::Forget => "forget",
             Ours::EveryDay => "every_day",
             Ours::KeepAnEyeOn => "keep_an_eye_on",
+            Ours::OverToYou => "over_to_you",
         }
     }
 }
@@ -276,6 +318,7 @@ pub fn ours(tool: &str) -> Option<Ours> {
         "forget" => Some(Ours::Forget),
         "every_day" => Some(Ours::EveryDay),
         "keep_an_eye_on" => Some(Ours::KeepAnEyeOn),
+        "over_to_you" => Some(Ours::OverToYou),
         _ => None,
     }
 }
@@ -326,6 +369,10 @@ pub fn in_plain_words(tool: Ours, args: &Value) -> String {
             "" => "Setting a watch".to_string(),
             what => format!("Keeping an eye on {what}"),
         },
+        Ours::OverToYou => match get("what") {
+            "" => "Handing this over to you".to_string(),
+            what => format!("Over to you: {what}"),
+        },
         Ours::Remember => match get("about") {
             "" => "Making a note".to_string(),
             about => format!("Making a note about {}", about.replace('_', " ")),
@@ -366,6 +413,9 @@ pub fn the_thing_itself(tool: Ours, args: &Value) -> String {
         // The schedule rather than the errand: somebody saying always to this
         // is agreeing to a thing that runs at a time, and the time is the half
         // that decides whether they meant it.
+        // Nothing. An "always" here would be somebody agreeing in advance to be
+        // interrupted, which is not a thing anybody wants to agree to once.
+        Ours::OverToYou => String::new(),
         Ours::EveryDay => args
             .get("when")
             .and_then(|v| v.as_str())
@@ -413,6 +463,10 @@ pub fn asks_first(tool: Ours) -> bool {
         // person just asked for out loud is a question about their own
         // sentence.
         Ours::EveryDay | Ours::KeepAnEyeOn => false,
+        // Nor this, and it is the clearest case of the lot: the whole tool is
+        // asking. A permission card in front of a request to come and do
+        // something is two questions where one was meant.
+        Ours::OverToYou => false,
     }
 }
 
@@ -432,6 +486,10 @@ pub fn without_the_app(tool: Ours) -> &'static str {
         Ours::EveryDay | Ours::KeepAnEyeOn => {
             "Nothing here runs on a schedule. This is an engine with no app behind it, so \
              say what you would have set up and leave it to them."
+        }
+        Ours::OverToYou => {
+            "There is nobody at a window here to hand anything to. Say what somebody would \
+             have to do, and stop there."
         }
     }
 }
@@ -548,6 +606,7 @@ mod tests {
                 "forget",
                 "every_day",
                 "keep_an_eye_on",
+                "over_to_you",
                 "who_else"
             ]
         );

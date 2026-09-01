@@ -56,6 +56,11 @@ export const FIXTURE = {
   conversations: {
     "agent-unnamed": [
       { id: "talk-1", agent: "agent-unnamed", name: "First", opened: true },
+      // Two that exist only to be opened once each, because whether a handover
+      // still has its buttons is decided while a conversation is read back and
+      // a conversation is read back exactly once.
+      { id: "talk-waiting", agent: "agent-unnamed", name: "Waiting on you", opened: true },
+      { id: "talk-over", agent: "agent-unnamed", name: "Was waiting", opened: true },
     ],
     "agent-bitcoin": [
       { id: "talk-2", agent: "agent-bitcoin", name: "First", opened: true },
@@ -64,6 +69,31 @@ export const FIXTURE = {
     ],
   },
   lines: {
+    // Somebody is being asked to do something, and the agent is still sitting
+    // there: `waiting_on_you` names this one.
+    "talk-waiting": [
+      {
+        seq: 1,
+        at: 1,
+        kind: "over_to_you",
+        text: "Sign in to your Apple Account\nThe order will not show without it\nhttps://secure.store.apple.com/shop/order/list",
+        call: "still-waiting",
+        tool: null,
+        outcome: null,
+      },
+    ],
+    // The same line, from an errand that ended long ago.
+    "talk-over": [
+      {
+        seq: 1,
+        at: 1,
+        kind: "over_to_you",
+        text: "Sign in to your Apple Account\nhttps://secure.store.apple.com/shop/order/list",
+        call: "long-gone",
+        tool: null,
+        outcome: null,
+      },
+    ],
     "talk-1": [
       { seq: 1, at: 1, kind: "mine", text: "Show me the latest Bitcoin news", call: null, tool: null, outcome: null },
       { seq: 2, at: 2, kind: "said", text: "**BTC** is around $77,700.", call: null, tool: null, outcome: null },
@@ -306,6 +336,15 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           // and what it does with its own list afterwards.
           case "forget":
             return Promise.resolve(null);
+          // Somebody saying they have done the thing they were asked to do,
+          // or that they are not going to.
+          case "handed_back":
+          case "show_in_browser":
+            return Promise.resolve(null);
+          // Which handovers are still being waited on. A line on disk cannot
+          // say, so the window asks.
+          case "waiting_on_you":
+            return Promise.resolve(fixture.waiting_on_you || ["still-waiting"]);
           case "opens_at_login":
             // A check can put the third answer here, which is the one the app
             // cannot produce by pressing anything: something starts at login
