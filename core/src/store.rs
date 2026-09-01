@@ -794,6 +794,17 @@ const CHANGES: &[&str] = &[
     // not also be an album. The files sit beside the store, and this says which
     // of them belong to which thing somebody said.
     "ALTER TABLE lines ADD COLUMN pictures TEXT;",
+    // 22
+    //
+    // Whether a turn was in flight. Set when one starts and cleared when it
+    // ends, so that a turn cut off by the app closing can be told, at the next
+    // start, from one that finished.
+    //
+    // Nothing anywhere knew this. Quitting Errand mid-turn killed the engine
+    // and left the transcript holding a question with no answer and nothing
+    // saying why -- which reads exactly like an app still thinking about it,
+    // for ever.
+    "ALTER TABLE conversations ADD COLUMN in_flight INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -1832,6 +1843,36 @@ impl Store {
         Self::only_if_it_is_there(changed, "conversation")
     }
 
+    /// Say that a turn has started in this conversation.
+    pub fn a_turn_began(&self, conversation: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE conversations SET in_flight = 1 WHERE id = ?",
+            [conversation],
+        )?;
+        Ok(())
+    }
+
+    /// Say that it has ended, however it ended.
+    pub fn a_turn_ended(&self, conversation: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE conversations SET in_flight = 0 WHERE id = ?",
+            [conversation],
+        )?;
+        Ok(())
+    }
+
+    /// Every conversation that was mid-turn when this last stopped.
+    ///
+    /// Read once at startup. A turn cannot survive the process that was running
+    /// it, so anything still marked when the app opens was cut off rather than
+    /// finished, and the person is owed a sentence saying so.
+    pub fn turns_that_were_cut_off(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare("SELECT id FROM conversations WHERE in_flight = 1")?;
+        let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Say that a routine has just run.
     pub fn ran(&self, conversation: &str, at: i64) -> Result<()> {
         self.conn.lock().unwrap().execute(
@@ -2777,6 +2818,56 @@ mod tests {
             "{:?}",
             hits[0].snippet
         );
+    }
+
+    #[test]
+    fn a_turn_the_app_was_closed_during_is_known_about_when_it_opens_again() {
+        // Nothing anywhere knew this. Quitting Errand mid-turn killed the
+        // engine and left a question with no answer and nothing saying why,
+        // which from the window is indistinguishable from an app still
+        // thinking about it, and stays that way for ever.
+        let at = std::env::temp_dir().join("errand-cut-off-test.db");
+        let _ = std::fs::remove_file(&at);
+        {
+            let s = Store::open(&at).unwrap();
+            s.make_sure_it_exists("who", NOT_YET_NAMED, Path::new("/tmp/who"))
+                .unwrap();
+            s.asked("who", "Show me the most important news of today")
+                .unwrap();
+            s.a_turn_began("who").unwrap();
+            assert_eq!(
+                s.turns_that_were_cut_off().unwrap(),
+                vec!["who".to_string()]
+            );
+        }
+
+        // The process is gone, which is the whole point: the mark is on disk
+        // and not in the memory of the thing that died.
+        let s = Store::open(&at).unwrap();
+        assert_eq!(
+            s.turns_that_were_cut_off().unwrap(),
+            vec!["who".to_string()],
+            "the app came back not knowing it had been interrupted"
+        );
+
+        // And a turn that finished leaves nothing behind to say sorry for.
+        s.a_turn_ended("who").unwrap();
+        assert!(s.turns_that_were_cut_off().unwrap().is_empty());
+        let _ = std::fs::remove_file(&at);
+    }
+
+    #[test]
+    fn a_turn_that_finished_before_the_app_closed_is_not_apologised_for() {
+        // The other half, and the one that would be tiresome to get wrong: a
+        // line saying "this was interrupted" under every conversation that ever
+        // finished is worse than saying nothing.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("who", NOT_YET_NAMED, Path::new("/tmp/who"))
+            .unwrap();
+        assert!(s.turns_that_were_cut_off().unwrap().is_empty());
+        s.a_turn_began("who").unwrap();
+        s.a_turn_ended("who").unwrap();
+        assert!(s.turns_that_were_cut_off().unwrap().is_empty());
     }
 
     #[test]

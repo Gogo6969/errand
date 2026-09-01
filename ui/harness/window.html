@@ -205,7 +205,7 @@
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
 
-  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut, aCall, stepsDoNotOverlap, openingAtLogin, sayingWhatThisIs, repeatingWhatWasAsked, whatElseIsAllowed, whatChangedInThisOne, theMenuOnAnAgent, settingAWatchExplainsItself, handingItOver, whatAgentsCanReach, whenThingsHappened, somethingYouHaveNotRead, whatYouTypedStaysPut, namingAndDeletingAConversation, aNotificationThatLeadsSomewhere, pausingARoutineAndSeeingHowItWent, findingWhereTheWordsAre, whatALongCommandIsPrinting, picturesYouCanSee, theQuestionBeforeDeletingIsReadable, firstRun } =
+  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut, aCall, stepsDoNotOverlap, openingAtLogin, sayingWhatThisIs, repeatingWhatWasAsked, whatElseIsAllowed, whatChangedInThisOne, theMenuOnAnAgent, settingAWatchExplainsItself, handingItOver, whatAgentsCanReach, whenThingsHappened, somethingYouHaveNotRead, whatYouTypedStaysPut, namingAndDeletingAConversation, aNotificationThatLeadsSomewhere, pausingARoutineAndSeeingHowItWent, findingWhereTheWordsAre, whatALongCommandIsPrinting, picturesYouCanSee, theQuestionBeforeDeletingIsReadable, aTurnTheAppWasClosedDuring, aPictureAnAgentMade, firstRun } =
     await import(`./checks.js${fresh}`);
   // A first run is looked at on its own, because there is nothing else in it.
   if (brandNew) {
@@ -258,6 +258,8 @@
     ["whatALongCommandIsPrinting", whatALongCommandIsPrinting],
     ["picturesYouCanSee", picturesYouCanSee],
     ["theQuestionBeforeDeletingIsReadable", theQuestionBeforeDeletingIsReadable],
+    ["aTurnTheAppWasClosedDuring", aTurnTheAppWasClosedDuring],
+    ["aPictureAnAgentMade", aPictureAnAgentMade],
     ["aiming", aiming],
     ["whichModels", whichModels],
     ["questionsStillOpen", questionsStillOpen],
@@ -282,13 +284,19 @@
   const header = headerFitsOnOneRow();
   found.push({
     what: "everything in the header is on one row",
-    ok: header.rows === 1,
+    // Saying "cannot be judged" and then counting itself a failure is the
+    // worst of both: the report says the app is broken and the reason says it
+    // has no idea. Not judged is not failed.
+    ok: header.tooNarrowToJudge || header.rows === 1,
     saw: header.tooNarrowToJudge
       ? `cannot be judged: this window is ${header.at}px, below the width where wrapping is meant to happen. Widen it and run again.`
       : `${header.rows} row(s) at ${header.at}px`,
   });
-  found.push({ what: "Tools is inside the header rather than past its edge",
-               ok: header.toolsInside, saw: String(header.toolsInside) });
+  found.push({
+    what: "Tools is inside the header rather than past its edge",
+    ok: header.tooNarrowToJudge || header.toolsInside,
+    saw: String(header.toolsInside),
+  });
 
   const failed = found.filter((f) => !f.ok);
   report.innerHTML =

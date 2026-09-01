@@ -2042,3 +2042,40 @@ body.in-a-call #what {
   border-radius: 10px;
   box-shadow: var(--cast);
 }
+
+/* A turn the app cut off by closing. The one ending somebody can do something
+   about, so it is the only one that offers to. */
+.ended .again {
+  margin-left: 10px;
+  border: 1px solid var(--edge);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 9px;
+  cursor: pointer;
+}
+.ended .again:hover { background: var(--hover); }
+
+/* A picture an agent made or fetched, inside its answer. Wider than one
+   somebody attached: this is the thing that was asked for, not a note beside
+   a message. */
+.said img.drawn {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  margin: 10px 0;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  cursor: zoom-in;
+}
+/* A file on this machine that an answer points at. Revealed in Finder rather
+   than opened, so a path in an answer stops being a dead end. */
+a.on-disk {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}

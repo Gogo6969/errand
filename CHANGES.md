@@ -79,6 +79,17 @@ would notice, not something a commit did.
   means quitting that app, so the one permission you are most likely to be
   asked for was the one that killed the agent waiting for your answer. The
   card keeps its buttons and picks the errand up where it left off.
+- Pictures an agent makes or fetches are shown in its answer, instead of a path
+  you cannot click. Agents had started apologising for this in prose: "both are
+  downloaded locally if the images don't render for you".
+- A file an answer points at can be clicked to show it in Finder. It is
+  revealed rather than opened, so a path in an answer cannot run anything.
+- When an agent needs a macOS permission it now opens that Settings pane for
+  you, rather than describing where to find it. Automation is four levels down
+  a screen most people have never opened.
+- A task interrupted by Errand closing says so when you come back, and offers
+  to run it again. It used to leave a question with no answer and nothing
+  saying why, which looks exactly like an app still thinking about it.
 - Fixed: the question before deleting an agent could be pushed off the bottom
   of the screen by its own length, so the one line you had to read was the one
   you could not.

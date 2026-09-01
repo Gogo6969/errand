@@ -243,8 +243,15 @@ pub fn declarations() -> Vec<Value> {
                         "where": {
                             "type": "string",
                             "description":
-                                "The address to open for them, where there is one. Left out \
-                                 if what they need to do is not in a browser."
+                                "What to open for them, where there is something. A web \
+                                 address, or a pane of macOS System Settings as \
+                                 `x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Automation` \
+                                 -- swap the last part for `Privacy_AllFiles` for Full Disk \
+                                 Access, `Privacy_Microphone`, `Privacy_Calendars`, \
+                                 `Privacy_Contacts` or `Privacy_ScreenCapture`. Always send \
+                                 them to the pane rather than describing where it is: \
+                                 Automation is four levels down a screen most people have \
+                                 never opened. Left out when there is nothing to open."
                         },
                         "why": {
                             "type": "string",

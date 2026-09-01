@@ -67,6 +67,7 @@ export const FIXTURE = {
       { id: "talk-3", agent: "agent-bitcoin", name: "Asked by Day Check", opened: true },
       { id: "talk-4", agent: "agent-bitcoin", name: "Answered a few", opened: true },
       { id: "talk-overnight", agent: "agent-bitcoin", name: "Ran overnight", opened: true },
+      { id: "talk-cut-off", agent: "agent-bitcoin", name: "Cut off", opened: true },
     ],
   },
   // How a routine has been going: one good morning, one failed, and one that
@@ -111,6 +112,15 @@ export const FIXTURE = {
       { seq: 5, at: 5, kind: "mine", text: "What is wrong with this screen?", call: null, tool: null, outcome: null,
         pictures: ["5-0.png", "gone.png"] },
       { seq: 2, at: 2, kind: "said", text: "**BTC** is around $77,700.", call: null, tool: null, outcome: null },
+    ],
+    // A turn the app was closed during: a question, and an ending that says so.
+    // What made this worth a fixture is that there is no answer to hang the
+    // ordinary "Ask again" on -- never getting one is the whole of what
+    // happened -- so the ending itself has to offer it.
+    "talk-cut-off": [
+      { seq: 1, at: Date.now() - 60000, kind: "mine", text: "Show me the most important news of today", call: null, tool: null, outcome: null },
+      { seq: 2, at: Date.now() - 30000, kind: "ended", call: "cut-off", tool: null, outcome: null,
+        text: "Errand was closed while this was running, so it stopped part way. Nothing already written down was lost." },
     ],
     // A conversation an agent carried on while nobody was looking: yesterday's
     // briefing and today's, one under the other. Dated rather than numbered,

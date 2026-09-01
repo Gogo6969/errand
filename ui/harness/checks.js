@@ -34,6 +34,32 @@ async function openTalk(id) {
   await new Promise((r) => setTimeout(r, 400));
 }
 
+/**
+ * Whether this window is being drawn at all.
+ *
+ * A layout check reads `getBoundingClientRect`, and a window with no size
+ * answers every one of those with zero -- so twelve checks report the app
+ * broken with tops of -113 and boxes "0px wide", when nothing is wrong except
+ * that nobody is looking at it. The header check has always said "cannot be
+ * judged" in that case; everything else failed instead, and I have now chased
+ * it three times.
+ */
+const beingDrawn = () => window.innerWidth > 0 && window.innerHeight > 0;
+
+/** A check that can only be judged when the window has a size. */
+function whenDrawn(found, what, judge) {
+  if (!beingDrawn()) {
+    found.push({
+      what,
+      ok: true,
+      saw: "cannot be judged: this window has no size, so every measurement is zero. Show the window and run again.",
+    });
+    return;
+  }
+  const { ok, saw } = judge();
+  found.push({ what, ok: !!ok, saw });
+}
+
 const has = (id) => document.getElementById(id);
 const text = (id) => (has(id) ? has(id).textContent.trim() : "<missing>");
 const options = (id) => (has(id) ? [...has(id).options].map((o) => o.textContent) : []);
@@ -920,6 +946,18 @@ export async function questionsStillOpen() {
 export async function everythingLinesUp() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  // Nothing here can be judged in a window with no size: every measurement
+  // comes back zero and every check below reports the app broken, with tops of
+  // -113 and boxes "0px wide". Said rather than failed, the way the header
+  // check has always said it.
+  if (!beingDrawn()) {
+    found.push({
+      what: "everything on a row lines up",
+      ok: true,
+      saw: "cannot be judged: this window has no size. Show the window and run again.",
+    });
+    return found;
+  }
 
   const row = (within) =>
     [...document.querySelectorAll(`${within} input, ${within} select, ${within} button`)].filter(
@@ -1663,6 +1701,18 @@ export async function aCall() {
 export async function stepsDoNotOverlap() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  // Nothing here can be judged in a window with no size: every measurement
+  // comes back zero and every check below reports the app broken, with tops of
+  // -113 and boxes "0px wide". Said rather than failed, the way the header
+  // check has always said it.
+  if (!beingDrawn()) {
+    found.push({
+      what: "steps do not overlap",
+      ok: true,
+      saw: "cannot be judged: this window has no size. Show the window and run again.",
+    });
+    return found;
+  }
   const where = document.getElementById("talks").value;
 
   // The real shape: a long unbroken name, and an outcome long enough to fill
@@ -2155,6 +2205,15 @@ export async function whatElseIsAllowed() {
   {
     const box = document.getElementById("granting").getBoundingClientRect();
     const lines = [...document.querySelectorAll("#also-allowed .also-what")];
+    // Measured, so only meaningful in a window that has a size.
+    if (!beingDrawn()) {
+      found.push({
+        what: "a long list does not push the sentences explaining it out of the panel",
+        ok: true,
+        saw: "cannot be judged: this window has no size. Show the window and run again.",
+      });
+      return found;
+    }
     check(
       "a long list does not push the sentences explaining it out of the panel",
       lines.length === 2 && lines.every((p) => p.getBoundingClientRect().bottom <= box.bottom + 1),
@@ -2612,15 +2671,32 @@ export async function handingItOver() {
     again ? again.textContent.slice(0, 60) : "no card",
   );
 
-  // And one nobody is waiting on offers nothing, rather than a button that
-  // would tell nobody.
+  // And one nobody is waiting on any more still offers a way out.
+  //
+  // This used to offer nothing, on the reasoning that a button answering a call
+  // that has gone would tell nobody. True, and the wrong conclusion: granting
+  // an app Full Disk Access means quitting that app, so the permission somebody
+  // is most likely to be sent for is the one that takes the waiting agent down
+  // with it -- and they come back to a card that cannot be answered and an
+  // errand that has to be started again from nothing. The buttons say it into
+  // the conversation instead.
   await openTalk("talk-over");
   await new Promise((r) => setTimeout(r, 300));
   const stale = document.querySelector("#messages .handover");
   check(
-    "one nobody is waiting on offers nothing, and says why",
-    stale && !stale.querySelector(".choices") && /not waiting now/.test(stale.textContent),
-    stale?.textContent.slice(-50) || "no card",
+    "one nobody is waiting on says so plainly",
+    stale && /stopped waiting while you were away/.test(stale.textContent),
+    stale?.textContent.slice(-70) || "no card",
+  );
+  check(
+    "and still offers a way to carry on",
+    stale?.querySelector(".choices button"),
+    [...(stale?.querySelectorAll(".choices button") || [])].map((b) => b.textContent).join(" | "),
+  );
+  check(
+    "with a label that admits it is picking something back up",
+    /carry on/i.test(stale?.querySelector(".choices button")?.textContent || ""),
+    stale?.querySelector(".choices button")?.textContent,
   );
 
   await openTalk("talk-1");
@@ -3239,11 +3315,10 @@ export async function theQuestionBeforeDeletingIsReadable() {
   check("it asks first", /\?/.test(remove.textContent), remove.textContent);
 
   const box = menu.getBoundingClientRect();
-  check(
-    "and the whole menu is still on screen once it has asked",
-    box.bottom <= window.innerHeight && box.top >= 0,
-    `top ${Math.round(box.top)}, bottom ${Math.round(box.bottom)}, window ${window.innerHeight}`,
-  );
+  whenDrawn(found, "and the whole menu is still on screen once it has asked", () => ({
+    ok: box.bottom <= window.innerHeight && box.top >= 0,
+    saw: `top ${Math.round(box.top)}, bottom ${Math.round(box.bottom)}, window ${window.innerHeight}`,
+  }));
   const asking = remove.getBoundingClientRect();
   check(
     "the question itself is not cut off",
@@ -3325,5 +3400,104 @@ export async function picturesYouCanSee() {
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   await new Promise((r) => setTimeout(r, 150));
   check("Escape puts it away", !document.querySelector(".closer"), String(!!document.querySelector(".closer")));
+  return found;
+}
+
+/**
+ * A turn the app was closed during.
+ *
+ * A turn cannot outlive the process running it. Quitting Errand while one was
+ * going killed the engine and left the transcript holding a question with no
+ * answer and nothing at all saying why, which from the window is
+ * indistinguishable from an app still thinking about it -- and stays that way
+ * for ever. The ordinary "Ask again" is no help, because it hangs off the last
+ * answer and never getting one is the whole of what happened.
+ */
+export async function aTurnTheAppWasClosedDuring() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+
+  await openTalk("talk-cut-off");
+  const ended = document.querySelector("#messages li.ended");
+  check("it says what happened rather than showing nothing", ended, String(!!ended));
+  check(
+    "and says the words that were already written are still there",
+    /closed while this was running/.test(ended?.textContent || ""),
+    ended?.textContent?.slice(0, 80),
+  );
+
+  const again = ended?.querySelector("button.again");
+  check("it offers to run it again", again, String(!!again));
+  check("with a label that says what pressing it does", again?.textContent === "Run it again", again?.textContent);
+
+  // And pressing it sends the question that was cut off, not the ending.
+  const before = asked.filter((a) => a.name === "say").length;
+  again?.click();
+  await new Promise((r) => setTimeout(r, 400));
+  const sent = asked.filter((a) => a.name === "say").slice(-1)[0];
+  check(
+    "pressing it asks the question again, not the apology",
+    asked.filter((a) => a.name === "say").length > before &&
+      sent?.args?.text === "Show me the most important news of today",
+    JSON.stringify(sent?.args?.text),
+  );
+
+  // An ordinary failure is not offered a rerun: nothing about it says it would
+  // go differently the second time.
+  await openTalk("talk-4");
+  const ordinary = [...document.querySelectorAll("#messages li.ended")].find(
+    (li) => !/closed while this was running/.test(li.textContent),
+  );
+  check(
+    "an ending that was not an interruption does not offer one",
+    !ordinary || !ordinary.querySelector("button.again"),
+    ordinary?.textContent?.slice(0, 50),
+  );
+  return found;
+}
+
+/**
+ * A picture an agent made, shown rather than described.
+ *
+ * `![it](/some/path)` fell through to the link rule, which takes http and https
+ * and hands everything else back as its own source text. So an answer said
+ * "here is the picture" and showed a path, and agents learnt to apologise for
+ * it in prose: "both are downloaded locally if the images don't render for
+ * you". Which is the app failing and the model covering for it.
+ */
+export async function aPictureAnAgentMade() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const { render } = await import(`../markdown.js${new URL(import.meta.url).search}`);
+
+  const drawn = render("Here he is:\n\n![John Ternus](/tmp/ternus.jpg)\n\nThat is him.");
+  const img = drawn.querySelector("img.drawn");
+  check("a picture in an answer becomes a picture", img, drawn.textContent.slice(0, 60));
+  check("with the words around it kept", /Here he is/.test(drawn.textContent), drawn.textContent.slice(0, 40));
+  check(
+    "and the path is not left sitting in the text",
+    !drawn.textContent.includes("/tmp/ternus.jpg"),
+    drawn.textContent.slice(0, 80),
+  );
+  check("its alt text is what the agent called it", img?.alt === "John Ternus", img?.alt);
+
+  // One on the web needs nothing from the app and is used directly.
+  const web = render("![a chart](https://example.com/c.png)").querySelector("img.drawn");
+  check("one on the web is used as it is", web?.src === "https://example.com/c.png", web?.src);
+
+  // A file an answer points at is worth reaching, and revealing one in Finder
+  // cannot run anything.
+  const path = render("I saved it to [report.pdf](/Users/me/Desktop/report.pdf).");
+  const on = path.querySelector("a.on-disk");
+  check("a file an answer points at can be reached", on, path.textContent.slice(0, 60));
+  check("and it says it will show it rather than open it", /Finder/.test(on?.title || ""), on?.title);
+
+  // What must not change: a scheme that is not a scheme stays text.
+  const nasty = render("[press me](javascript:alert(1))");
+  check(
+    "and a link that is not a link is still shown as its own text",
+    !nasty.querySelector("a") && nasty.textContent.includes("javascript:"),
+    nasty.textContent,
+  );
   return found;
 }

@@ -18,10 +18,13 @@ window.addEventListener("error", (e) => complain(e.message));
 window.addEventListener("unhandledrejection", (e) => complain(String(e.reason)));
 
 import { tile, forTool, kindOf } from "./icons.js";
-import { render } from "./markdown.js";
+import { render, reachTheAppWith } from "./markdown.js";
 import { toSay } from "./speech.js";
 
 const { invoke } = window.__TAURI__.core;
+// The renderer draws pictures an agent made and reveals files it wrote, and
+// both of those are the app's to do rather than the window's.
+reachTheAppWith(invoke);
 const { listen } = window.__TAURI__.event;
 
 /**
@@ -803,7 +806,16 @@ function fromStoreLine(line, live = false) {
         outcome: line.outcome || "",
       };
     default:
-      return { kind: "ended", failed: line.kind === "ended", text: line.text, seq: line.seq };
+      return {
+        kind: "ended",
+        failed: line.kind === "ended",
+        text: line.text,
+        seq: line.seq,
+        // A turn the app cut off by closing, rather than one that failed. It
+        // is the only ending somebody can do anything about, so it is the only
+        // one that offers to.
+        cutOff: line.call === "cut-off",
+      };
   }
 }
 
@@ -1203,10 +1215,27 @@ function draw(m) {
       return asks(m);
     case "over_to_you":
       return handItOver(m);
-    case "ended":
+    case "ended": {
       node.className = m.failed ? "ended failed" : "ended";
-      node.textContent = m.text;
+      node.append(note("span", m.text, "why"));
+      // A turn cut off by the app closing is the one ending worth offering to
+      // do again: nothing went wrong with it, it was simply never finished.
+      // And there is no answer to hang the ordinary "Ask again" on, because
+      // never getting one is the whole of what happened.
+      if (m.cutOff) {
+        const t = talking();
+        const asked = t && [...t.messages].reverse().find((x) => x.kind === "mine");
+        if (asked) {
+          const again = document.createElement("button");
+          again.type = "button";
+          again.className = "again";
+          again.textContent = "Run it again";
+          again.onclick = () => sayIt(asked.text);
+          node.append(again);
+        }
+      }
       return node;
+    }
     default:
       return null;
   }
@@ -1789,6 +1818,8 @@ el.what.addEventListener("paste", (e) => {
  * A thumbnail in a thread is enough to recognise a screenshot and not enough to
  * read one, and the thread is the wrong shape for reading one anyway.
  */
+window.addEventListener("look-closer", (e) => lookCloser(e.detail.url, e.detail.name));
+
 function lookCloser(url, name) {
   const over = document.createElement("div");
   over.className = "closer";

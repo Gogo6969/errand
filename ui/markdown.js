@@ -17,6 +17,23 @@
 // inline and fenced code, tables, quotes, rules, bold and italic. Anything else
 // falls through as text rather than being half-supported.
 
+/**
+ * How this module reaches the app, for the two things it cannot do itself.
+ *
+ * Drawing a picture an agent made means reading a file, and revealing one in
+ * Finder means asking the system: both are the app's to do and neither is the
+ * window's. Handed in rather than imported, so this file stays a renderer that
+ * turns text into nodes and can still be tested without an app behind it.
+ */
+let ask = async () => {
+    throw new Error("nothing is wired up to answer that yet");
+};
+
+/** Tell this module how to reach the app. Called once, by the window. */
+export function reachTheAppWith(invoke) {
+    ask = invoke;
+}
+
 /** Everything in `text`, as nodes ready to be put on the page. */
 export function render(text) {
   const out = document.createDocumentFragment();
@@ -217,6 +234,11 @@ function inline(text) {
       "(\\*\\*|__)(?=\\S)([\\s\\S]*?\\S)\\5", // 5,6   **bold**
       "(\\*|_)(?=\\S)([\\s\\S]*?\\S)\\7", // 7,8   *italic*
       "(https?://[^\\s<>\\])]+)", // 9     a bare address
+      // 10,11  ![alt](src). Last on purpose: adding it earlier would renumber
+      // every back-reference above, which the note above says is silent when it
+      // goes wrong. At the position of the `!` no other alternative can match,
+      // so being last costs it nothing.
+      "!\\[([^\\]]*)\\]\\(([^)\\s]+)[^)]*\\)",
     ].join("|"),
     "g",
   );
@@ -224,9 +246,11 @@ function inline(text) {
   let from = 0;
   for (const hit of text.matchAll(pattern)) {
     if (hit.index > from) out.append(text.slice(from, hit.index));
-    const [whole, , code, label, href, , strong, , stress, bare] = hit;
+    const [whole, , code, label, href, , strong, , stress, bare, alt, src] = hit;
 
-    if (code !== undefined) {
+    if (src !== undefined) {
+      out.append(picture(src, alt));
+    } else if (code !== undefined) {
       const node = document.createElement("code");
       node.textContent = code;
       out.append(node);
@@ -256,8 +280,65 @@ function inline(text) {
  * `javascript:` is the one that matters -- is shown as the text it is, so a
  * model that read a poisoned page cannot put a trap in a thread.
  */
+/**
+ * A picture an answer points at.
+ *
+ * An agent that fetches or draws something writes `![it](/some/path)`, and
+ * until now that fell through to the link rule, which takes http and https and
+ * hands everything else back as its own text. So an answer said "here is the
+ * picture" and showed a path, and the agent learnt to apologise for it in
+ * prose: "both are downloaded locally if the images don't render for you".
+ *
+ * A path is read through the app rather than put in `src` directly. The window
+ * cannot open a file for itself, and the command that does is bounded to the
+ * places agents actually work.
+ */
+function picture(src, alt) {
+  const img = document.createElement("img");
+  img.className = "drawn";
+  img.alt = alt || "";
+  img.loading = "lazy";
+  if (/^https?:/i.test(src)) {
+    img.src = src;
+  } else {
+    ask("a_local_picture", { path: src })
+      .then((url) => {
+        img.src = url;
+      })
+      .catch((why) => {
+        // Said, and the path kept. A picture that will not load must not take
+        // the only way of getting at the file down with it.
+        const gone = document.createElement("span");
+        gone.className = "picture-gone";
+        gone.textContent = String(why);
+        const where = document.createElement("code");
+        where.textContent = src;
+        img.replaceWith(gone, where);
+      });
+  }
+  img.onclick = () => {
+    if (img.src) window.dispatchEvent(new CustomEvent("look-closer", { detail: { url: img.src, name: alt } }));
+  };
+  return img;
+}
+
 function link(href, label, original) {
   const safe = /^(https?:|mailto:)/i.test(href.trim());
+  // A path is not a scheme and is not a trap: revealing one in Finder cannot
+  // run anything. "I saved the report to ~/Desktop/report.pdf" is the end of
+  // most errands, and it was a dead end.
+  if (!safe && /^([~/]|file:\/\/)/.test(href.trim())) {
+    const a = document.createElement("a");
+    a.href = "#";
+    a.textContent = label;
+    a.className = "on-disk";
+    a.title = "Show it in Finder";
+    a.onclick = (e) => {
+      e.preventDefault();
+      ask("show_in_finder", { path: href.replace(/^file:\/\//, "") }).catch(() => {});
+    };
+    return a;
+  }
   if (!safe) return document.createTextNode(original);
   const a = document.createElement("a");
   a.href = href;

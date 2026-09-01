@@ -743,6 +743,9 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 let held: State<Held> = app.state();
                 held.running.lock().unwrap().remove(&id);
                 held.doing.lock().unwrap().remove(&id);
+                // However it ended. The mark is only about whether one was
+                // going, so a failure clears it as surely as an answer does.
+                let _ = store.a_turn_ended(&id);
                 // And a goal decides whether there is another one. Handed on
                 // rather than done here: deciding means possibly starting the
                 // next turn, and starting a turn inside the handler for the end
@@ -871,6 +874,12 @@ async fn say(
         open_thread(app.clone(), held.clone(), id.clone()).await?;
     }
 
+    // Written down as in flight before the engine is handed it. A turn cannot
+    // survive the process running it, and until this nothing anywhere knew one
+    // had been going: quitting Errand mid-turn left a question with no answer
+    // and nothing saying why, which reads as an app still thinking about it.
+    let _ = held.store.a_turn_began(&id);
+
     let mut live = held.live.lock().unwrap();
     let thread = live
         .get_mut(&id)
@@ -954,6 +963,92 @@ async fn a_picture(app: AppHandle, conversation: String, name: String) -> Result
         "data:{kind};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
     ))
+}
+
+/// A picture an agent made or fetched, for the window to draw.
+///
+/// Different from `a_picture`, which hands back one somebody attached and is
+/// confined to the folder those are kept in. This one takes a path, because the
+/// whole point is a file the agent has just written somewhere of its own
+/// choosing -- and the alternative is what happened without it: an answer
+/// saying "here is the picture" followed by a path, and no picture.
+///
+/// Bounded three ways rather than trusted. It must be an image by its ending,
+/// it must be inside somewhere this app or its agents actually work, and it
+/// must be small enough to be a picture rather than a disk image somebody
+/// renamed. Between them those keep a command whose job is handing bytes to
+/// the window from becoming a way to read any file on the machine.
+#[tauri::command]
+async fn a_local_picture(app: AppHandle, path: String) -> Result<String, String> {
+    use base64::Engine as _;
+    let at = std::path::Path::new(&path);
+    let kind = match at
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => return Err("that is not a picture".to_string()),
+    };
+    let real = at
+        .canonicalize()
+        .map_err(|_| "there is nothing there".to_string())?;
+    if !somewhere_an_agent_works(&app, &real) {
+        return Err("that is not somewhere an agent of yours works".to_string());
+    }
+    let how_big = std::fs::metadata(&real).map_err(|e| e.to_string())?.len();
+    if how_big > A_PICTURE_AT_MOST {
+        return Err(format!(
+            "that is {}MB, which is too big to show here",
+            how_big / 1024 / 1024
+        ));
+    }
+    let bytes = std::fs::read(&real).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "data:{kind};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+/// Whether a file is somewhere this app's agents actually work.
+///
+/// Their own folders, and the temporary places a shell puts things -- which is
+/// where a downloaded file lands, and is the case this exists for. Compared
+/// after resolving both sides, because a comparison between a resolved path and
+/// an unresolved one fails on a machine with a symlink in it, and `/tmp` on a
+/// Mac is one.
+fn somewhere_an_agent_works(app: &AppHandle, real: &std::path::Path) -> bool {
+    let mut allowed: Vec<std::path::PathBuf> = vec![std::env::temp_dir()];
+    if let Ok(here) = where_things_live(app) {
+        allowed.push(here);
+    }
+    allowed
+        .into_iter()
+        .filter_map(|one| one.canonicalize().ok())
+        .any(|one| real.starts_with(one))
+}
+
+/// Show a file in Finder, without opening it.
+///
+/// Revealed rather than opened, and that is the whole of the difference: an
+/// answer ending "I saved it to ~/Desktop/report.pdf" is a dead end without
+/// this, and opening whatever a path points at would be a way to run something
+/// on the strength of a line a model wrote.
+#[tauri::command]
+async fn show_in_finder(path: String) -> Result<(), String> {
+    let at = std::path::Path::new(&path)
+        .canonicalize()
+        .map_err(|_| "there is nothing there any more".to_string())?;
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(&at)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// The most an attached picture may be, before base64.
@@ -2272,6 +2367,42 @@ fn say_it_out_loud(title: &str, said: &str) {
         .status();
 }
 
+/// Say so, in the conversations that were mid-turn when this last stopped.
+///
+/// A turn cannot outlive the process running it. Quitting Errand while one was
+/// going killed the engine and left the transcript holding a question with no
+/// answer and nothing at all saying why -- which from the window is
+/// indistinguishable from an app still thinking about it, and stays that way
+/// for ever.
+///
+/// Said rather than restarted. Running it again on its own would be an errand
+/// nobody asked for that minute, which is a fault this app has had once
+/// already and does not want back; the line says what happened and offers to
+/// run it again, and the person decides.
+fn say_what_was_cut_off(app: &AppHandle) {
+    let held: State<Held> = app.state();
+    let Ok(cut_off) = held.store.turns_that_were_cut_off() else {
+        return;
+    };
+    for conversation in cut_off {
+        let _ = held.store.the_app_says_about(
+            &conversation,
+            "ended",
+            "Errand was closed while this was running, so it stopped part way. \
+             Nothing already written down was lost.",
+            WAS_CUT_OFF,
+        );
+        let _ = held.store.a_turn_ended(&conversation);
+    }
+}
+
+/// What marks the line saying a turn was cut off.
+///
+/// On the line rather than worked out from its words, because the window puts
+/// a way to run it again on this one and nothing else, and matching on a
+/// sentence is how that stops working the day the sentence is reworded.
+pub const WAS_CUT_OFF: &str = "cut-off";
+
 /// Sockets left behind by an app that did not get to tidy up.
 ///
 /// A doorway unlinks its own socket when its conversation closes, and the app
@@ -2655,7 +2786,15 @@ async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Str
     // has to be done rather than a URL had the entire request thrown back at
     // it, so the person was never asked. What is dropped is the opening; what
     // is said is still said.
-    let can_be_opened = where_at.starts_with("https://") || where_at.starts_with("http://");
+    // Web pages, and the one other destination this app repeatedly has to send
+    // somebody to: a pane of System Settings. Those cannot be reached any other
+    // way -- no path to open, no page to visit -- so without this the
+    // instruction is "go and find it", and for Automation that is four levels
+    // down a screen most people have never opened. The scheme opens Settings at
+    // a pane and can do nothing else.
+    let can_be_opened = where_at.starts_with("https://")
+        || where_at.starts_with("http://")
+        || where_at.starts_with("x-apple.systempreferences:");
     let where_at = match can_be_opened {
         true => where_at,
         false => "",
@@ -4120,6 +4259,7 @@ pub fn run() {
             app.manage(Waiting(Mutex::new(Some(asked))));
             app.manage(TurnsThatEnded(Mutex::new(Some(ended))));
 
+            say_what_was_cut_off(app.handle());
             sweep_up_after_a_crash(&here);
             say_if_the_name_is_taken(&here);
 
@@ -4137,6 +4277,8 @@ pub fn run() {
             looking_at,
             conversation_agent,
             a_picture,
+            a_local_picture,
+            show_in_finder,
             hits,
             routine_off,
             how_it_has_been_going,
