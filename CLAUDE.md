@@ -29,6 +29,41 @@ and obvious in a window:
 None of those is a mistake in the thing that was changed. All of them are a
 mistake about what else was true.
 
+### Before any version goes out: the five errands
+
+`./scripts/before-shipping.sh` runs five real errands against the installed
+`/Applications/Errand.app` and its real store. **All five have to pass before a
+build is pushed anywhere.** No exceptions, and passing unit tests is not a
+substitute: for weeks every unit test was green while the app itself could not
+finish a single errand, which is the only measure anybody outside this repo
+cares about.
+
+1. It answers a plain question.
+2. It runs a command and shows what came back.
+3. It writes a file and reads it back.
+4. It reads something outside the app, through a connector.
+5. A routine fires on its own, off the clock, and is written down.
+
+Run it after installing the new bundle, not before:
+
+```
+cargo tauri build --bundles app
+rm -rf /Applications/Errand.app && cp -R target/release/bundle/macos/Errand.app /Applications/
+./scripts/before-shipping.sh
+```
+
+Two things the suite has already had to learn the hard way, both of which cost
+an afternoon by looking like a dead clock:
+
+- **A conversation's id is also the engine's session id, so it has to be a
+  uuid.** A readable id like `shipping-routine` fails with "not a UUID", and
+  fifteen characters of one panicked the socket name.
+- **`opened` is what decides resume against start.** Setting it on a
+  conversation that has no session behind it fails every single run.
+
+When task 5 fails, read the `ended` line on the conversation before believing
+the clock is broken. Three times now it has been something else.
+
 ### What counts as having tested it
 
 | Kind of change | What has to be run |

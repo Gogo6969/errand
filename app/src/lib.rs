@@ -565,7 +565,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             let door = doorway::listen(
                 where_things_live(&app)?
                     .join("mcp")
-                    .join(format!("{}.sock", &id.replace('-', "")[..16])),
+                    .join(format!("{}.sock", short_enough_for_a_socket(&id))),
                 id.clone(),
                 held.wants.clone(),
             )
@@ -762,6 +762,18 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                     None
                 }
             };
+            // A session that is not there is not a fault worth repeating. Left
+            // alone, the next turn asks to pick up the same missing session and
+            // fails in the same words, for ever. Forgetting that it was ever
+            // opened is what lets the next one start.
+            if let Event::Failed { why } = &event {
+                if errand_core::claude::the_session_is_gone(why) {
+                    if let Err(e) = store.start_it_again(&id) {
+                        eprintln!("could not let {id} start again: {e}");
+                    }
+                }
+            }
+
             // A routine's turn is over, so the clock may start it again.
             if event.ends_the_turn() {
                 let held: State<Held> = app.state();
@@ -869,6 +881,14 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 },
             );
         }
+
+        // Nothing more will come, which means the engine has stopped. Left in
+        // the list of conversations that are live it goes on looking open, and
+        // every turn after this one writes the question down and then does
+        // nothing whatever: no answer, no failure, no sign that anything was
+        // asked. Taking it out is what makes the next turn open a new one.
+        let held: State<Held> = app.state();
+        held.live.lock().unwrap().remove(&id);
     });
     Ok(())
 }
@@ -2002,6 +2022,16 @@ impl Drop for Turn {
             self.among.lock().unwrap().remove(&self.id);
         }
     }
+}
+
+/// A name for this conversation's socket, short enough for one.
+///
+/// A unix socket path has a hard length limit and the folder it sits in is
+/// already long, so the name is cut down. It used to be cut with a plain slice
+/// at sixteen bytes, which assumed every id was a uuid: an id shorter than that
+/// panicked, and the panic landed inside whichever loop had asked for the turn.
+fn short_enough_for_a_socket(id: &str) -> String {
+    id.replace('-', "").chars().take(16).collect()
 }
 
 /// Look at everything that is due to be looked at.
@@ -3355,14 +3385,28 @@ fn watch_the_clock(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            if let Err(why) = run_what_is_due(&app).await {
-                eprintln!("the clock: {why}");
-            }
-            if let Err(why) = look_around(&app).await {
-                eprintln!("the looking: {why}");
+            // Each tick on a task of its own. A loop that can die is a loop
+            // that eventually does, and an app whose clock has quietly stopped
+            // looks exactly like an app that was never asked to do anything:
+            // nothing runs, nothing is written down, nothing says why.
+            if tauri::async_runtime::spawn(one_tick(app.clone()))
+                .await
+                .is_err()
+            {
+                eprintln!("the clock: a tick stopped in a way it could not report");
             }
         }
     });
+}
+
+/// Everything the clock does once, which is the part allowed to go wrong.
+async fn one_tick(app: AppHandle) {
+    if let Err(why) = run_what_is_due(&app).await {
+        eprintln!("the clock: {why}");
+    }
+    if let Err(why) = look_around(&app).await {
+        eprintln!("the looking: {why}");
+    }
 }
 
 /// Anything whose time has come, started once each.
@@ -3414,22 +3458,61 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
             }
         }
 
-        let turn = {
+        // Each turn on a task of its own, so that one routine going wrong
+        // cannot take the clock with it. It used to be started right here,
+        // inside the clock's own loop: a panic anywhere in a turn killed that
+        // loop for the life of the app, and from then on no routine ever ran
+        // again, with nothing on screen or in the database saying why. That is
+        // the shape of "it worked this morning and then it just stopped".
+        let running = tauri::async_runtime::spawn(a_routines_turn(
+            app.clone(),
+            conversation.clone(),
+            what,
+            late,
+            now,
+        ));
+        // A turn that never reached the engine has to be closed here, or its
+        // run stays open forever and its history reads as still going.
+        let trouble = match running.await {
+            Ok(Ok(())) => None,
+            Ok(Err(why)) => Some(why),
+            Err(_) => Some("the run stopped in a way it could not report".to_string()),
+        };
+        if let Some(why) = trouble {
+            eprintln!("the routine {conversation}: {why}");
             let held: State<Held> = app.state();
-            Turn::claim(held.running.clone(), conversation.clone())
-        };
-        open_thread(app.clone(), app.state(), conversation.clone()).await?;
-        let said = match late {
-            None => what,
-            Some(due) => format!(
-                "{what}\n\n{}",
-                errand_core::routine::arriving_late(due, now)
-            ),
-        };
-        // A routine says what it was set to say, and nothing else.
-        say(app.clone(), app.state(), conversation, said, None).await?;
-        turn.handed_to_the_engine();
+            let run = held.mid_run.lock().unwrap().remove(&conversation);
+            if let Some(run) = run {
+                let _ = held.store.a_run_ended(run, &why);
+            }
+        }
     }
+    Ok(())
+}
+
+/// One routine's turn, from opening the conversation to handing it over.
+async fn a_routines_turn(
+    app: AppHandle,
+    conversation: String,
+    what: String,
+    late: Option<chrono::DateTime<chrono::Local>>,
+    now: chrono::DateTime<chrono::Local>,
+) -> Result<(), String> {
+    let turn = {
+        let held: State<Held> = app.state();
+        Turn::claim(held.running.clone(), conversation.clone())
+    };
+    open_thread(app.clone(), app.state(), conversation.clone()).await?;
+    let said = match late {
+        None => what,
+        Some(due) => format!(
+            "{what}\n\n{}",
+            errand_core::routine::arriving_late(due, now)
+        ),
+    };
+    // A routine says what it was set to say, and nothing else.
+    say(app.clone(), app.state(), conversation, said, None).await?;
+    turn.handed_to_the_engine();
     Ok(())
 }
 
@@ -4626,6 +4709,20 @@ fn everything_that_waits_for_the_app(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_socket_name_is_made_from_an_id_that_is_shorter_than_the_cut() {
+        // What actually happened: the name was cut with a byte slice that
+        // assumed every id was a uuid. A shorter id panicked, and because the
+        // turn had been started inside the clock's own loop, the panic killed
+        // the clock and no routine ran again until the app was restarted.
+        assert_eq!(short_enough_for_a_socket("clock-probe"), "clockprobe");
+        assert_eq!(short_enough_for_a_socket(""), "");
+        assert_eq!(
+            short_enough_for_a_socket("0cfe08f1-04d2-496a-80cc-3fc368499dc2"),
+            "0cfe08f104d2496a"
+        );
+    }
 
     #[test]
     fn a_fault_while_the_app_is_starting_does_not_take_the_app_with_it() {

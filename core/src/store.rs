@@ -2485,6 +2485,21 @@ impl Store {
         Ok(())
     }
 
+    /// Forget that this conversation was ever opened.
+    ///
+    /// Only for a session that really is gone. The flag says "resume me", and
+    /// when there is nothing to resume, resuming is all it will ever try: the
+    /// conversation fails the same way every time with no way back. Clearing
+    /// it costs the engine's own memory of the thread and keeps the
+    /// conversation, its lines and its history, which is the better half.
+    pub fn start_it_again(&self, id: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE conversations SET opened = 0 WHERE id = ?",
+            params![id],
+        )?;
+        Ok(())
+    }
+
     /// Write down what somebody said to a question.
     ///
     /// Onto the question rather than under it, the same way an outcome goes
@@ -3968,6 +3983,30 @@ mod tests {
         s.forget("a1").unwrap();
         assert!(s.conversations("a1").unwrap().is_empty());
         assert!(s.lines("c2").unwrap().is_empty(), "its lines outlived it");
+    }
+
+    #[test]
+    fn a_conversation_whose_session_is_gone_can_be_started_again() {
+        // What actually happened: the session Claude Code held was no longer
+        // there, so every run asked to resume it, failed in the same words,
+        // and the routine that had worked for a week never worked again.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp");
+        s.happened(
+            "a1",
+            &Event::Started {
+                session: "a1".into(),
+                model: "claude".into(),
+            },
+        )
+        .unwrap();
+        assert!(s.conversation("a1").unwrap().unwrap().opened);
+
+        s.start_it_again("a1").unwrap();
+        assert!(
+            !s.conversation("a1").unwrap().unwrap().opened,
+            "it has to be able to start over, or it is stuck for good"
+        );
     }
 
     #[test]

@@ -1017,6 +1017,16 @@ fn in_words(complained: &str) -> String {
     said.to_string()
 }
 
+/// Whether a failure means the session it was told to pick up is not there.
+///
+/// Beside the sentence it matches, so that changing the words changes both.
+/// Worth knowing by name because it is the one failure that repeats itself for
+/// ever: the session is gone, so every reopening asks for it again and fails
+/// again, and a routine that worked yesterday never works again.
+pub fn the_session_is_gone(said: &str) -> bool {
+    said.contains("could not be found where it was left")
+}
+
 /// One content block, if it is something a person should see.
 fn block(b: &serde_json::Value) -> Option<Event> {
     match b.get("type").and_then(|t| t.as_str())? {
@@ -1248,6 +1258,17 @@ mod tests {
             panic!("it was not a step");
         };
         assert_eq!(step.what, "Looking for somebody to hand this to");
+    }
+
+    #[test]
+    fn a_missing_session_is_recognised_from_the_words_it_is_reported_in() {
+        // The two are a pair: one turns the engine's complaint into a sentence,
+        // the other reads that sentence back to decide the conversation may
+        // start over. Kept honest here so that rewording one cannot quietly
+        // strand every conversation whose session has gone.
+        let said = in_words("Error: No conversation found with session ID: abc");
+        assert!(the_session_is_gone(&said), "got: {said}");
+        assert!(!the_session_is_gone(&in_words("something else entirely")));
     }
 
     #[test]
