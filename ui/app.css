@@ -456,6 +456,10 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   cursor: pointer;
 }
 #hand-says { flex: 1 0 100%; }
+/* Under the sentence that promises them, not beside it. The form is a wrapping
+   row, so a list dropped into it becomes another item on the same line and the
+   models came out to the right of the words pointing at them. */
+#hand-models { flex: 1 0 100%; margin: 0; padding: 0; list-style: none; }
 #hand-says[data-wrong="true"] { color: var(--wrong); }
 
 /* The way out of being asked, offered where being asked is happening. Quiet,

@@ -654,6 +654,30 @@ async fn list_via_ollama(client: &reqwest::Client, base: &str) -> Result<Vec<Str
 ///
 /// Returns the address that answered, which is what to store, and what it said
 /// it has.
+/// Whether two addresses are the same place, typed differently.
+///
+/// The address somebody types and the address a provider actually answers at
+/// are usually not the same string: `settle` finds `https://api.deepseek.com`
+/// answers at `https://api.deepseek.com/v1` and keeps the second. Typing the
+/// first again then looks like a new place, so a second copy is kept beside
+/// the first, with its own key, and the picker fills up with the same provider
+/// twice. Compared with the version path and any trailing slash taken off,
+/// which are the only two ways this differs in practice.
+pub fn the_same_place(one: &str, other: &str) -> bool {
+    fn bare(url: &str) -> String {
+        let url = url.trim().trim_end_matches('/');
+        // Longest first, or "/openai/v1" loses only its "/v1" and the two
+        // spellings of one address stop matching.
+        let url = url
+            .strip_suffix("/openai/v1")
+            .or_else(|| url.strip_suffix("/api/v1"))
+            .or_else(|| url.strip_suffix("/v1"))
+            .unwrap_or(url);
+        url.trim_end_matches('/').to_ascii_lowercase()
+    }
+    !one.trim().is_empty() && bare(one) == bare(other)
+}
+
 pub async fn settle(
     base_url: &str,
     api_key: Option<&str>,
@@ -880,5 +904,48 @@ pub async fn probe_alive(settings: &LlmSettings) -> bool {
         )
         .await
         .is_ok(),
+    }
+}
+
+#[cfg(test)]
+mod the_same_place_tests {
+    use super::*;
+
+    #[test]
+    fn an_address_and_the_one_it_actually_answers_at_are_one_place() {
+        // What actually happened: typed api.deepseek.com, kept as
+        // api.deepseek.com/v1, typed the same thing again, and a second copy
+        // was kept beside the first with its own key.
+        assert!(the_same_place(
+            "https://api.deepseek.com",
+            "https://api.deepseek.com/v1"
+        ));
+        assert!(the_same_place(
+            "https://api.deepseek.com/",
+            "https://api.deepseek.com/v1/"
+        ));
+        assert!(the_same_place(
+            "http://127.0.0.1:11434",
+            "http://127.0.0.1:11434/v1"
+        ));
+        assert!(the_same_place(
+            "https://generativelanguage.googleapis.com",
+            "https://generativelanguage.googleapis.com/openai/v1"
+        ));
+    }
+
+    #[test]
+    fn two_different_providers_are_not_one_place() {
+        assert!(!the_same_place(
+            "https://api.deepseek.com",
+            "https://api.moonshot.cn/v1"
+        ));
+        // Nor are two machines that differ only by port, which is the usual
+        // way somebody runs two model servers on one box.
+        assert!(!the_same_place(
+            "http://192.168.1.25:8081",
+            "http://192.168.1.25:8080/v1"
+        ));
+        assert!(!the_same_place("", "https://api.deepseek.com"));
     }
 }

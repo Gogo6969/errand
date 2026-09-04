@@ -104,6 +104,14 @@ struct Held {
     /// arriving while the first is still on screen must not be ended by the
     /// first card being pressed.
     handovers: Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<String>)>>,
+    /// Which opening of a conversation is the current one.
+    ///
+    /// An engine that has stopped takes itself out of `live`, which is right
+    /// until a new one has already been opened in its place: the old one's
+    /// reader then removes the new one, the turn finds nothing open and opens
+    /// a third. Counting the openings makes "take yourself out" mean "take
+    /// yourself out if you are still the one there".
+    opening: Mutex<HashMap<String, u64>>,
     /// Conversations whose next turn starts without the ones before it.
     ///
     /// A standing job is the same job every time, not a conversation that gets
@@ -493,7 +501,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // routine's own past runs are what made it repeat itself and then
             // claim work it had not done, and the agent's notes, which are
             // where a standing job's memory belongs, are unaffected.
-            let alone = held.fresh.lock().unwrap().remove(&id);
+            let alone = held.fresh.lock().unwrap().contains(&id);
             let so_far = match again && !alone {
                 true => held
                     .store
@@ -604,6 +612,14 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             held.doorways.lock().unwrap().insert(id.clone(), door);
             (Box::new(it), events)
         }
+    };
+    // Which opening this is, so the reader started below knows whether the
+    // engine it is reading is still the conversation's own when it ends.
+    let opening = {
+        let mut all = held.opening.lock().unwrap();
+        let count = all.entry(id.clone()).or_insert(0);
+        *count += 1;
+        *count
     };
     held.live.lock().unwrap().insert(id.clone(), engine);
 
@@ -907,8 +923,22 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         // every turn after this one writes the question down and then does
         // nothing whatever: no answer, no failure, no sign that anything was
         // asked. Taking it out is what makes the next turn open a new one.
+        //
+        // Only if it is still the one there. A routine closes the last run's
+        // engine and opens its own; this line then removed the new one, the
+        // turn opened a third, and the third read the whole conversation back
+        // because the first had already spent the flag that says to start
+        // clean. The standing job went back to repeating itself.
         let held: State<Held> = app.state();
-        held.live.lock().unwrap().remove(&id);
+        let still_ours = held
+            .opening
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|current| *current == opening);
+        if still_ours {
+            held.live.lock().unwrap().remove(&id);
+        }
     });
     Ok(())
 }
@@ -1500,7 +1530,19 @@ async fn remember_backend(
         "" => base_url.clone(),
         named => named.to_string(),
     };
-    let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // Adding an address that is already kept changes that one rather than
+    // making a second beside it. Typing it again is what somebody does when
+    // they are not sure the first attempt took, and it used to leave two
+    // copies of the same provider, each with its own key, and a picker with
+    // the same models in it twice.
+    let id = id
+        .or_else(|| {
+            held.store.backends().ok()?.into_iter().find_map(|kept| {
+                errand_core::local::find::the_same_place(&base_url, &kept.base_url)
+                    .then_some(kept.id)
+            })
+        })
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // Written before the store hears about it, so that a store row claiming a
     // key exists can never outlive a keychain that does not have one.
@@ -3591,7 +3633,14 @@ async fn a_routines_turn(
         ),
     };
     // A routine says what it was set to say, and nothing else.
-    say(app.clone(), app.state(), conversation, said, None).await?;
+    say(app.clone(), app.state(), conversation.clone(), said, None).await?;
+    // Cleared once the turn is under way rather than when the engine opened,
+    // because a turn can open one more than once and every one of them has to
+    // start clean.
+    {
+        let held: State<Held> = app.state();
+        held.fresh.lock().unwrap().remove(&conversation);
+    }
     turn.handed_to_the_engine();
     Ok(())
 }
@@ -4604,6 +4653,7 @@ pub fn run() {
                 looking: Arc::default(),
                 doorways: Mutex::new(HashMap::new()),
                 handovers: Mutex::new(HashMap::new()),
+                opening: Mutex::new(HashMap::new()),
                 fresh: Mutex::new(std::collections::HashSet::new()),
                 trouble: Mutex::new(None),
                 sized: Mutex::new(HashMap::new()),

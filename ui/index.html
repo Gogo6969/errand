@@ -102,6 +102,13 @@
           <label>Key <input id="hand-key" type="password" placeholder="Leave empty if it needs none" autocorrect="off" autocapitalize="off" spellcheck="false" /></label>
           <button id="hand-save" type="submit">Add</button>
           <p id="hand-says"></p>
+          <!--
+            What it found, here, under the sentence that says so. The sentence
+            said "to choose from below" while the only place to choose was a
+            card above the form, so somebody who added a provider was told
+            three models were waiting and shown none.
+          -->
+          <ul id="hand-models"></ul>
         </form>
       </div>
 

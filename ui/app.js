@@ -176,6 +176,7 @@ const el = {
   asks: document.getElementById("asks"),
   allowed: document.getElementById("allowed"),
   allowAhead: document.getElementById("allow-ahead"),
+  handModels: document.getElementById("hand-models"),
   allowWhat: document.getElementById("allow-what"),
   allowTool: document.getElementById("allow-tool"),
   allowSays: document.getElementById("allow-says"),
@@ -4785,18 +4786,86 @@ el.byHand.addEventListener("submit", async (e) => {
       : [
           moved ? `It answers at ${kept.base_url}, not quite what was typed.` : "Checked: it answers there.",
           kept.models.length
-            ? `${kept.models.length} model${kept.models.length === 1 ? "" : "s"} to choose from below.`
+            ? `Choose which of its ${kept.models.length} model${kept.models.length === 1 ? "" : "s"} to show in the picker:`
             : "It offered no models, which is what a key with nothing enabled on it looks like.",
         ].join(" ");
+    // And the models themselves, right here. Nothing else on this screen
+    // offered them: they live in a card above the form, behind a button, so
+    // adding a provider ended with a sentence about three models and no way
+    // to reach any of them.
+    showTheModels(kept);
   } catch (why) {
     el.handSays.dataset.wrong = "true";
     el.handSays.textContent = String(why);
+    el.handModels.replaceChildren();
   }
   // The key is not kept in the page for a moment longer than it takes to send.
   el.handKey.value = "";
   backToAdding();
   await drawKept();
 });
+
+/**
+ * The models a newly added place offered, each with a way to show it.
+ *
+ * The same row as the list above, deliberately: the same dot for whether it is
+ * loaded, the same words, the same button doing the same thing. A second way
+ * of choosing a model would be a second thing to keep working.
+ */
+function showTheModels(place) {
+  const models = place.models || [];
+  if (!models.length) {
+    el.handModels.replaceChildren();
+    return;
+  }
+  el.handModels.replaceChildren(
+    ...models.map((m) => {
+      const row = document.createElement("li");
+      const lit = document.createElement("span");
+      lit.className = m.loaded ? "lit" : "lit cold";
+      lit.title = m.loaded ? "Loaded and ready" : "Downloaded, but not loaded: the first errand waits";
+      const words = document.createElement("span");
+      words.className = "grow";
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = m.model;
+      words.append(name);
+
+      const add = document.createElement("button");
+      add.type = "button";
+      add.textContent = "Show in picker";
+      add.onclick = async () => {
+        add.disabled = true;
+        try {
+          await invoke("offer_this", {
+            engine: "local",
+            label: `${m.model} · ${place.label}`,
+            settings: JSON.stringify({
+              provider: place.provider,
+              base_url: place.base_url,
+              model: m.model,
+              wire: place.wire || "openai",
+            }),
+            backend: place.id,
+          });
+        } catch (why) {
+          add.disabled = false;
+          el.handSays.dataset.wrong = "true";
+          el.handSays.textContent = String(why);
+          return;
+        }
+        thePickerHasChanged();
+        add.textContent = "In the picker";
+        add.className = "on";
+        await Promise.all([drawChosen(), drawKept()]);
+        const a = whose();
+        if (a) await drawEngines(a);
+      };
+      row.append(lit, words, add);
+      return row;
+    }),
+  );
+}
 
 
 // ------------------------------------------------------------- what it cost --
