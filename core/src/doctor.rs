@@ -74,7 +74,10 @@ impl Finding {
 
 /// Is Claude Code there, and what does it call itself?
 pub fn claude_code() -> Finding {
-    let said = std::process::Command::new("claude")
+    // Looked for the way the engine looks for it, so this cannot say "fine"
+    // about a program the engine then fails to start, or "missing" about one
+    // it would have found in the usual place.
+    let said = std::process::Command::new(crate::claude::where_claude_is())
         .arg("--version")
         .output();
     match said {

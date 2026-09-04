@@ -976,8 +976,14 @@ pub(crate) fn opening_instructions(
          asking again.\n\n\
          Your working directory is {}. Paths are relative to it and it is the only \
          place you write.\n\n\
+         {wall}\n\n\
          Finish on the result. Do not append an offer of further work.{more}{notes}{plan}",
-        home.display()
+        home.display(),
+        // Told about the wall before it runs into it. A local model is always
+        // walled in, and one that only finds out from a bare "Operation not
+        // permitted" decides it is macOS and sends the person to grant access
+        // the app already has.
+        wall = crate::wall::what_the_wall_means(home),
     )
 }
 

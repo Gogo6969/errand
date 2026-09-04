@@ -1807,6 +1807,31 @@ impl Store {
     }
 
     /// Take one back.
+    /// Whose an allowance is, so that taking it back can refresh that agent.
+    pub fn whose_allowance(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare("SELECT agent FROM allowed WHERE id = ?")?;
+        let mut rows = q.query(params![id])?;
+        Ok(match rows.next()? {
+            Some(row) => Some(row.get(0)?),
+            None => None,
+        })
+    }
+
+    /// The folders this agent may write in beyond its own, as allowed here.
+    ///
+    /// Read out of the same table as everything else it may do, so that the
+    /// Allowed panel shows them and can take them back, and so there is one
+    /// list of what an agent was granted rather than one per kind of thing.
+    pub fn folders_allowed(&self, agent: &str) -> Result<Vec<std::path::PathBuf>> {
+        Ok(self
+            .allowances(agent)?
+            .into_iter()
+            .filter(|one| crate::allowing::is_a_folder(&one.tool))
+            .map(|one| std::path::PathBuf::from(one.rule))
+            .collect())
+    }
+
     pub fn revoke(&self, id: &str) -> Result<()> {
         self.conn
             .lock()
@@ -3983,6 +4008,28 @@ mod tests {
         s.forget("a1").unwrap();
         assert!(s.conversations("a1").unwrap().is_empty());
         assert!(s.lines("c2").unwrap().is_empty(), "its lines outlived it");
+    }
+
+    #[test]
+    fn a_folder_allowed_for_an_agent_is_listed_with_its_other_allowances_and_can_be_found() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp");
+        s.allow("a1", "Bash", "curl").unwrap();
+        s.allow("a1", "folder", "/Volumes/Disk").unwrap();
+        assert_eq!(
+            s.folders_allowed("a1").unwrap(),
+            vec![std::path::PathBuf::from("/Volumes/Disk")]
+        );
+        let all = s.allowances("a1").unwrap();
+        assert_eq!(all.len(), 2, "the folder has to show beside the rest");
+        let folder = all.iter().find(|x| x.tool == "folder").unwrap();
+        assert_eq!(
+            s.whose_allowance(&folder.id).unwrap().as_deref(),
+            Some("a1")
+        );
+        assert_eq!(s.whose_allowance("nobody").unwrap(), None);
+        s.revoke(&folder.id).unwrap();
+        assert!(s.folders_allowed("a1").unwrap().is_empty());
     }
 
     #[test]

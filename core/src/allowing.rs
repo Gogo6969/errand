@@ -48,6 +48,16 @@ pub fn what_always_means(tool: &str, suggested: Option<&str>) -> Option<Allowing
     if suggested.is_empty() {
         return Some(the_whole_tool(tool));
     }
+    // A folder is not a tool the engine asks about: it widens the wall a
+    // never-asking agent runs behind. Stored as the folder itself, and said as
+    // what it is, because "anything starting /Volumes/Disk" reads like a
+    // command rule and this is a place.
+    if is_a_folder(tool) {
+        return Some(Allowing {
+            rule: suggested.to_string(),
+            in_words: format!("writing anywhere inside {suggested}"),
+        });
+    }
 
     // Only shell commands are narrowed. Everything else the engine suggests is
     // already the useful shape: a path glob for a file tool covers a directory,
@@ -120,6 +130,9 @@ pub fn in_words(tool: &str, rule: &str) -> String {
     if rule.is_empty() {
         return the_whole_tool(tool).in_words;
     }
+    if is_a_folder(tool) {
+        return format!("writing anywhere inside {rule}");
+    }
     if !tool.eq_ignore_ascii_case("bash") {
         return format!("anything starting {rule}");
     }
@@ -130,6 +143,14 @@ pub fn in_words(tool: &str, rule: &str) -> String {
         // practice means that command and nothing else.
         _ => "only this exact command".to_string(),
     }
+}
+
+/// The one kind of allowance that is a place rather than a tool.
+pub const A_FOLDER: &str = "folder";
+
+/// Whether an allowance is for a folder the agent may write in.
+pub fn is_a_folder(tool: &str) -> bool {
+    tool.eq_ignore_ascii_case(A_FOLDER)
 }
 
 /// Whether something already allowed covers what is being asked.
@@ -154,6 +175,16 @@ pub fn covers(rule: &str, doing: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_is_said_as_a_place_to_write_and_not_as_a_command_rule() {
+        // "anything starting /Volumes/Disk" reads like a command. It is a
+        // place, and the words have to say which.
+        let said = what_always_means("folder", Some("/Volumes/Disk")).unwrap();
+        assert_eq!(said.rule, "/Volumes/Disk");
+        assert_eq!(said.in_words, "writing anywhere inside /Volumes/Disk");
+        assert_eq!(in_words("folder", "/Volumes/Disk"), said.in_words);
+    }
 
     #[test]
     fn saying_always_to_a_plain_command_allows_that_command_again() {

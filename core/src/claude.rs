@@ -267,6 +267,105 @@ pub fn the_mode_for(asks: &str) -> &'static str {
     }
 }
 
+/// Where `claude` is, found once and remembered.
+///
+/// An app opened from the Dock or at login inherits the system's PATH, which
+/// is four folders and none of the ones Claude Code installs into. Looking it
+/// up by name from there fails on every machine that installed it the normal
+/// way, and it failed here for an evening: the first message of every new
+/// agent ended with "execvp() of 'claude' failed" and the person concluded the
+/// app did not work. The PATH inside a login shell knows; so do the usual
+/// places. Both are asked before giving up on the bare name.
+pub fn where_claude_is() -> std::path::PathBuf {
+    static FOUND: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            on_the_path("claude", std::env::var("PATH").ok().as_deref())
+                .or_else(|| in_the_usual_places("claude"))
+                .or_else(|| on_the_path("claude", the_persons_path().as_deref()))
+                .unwrap_or_else(|| std::path::PathBuf::from("claude"))
+        })
+        .clone()
+}
+
+/// The PATH a login shell would give this person, found once and remembered.
+///
+/// Handed to the engine as well, so that the commands it runs see the same
+/// tools the person sees in a terminal: `yt-dlp`, `node`, `python3` from a
+/// version manager, and everything else that lives outside the four system
+/// folders. Nothing if the shell will not say within a few seconds, because a
+/// profile that hangs must not hang the app.
+pub fn the_persons_path() -> Option<String> {
+    static KNOWN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    KNOWN
+        .get_or_init(|| {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            let mut child = std::process::Command::new(shell)
+                .args(["-lc", "printf %s \"$PATH\""])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
+            // A login shell that never returns is a broken profile, not a
+            // reason for the app to sit there. Waited on in small steps, then
+            // given up on.
+            let started = std::time::Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if started.elapsed() < std::time::Duration::from_secs(5) => {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        return None;
+                    }
+                }
+            }
+            let mut said = String::new();
+            std::io::Read::read_to_string(&mut child.stdout.take()?, &mut said).ok()?;
+            let said = said.trim().to_string();
+            (!said.is_empty()).then_some(said)
+        })
+        .clone()
+}
+
+/// The first folder on a PATH that holds an executable of this name.
+fn on_the_path(name: &str, path: Option<&str>) -> Option<std::path::PathBuf> {
+    path?
+        .split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| std::path::Path::new(dir).join(name))
+        .find(|candidate| is_something_to_run(candidate))
+}
+
+/// Where Claude Code's installers put it, whether or not the PATH says so.
+fn in_the_usual_places(name: &str) -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let home = std::path::Path::new(&home);
+    [
+        home.join(".local/bin"),
+        home.join(".claude/local"),
+        std::path::PathBuf::from("/opt/homebrew/bin"),
+        std::path::PathBuf::from("/usr/local/bin"),
+        home.join(".npm-global/bin"),
+        home.join(".volta/bin"),
+        home.join(".bun/bin"),
+        home.join(".nvm/current/bin"),
+    ]
+    .into_iter()
+    .map(|dir| dir.join(name))
+    .find(|candidate| is_something_to_run(candidate))
+}
+
+fn is_something_to_run(candidate: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(candidate)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
 pub fn already_going(session: &str, cwd: &std::path::Path) -> bool {
     let Ok(home) = std::env::var("HOME") else {
         return false;
@@ -337,6 +436,11 @@ impl Claude {
         // was told is an agent that mostly will not, and the whole point of a
         // standing job is that it does not have to be told twice.
         //
+        // Walled in exactly when nobody is going to be asked; see below. Decided
+        // here because the steering has to say so: a model that only finds out
+        // from a bare "Operation not permitted" decides it is macOS and sends
+        // the person to grant access the app already has.
+        let walled = asks == "auto" && crate::wall::possible();
         // Owned, because it has to outlive the command builder that borrows it.
         let steering = match remembers.trim().is_empty() {
             true => format!("{ERRAND_MODE}\n\n{}", crate::memory::HOW_TO_USE_IT),
@@ -344,6 +448,10 @@ impl Claude {
                 "{ERRAND_MODE}\n\n{}\n\n{remembers}",
                 crate::memory::HOW_TO_USE_IT
             ),
+        };
+        let steering = match walled {
+            true => format!("{steering}\n\n{}", crate::wall::what_the_wall_means(cwd)),
+            false => steering,
         };
 
         // Where to reach this app's own two tools, if this conversation has a
@@ -368,60 +476,70 @@ impl Claude {
         // it too, MCP servers and hooks included, so the profile has to make
         // room for the directories those write to. That list is in one place
         // rather than two, because a second copy of it went stale.
-        let walled = asks == "auto" && crate::wall::possible();
-        let mut child = match walled {
-            true => crate::wall::around("claude", cwd),
-            false => tokio::process::Command::new("claude"),
+        // By its full path, never by name: the name is looked up on the PATH
+        // the app was opened with, and from the Dock that is four system
+        // folders with no Claude Code in any of them.
+        let claude = where_claude_is();
+        let claude = claude.to_string_lossy();
+        let mut command = match walled {
+            true => crate::wall::around(&claude, cwd),
+            false => tokio::process::Command::new(claude.as_ref()),
+        };
+        // And the person's own PATH for everything it runs, so the tools they
+        // have in a terminal are the tools their agent has.
+        if let Some(path) = the_persons_path() {
+            command.env("PATH", path);
         }
-        .args([
-            "--print",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--include-partial-messages",
-            "--verbose",
-            // What a helper says, so that handing part of an errand to one
-            // is something you can watch rather than a step that sits
-            // there. It arrives tagged with the step that started it, and
-            // is shown underneath that step.
-            "--forward-subagent-text",
-            "--permission-mode",
-            // The agent's, not one decision for the whole app. A research
-            // agent and one that edits your files do not deserve the same
-            // posture, and it was compiled in until now.
-            the_mode_for(asks),
-            "--allowedTools",
-        ])
-        .args(GRANTED)
-        .args([
-            "--permission-prompt-tool",
-            "stdio",
-            "--append-system-prompt",
-            &steering,
-        ])
-        .args(&opening)
-        // Not `--strict-mcp-config`, which would silently switch off every
-        // server the person has set up for Claude Code. Ours is added to
-        // theirs, the way anybody would expect.
-        .args(match &reach_us {
-            Some(config) => vec!["--mcp-config", config.as_str()],
-            None => vec![],
-        })
-        // Nothing chosen means whatever this person's Claude Code is set
-        // to, which is the right default: it is their CLI and their
-        // account, and overruling it from here would be a surprise.
-        .args(match model {
-            Some(named) => vec!["--model", named],
-            None => vec![],
-        })
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("starting claude; is Claude Code installed and on the PATH?")?;
+        let mut child = command
+            .args([
+                "--print",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--include-partial-messages",
+                "--verbose",
+                // What a helper says, so that handing part of an errand to one
+                // is something you can watch rather than a step that sits
+                // there. It arrives tagged with the step that started it, and
+                // is shown underneath that step.
+                "--forward-subagent-text",
+                "--permission-mode",
+                // The agent's, not one decision for the whole app. A research
+                // agent and one that edits your files do not deserve the same
+                // posture, and it was compiled in until now.
+                the_mode_for(asks),
+                "--allowedTools",
+            ])
+            .args(GRANTED)
+            .args([
+                "--permission-prompt-tool",
+                "stdio",
+                "--append-system-prompt",
+                &steering,
+            ])
+            .args(&opening)
+            // Not `--strict-mcp-config`, which would silently switch off every
+            // server the person has set up for Claude Code. Ours is added to
+            // theirs, the way anybody would expect.
+            .args(match &reach_us {
+                Some(config) => vec!["--mcp-config", config.as_str()],
+                None => vec![],
+            })
+            // Nothing chosen means whatever this person's Claude Code is set
+            // to, which is the right default: it is their CLI and their
+            // account, and overruling it from here would be a surprise.
+            .args(match model {
+                Some(named) => vec!["--model", named],
+                None => vec![],
+            })
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("starting claude; is Claude Code installed and on the PATH?")?;
         let waiting: Waiting = Arc::default();
         let brought: Arc<Mutex<crate::Brought>> = Arc::default();
         let turning_up = brought.clone();
@@ -1258,6 +1376,45 @@ mod tests {
             panic!("it was not a step");
         };
         assert_eq!(step.what, "Looking for somebody to hand this to");
+    }
+
+    #[test]
+    fn claude_is_found_on_a_path_that_holds_it_and_not_on_one_that_does_not() {
+        // What actually happened: opened from the Dock, the app's PATH was the
+        // system's four folders, and every new agent's first message died with
+        // "execvp() of 'claude' failed".
+        let dir = std::env::temp_dir().join("errand-claude-on-path");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let there = dir.join("claude");
+        std::fs::write(&there, "#!/bin/sh\n").unwrap();
+        let mut mode = std::fs::metadata(&there).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
+        std::fs::set_permissions(&there, mode).unwrap();
+
+        let path = format!("/usr/bin:{}", dir.display());
+        assert_eq!(on_the_path("claude", Some(&path)), Some(there.clone()));
+        assert_eq!(on_the_path("claude", Some("/usr/bin:/bin")), None);
+        assert_eq!(on_the_path("claude", None), None);
+
+        // A file that is there but cannot be run is not the program.
+        let mut mode = std::fs::metadata(&there).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o644);
+        std::fs::set_permissions(&there, mode).unwrap();
+        assert_eq!(on_the_path("claude", Some(&path)), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn whatever_is_found_it_is_never_a_bare_name_unless_nothing_else_exists() {
+        // Either an absolute path, or the bare name as the last resort so the
+        // error stays the one people already know how to read.
+        let found = where_claude_is();
+        assert!(
+            found.is_absolute() || found == std::path::Path::new("claude"),
+            "{}",
+            found.display()
+        );
     }
 
     #[test]

@@ -120,11 +120,11 @@ fn nothing_will_change(lc: &str) -> bool {
 /// one that has hung, and somebody watching will press Stop.
 pub fn in_plain_words(why: &str, waiting: Duration) -> String {
     let reason = match crate::local::talk::is_server_down_error(why) {
-        true => crate::local::talk::short_server_down_reason(why),
-        false => "busy",
+        true => crate::local::talk::what_the_server_did(why),
+        false => "is busy",
     };
     let secs = waiting.as_secs().max(1);
-    format!("The model server is {reason}. Trying once more in {secs}s.")
+    format!("The model server {reason}. Trying once more in {secs}s.")
 }
 
 #[cfg(test)]
@@ -189,8 +189,17 @@ mod tests {
         // Twenty seconds of nothing on screen is indistinguishable from a
         // hang, and somebody watching one will press Stop.
         let said = in_plain_words("error sending request: connection refused", A_MOMENT);
-        assert!(said.contains("unreachable"), "{said}");
-        assert!(said.contains("3s"), "{said}");
-        assert!(said.contains("once more"), "{said}");
+        assert_eq!(
+            said,
+            "The model server cannot be reached. Trying once more in 3s."
+        );
+        // A whole sentence, because it used to read "The model server is
+        // server unreachable" and a line like that costs the screen its
+        // credibility for everything else on it.
+        assert!(!said.contains("is server"), "{said}");
+        assert_eq!(
+            in_plain_words("LLM error 500", A_MOMENT),
+            "The model server answered with an error. Trying once more in 3s."
+        );
     }
 }

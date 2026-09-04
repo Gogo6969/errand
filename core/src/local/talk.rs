@@ -468,29 +468,60 @@ pub fn is_server_down_error(err: &str) -> bool {
     .any(|n| lc.contains(n))
 }
 
-/// Compress a raw server-down error into a 2-3 word reason for the
-/// user-facing failover notice ("isn't responding (still loading)").
-pub fn short_server_down_reason(err: &str) -> &'static str {
+/// What the model server did, as the rest of a sentence beginning "The model
+/// server".
+///
+/// A whole predicate rather than a two-word label, because both callers put it
+/// after those three words and a label put there does not make a sentence: the
+/// screen said "The model server is server error", which is the kind of line
+/// that makes somebody trust nothing else on the screen either.
+pub fn what_the_server_did(err: &str) -> &'static str {
     let lc = err.to_ascii_lowercase();
     if lc.contains("loading model") || lc.contains("503") {
-        "model still loading"
+        "is still loading the model"
     } else if lc.contains("timed out") || lc.contains("timeout") || lc.contains("went silent") {
-        "not answering"
+        "is not answering"
     } else if lc.contains("refused")
         || lc.contains("connect")
         || lc.contains("sending request")
         || lc.contains("dns")
         || lc.contains("no route")
     {
-        "server unreachable"
+        "cannot be reached"
     } else {
-        "server error"
+        "answered with an error"
     }
 }
 
 #[cfg(test)]
 mod what_goes_on_the_wire {
     use super::*;
+
+    #[test]
+    fn what_the_server_did_finishes_the_sentence_it_is_put_into() {
+        // What was on screen: "The model server is server error." Every one of
+        // these has to read as English after those three words, because that
+        // is the only place they are ever used.
+        for (raw, expected) in [
+            (
+                "LLM error 503: loading model qwen3",
+                "is still loading the model",
+            ),
+            (
+                "the model server went silent for 5 minutes",
+                "is not answering",
+            ),
+            (
+                "error sending request: connection refused",
+                "cannot be reached",
+            ),
+            ("LLM error 500: internal", "answered with an error"),
+        ] {
+            let said = format!("The model server {}.", what_the_server_did(raw));
+            assert_eq!(said, format!("The model server {expected}."));
+            assert!(!said.contains("is server"), "{said}");
+        }
+    }
 
     #[test]
     fn a_thinking_models_working_goes_back_the_way_it_came() {

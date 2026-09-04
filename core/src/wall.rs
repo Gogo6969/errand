@@ -19,7 +19,9 @@
 //! a directory that was fine. A wall that produces misleading errors somewhere
 //! else is worse than no wall, because somebody will follow the advice.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 /// Where sandboxing lives on macOS.
 ///
@@ -62,6 +64,13 @@ const SCRATCH: &[&str] = &["/private/tmp", "/private/var/folders", "/tmp"];
 /// day it is not complete is the day it is worth nothing.
 pub fn profile(home: &Path) -> String {
     let mut allowed = vec![format!("  (subpath {:?})", home.display().to_string())];
+    // Folders somebody allowed for this agent on purpose, on top of its own.
+    // The wall used to be absolute: an agent set never to ask could not write
+    // outside its folder by any means, and somebody who wanted a file on an
+    // external disk every five minutes had no way to say so.
+    for place in also_allowed(home) {
+        allowed.push(format!("  (subpath {:?})", place.display().to_string()));
+    }
     // The environment rather than a crate, because this is the same HOME the
     // process being walled in will use, and the two agreeing is the point.
     if let Ok(theirs) = std::env::var("HOME") {
@@ -90,6 +99,92 @@ pub fn profile(home: &Path) -> String {
     format!(
         "(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*\n{})",
         allowed.join("\n")
+    )
+}
+
+/// Folders allowed on top of each errand's own, by the errand's folder.
+///
+/// Kept in the process rather than in a file, and deliberately so: the one
+/// place a walled agent can write is its own folder, so a list kept there is a
+/// list the agent could add to. This one it cannot reach.
+fn registry() -> &'static Mutex<HashMap<PathBuf, Vec<PathBuf>>> {
+    static ALSO: OnceLock<Mutex<HashMap<PathBuf, Vec<PathBuf>>>> = OnceLock::new();
+    ALSO.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Let an errand write inside these folders as well as its own.
+///
+/// Replaces what was allowed before, so taking a folder back is the same call
+/// with a shorter list. A relative path is not a folder anybody meant, and is
+/// dropped rather than turned into one under the working directory.
+pub fn also_allow(home: &Path, folders: Vec<PathBuf>) {
+    let folders: Vec<PathBuf> = folders
+        .into_iter()
+        .filter(|f| f.is_absolute())
+        .map(|f| f.canonicalize().unwrap_or(f))
+        .collect();
+    let mut all = registry().lock().unwrap_or_else(|e| e.into_inner());
+    match folders.is_empty() {
+        true => {
+            all.remove(home);
+        }
+        false => {
+            all.insert(home.to_path_buf(), folders);
+        }
+    }
+}
+
+/// The folders this errand may write in beyond its own.
+pub fn also_allowed(home: &Path) -> Vec<PathBuf> {
+    registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(home)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Whether what a command printed is the wall refusing it.
+///
+/// The system's words for the wall are the same as its words for a permission
+/// it has not been granted, which is exactly the confusion this module exists
+/// to end: a model that reads "Operation not permitted" on an external disk
+/// sends somebody to System Settings to grant access the app already has.
+pub fn looks_like_the_wall(said: &str) -> bool {
+    said.to_ascii_lowercase()
+        .contains("operation not permitted")
+}
+
+/// What a model has to be told about the wall before it runs into it.
+///
+/// Told as well as enforced, because a wall that is only enforced produces a
+/// bare "Operation not permitted", and every model that reads that invents the
+/// same wrong reason: macOS, and a permission the person should go and grant.
+/// The person then grants nothing, because they already had it, and the errand
+/// is stuck on a door that was never the problem.
+pub fn what_the_wall_means(home: &Path) -> String {
+    let also = also_allowed(home);
+    let more = match also.is_empty() {
+        true => String::new(),
+        false => format!(
+            " It has also been allowed to write inside: {}.",
+            also.iter()
+                .map(|f| f.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    format!(
+        "WHERE YOU CAN WRITE\n\n\
+         You run inside Errand's own wall. You can write only inside your working \
+         directory, {}, and the usual temporary places.{more} Everywhere else on this \
+         Mac is read-only to you, whatever permissions the app has: a write there fails \
+         with \"Operation not permitted\", and that is the wall, never a macOS setting. \
+         Full Disk Access does not change it, so never send the person to System \
+         Settings for it. If an errand needs a file somewhere else, say so plainly: the \
+         person can allow that folder for you under Allowed, choosing \"a folder\", and \
+         then it works. Until then, do the work inside your own folder.",
+        home.display()
     )
 }
 
@@ -137,12 +232,29 @@ pub fn shell(home: &Path, command: &str) -> tokio::process::Command {
 /// problem, by a wall that would not let them write there anyway.
 pub fn why_it_could_not_write(where_to: &Path, home: &Path) -> String {
     format!(
-        "{} could not be written to. This agent runs without being asked about \
-         anything, so it is walled in instead, and it can only write inside {} and \
-         the usual temporary places. Nothing is wrong with the folder itself. Either \
-         work inside the agent's own folder, or set the agent back to asking first, \
-         where you decide each time rather than up front.",
+        "{} could not be written to, and that is Errand's own wall, not a macOS \
+         permission. This agent runs without being asked about anything, so it is \
+         walled in instead: it can write inside {} and the usual temporary places, \
+         and nowhere else, whatever access the app has been granted. Full Disk Access \
+         does not change it. Nothing is wrong with the folder itself. To let it write \
+         there, allow that folder for this agent under Allowed, choosing \"a folder\"; \
+         otherwise work inside the agent's own folder.",
         where_to.display(),
+        home.display()
+    )
+}
+
+/// The same, for a command that failed somewhere it did not name.
+///
+/// A shell command says only that something was not permitted, not where, so
+/// the sentence has to work without a path.
+pub fn the_wall_refused(home: &Path) -> String {
+    format!(
+        "That \"Operation not permitted\" is Errand's own wall, not a macOS permission: \
+         this agent runs without being asked, so it can write only inside {} and the \
+         usual temporary places, whatever access the app has been granted. Full Disk \
+         Access does not change it. To write somewhere else, the folder has to be \
+         allowed for this agent under Allowed, choosing \"a folder\".",
         home.display()
     )
 }
@@ -234,7 +346,62 @@ mod tests {
             why_it_could_not_write(Path::new("/Users/someone/Desktop/x"), Path::new("/tmp/a"));
         assert!(said.contains("walled in"), "{said}");
         assert!(said.contains("Nothing is wrong with the folder"), "{said}");
-        assert!(said.contains("asking first"), "{said}");
+        assert!(said.contains("not a macOS permission"), "{said}");
+        assert!(
+            said.contains("Full Disk Access does not change it"),
+            "{said}"
+        );
+        assert!(said.contains("choosing \"a folder\""), "{said}");
         assert!(!said.to_lowercase().contains("sudo"), "{said}");
+    }
+
+    #[test]
+    fn a_folder_allowed_for_an_errand_is_writable_and_only_for_that_errand() {
+        // What actually happened: somebody asked for a file on an external
+        // disk every five minutes, the wall refused it, and there was no way
+        // to say the disk was fine. Allowing it has to reach the profile, and
+        // has to reach only the errand it was allowed for.
+        let mine = Path::new("/tmp/errand-wall-mine");
+        let other = Path::new("/tmp/errand-wall-other");
+        also_allow(mine, vec![PathBuf::from("/Volumes/Somewhere")]);
+        let said = profile(mine);
+        assert!(said.contains("(subpath \"/Volumes/Somewhere\")"), "{said}");
+        assert!(
+            !profile(other).contains("/Volumes/Somewhere"),
+            "the folder leaked into another errand's wall"
+        );
+        // Taking it back is the same call with nothing in it.
+        also_allow(mine, vec![]);
+        assert!(!profile(mine).contains("/Volumes/Somewhere"));
+    }
+
+    #[test]
+    fn a_relative_folder_is_not_allowed_because_nobody_meant_one() {
+        let home = Path::new("/tmp/errand-wall-relative");
+        also_allow(home, vec![PathBuf::from("Documents")]);
+        assert!(also_allowed(home).is_empty());
+    }
+
+    #[test]
+    fn the_walls_refusal_is_recognised_however_it_is_capitalised() {
+        assert!(looks_like_the_wall("sh: x.txt: Operation not permitted"));
+        assert!(looks_like_the_wall(
+            "EPERM: operation not permitted, open '/x'"
+        ));
+        assert!(!looks_like_the_wall("No such file or directory"));
+    }
+
+    #[test]
+    fn what_a_model_is_told_about_the_wall_names_the_folders_it_may_use() {
+        // The whole point of telling it: a model that reads a bare refusal
+        // sends somebody to System Settings for access the app already has.
+        let home = Path::new("/tmp/errand-wall-told");
+        also_allow(home, vec![PathBuf::from("/Volumes/Disk")]);
+        let said = what_the_wall_means(home);
+        assert!(said.contains("/tmp/errand-wall-told"), "{said}");
+        assert!(said.contains("/Volumes/Disk"), "{said}");
+        assert!(said.contains("never a macOS setting"), "{said}");
+        assert!(said.contains("Full Disk Access"), "{said}");
+        also_allow(home, vec![]);
     }
 }

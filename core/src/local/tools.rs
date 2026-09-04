@@ -681,9 +681,17 @@ pub async fn run(
             Ok(match ended.code == 0 {
                 true => cut_to_something_readable(&said),
                 false => format!(
-                    "exited {}\n{}",
+                    "exited {}\n{}{}",
                     ended.code,
-                    cut_to_something_readable(&said)
+                    cut_to_something_readable(&said),
+                    // The wall's refusal, named. A shell says only "Operation
+                    // not permitted", and a model that reads that on an external
+                    // disk sends somebody to grant Full Disk Access the app
+                    // already had. What actually happened, for a whole evening.
+                    match crate::wall::looks_like_the_wall(&said) {
+                        true => format!("\n\n{}", crate::wall::the_wall_refused(home)),
+                        false => String::new(),
+                    }
                 ),
             })
         }
@@ -1169,7 +1177,11 @@ mod tests {
         .expect_err("it wrote where it could not");
         let said = why.to_string();
         assert!(said.contains("walled in"), "{said}");
-        assert!(said.contains("asking first"), "{said}");
+        // The remedy has to be one that works. "Set it back to asking first"
+        // did nothing for a local model, which is always walled in; a folder
+        // it is allowed to write in does.
+        assert!(said.contains("not a macOS permission"), "{said}");
+        assert!(said.contains("choosing \"a folder\""), "{said}");
         // And not the system's own words, which are what sends people wrong.
         assert!(!said.contains("Permission denied"), "{said}");
 

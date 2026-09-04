@@ -675,7 +675,7 @@ function asAgent(a, keeping) {
     about: a.about || "",
     mark: a.mark || null,
     hue: a.hue || null,
-    asks: a.asks || "ask",
+    asks: a.asks || "auto",
     pinned: !!a.pinned,
     hidden: !!a.hidden,
     engine: a.model || "",
@@ -1608,6 +1608,18 @@ listen("noted", ({ payload }) => {
 // Somebody is wanted at the keyboard. Its own listener rather than a kind
 // inside `happened`, because it is the app asking rather than an engine
 // saying: nothing about it came from the conversation's own stream.
+// A handover answered by typing rather than by pressing its button. The app
+// hands the words to the agent that was waiting; here the card closes, so the
+// question does not go on looking open above the answer somebody just gave.
+listen("handed_back", ({ payload }) => {
+  const t = talks.get(payload.conversation);
+  if (!t) return;
+  stillWaiting.delete(payload.handover);
+  const m = t.messages.find((one) => one.handover === payload.handover);
+  if (m && m.answered == null) m.answered = payload.how;
+  if (showing === payload.conversation) drawMessages();
+});
+
 listen("handing_over", ({ payload }) => {
   const t = talks.get(payload.conversation);
   if (!t) return;
@@ -2892,7 +2904,7 @@ el.allowAhead?.addEventListener("submit", async (e) => {
 async function drawGranted() {
   const a = whose();
   if (!a) return;
-  el.asks.value = a.asks || "ask";
+  el.asks.value = a.asks || "auto";
   sayWhatAsksMeans();
 
   const allowed = await invoke("allowances", { agent: a.id });

@@ -87,8 +87,8 @@ pub fn what_it_means(why: &str) -> Option<Trouble> {
     if crate::local::talk::is_server_down_error(why) {
         return Some(Trouble {
             said: format!(
-                "The model server is {}.",
-                crate::local::talk::short_server_down_reason(why)
+                "The model server {}.",
+                crate::local::talk::what_the_server_did(why)
             ),
             fix: "It was tried twice. If it is a machine of yours, check it is running; \
                   otherwise this usually clears on its own."

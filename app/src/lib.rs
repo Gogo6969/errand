@@ -103,7 +103,7 @@ struct Held {
     /// answer has to reach the exact call that is waiting: a second handover
     /// arriving while the first is still on screen must not be ended by the
     /// first card being pressed.
-    handovers: Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>,
+    handovers: Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<String>)>>,
     /// What is stopping errands from working, if anything is.
     ///
     /// Only the kind that goes on happening until somebody does something: a
@@ -428,6 +428,13 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         // one.
         None => (where_things_live(&app)?, false),
     };
+    // The folders this agent may write in beyond its own, told to the wall
+    // before an engine is started behind it. A sandbox profile is fixed at
+    // the moment the process starts, so this has to come first.
+    if let Some(a) = &known {
+        let folders = held.store.folders_allowed(&a.id).unwrap_or_default();
+        errand_core::wall::also_allow(&home, folders);
+    }
 
     // What this agent has already been told about its job. Read here, in the
     // app, because the store is the app's: an engine is handed a string and
@@ -939,6 +946,26 @@ async fn say(
             // being able to look at it again afterwards, which is worth a line
             // on stderr rather than a refused message.
             Err(why) => eprintln!("that picture could not be kept: {why}"),
+        }
+    }
+
+    // Typed while the agent was waiting for a button to be pressed. The words
+    // are the answer, and they go to the call that is waiting rather than into
+    // the queue behind it. The queue is read only when the handover ends, and
+    // a handover nobody presses a button on ends ten minutes later: for those
+    // ten minutes somebody had answered and nothing whatever had happened.
+    if let Some(handover) = a_handover_waiting_in(&held, &id) {
+        if let Some((_, tell)) = held.handovers.lock().unwrap().remove(&handover) {
+            let _ = tell.send(format!("{SAID_INSTEAD}{text}"));
+            let _ = app.emit(
+                "handed_back",
+                HandedBack {
+                    conversation: id.clone(),
+                    handover,
+                    how: text.clone(),
+                },
+            );
+            return Ok(Some(written.seq));
         }
     }
 
@@ -2951,7 +2978,7 @@ async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Str
         held.handovers
             .lock()
             .unwrap()
-            .insert(handover.clone(), tell_me);
+            .insert(handover.clone(), (asked.from.clone(), tell_me));
     }
 
     // Opened before the card is shown, so that by the time somebody reads what
@@ -3005,6 +3032,13 @@ async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Str
                 false => "",
             }
         )),
+        // They typed instead of pressing a button. Their words are the answer.
+        Ok(Ok(word)) if word.starts_with(SAID_INSTEAD) => Ok(format!(
+            "They answered in words rather than pressing a button: \"{}\". Take that as \
+             their answer about: {what}. Carry on from it, and do not ask them to press \
+             anything.",
+            &word[SAID_INSTEAD.len()..]
+        )),
         Ok(Ok(_)) => Ok(format!(
             "They have skipped it: {what}. Do not ask again. Carry on with whatever can be \
              done without it, and say plainly what cannot."
@@ -3015,6 +3049,27 @@ async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Str
              there."
         )),
     }
+}
+
+/// What a handover's answer starts with when it was typed rather than pressed.
+const SAID_INSTEAD: &str = "said:";
+
+/// A handover answered by typing, so the card on screen can close.
+#[derive(Clone, Serialize)]
+struct HandedBack {
+    conversation: String,
+    handover: String,
+    how: String,
+}
+
+/// The handover this conversation is parked on, if it is parked on one.
+fn a_handover_waiting_in(held: &Held, conversation: &str) -> Option<String> {
+    held.handovers
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(_, (whose, _))| whose == conversation)
+        .map(|(handover, _)| handover.clone())
 }
 
 /// Somebody is being asked to come and do something.
@@ -3047,7 +3102,7 @@ async fn waiting_on_you(held: State<'_, Held>) -> Result<Vec<String>, String> {
 async fn handed_back(held: State<'_, Held>, handover: String, how: String) -> Result<(), String> {
     let waiting = held.handovers.lock().unwrap().remove(&handover);
     match waiting {
-        Some(tell) => {
+        Some((_, tell)) => {
             let _ = tell.send(how);
             Ok(())
         }
@@ -3599,10 +3654,47 @@ async fn allow_in_advance(
     // would have meant, and not something quietly different.
     let allowing = errand_core::allowing::what_always_means(tool, Some(rule))
         .ok_or_else(|| "there is nothing to remember in that".to_string())?;
+    // A folder has to be one. A path that is not absolute is a guess about
+    // the working directory, and a folder that is not there is a typo, and
+    // both would sit in the list looking like a permission that never works.
+    if errand_core::allowing::is_a_folder(tool) {
+        let folder = std::path::Path::new(&allowing.rule);
+        if !folder.is_absolute() {
+            return Err("give the folder's whole path, starting with /".into());
+        }
+        if !folder.is_dir() {
+            return Err(format!("{} is not a folder on this Mac", folder.display()));
+        }
+    }
     held.store
         .allow(&agent, tool, &allowing.rule)
         .map_err(|e| e.to_string())?;
+    let_the_wall_know(&held, &agent);
     Ok(allowing.in_words)
+}
+
+/// Bring the wall up to date with what this agent may write in.
+///
+/// An engine already running behind the old wall keeps it until it is next
+/// started: the profile is fixed when the process is. One sitting idle is
+/// closed here, so the next message opens it behind the new wall; one in the
+/// middle of a turn is left alone and gets the new wall after that turn.
+fn let_the_wall_know(held: &Held, agent: &str) {
+    let Ok(Some(a)) = held.store.agent(agent) else {
+        return;
+    };
+    let folders = held.store.folders_allowed(agent).unwrap_or_default();
+    errand_core::wall::also_allow(std::path::Path::new(&a.cwd), folders);
+    let open: Vec<String> = held.live.lock().unwrap().keys().cloned().collect();
+    for id in open {
+        let theirs = matches!(held.store.conversation(&id), Ok(Some(c)) if c.agent == agent);
+        let busy = held.running.lock().unwrap().contains(&id);
+        if theirs && !busy {
+            if let Some(mut thread) = held.live.lock().unwrap().remove(&id) {
+                let _ = thread.stop();
+            }
+        }
+    }
 }
 
 /// Everything an agent may do without being asked again.
@@ -3648,7 +3740,12 @@ async fn stop_a_command(handle: String) -> Result<bool, String> {
 /// Take one back.
 #[tauri::command]
 async fn revoke(held: State<'_, Held>, id: String) -> Result<(), String> {
-    held.store.revoke(&id).map_err(|e| e.to_string())
+    let whose = held.store.whose_allowance(&id).map_err(|e| e.to_string())?;
+    held.store.revoke(&id).map_err(|e| e.to_string())?;
+    if let Some(agent) = whose {
+        let_the_wall_know(&held, &agent);
+    }
+    Ok(())
 }
 
 /// How much an agent asks before acting.
@@ -4377,6 +4474,13 @@ fn from_a_terminal(args: Vec<String>) -> i32 {
     match outcome {
         Ok(said) if wanted.is_none() => {
             println!("{said}");
+            // A turn that failed says so in its first words, and a script
+            // reading the exit code has to be told as well: this returned 0
+            // for "It could not: ..." and a pipeline carried on as though the
+            // errand had been done.
+            if said.starts_with("It could not:") {
+                return 1;
+            }
             0
         }
         // Asked for in a shape, so checked before it is printed. A script that

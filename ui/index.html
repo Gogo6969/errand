@@ -308,6 +308,14 @@
               <option value="Edit">changing files</option>
               <option value="Write">writing files</option>
               <option value="WebFetch">fetching a page</option>
+              <!--
+                A place rather than a tool. An agent set never to ask is walled
+                into its own folder, and until this option there was no way to
+                let it write anywhere else: somebody who wanted a file on an
+                external disk every five minutes was sent to grant Full Disk
+                Access the app already had.
+              -->
+              <option value="folder">a folder it may write in</option>
             </select>
           </label>
           <button id="allow-save" type="submit">Allow it</button>
