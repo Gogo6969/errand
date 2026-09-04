@@ -639,6 +639,15 @@ async fn errand(
             // same name, and doing it by string in three places is how a
             // fourth place gets it slightly different.
             let mine = team::ours(&name);
+            // Mail and the diary are the app's too, and they were declared to
+            // the model without being routed anywhere: the arm below sent only
+            // the app's own team tools up, so every connector call fell past it
+            // into the local tool table, which has never heard of them. A model
+            // offered `unread_mail` and told "There is no tool called
+            // unread_mail here" reports that as "Mail is not connected", and
+            // somebody goes looking at their permissions for a fault that is in
+            // this line.
+            let this_mac = crate::connectors::which(&name).is_some();
             let must_ask = match asks {
                 // `auto` first, or it would not mean never: handing work to
                 // another agent had its own default and quietly outranked the
@@ -718,8 +727,16 @@ async fn errand(
                 "find_tools" => Ok(look_up(outside, loaded, &args)),
                 // Only the thing holding every agent can reach another one, so
                 // this goes up rather than being answered here.
-                _ if mine.is_some() => match host {
-                    None => Ok(team::without_the_app(mine.expect("just matched")).to_string()),
+                _ if mine.is_some() || this_mac => match host {
+                    None => Ok(match mine {
+                        Some(ours) => team::without_the_app(ours).to_string(),
+                        // A connector reaches this Mac's own apps through the
+                        // app itself, so without one there is nothing to reach
+                        // them with.
+                        None => "That reads something on this Mac, which needs Errand \
+                                 itself to be running."
+                            .to_string(),
+                    }),
                     Some((from, to)) => {
                         let (tell_me, answer) = tokio::sync::oneshot::channel();
                         let sent = to.send(team::Wants {
@@ -1030,6 +1047,38 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_tool_a_local_model_is_offered_has_somewhere_to_go() {
+        // What actually happened: the connector tools were declared to the
+        // model and routed nowhere, so calling one answered "There is no tool
+        // called unread_mail here". The model reported that as Mail not being
+        // connected, and the mail feature was dead on the only engine that
+        // could run, with nothing anywhere saying so.
+        //
+        // The declarations and the routing are two lists that have to agree.
+        // This is the check that they do.
+        for schema in crate::connectors::declarations() {
+            let name = schema
+                .pointer("/function/name")
+                .and_then(|n| n.as_str())
+                .expect("every declaration names its tool");
+            assert!(
+                crate::connectors::which(name).is_some(),
+                "{name} is offered to a local model and routed nowhere"
+            );
+        }
+        for schema in team::declarations() {
+            let name = schema
+                .pointer("/function/name")
+                .and_then(|n| n.as_str())
+                .expect("every declaration names its tool");
+            assert!(
+                team::ours(name).is_some(),
+                "{name} is offered to a local model and routed nowhere"
+            );
+        }
+    }
 
     #[test]
     fn a_plan_says_it_is_a_plan_and_an_ordinary_errand_says_nothing_about_one() {
