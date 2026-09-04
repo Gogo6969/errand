@@ -713,7 +713,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 let asked = {
                     let held: State<Held> = app.state();
                     let mut live = held.live.lock().unwrap();
-                    live.get_mut(&id).map(|engine| engine.say(WHO_ARE_YOU, &[]))
+                    live.get_mut(&id).map(|engine| engine.aside(WHO_ARE_YOU))
                 };
                 // Nothing to ask, or it would not take the question. Either
                 // way it keeps the name it has and is asked again next time.

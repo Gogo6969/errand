@@ -228,6 +228,22 @@ pub trait Engine {
     /// whole point and also the thing to be careful about: a question nobody
     /// answers is a thread that waits for ever.
     fn answer(&mut self, call: &str, said: Answer) -> anyhow::Result<()>;
+    /// Ask something that is not part of the conversation.
+    ///
+    /// For the app's own questions rather than anybody's errand: what an agent
+    /// should be called, and nothing a person asked for. The exchange is taken
+    /// back out afterwards where an engine can do that, because it is invisible
+    /// to the person and a question they cannot see is a question they cannot
+    /// account for. One that stays in shapes the next answer: asked "who are
+    /// you?" and then "do this once a day", a model answered the second in the
+    /// format of the first, set no routine, and the person was shown a line of
+    /// fields where a confirmation should have been.
+    ///
+    /// Falls back to saying it, for an engine that keeps a session of its own
+    /// and cannot be asked to forget part of it.
+    fn aside(&mut self, text: &str) -> anyhow::Result<()> {
+        self.say(text, &[])
+    }
     /// Stop it, whatever it is doing.
     fn stop(&mut self) -> anyhow::Result<()>;
     /// What it turned up with, once it has said.

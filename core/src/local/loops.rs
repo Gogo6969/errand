@@ -131,6 +131,8 @@ pub struct Local {
 enum Turn {
     /// What was said, and anything attached to it as a data URL.
     Say(String, Vec<String>),
+    /// A question of the app's own, taken back out when it is answered.
+    Aside(String),
     Answer {
         call: String,
         said: Answer,
@@ -192,6 +194,12 @@ impl Engine for Local {
                 text.to_string(),
                 pictures.iter().map(crate::Picture::as_data_url).collect(),
             ))
+            .map_err(|_| anyhow::anyhow!("this conversation has ended"))
+    }
+
+    fn aside(&mut self, text: &str) -> Result<()> {
+        self.turns
+            .send(Turn::Aside(text.to_string()))
             .map_err(|_| anyhow::anyhow!("this conversation has ended"))
     }
 
@@ -274,13 +282,18 @@ async fn conversation(
     let mut forgotten: usize = 0;
 
     while let Some(turn) = asked.recv().await {
-        let (said, pictures) = match turn {
-            Turn::Say(text, pictures) => (text, pictures),
+        let (said, pictures, an_aside) = match turn {
+            Turn::Say(text, pictures) => (text, pictures, false),
+            Turn::Aside(text) => (text, Vec::new(), true),
             // An answer with no question behind it. It happens when a thread is
             // reopened while a card is still on screen from last time.
             Turn::Answer { .. } => continue,
             Turn::Stop => break,
         };
+        // Where the conversation stood before this. An aside is put back to
+        // here when it is done, so nothing the app asked on its own account is
+        // left in front of the model when somebody says the next thing.
+        let stood_at = history.len();
 
         // Look the request up before handing it over.
         //
@@ -294,8 +307,13 @@ async fn conversation(
         //
         // As many as fit rather than a fixed few: what fits depends on the
         // model, and a number chosen for one is wrong for every other.
-        for called in as_many_as_fit(&client.settings, &outside, &said, &history) {
-            loaded.insert(called);
+        // Not for an aside: it is a question about the errand just finished and
+        // has no use for a tool, and loading tools for it would leave them in
+        // front of the model afterwards with nothing that asked for them.
+        if !an_aside {
+            for called in as_many_as_fit(&client.settings, &outside, &said, &history) {
+                loaded.insert(called);
+            }
         }
 
         history.push(ChatMessage::User {
@@ -318,6 +336,11 @@ async fn conversation(
             &out,
         )
         .await;
+        // Taken back out, however it went. A failed aside that stayed would be
+        // the same problem with none of the benefit.
+        if an_aside {
+            history.truncate(stood_at);
+        }
         match ran {
             Ok(Done::Finished(said)) => {
                 // Nothing: a model on this machine costs no dollars, and saying
@@ -783,6 +806,10 @@ async fn wait_for_an_answer(
             }
             Some(Turn::Stop) | None => return None,
             Some(Turn::Say(text, _)) => meanwhile.push(text),
+            // The app asking something of its own while a card is on screen.
+            // Not what the card is waiting for and not a person's words either,
+            // so it is neither answered nor carried into the conversation.
+            Some(Turn::Aside(_)) => {}
             // An answer to some other question, which by now has no question
             // behind it. Nothing to do with it but let it go.
             Some(Turn::Answer { .. }) => {}
@@ -1166,5 +1193,130 @@ mod tests {
             bare.contains("/tmp/x"),
             "it still needs to know where it is working"
         );
+    }
+}
+
+#[cfg(test)]
+mod an_aside_leaves_no_trace {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A model server that answers anything, and keeps what it was asked.
+    ///
+    /// Enough of one to see what went on the wire, which is the only place the
+    /// thing under test is visible: an aside is invisible in the conversation,
+    /// in the store and on screen, and shows up solely as messages the next
+    /// request does or does not carry.
+    async fn a_server_that_remembers(asked: Arc<Mutex<Vec<String>>>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let where_it_is = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let asked = asked.clone();
+                tokio::spawn(async move {
+                    let mut got = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    // Until the body is whole, which is when what follows the
+                    // blank line is as long as Content-Length says.
+                    loop {
+                        let Ok(n) = stream.read(&mut buf).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        got.extend_from_slice(&buf[..n]);
+                        let text = String::from_utf8_lossy(&got).to_string();
+                        let Some(at) = text.find("\r\n\r\n") else {
+                            continue;
+                        };
+                        let want: usize = text
+                            .to_ascii_lowercase()
+                            .split("content-length:")
+                            .nth(1)
+                            .and_then(|rest| rest.split("\r\n").next())
+                            .and_then(|n| n.trim().parse().ok())
+                            .unwrap_or(0);
+                        if text.len() - (at + 4) >= want {
+                            asked.lock().unwrap().push(text[at + 4..].to_string());
+                            break;
+                        }
+                    }
+                    let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n\
+                                data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                                data: [DONE]\n\n";
+                    let _ = stream
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                                 Content-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        where_it_is
+    }
+
+    async fn until_it_finishes(events: &std::sync::mpsc::Receiver<Event>) {
+        let waited = std::time::Instant::now();
+        while waited.elapsed() < std::time::Duration::from_secs(20) {
+            match events.try_recv() {
+                Ok(Event::Done { .. }) | Ok(Event::Failed { .. }) => return,
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        }
+        panic!("the turn never finished");
+    }
+
+    #[tokio::test]
+    async fn what_the_app_asks_on_its_own_account_is_gone_by_the_next_turn() {
+        // What actually happened: an agent finished its first errand, the app
+        // asked it who it was so it could be named, and the person's next
+        // message was answered in the shape of that hidden question. They
+        // asked for a daily job and were shown a line of fields. No routine
+        // was set and nothing said why.
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_remembers(asked.clone()).await;
+        let home = std::env::temp_dir().join("errand-aside-test");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let settings = LlmSettings {
+            provider: "openai-compat".into(),
+            base_url: where_it_is,
+            model: "pretend".into(),
+            ..Default::default()
+        };
+        let (mut engine, events) = Local::open(settings, home, "auto", "", Vec::new(), None)
+            .expect("a conversation to talk to");
+
+        engine.say("the first errand", &[]).unwrap();
+        until_it_finishes(&events).await;
+        engine.aside("WHO ARE YOU, in five fields").unwrap();
+        until_it_finishes(&events).await;
+        engine.say("do this once a day", &[]).unwrap();
+        until_it_finishes(&events).await;
+
+        let seen = asked.lock().unwrap().clone();
+        assert_eq!(seen.len(), 3, "one request per turn");
+        let last = &seen[2];
+        assert!(
+            !last.contains("WHO ARE YOU"),
+            "the app's own question was still in front of the model:\n{last}"
+        );
+        assert!(
+            last.contains("the first errand"),
+            "the conversation itself was thrown away with the aside:\n{last}"
+        );
+        assert!(last.contains("do this once a day"));
     }
 }
