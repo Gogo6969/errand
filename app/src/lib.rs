@@ -476,12 +476,34 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // line above, and it sent somebody looking at the picker for a
             // fault that was in what the picker had written.
             let said = settings.unwrap_or_default();
-            let settings: LlmSettings = serde_json::from_str(&said).map_err(|why| {
+            let mut settings: LlmSettings = serde_json::from_str(&said).map_err(|why| {
                 format!(
                     "the model set for this thread could not be read ({why}). \
                      Choose it again in the picker at the top."
                 )
             })?;
+            // The key, which is not in there and must not be: a picker entry is
+            // copied into every agent set to that model and shown by anything
+            // that shows settings, and a key in it would be copied and shown
+            // with it. It lives in the keychain under the address it was typed
+            // for, and until now nothing fetched it back, so every request to a
+            // provider that needs one went without an Authorization header at
+            // all. DeepSeek answered "401 Authentication Fails", which read as
+            // a wrong key rather than as no key, and no hosted provider had
+            // ever worked.
+            if settings.api_key.is_none() {
+                let mine = held.store.backends().ok().and_then(|kept| {
+                    kept.into_iter()
+                        .find(|b| {
+                            errand_core::local::find::the_same_place(
+                                &settings.base_url,
+                                &b.base_url,
+                            )
+                        })
+                        .and_then(|b| keys::look_up(&b.id))
+                });
+                settings.api_key = mine;
+            }
             // Ask again, behind this, whether it still holds what it did. Not
             // in front of it: the asking takes seconds against a server that is
             // slow and five against one that is off, and paying that before
@@ -863,7 +885,8 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // terminal command away from working, and nothing in those words
             // says so.
             let event = match &event {
-                Event::Failed { why } => match errand_core::trouble::what_it_means(why) {
+                Event::Failed { why } => match errand_core::trouble::what_it_means(why, &on_engine)
+                {
                     Some(trouble) => {
                         // Remembered, so the next errand is warned before it is
                         // typed rather than after. The one that prompted this

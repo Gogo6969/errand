@@ -32,12 +32,18 @@ pub struct Trouble {
 /// Nothing for the ones it does not, and that is deliberate: a guess dressed as
 /// an explanation is worse than the provider's own words, because the provider
 /// at least was there.
-pub fn what_it_means(why: &str) -> Option<Trouble> {
+pub fn what_it_means(why: &str, engine: &str) -> Option<Trouble> {
     let lc = why.to_ascii_lowercase();
+    // Whose failure this is. Without it, every engine's refusal was read as
+    // Claude Code's: DeepSeek answering "401 Unauthorized: Authentication
+    // Fails" put "Claude Code is signed out, run `claude` and sign in" on
+    // screen, which is advice about a program that was not involved and does
+    // nothing about the key that was.
+    let on_claude = engine.eq_ignore_ascii_case("claude");
 
-    // The one that started this. Claude Code holds its own login and it
-    // expires; every turn fails identically until somebody signs in again.
-    if lc.contains("oauth") || (lc.contains("401") && lc.contains("authenticat")) {
+    // Claude Code holds its own login and it expires; every turn fails
+    // identically until somebody signs in again.
+    if on_claude && (lc.contains("oauth") || (lc.contains("401") && lc.contains("authenticat"))) {
         return Some(Trouble {
             said: "Claude Code is signed out. Its login has expired or been revoked, so \
                    nothing can be asked of it until it is signed in again."
@@ -52,6 +58,10 @@ pub fn what_it_means(why: &str) -> Option<Trouble> {
     if lc.contains("invalid api key")
         || lc.contains("incorrect api key")
         || lc.contains("error 401")
+        // However the provider spells it. DeepSeek says "401 Unauthorized:
+        // Authentication Fails", which matched none of the three above and
+        // fell through to being called somebody else's expired login.
+        || (lc.contains("401") && (lc.contains("authenticat") || lc.contains("unauthorized")))
     {
         return Some(Trouble {
             said: "The key for this model is not being accepted.".to_string(),
@@ -109,11 +119,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn another_engines_refused_key_is_not_reported_as_claude_being_signed_out() {
+        // What was on screen: DeepSeek answered "401 Unauthorized:
+        // Authentication Fails" and the app said Claude Code was signed out
+        // and to run `claude` in a terminal. Claude Code was not involved, and
+        // the thing that was, the key, went unmentioned.
+        let real = "LLM error 401 Unauthorized: Authentication Fails (governor)";
+        let said = what_it_means(real, "local").expect("this one is recognised");
+        assert!(said.said.contains("key"), "{said:?}");
+        assert!(!said.said.contains("Claude"), "{said:?}");
+        assert!(!said.fix.contains("terminal"), "{said:?}");
+        // And the same words on Claude Code still are its login.
+        let claude = what_it_means(real, "claude").expect("this one is recognised");
+        assert!(claude.said.contains("signed out"), "{claude:?}");
+    }
+
+    #[test]
     fn an_expired_login_says_it_is_a_login_and_how_to_fix_it() {
         // The exact string that arrived, on a message somebody had spent a
         // paragraph and a screenshot writing.
         let real = "Failed to authenticate. API Error: 401 OAuth access token has been revoked.";
-        let said = what_it_means(real).expect("this one is recognised");
+        let said = what_it_means(real, "claude").expect("this one is recognised");
         assert!(said.said.contains("signed out"), "{said:?}");
         assert!(said.fix.contains("claude"), "{said:?}");
         // And it is the kind worth saying before the next errand rather than
@@ -125,7 +151,7 @@ mod tests {
     fn a_busy_server_is_not_somebodys_fault_and_needs_nothing_done() {
         // The distinction that decides whether the app nags: a rate limit
         // clears itself, a revoked token does not.
-        let said = what_it_means("error sending request: connection refused")
+        let said = what_it_means("error sending request: connection refused", "local")
             .expect("this one is recognised");
         assert!(!said.until_somebody_acts, "{said:?}");
         assert!(said.said.contains("server"), "{said:?}");
@@ -135,8 +161,11 @@ mod tests {
     fn a_failure_this_app_does_not_recognise_is_left_in_the_provider_s_own_words() {
         // A guess dressed as an explanation is worse than the raw message,
         // because the provider at least was there.
-        assert_eq!(what_it_means("something nobody has seen before"), None);
-        assert_eq!(what_it_means(""), None);
+        assert_eq!(
+            what_it_means("something nobody has seen before", "claude"),
+            None
+        );
+        assert_eq!(what_it_means("", "claude"), None);
     }
 
     #[test]
@@ -149,7 +178,8 @@ mod tests {
             "LLM error 404: unknown model gpt-9",
             "error sending request: connection refused",
         ] {
-            let said = what_it_means(why).unwrap_or_else(|| panic!("{why} was not recognised"));
+            let said =
+                what_it_means(why, "claude").unwrap_or_else(|| panic!("{why} was not recognised"));
             assert!(!said.fix.trim().is_empty(), "{why}: {said:?}");
             assert!(!said.said.trim().is_empty(), "{why}: {said:?}");
         }

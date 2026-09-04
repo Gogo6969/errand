@@ -21,6 +21,15 @@ set -u
 APP="/Applications/Errand.app/Contents/MacOS/errand-app"
 STORE="$HOME/Library/Application Support/Errand/errand.db"
 WHO="Shipping Check"
+# Which engine the five errands run on. Claude Code by default, because that is
+# what most people have; any model in the picker by naming it, because an app
+# that only passes its own gate on one engine has only been tested on one, and
+# because a login that expires should not be able to stop the gate running at
+# all.
+#
+#   ENGINE=local MODEL='{"provider":"openai-compat","base_url":"https://api.deepseek.com/v1","model":"deepseek-v4-flash","wire":"openai"}' ./scripts/before-shipping.sh
+ENGINE="${ENGINE:-claude}"
+MODEL="${MODEL:-}"
 PASSED=0
 FAILED=0
 
@@ -64,8 +73,9 @@ sqlite3 "$STORE" "
   exit 2
 }
 sqlite3 "$STORE" "
-  INSERT INTO agents (id, name, cwd, opened, started_at, spoke_at, engine, asks)
-  VALUES ('$AGENT', '$WHO', '$HOME_DIR', 0, $NOW, $NOW, 'claude', 'auto');
+  INSERT INTO agents (id, name, cwd, opened, started_at, spoke_at, engine, engine_settings, asks)
+  VALUES ('$AGENT', '$WHO', '$HOME_DIR', 0, $NOW, $NOW, '$ENGINE',
+          $([ -n "$MODEL" ] && printf "'%s'" "$MODEL" || printf NULL), 'auto');
   INSERT INTO conversations (id, agent, name, opened, started_at, spoke_at)
   VALUES ('$FIRST', '$AGENT', 'First', 0, $NOW, $NOW);" || {
   echo "could not make the agent to test with"
@@ -76,8 +86,14 @@ sqlite3 "$STORE" "
 # A turn that completes at all. Everything else is built on this, and it is
 # what fails when the engine is signed out -- which looked like a working app
 # until somebody typed a paragraph into it.
+printf '\nRunning the five errands on \033[1m%s\033[0m%s\n' "$ENGINE" "$([ -n "$MODEL" ] && echo " ($(printf '%s' "$MODEL" | sed 's/.*"model":"\([^"]*\)".*/\1/'))")"
+
 say "1. It answers a plain question"
-ONE=$("$APP" ask "$WHO" "What is 17 times 23? Reply with just the number." 2>/dev/null | tail -1)
+# The whole answer rather than its last line. A model that wraps what it was
+# asked for in a code fence puts ``` on the last line, and the check then
+# reported the fence as the answer: a fault in the test that read exactly like
+# a fault in the app.
+ONE=$("$APP" ask "$WHO" "What is 17 times 23? Reply with just the number." 2>/dev/null | tr "\n" " ")
 case "$ONE" in
   *391*) won "said 391" ;;
   *) lost "expected 391, got: ${ONE:-nothing at all}" ;;
@@ -88,7 +104,7 @@ esac
 # output half is the one that has broken: an outcome cut to 79 characters is
 # an app that knows what happened and will not say.
 say "2. It runs a command and shows what came back"
-TWO=$("$APP" ask "$WHO" "Run the shell command: echo shipping-check-ok. Then reply with exactly what it printed." 2>/dev/null | tail -1)
+TWO=$("$APP" ask "$WHO" "Run the shell command: echo shipping-check-ok. Then reply with exactly what it printed." 2>/dev/null | tr "\n" " ")
 case "$TWO" in
   *shipping-check-ok*) won "the command ran and its output came back" ;;
   *) lost "expected shipping-check-ok, got: ${TWO:-nothing at all}" ;;
@@ -98,7 +114,7 @@ esac
 # Writing and reading a file in the agent's own folder: the wall, and the two
 # tools an errand uses most.
 say "3. It writes a file and reads it back"
-THREE=$("$APP" ask "$WHO" "Write a file called shipping.txt containing the word marmalade, then read it back and reply with just what it contains." 2>/dev/null | tail -1)
+THREE=$("$APP" ask "$WHO" "Write a file called shipping.txt containing the word marmalade, then read it back and reply with just what it contains." 2>/dev/null | tr "\n" " ")
 case "$THREE" in
   *marmalade*) won "the file was written and read back" ;;
   *) lost "expected marmalade, got: ${THREE:-nothing at all}" ;;
@@ -108,7 +124,7 @@ esac
 # A connector. Reaching outside the app at all, and answering honestly about
 # what it could not reach rather than hanging or lying.
 say "4. It reads something outside the app"
-FOUR=$("$APP" ask "$WHO" "Use your unread_mail tool once with at_most 1, and reply in one line with exactly what it returned." 2>/dev/null | tail -1)
+FOUR=$("$APP" ask "$WHO" "Use your unread_mail tool once with at_most 1, and reply in one line with exactly what it returned." 2>/dev/null | tr "\n" " ")
 case "$FOUR" in
   *nread*|*unread*|*Mail*) won "the connector answered" ;;
   *) lost "the connector said nothing usable: ${FOUR:-nothing at all}" ;;

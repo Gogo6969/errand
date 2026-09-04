@@ -52,6 +52,23 @@ rm -rf /Applications/Errand.app && cp -R target/release/bundle/macos/Errand.app 
 ./scripts/before-shipping.sh
 ```
 
+On any engine, not only Claude Code. An app that passes its own gate on one
+engine has been tested on one, and a login that expires should not be able to
+stop the gate running at all:
+
+```
+ENGINE=local MODEL='{"provider":"openai-compat","base_url":"https://api.deepseek.com/v1","model":"deepseek-v4-flash","wire":"openai"}' ./scripts/before-shipping.sh
+```
+
+Launch the app the way somebody actually launches it, from the Finder, and not
+from a terminal. A terminal hands it the PATH from your shell profile and the
+Finder hands it four system folders, which is the difference between finding
+Claude Code and not:
+
+```
+env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$HOME" USER="$USER" SHELL=/bin/zsh /usr/bin/open -a Errand
+```
+
 Two things the suite has already had to learn the hard way, both of which cost
 an afternoon by looking like a dead clock:
 
