@@ -53,11 +53,49 @@ pub fn trim_to_fit(messages: &mut Vec<ChatMessage>, budget: usize) {
         return;
     }
 
+    // The turn being worked on starts at the last thing the person said, and
+    // everything from there is what this turn has done so far.
+    //
+    // Dropping the oldest turns is right until the oldest turns are this one.
+    // A turn's own tool results are the biggest things in the window, so a long
+    // errand trims away its own evidence: first the sentence that started it,
+    // then the result proving the work was already done. A model left holding
+    // the request and no record of having done it does the only sensible thing
+    // it can see, which is to do it again. On a standing job that ran every
+    // five minutes, somebody found twenty-four copies of a file meant to be
+    // written once, and after protecting only the request, two.
+    //
+    // So the history before this turn goes first, all of it, before anything
+    // belonging to the turn is even considered.
+    let turn_begins = messages
+        .iter()
+        .rposition(|m| matches!(m, ChatMessage::User { .. }));
+
+    if let Some(mut begins) = turn_begins {
+        let mut i = 0;
+        while total > budget && i < begins && messages.len() > 2 {
+            if matches!(messages.get(i), Some(ChatMessage::System { .. })) {
+                i += 1;
+                continue;
+            }
+            messages.remove(i);
+            total -= costs.remove(i);
+            begins -= 1;
+        }
+    }
+
+    // Only then the turn itself, oldest first, keeping the request and the
+    // thing just said. A turn that does not fit on its own is a turn whose
+    // tool results are enormous, and something has to go.
+    let mut anchor = messages
+        .iter()
+        .rposition(|m| matches!(m, ChatMessage::User { .. }));
+
     let mut i = 0;
     while total > budget && messages.len() > 2 {
         let last_idx = messages.len().saturating_sub(1);
         let is_system = matches!(messages.get(i), Some(ChatMessage::System { .. }));
-        if i == last_idx || is_system {
+        if i == last_idx || is_system || Some(i) == anchor {
             i += 1;
             if i >= messages.len() {
                 break;
@@ -66,6 +104,12 @@ pub fn trim_to_fit(messages: &mut Vec<ChatMessage>, budget: usize) {
         }
         messages.remove(i);
         total -= costs.remove(i);
+        // Everything after the hole moved down one, the anchor included.
+        if let Some(at) = anchor {
+            if at > i {
+                anchor = Some(at - 1);
+            }
+        }
     }
 
     if total > budget {
@@ -82,5 +126,98 @@ pub fn trim_to_fit(messages: &mut Vec<ChatMessage>, budget: usize) {
                 content.push_str("\n…(truncated)");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(said: &str) -> ChatMessage {
+        ChatMessage::User {
+            content: said.to_string(),
+            name: None,
+            image_data_urls: Vec::new(),
+        }
+    }
+
+    fn tool_result(said: &str) -> ChatMessage {
+        ChatMessage::Tool {
+            content: said.to_string(),
+            tool_call_id: "call-1".into(),
+        }
+    }
+
+    #[test]
+    fn making_room_never_drops_the_request_that_is_being_worked_on() {
+        // What actually happened: a standing job wrote one file every five
+        // minutes into the same conversation. After a few hours its own tool
+        // results filled the window, the trim reached the sentence that had
+        // started the turn, and the model went on repeating its last action
+        // for twenty-four rounds. The person found twenty-four files.
+        let mut talk = vec![
+            ChatMessage::System {
+                content: "you are an errand".repeat(20),
+            },
+            user("something asked hours ago"),
+            tool_result(&"old output ".repeat(400)),
+            user("Write ONE pulse file to the disk"),
+            tool_result(&"the output of the write ".repeat(400)),
+            tool_result(&"the output of the check ".repeat(400)),
+        ];
+        trim_to_fit(&mut talk, 600);
+
+        let kept: Vec<&str> = talk.iter().map(|m| m.content()).collect();
+        assert!(
+            kept.iter().any(|c| c.contains("Write ONE pulse file")),
+            "the request being worked on was trimmed away: {kept:?}"
+        );
+        // And the instructions, which were never in question.
+        assert!(matches!(talk.first(), Some(ChatMessage::System { .. })));
+    }
+
+    #[test]
+    fn what_this_turn_already_did_outlives_the_conversation_before_it() {
+        // The exact sequence off somebody's disk: write the file, say it
+        // landed, make a note, and then the note's result is kept while the
+        // proof of the write is dropped, so it writes the file again.
+        let mut talk = vec![
+            ChatMessage::System {
+                content: "instructions".into(),
+            },
+            user(&"a conversation from hours ago ".repeat(200)),
+            tool_result(&"and its output ".repeat(200)),
+            user("Write ONE pulse file"),
+            tool_result("the pulse file was written: errand-pulse-081717.txt"),
+            tool_result("the note was made"),
+        ];
+        trim_to_fit(&mut talk, 700);
+        let kept: Vec<&str> = talk.iter().map(|m| m.content()).collect();
+        assert!(
+            kept.iter().any(|c| c.contains("pulse file was written")),
+            "the proof the work was done was dropped: {kept:?}"
+        );
+        assert!(kept.iter().any(|c| c.contains("Write ONE pulse file")));
+        assert!(
+            !kept.iter().any(|c| c.contains("hours ago")),
+            "the old conversation should have gone first"
+        );
+    }
+
+    #[test]
+    fn the_oldest_turns_still_go_first_when_there_is_something_to_drop() {
+        let mut talk = vec![
+            ChatMessage::System {
+                content: "instructions".into(),
+            },
+            user("the oldest thing"),
+            tool_result(&"filler ".repeat(500)),
+            user("the newest thing"),
+            tool_result("small"),
+        ];
+        trim_to_fit(&mut talk, 400);
+        let kept: Vec<&str> = talk.iter().map(|m| m.content()).collect();
+        assert!(!kept.iter().any(|c| c.contains("the oldest thing")));
+        assert!(kept.iter().any(|c| c.contains("the newest thing")));
     }
 }

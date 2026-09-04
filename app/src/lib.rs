@@ -104,6 +104,14 @@ struct Held {
     /// arriving while the first is still on screen must not be ended by the
     /// first card being pressed.
     handovers: Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<String>)>>,
+    /// Conversations whose next turn starts without the ones before it.
+    ///
+    /// A standing job is the same job every time, not a conversation that gets
+    /// longer. Handed its own past runs, a local model reads them as this run:
+    /// it wrote a file twenty-four times in one turn, and then stopped writing
+    /// at all and reported a file from half an hour earlier as though it had
+    /// just made it. Both came from the same history.
+    fresh: Mutex<std::collections::HashSet<String>>,
     /// What is stopping errands from working, if anything is.
     ///
     /// Only the kind that goes on happening until somebody does something: a
@@ -481,7 +489,12 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // window went on showing the whole thread, so a follow-up the next
             // morning was answered by an agent that had never read what it was
             // following up on.
-            let so_far = match again {
+            // Except when this turn is meant to start clean: see `fresh`. A
+            // routine's own past runs are what made it repeat itself and then
+            // claim work it had not done, and the agent's notes, which are
+            // where a standing job's memory belongs, are unaffected.
+            let alone = held.fresh.lock().unwrap().remove(&id);
+            let so_far = match again && !alone {
                 true => held
                     .store
                     .lines(&id)
@@ -3557,6 +3570,18 @@ async fn a_routines_turn(
         let held: State<Held> = app.state();
         Turn::claim(held.running.clone(), conversation.clone())
     };
+    // This run starts on its own, without the runs before it. An engine left
+    // open from the last run holds them in memory whatever the store is asked
+    // for, so it is closed rather than reused: a standing job is the same job
+    // every time and the previous answer is not evidence about this one.
+    {
+        let held: State<Held> = app.state();
+        held.fresh.lock().unwrap().insert(conversation.clone());
+        let live = held.live.lock().unwrap().remove(&conversation);
+        if let Some(mut thread) = live {
+            let _ = thread.stop();
+        }
+    }
     open_thread(app.clone(), app.state(), conversation.clone()).await?;
     let said = match late {
         None => what,
@@ -4579,6 +4604,7 @@ pub fn run() {
                 looking: Arc::default(),
                 doorways: Mutex::new(HashMap::new()),
                 handovers: Mutex::new(HashMap::new()),
+                fresh: Mutex::new(std::collections::HashSet::new()),
                 trouble: Mutex::new(None),
                 sized: Mutex::new(HashMap::new()),
                 mid_run: Mutex::new(HashMap::new()),
