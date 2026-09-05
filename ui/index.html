@@ -102,14 +102,19 @@
           <label>Key <input id="hand-key" type="password" placeholder="Leave empty if it needs none" autocorrect="off" autocapitalize="off" spellcheck="false" /></label>
           <button id="hand-save" type="submit">Add</button>
           <p id="hand-says"></p>
-          <!--
-            What it found, here, under the sentence that says so. The sentence
-            said "to choose from below" while the only place to choose was a
-            card above the form, so somebody who added a provider was told
-            three models were waiting and shown none.
-          -->
-          <ul id="hand-models"></ul>
         </form>
+        <!--
+          What it found, here, under the sentence that says so. The sentence
+          said "to choose from below" while the only place to choose was a
+          card above the form, so somebody who added a provider was told
+          three models were waiting and shown none.
+
+          Outside the form on purpose. Its rows carry buttons, and a button
+          inside the form counts as one of the form's fields to the check that
+          keeps that row one height and one line: with a model listed, the
+          row measured two heights and two lines and read as broken.
+        -->
+        <ul id="hand-models"></ul>
       </div>
 
       <div class="card">
@@ -128,11 +133,13 @@
             <h2>What your agents can reach</h2>
             <p>
               Things on this Mac, not accounts somewhere else: nothing here signs
-              in to anything, nothing leaves this machine, and there is no token
-              to expire. Everything is off until you switch it on, and that
-              switch is the whole of the permission, because these are run by
-              Errand rather than by the agent, so walling an agent into its own
-              folder does not decide them.
+              in to anything and there is no token to expire. Everything is off
+              until you switch it on, and these are run by Errand rather than by
+              the agent, so walling an agent into its own folder does not decide
+              them. Mail and Calendar stay on this machine. Chrome does not:
+              reading a page sends a request out, from your browser, signed in as
+              you, and Chrome has a second switch of its own that has to be on
+              as well. Read that row before you turn it on.
             </p>
           </div>
         </div>

@@ -774,7 +774,8 @@ mod tests {
                 // nobody can be told about.
                 "unread_mail",
                 "search_mail",
-                "what_is_on"
+                "what_is_on",
+                "read_web_page"
             ]
         );
         for tool in &tools {

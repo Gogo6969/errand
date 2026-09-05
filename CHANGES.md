@@ -11,6 +11,19 @@ would notice, not something a commit did.
   on under Settings. Nothing signs in to anything: these read the apps already
   on this Mac, so there is no account, no token and nothing that expires. Both
   are read-only, and each says what it lets an agent see before you turn it on.
+- Your agents can read a web page in your own Chrome, once you switch that on
+  too. Pages that need JavaScript, or that only make sense while you are signed
+  in, now read as you see them rather than coming back as a consent screen. It
+  opens a tab of its own behind the one you are on, reads it and closes it: it
+  never clicks, types or fills anything in, and never touches a tab you already
+  had open. It never asks for a file either, but a page it opens is a page, and
+  a page can start a download the same as it would if you opened it yourself.
+  Chrome needs "Allow JavaScript from Apple Events" switched on, under View,
+  then Developer, in Chrome's own menu bar; it says so if it is off. Public
+  addresses only: not localhost, not your router, not a .local name. And
+  because the request goes out from your browser signed in as you, an agent
+  that wants to read an address you did not give it yourself asks first,
+  whatever posture it is on.
 - New agents start at "never ask", which is what a standing job needs: an
   errand nobody is sitting in front of cannot answer a permission card. Agents
   you already have keep the posture they had.

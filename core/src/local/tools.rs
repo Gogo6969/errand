@@ -573,7 +573,7 @@ pub async fn run(
                 .with_context(|| format!("fetching {url}"))?
                 .text()
                 .await?;
-            Ok(a_part_of(&body, from))
+            Ok(a_part_of(&body, from, "fetch_url"))
         }
 
         "write_file" => {
@@ -789,7 +789,12 @@ fn cut_to_something_readable(s: &str) -> String {
 /// So the notice carries the offset to ask for next, and says the thing a
 /// paging model needs to hear anyway: for a search, asking the server for less
 /// beats reading all of it in pieces.
-fn a_part_of(body: &str, from: usize) -> String {
+///
+/// `calling` is the tool to name in that notice. There are two of these now,
+/// this one and the browser connector, and a notice that names the wrong one
+/// sends a model to fetch the page again without a browser, which is exactly
+/// the thing it reached for the browser to avoid.
+pub fn a_part_of(body: &str, from: usize, calling: &str) -> String {
     let total = body.chars().count();
     let Some((start, _)) = body.char_indices().nth(from) else {
         return match from {
@@ -810,7 +815,7 @@ fn a_part_of(body: &str, from: usize) -> String {
             let next = from + ROOM;
             format!(
                 "{opening}{}\n\n[cut here: characters {from} to {next} of {total}. For the next \
-                 part, call fetch_url again with the same url and from: {next}. If this is a \
+                 part, call {calling} again with the same url and from: {next}. If this is a \
                  search or an API, asking the server for fewer results is better than reading it \
                  in parts.]",
                 &rest[..at]
@@ -845,7 +850,7 @@ mod tests {
         // no way to ask for the rest.
         let body = "x".repeat(60_000);
 
-        let first = a_part_of(&body, 0);
+        let first = a_part_of(&body, 0, "fetch_url");
         assert!(
             first.starts_with("xxxx"),
             "the first part starts at the top"
@@ -858,22 +863,33 @@ mod tests {
         assert!(first.contains("from: 24000"), "{}", tail(&first));
 
         // And that offset is one that works.
-        let second = a_part_of(&body, 24_000);
+        let second = a_part_of(&body, 24_000, "fetch_url");
         assert!(second.contains("[characters 24000 onwards, of 60000]"));
         assert!(second.contains("from: 48000"), "{}", tail(&second));
 
         // The last part says nothing about a next one, because there is none.
-        let last = a_part_of(&body, 48_000);
+        let last = a_part_of(&body, 48_000, "fetch_url");
         assert!(!last.contains("cut here"), "{}", tail(&last));
         assert!(!last.contains("from:"), "{}", tail(&last));
 
         // Past the end is a sentence, not an empty answer or a panic.
-        assert!(a_part_of(&body, 60_000).contains("nothing at character 60000"));
+        assert!(a_part_of(&body, 60_000, "fetch_url").contains("nothing at character 60000"));
+    }
+
+    #[test]
+    fn the_notice_names_the_tool_that_can_actually_fetch_the_rest() {
+        // Two tools page the same way now. A notice that names fetch_url on a
+        // page read through the browser connector sends the model back to the
+        // plain fetch, which is what could not read the page in the first
+        // place, and it reads that empty answer as the page being empty.
+        let body = "x".repeat(30_000);
+        assert!(a_part_of(&body, 0, "read_web_page").contains("call read_web_page again"));
+        assert!(a_part_of(&body, 0, "fetch_url").contains("call fetch_url again"));
     }
 
     #[test]
     fn something_short_comes_back_whole_and_says_nothing_about_parts() {
-        let said = a_part_of("the whole thing", 0);
+        let said = a_part_of("the whole thing", 0, "fetch_url");
         assert_eq!(said, "the whole thing");
     }
 
@@ -884,7 +900,7 @@ mod tests {
         // did not match where it had been cut.
         let body = "é".repeat(30_000);
         assert_eq!(body.len(), 60_000, "two bytes each, to make the point");
-        let said = a_part_of(&body, 0);
+        let said = a_part_of(&body, 0, "fetch_url");
         assert!(said.contains("of 30000"), "{}", tail(&said));
         assert!(!said.contains("60000"), "{}", tail(&said));
         assert!(cut_to_something_readable(&body).contains("30000 characters in all"));

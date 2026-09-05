@@ -857,7 +857,16 @@ fn beside_it(at: &Path, suffix: &str) -> std::path::PathBuf {
 /// "Never", which is not what it sounds like. Asking and a wall are the two
 /// mechanisms there are, and turning one off is exactly when the other has to
 /// be on: an agent that never asks is confined to its own folder and the usual
-/// temporary places, and can touch nothing else on the machine.
+/// temporary places.
+///
+/// That used to end "and can touch nothing else on the machine", and the
+/// connectors have made it not quite true, so it does not say it any more. They
+/// are run by the app rather than by the walled engine, on purpose, and the
+/// switch under Settings is what decides them instead. The browser is the one
+/// that goes furthest, because a page read through it is a request leaving this
+/// Mac signed in as the person, so that one does not ride on this posture:
+/// `connectors::asks_first` puts a card in front of any address the person did
+/// not name themselves, whatever is set here.
 ///
 /// It was "ask", and the cost of that was watching somebody give the same
 /// errand to this and to something else. Half of these errands run at seven in

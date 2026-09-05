@@ -647,9 +647,33 @@ async fn errand(
             // unread_mail here" reports that as "Mail is not connected", and
             // somebody goes looking at their permissions for a fault that is in
             // this line.
-            let this_mac = crate::connectors::which(&name).is_some();
+            let job = crate::connectors::which(&name);
+            let this_mac = job.is_some();
+            // What the person themselves typed in this conversation, and
+            // nothing else. A tool result goes in as a `Tool` message and never
+            // as a `User` one, so a web page's own words can never end up in
+            // here pretending to be somebody asking for something.
+            let they_said: Vec<String> = history
+                .iter()
+                .filter_map(|m| match m {
+                    ChatMessage::User { content, .. } => Some(content.clone()),
+                    _ => None,
+                })
+                .collect();
             let must_ask = match asks {
-                // `auto` first, or it would not mean never: handing work to
+                // Ahead of `auto`, and the only thing that is. Reading a page
+                // in somebody's own browser sends a request out from this Mac
+                // signed in as them, so it is the one thing here that acts
+                // rather than looks, and an address that came from somewhere
+                // other than them is worth stopping for whatever the posture.
+                // `connectors::asks_first` says why the address decides it
+                // rather than the tool.
+                _ if job
+                    .is_some_and(|job| crate::connectors::asks_first(job, &args, &they_said)) =>
+                {
+                    true
+                }
+                // `auto` next, or it would not mean never: handing work to
                 // another agent had its own default and quietly outranked the
                 // posture somebody had chosen for this agent.
                 "auto" => false,

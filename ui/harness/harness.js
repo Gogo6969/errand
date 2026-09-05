@@ -306,6 +306,12 @@ export const FIXTURE = {
       sees: "Reads what is in your calendars: what, when, where, and which calendar. It never adds, moves or cancels anything.",
       on: false,
     },
+    {
+      id: "browser",
+      name: "Chrome",
+      sees: "Reads a web page in your own Chrome, the way you see it: signed in, and with the page's scripts run. That means a request does leave this Mac, carrying whatever you are signed in with. It opens a tab of its own, behind the one you are on, and closes it again; it never clicks, types or fills anything in, and never touches a tab you already had open. It never asks for a file, but a page it opens is a page, and a page can start a download the same as it would if you opened it yourself. Chrome has to allow this too, in its own menu bar: View, then Developer, then \"Allow JavaScript from Apple Events\".",
+      on: false,
+    },
   ],
   what_it_cost: {
     today: [{ agent: "agent-bitcoin", who: "Bitcoin Desk", dollars: 0.19, turns: 1, errands: 1 }],

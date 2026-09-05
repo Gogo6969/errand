@@ -4257,13 +4257,13 @@ const KNOWN_PLACES = [
     name: "Kimi",
     url: "https://api.moonshot.ai/v1",
     sure: true,
-    why: "Checked: this is where it answers.",
+    why: "Checked: this is where it answers. With your key in, it lists its models; kimi-k3 is the flagship, with a 1M-token window.",
   },
   {
     name: "GLM",
     url: "https://api.z.ai/api/paas/v4",
     sure: true,
-    why: "Checked: this is where it answers. Not /v1, which is not served at all.",
+    why: "Checked: this is where it answers. Not /v1, which is not served at all. With your key in, it lists its models; GLM-5.3 is the flagship.",
   },
   {
     name: "OpenRouter",

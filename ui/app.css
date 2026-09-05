@@ -459,7 +459,8 @@ body { display: grid; grid-template-columns: 232px 1fr; }
 /* Under the sentence that promises them, not beside it. The form is a wrapping
    row, so a list dropped into it becomes another item on the same line and the
    models came out to the right of the words pointing at them. */
-#hand-models { flex: 1 0 100%; margin: 0; padding: 0; list-style: none; }
+#hand-models { margin: 10px 0 0; padding: 0; list-style: none; }
+#hand-models:empty { margin: 0; }
 #hand-says[data-wrong="true"] { color: var(--wrong); }
 
 /* The way out of being asked, offered where being asked is happening. Quiet,
@@ -1505,9 +1506,12 @@ body.catching #what { border-color: var(--accent); }
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: 34vh;
-  overflow-y: auto;
 }
+/* The list scrolls, not the panel. With the whole panel scrolling, an ordinary
+   number of engine rules pushed the two sentences that explain the list out of
+   sight below it, and a list nobody can see the explanation of is a list of
+   rules nobody understands. */
+#also-allowed .also-list { max-height: 22vh; overflow-y: auto; }
 #granting label {
   display: flex;
   align-items: center;
