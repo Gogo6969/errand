@@ -20,7 +20,7 @@
 
 use anyhow::{bail, Result};
 
-use crate::store::{Memory, Store};
+use crate::store::{Agent, Memory, Store, NOT_YET_NAMED};
 
 /// How many notes an agent starts a conversation holding.
 ///
@@ -140,7 +140,11 @@ pub fn a_note(said: &str) -> Result<String> {
 /// refused note with a sentence explaining why, which somebody can work around.
 /// The cost of a false negative is an API key sitting in plain text and read
 /// back into every conversation this agent ever has.
-fn looks_like_a_secret(note: &str) -> bool {
+///
+/// Public because a note is not the only standing text a model writes about
+/// itself: the job description it settles on after its first errand is read
+/// into every conversation too, and handed to every other agent.
+pub fn looks_like_a_secret(note: &str) -> bool {
     let lower = note.to_lowercase();
     // The prefixes that are only ever the start of a credential.
     let known_shapes = [
@@ -203,6 +207,102 @@ pub fn opening(store: &Store, agent: &str) -> Result<String> {
         out.push_str(&line);
     }
     Ok(out)
+}
+
+/// Who this agent is, said to it before anything else.
+///
+/// The name, the role and the sentence about what it handles were all there
+/// in the store and none of them reached the agent's own prompt: the only
+/// readers were `who_else`, which tells the other agents, and the export. So
+/// an agent whose job description said what it was for answered "unknown" when
+/// asked, in one line, what it was for. Every teammate knew and it did not.
+///
+/// Nothing at all while it is still the placeholder with nothing settled,
+/// because "You are New errand" is worse than silence: it is a name the agent
+/// would then use. A real name with nothing else is still worth saying, since
+/// a name somebody typed by hand is the one thing they will expect it to know.
+///
+/// The job description is read out as what it is: the text on a card the
+/// person can see and edit under Handles, quoted, and not an order. It is the
+/// one piece of standing prompt text a model wrote about itself, after an
+/// errand that may have read a page or a mailbox, so it is held at the
+/// distance a quotation gives. And nothing here tells the agent to keep to
+/// it. "Keep to that job" was an instruction nobody gave: an agent whose card
+/// says mail and is asked about disk space has been asked about disk space.
+pub fn who_you_are(name: &str, title: Option<&str>, about: Option<&str>) -> String {
+    let name = name.trim();
+    let named = !name.is_empty() && name != NOT_YET_NAMED;
+    let title = title.map(str::trim).filter(|s| !s.is_empty());
+    let about = about.map(str::trim).filter(|s| !s.is_empty());
+    if !named && title.is_none() && about.is_none() {
+        return String::new();
+    }
+
+    let mut out = String::from("WHO YOU ARE\n\n");
+    match (named, title) {
+        (true, Some(title)) => out.push_str(&format!("You are {name} ({title}).")),
+        (true, None) => out.push_str(&format!("You are {name}.")),
+        (false, Some(title)) => out.push_str(&format!("Your role is {title}.")),
+        (false, None) => {}
+    }
+    if let Some(about) = about {
+        if !out.ends_with("\n\n") {
+            out.push(' ');
+        }
+        out.push_str(&format!("The description on your card reads: \"{about}\""));
+    }
+    // Only where there is a job to point at. After a bare name, "that" would
+    // point at nothing.
+    if title.is_some() || about.is_some() {
+        out.push_str(
+            "\n\nThat is your standing job, the one people come back to you for. It is what \
+             you are for, not the only thing you may be asked.",
+        );
+    }
+    out
+}
+
+/// What an agent opens a conversation knowing, in the two pieces an engine
+/// places apart.
+///
+/// Two pieces rather than one string, because they do not go in the same
+/// place. The identity goes before anything else the model reads, and the
+/// notes go under their own heading with the instructions for keeping them.
+/// Joined into one string, the identity landed under YOUR OWN NOTES on both
+/// engines, between the instructions and the list, and on the local engine it
+/// was the second "You are" sentence in the prompt, two thousand characters
+/// after "You are Errand", which is the one a small model takes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Knowing {
+    /// Who it is, from `who_you_are`. Empty while it is still the placeholder.
+    pub identity: String,
+    /// Its own notes, from `opening`. Empty when it has none.
+    pub notes: String,
+}
+
+impl Knowing {
+    /// With what was said before, for a conversation carried on from another.
+    ///
+    /// After the notes, because it is about this conversation and the notes
+    /// are about the job; it goes in with them because both are things the
+    /// agent is reminded of rather than told.
+    pub fn carrying(mut self, carried: &str) -> Self {
+        if !carried.trim().is_empty() {
+            self.notes = match self.notes.trim().is_empty() {
+                true => carried.to_string(),
+                false => format!("{}\n\n{carried}", self.notes),
+            };
+        }
+        self
+    }
+}
+
+/// Everything an agent opens a conversation knowing: who it is, and its notes.
+pub fn opening_as(store: &Store, agent: &Agent) -> Result<Knowing> {
+    Ok(Knowing {
+        identity: who_you_are(&agent.name, agent.title.as_deref(), agent.about.as_deref()),
+        notes: opening(store, &agent.id)?,
+    })
 }
 
 /// What a search hands back, as the model will read it.
@@ -341,6 +441,132 @@ mod tests {
         let said = opening(&store, "a1").unwrap();
         assert!(said.contains("your own notes"), "{said}");
         assert!(said.contains("where it goes: Telegram"), "{said}");
+    }
+
+    #[test]
+    fn an_agent_opens_knowing_its_own_name_role_and_what_it_handles() {
+        // What actually happened: an agent whose job description held a code
+        // word was asked for the code word and answered "unknown". The store
+        // knew, every teammate's who_else listing knew, and the agent did not,
+        // because nothing put its own row in front of it.
+        let store = Store::in_memory().unwrap();
+        store
+            .begin("a1", NOT_YET_NAMED, std::path::Path::new("/tmp/one"))
+            .unwrap();
+        store
+            .rename(
+                "a1",
+                "Inbox Watch",
+                "Mail",
+                "Reads the unread post each morning. The code word is TANGERINE-41.",
+            )
+            .unwrap();
+        let agent = store.agent("a1").unwrap().unwrap();
+
+        let knows = opening_as(&store, &agent).unwrap();
+        assert!(knows.identity.starts_with("WHO YOU ARE"), "{knows:?}");
+        assert!(
+            knows.identity.contains("You are Inbox Watch (Mail)."),
+            "{knows:?}"
+        );
+        assert!(
+            knows.identity.contains("The code word is TANGERINE-41."),
+            "{knows:?}"
+        );
+        assert!(knows.notes.is_empty(), "{knows:?}");
+
+        // And the notes come as well, apart from it, not instead of it.
+        store.remember("a1", "where_it_goes", "Telegram").unwrap();
+        let knows = opening_as(&store, &agent).unwrap();
+        assert!(
+            knows.identity.contains("You are Inbox Watch (Mail)."),
+            "{knows:?}"
+        );
+        assert!(knows.notes.contains("where it goes: Telegram"), "{knows:?}");
+        assert!(
+            !knows.identity.contains("Telegram"),
+            "a note ended up in the identity:\n{knows:?}"
+        );
+    }
+
+    #[test]
+    fn a_job_description_is_read_out_as_a_description_and_not_as_an_order() {
+        // The about is the one piece of standing prompt text a model wrote
+        // about itself, after an errand that may have read anything. It is
+        // quoted, so it reads as a card and not as an instruction, and nothing
+        // tells the agent to keep to it: "keep to that job" was a fence nobody
+        // asked for, and it invited an agent whose card says mail to decline a
+        // question about disk space.
+        let said = who_you_are(
+            "Inbox Watch",
+            Some("Mail"),
+            Some("Reads the unread post each morning."),
+        );
+        assert!(
+            said.contains(
+                "The description on your card reads: \"Reads the unread post each morning.\""
+            ),
+            "{said}"
+        );
+        assert!(!said.contains("keep to"), "{said}");
+        assert!(!said.contains("Answer as that agent"), "{said}");
+        assert!(
+            said.contains("not the only thing you may be asked"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn what_was_said_before_is_carried_after_the_notes_and_never_into_the_identity() {
+        let knows = Knowing {
+            identity: "WHO YOU ARE\n\nYou are Scout.".into(),
+            notes: "- where it goes: Telegram".into(),
+        }
+        .carrying("Earlier: the file was written.");
+        assert_eq!(knows.identity, "WHO YOU ARE\n\nYou are Scout.");
+        assert_eq!(
+            knows.notes,
+            "- where it goes: Telegram\n\nEarlier: the file was written."
+        );
+        let alone = Knowing::default().carrying("Earlier: the file was written.");
+        assert_eq!(alone.notes, "Earlier: the file was written.");
+        assert_eq!(Knowing::default().carrying("  "), Knowing::default());
+    }
+
+    #[test]
+    fn an_agent_that_has_not_settled_on_anything_is_not_told_it_is_called_new_errand() {
+        // The placeholder is not a name. Told "You are New errand", an agent
+        // would introduce itself as that, which is worse than saying nothing.
+        assert_eq!(who_you_are(NOT_YET_NAMED, None, None), "");
+        assert_eq!(who_you_are("", None, Some("   ")), "");
+
+        let store = Store::in_memory().unwrap();
+        store
+            .begin("a1", NOT_YET_NAMED, std::path::Path::new("/tmp/one"))
+            .unwrap();
+        let agent = store.agent("a1").unwrap().unwrap();
+        assert_eq!(opening_as(&store, &agent).unwrap(), Knowing::default());
+    }
+
+    #[test]
+    fn a_name_somebody_typed_by_hand_is_known_even_with_nothing_else_filled_in() {
+        // Somebody renames an agent and leaves Handles blank. The name is the
+        // one thing they will expect it to know.
+        let said = who_you_are("Tally Keeper", None, None);
+        assert!(said.contains("You are Tally Keeper."), "{said}");
+        assert!(!said.contains("card"), "{said}");
+        // And no "that is your standing job" pointing at nothing.
+        assert!(!said.contains("standing job"), "{said}");
+
+        // A job description with no name yet still reaches it, without the
+        // placeholder being passed off as a name.
+        let said = who_you_are(NOT_YET_NAMED, Some("Reports"), Some("Counts the week up."));
+        assert!(said.contains("Your role is Reports."), "{said}");
+        assert!(
+            said.contains("The description on your card reads: \"Counts the week up.\""),
+            "{said}"
+        );
+        assert!(!said.contains(NOT_YET_NAMED), "{said}");
     }
 
     #[test]

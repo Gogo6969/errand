@@ -17,8 +17,16 @@ async fn an_errand_set_to_plan_comes_back_with_one_and_changes_nothing() {
     std::fs::create_dir_all(&here).unwrap();
     let id = format!("aaaaaaaa-bbbb-4ccc-8ddd-{:012x}", std::process::id());
 
-    let (mut it, events) =
-        Claude::open(&id, &here, PickUp::New, "plan", None, None, "").expect("starting claude");
+    let (mut it, events) = Claude::open(
+        &id,
+        &here,
+        PickUp::New,
+        "plan",
+        None,
+        None,
+        &errand_core::memory::Knowing::default(),
+    )
+    .expect("starting claude");
 
     it.say(
         "Create three files here called one.txt, two.txt and three.txt, each \

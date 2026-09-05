@@ -452,17 +452,18 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         errand_core::wall::also_allow(&home, folders);
     }
 
-    // What this agent has already been told about its job. Read here, in the
-    // app, because the store is the app's: an engine is handed a string and
-    // never a database, which is what keeps there being one idea of what a note
-    // is rather than one per engine.
-    let remembers = held
-        .store
-        .conversation(&id)
-        .ok()
-        .flatten()
-        .map(|c| c.agent)
-        .and_then(|agent| memory::opening(&held.store, &agent).ok())
+    // Who this agent is, and what it has already been told about its job. Read
+    // here, in the app, because the store is the app's: an engine is handed
+    // text and never a database, which is what keeps there being one idea of
+    // what a note is rather than one per engine. The identity goes with it,
+    // because until it did the name, the role and the job description reached
+    // every other agent through who_else and never the agent itself: asked for
+    // a code word its own job description held, it said "unknown". In a piece
+    // of its own, because an engine puts it before everything else it says and
+    // the notes under their own heading.
+    let knows = known
+        .as_ref()
+        .and_then(|agent| memory::opening_as(&held.store, agent).ok())
         .unwrap_or_default();
 
     let (engine, events): (Box<dyn Engine + Send>, _) = match on_engine.as_str() {
@@ -544,15 +545,12 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                     .unwrap_or_default(),
                 None => String::new(),
             };
-            let remembers = match carried.is_empty() {
-                true => remembers.clone(),
-                false => format!("{remembers}\n\n{carried}"),
-            };
+            let knows = knows.clone().carrying(&carried);
             let (it, events) = Local::open(
                 settings,
                 home,
                 asks,
-                &remembers,
+                &knows,
                 so_far,
                 Some((id.clone(), held.wants.clone())),
             )
@@ -593,10 +591,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                     .unwrap_or_default(),
                 _ => String::new(),
             };
-            let remembers = match carried.is_empty() {
-                true => remembers.clone(),
-                false => format!("{remembers}\n\n{carried}"),
-            };
+            let knows = knows.clone().carrying(&carried);
             // Which model, if this agent was put on one. Held in the same
             // column a local engine keeps its whole settings blob in, because
             // for Claude the entire setting is one word.
@@ -628,7 +623,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 asks,
                 Some(door.at()),
                 model.as_deref(),
-                &remembers,
+                &knows,
             )
             .map_err(|e| e.to_string())?;
             held.doorways.lock().unwrap().insert(id.clone(), door);
@@ -2570,10 +2565,25 @@ fn read_what_it_settled_on(said: &str) -> Option<Settled> {
     if name.is_empty() || name.len() > 60 {
         return None;
     }
+    // Room for a job description rather than a caption. Cut at 200 this was a
+    // sentence and a half, and since it is now what the agent itself is told
+    // it is for, the cut decided what the agent knew about its own job.
+    // Somebody typing one by hand in the window is not cut at all.
+    let about: String = about.chars().take(2_000).collect();
+    // The one piece of standing prompt text a model writes about itself, after
+    // an errand that may have read a page or a mailbox. A note that looks like
+    // a key is refused; this is read into every conversation the agent has and
+    // handed to every other agent through who_else, so it gets the same look.
+    // Blanked rather than the whole answer thrown away, so the name stands and
+    // the person sees an empty Handles they can fill in by hand.
+    let about = match memory::looks_like_a_secret(&about) {
+        true => String::new(),
+        false => about,
+    };
     Some(Settled {
         name,
         title: title.chars().take(24).collect(),
-        about: about.chars().take(200).collect(),
+        about,
         // A mark it invented is not one the window can draw, so the guess from
         // the words stands instead.
         mark: MARKS.iter().find(|m| mark.contains(**m))?.to_string(),
@@ -3333,16 +3343,21 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
     // Its own conversation, so the delegated work does not land in the middle
     // of whatever else that agent was doing.
     let talk = uuid::Uuid::new_v4().to_string();
-    let asked_by = {
+    // In whose words. An agent's request carries the agent's name, so the one
+    // asked knows it is a hand-off. The owner's own, from their terminal, is
+    // said bare: prefixed "something outside asks:", a model has refused it
+    // as an injection attempt. `team::heard` holds the wording.
+    let heard = {
         let held: State<Held> = app.state();
         let who = mine
             .as_deref()
             .and_then(|a| held.store.agent(a).ok().flatten())
-            .map_or_else(|| "something outside".to_string(), |a| a.name);
+            .map(|a| a.name);
+        let heard = team::heard(who.as_deref(), asked.as_owner, request);
         held.store.begin_conversation_for(
             &talk,
             &them.id,
-            &format!("Asked by {who}"),
+            &heard.called,
             // The conversation that asked, so the next hand-off can be
             // followed back past this one. Nothing when the request came from
             // outside the app: there is no conversation to point at, and
@@ -3350,7 +3365,7 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
             // for on every change to its shape.
             Some(asked.from.as_str()).filter(|from| !from.is_empty()),
         )?;
-        who
+        heard
     };
 
     open_thread(app.clone(), app.state(), talk.clone())
@@ -3369,7 +3384,7 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
         app.clone(),
         app.state(),
         talk.clone(),
-        format!("{asked_by} asks: {request}"),
+        heard.said,
         // An agent asking another sends words and nothing else.
         None,
     )
@@ -5079,6 +5094,35 @@ mod tests {
         .expect("the line is in there");
         assert_eq!(on.name, "Ledger");
         assert_eq!(on.mark, "chart");
+    }
+
+    #[test]
+    fn a_job_description_longer_than_a_caption_is_kept_whole() {
+        // It is what the agent is told it is for, so a cut here decided what
+        // the agent knew about its own job. At 200 characters the code word at
+        // the end of a two-sentence description never reached it.
+        let about = format!(
+            "{} The code word is TANGERINE-41.",
+            "I read the unread post each morning and say which of it is routine. ".repeat(5)
+        );
+        assert!(about.chars().count() > 200, "the test needs a long one");
+        let on = read_what_it_settled_on(&format!("Inbox Watch | Mail | {about} | mail | blue"))
+            .expect("a clean answer");
+        assert_eq!(on.about, about.trim());
+    }
+
+    #[test]
+    fn a_job_description_that_looks_like_a_key_is_not_made_part_of_the_agents_own_prompt() {
+        // Notes are refused when they look like a key. The about is read into
+        // every conversation the same way and was not looked at at all.
+        let on = read_what_it_settled_on(
+            "Inbox Watch | Mail | Reads mail with the api key \
+             sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 | mail | blue",
+        )
+        .expect("the name still stands");
+        assert_eq!(on.name, "Inbox Watch");
+        assert_eq!(on.title, "Mail");
+        assert_eq!(on.about, "", "the key went into the agent's own prompt");
     }
 
     #[test]

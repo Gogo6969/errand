@@ -33,6 +33,26 @@ pub enum When {
     Every { minutes: i64 },
 }
 
+/// The most often a routine can run, in minutes.
+///
+/// Below this it would run every time the scheduler looked, which is a busy
+/// loop wearing a schedule.
+pub const FEWEST_MINUTES: i64 = 1;
+
+/// The most often a routine can run, written the way a schedule is written.
+///
+/// One place, read both by `read` when it refuses and by the tool text an
+/// agent reads before choosing, because the two drifted: the tool showed
+/// `every 30m` as its one example of an interval, a model took that for the
+/// floor, and rather than set a two-minute routine it started a shell loop
+/// that nothing here could see, stop or write down.
+pub fn most_often() -> String {
+    When::Every {
+        minutes: FEWEST_MINUTES,
+    }
+    .written()
+}
+
 impl When {
     /// Read a schedule the way somebody would write one.
     pub fn read(said: &str) -> Result<Self> {
@@ -62,16 +82,29 @@ impl When {
                     "m" => count,
                     "h" => count * 60,
                     "d" => count * 60 * 24,
-                    _ => bail!("`{span}` should end in m, h or d, like `every 30m`"),
+                    // With the floor named, like the refusal below it: `every
+                    // 30m` as the one example was read as the floor once.
+                    _ => bail!(
+                        "`{span}` should end in m, h or d, like `every 2m`; `{}` is as often as \
+                         it goes",
+                        most_often()
+                    ),
                 };
-                // Below a minute it would run every time the scheduler looked,
-                // which is a busy loop wearing a schedule.
-                if minutes < 1 {
-                    bail!("that is too often to be a routine");
+                // Said with the floor in it, because this is read by a model
+                // choosing how often, and "too often" alone sent one off to
+                // build a loop instead.
+                if minutes < FEWEST_MINUTES {
+                    bail!(
+                        "that is too often to be a routine; the most often is `{}`",
+                        most_often()
+                    );
                 }
                 Ok(When::Every { minutes })
             }
-            _ => bail!("try `daily 07:00`, `weekly mon,fri 09:30` or `every 30m`"),
+            _ => bail!(
+                "try `daily 07:00`, `weekly mon,fri 09:30` or `every 2m`; `{}` is the most often",
+                most_often()
+            ),
         }
     }
 
@@ -417,6 +450,40 @@ mod tests {
             "sometimes",
         ] {
             assert!(When::read(nonsense).is_err(), "{nonsense:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn a_minute_is_the_most_often_a_routine_can_run_and_asking_for_less_names_that_floor() {
+        // The floor is a minute, not the thirty in the example. A model that
+        // took the example for the floor started a shell loop rather than a
+        // two-minute routine, so both halves are pinned here: the shortest
+        // schedule is accepted as written, and the refusal says what the
+        // shortest is, in a sentence the model can act on.
+        assert_eq!(most_often(), "every 1m");
+        for said in ["every 1m", "every 2m"] {
+            let when = When::read(said).unwrap_or_else(|e| panic!("{said}: {e}"));
+            assert_eq!(when.written(), said, "it did not survive the round trip");
+        }
+        let refused = When::read("every 0m").expect_err("nothing below a minute is a routine");
+        assert!(
+            refused.to_string().contains(&most_often()),
+            "the refusal does not say how often is allowed: {refused}"
+        );
+        // And the two refusals beside it, which are what a person typing by
+        // hand reads in the Repeat panel and what a model reads when it
+        // guessed at the shape, no longer show thirty minutes as the only
+        // interval there is.
+        for said in ["every 90s", "sometimes"] {
+            let refused = When::read(said).expect_err("not a schedule");
+            assert!(
+                refused.to_string().contains(&most_often()),
+                "{said}: the refusal does not say how often is allowed: {refused}"
+            );
+            assert!(
+                !refused.to_string().contains("30m"),
+                "{said}: thirty minutes is still the example: {refused}"
+            );
         }
     }
 

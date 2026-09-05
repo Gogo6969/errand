@@ -20,8 +20,16 @@ async fn what_a_helper_is_doing_shows_under_the_step_that_started_it() {
     std::fs::write(here.join("two.txt"), "x").unwrap();
     let id = format!("aaaaaaaa-bbbb-4ccc-8ddd-{:012x}", std::process::id());
 
-    let (mut it, events) =
-        Claude::open(&id, &here, PickUp::New, "auto", None, None, "").expect("starting claude");
+    let (mut it, events) = Claude::open(
+        &id,
+        &here,
+        PickUp::New,
+        "auto",
+        None,
+        None,
+        &errand_core::memory::Knowing::default(),
+    )
+    .expect("starting claude");
 
     it.say(
         "Use the Task tool to launch one general-purpose subagent that counts \

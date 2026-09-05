@@ -196,6 +196,42 @@ pub fn possible() -> bool {
     Path::new(THE_SANDBOX).exists()
 }
 
+/// Whether a running process is inside a wall.
+///
+/// Asked of the kernel, which is the point: the wall goes with a process
+/// through every fork and exec and there is no taking it off, so this is a
+/// fact about the process and not a claim it makes. The front door reads it to
+/// tell a walled agent's shell from the person at a terminal, and the parent
+/// chain alone would not do: a `&` in a shell that then exits leaves a child
+/// whose parent is launchd, and launchd is everybody's.
+///
+/// `sandbox_check` is deprecated the way `sandbox-exec` is, and is the same
+/// age; the day one goes the other goes with it, and `None` here is that day,
+/// or a process that is already gone.
+pub fn holds(pid: u32) -> Option<bool> {
+    extern "C" {
+        // Variadic, because with an operation named it takes a filter after
+        // the type. Asked with no operation at all it answers whether the
+        // process is sandboxed in any way, which is the only question here.
+        fn sandbox_check(
+            pid: libc::pid_t,
+            operation: *const libc::c_char,
+            filter: libc::c_int,
+            ...
+        ) -> libc::c_int;
+    }
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return None;
+    };
+    // SAFETY: a null operation is the documented way to ask whether the
+    // process is in a sandbox at all, and no variadic argument is read for it.
+    match unsafe { sandbox_check(pid, std::ptr::null(), 0) } {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
 /// A command that runs `program` inside the wall.
 ///
 /// The caller adds the arguments, so this reads the same way as building the
@@ -262,6 +298,49 @@ pub fn the_wall_refused(home: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_process_inside_the_wall_is_known_to_be_and_one_outside_is_not() {
+        // The front door tells a walled agent's shell from the owner's
+        // terminal by asking the kernel, so what the kernel answers is pinned
+        // here against a real wall. The walled child says so on its own
+        // stdout before it is looked at, because `sandbox-exec` takes a moment
+        // to put the wall up before it runs the program.
+        if !possible() {
+            return;
+        }
+        let mut walled = std::process::Command::new(THE_SANDBOX)
+            .arg("-p")
+            .arg("(version 1)(allow default)")
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg("echo up; sleep 30")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("sandbox-exec starts");
+        let mut said = String::new();
+        std::io::Read::read_to_string(
+            &mut std::io::Read::take(walled.stdout.take().expect("its stdout"), 3),
+            &mut said,
+        )
+        .expect("it spoke");
+        assert_eq!(said, "up\n");
+        assert_eq!(holds(walled.id()), Some(true), "the wall was not seen");
+
+        // A plain child is exactly as walled as this test is, which is not at
+        // all unless whoever runs the tests has put a wall around them.
+        let mut plain = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("a plain child");
+        assert_eq!(holds(plain.id()), holds(std::process::id()));
+        assert!(holds(plain.id()).is_some(), "the kernel did not answer");
+
+        for child in [&mut walled, &mut plain] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 
     #[test]
     fn the_errands_own_folder_is_writable_and_the_home_directory_is_not() {

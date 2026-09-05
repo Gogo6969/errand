@@ -25,7 +25,7 @@ async fn one_turn_with_every_event_it_produces() {
         },
         home,
         "ask",
-        "",
+        &errand_core::memory::Knowing::default(),
         // No store behind this, so nothing was said before now.
         Vec::new(),
         None,

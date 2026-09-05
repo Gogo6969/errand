@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
             // The harness always asks. It is here to watch a card appear.
             "ask",
             // No app behind it, so no notebook either.
-            "",
+            &errand_core::memory::Knowing::default(),
             // And no store, so nothing said before now: the harness starts a
             // fresh conversation every time by design.
             Vec::new(),
@@ -46,8 +46,15 @@ async fn main() -> anyhow::Result<()> {
     } else {
         // No app behind it, so no doorway and nobody to hand work to, which
         // matches what the local branch above says for the same reason.
-        let (it, events) =
-            Claude::open(&thread, &here, claude::PickUp::New, "ask", None, None, "")?;
+        let (it, events) = Claude::open(
+            &thread,
+            &here,
+            claude::PickUp::New,
+            "ask",
+            None,
+            None,
+            &errand_core::memory::Knowing::default(),
+        )?;
         (Box::new(it), events)
     };
 

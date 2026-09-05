@@ -94,7 +94,21 @@ pub fn all() -> Vec<Tool> {
         ),
         tool(
             "start_command",
-            "Start a command that keeps running, and get a handle back instead of waiting for it.              Use this for anything that will not be over in a minute or two: a build, a download,              a long script, a server. It keeps running while you do something else and after this              errand ends, for as long as Errand is open. Check what it has printed with              check_command.",
+            // Sends a schedule to every_day by name, and says how often that
+            // can run, because a model that believed every_day stopped at
+            // thirty minutes started `while true; do sleep 120; ...` here
+            // instead: it ran, and nothing in the app could see it, stop it or
+            // write a run down.
+            &format!(
+                "Start a command that keeps running, and get a handle back instead of waiting \
+                 for it. Use this for anything that will not be over in a minute or two: a \
+                 build, a download, a long script, a server. It keeps running while you do \
+                 something else and after this errand ends, for as long as Errand is open. \
+                 Check what it has printed with check_command. Not for anything on a schedule, \
+                 however often: a command that loops and sleeps is not under Repeat and nobody \
+                 can see or stop it there. Use every_day for that; it runs as often as `{}`.",
+                crate::routine::most_often()
+            ),
             json!({
                 "command": { "type": "string", "description": "The command, exactly as it should run" },
                 "description": { "type": "string", "description": "What it is for, in one short sentence a person would read" }
@@ -840,6 +854,28 @@ fn one_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn starting_a_command_says_it_is_not_a_way_to_run_something_on_a_schedule() {
+        // What actually happened: asked for something every two minutes, a
+        // model started `while true; do sleep 120; date >> ticks.txt; done`
+        // with this tool. It ran, and it was under nobody's eye: not in
+        // Repeat, no run written down, nothing to stop. The text has to send a
+        // schedule to every_day, and say how often that can run, because the
+        // reason the model reached for a loop was believing every_day could
+        // not go that often.
+        let started = all()
+            .into_iter()
+            .find(|t| t.def.name == "start_command")
+            .expect("it is declared");
+        let said = &started.def.description;
+        assert!(said.contains("every_day"), "{said}");
+        assert!(said.contains("schedule"), "{said}");
+        assert!(
+            said.contains(&format!("`{}`", crate::routine::most_often())),
+            "it does not say how often every_day can run: {said}"
+        );
+    }
 
     #[test]
     fn a_long_page_comes_back_in_parts_that_can_actually_be_asked_for() {

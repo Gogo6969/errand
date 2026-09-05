@@ -35,7 +35,7 @@ async fn an_agent_says_when_the_start_of_the_conversation_falls_out_of_reach() {
         },
         home,
         "auto",
-        "",
+        &errand_core::memory::Knowing::default(),
         // No store behind this, so nothing was said before now.
         Vec::new(),
         None,

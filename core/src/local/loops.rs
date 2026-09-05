@@ -149,8 +149,8 @@ impl Local {
         settings: LlmSettings,
         home: PathBuf,
         asks: &str,
-        // What this agent has already been told about its job, if anything.
-        remembers: &str,
+        // Who this agent is and what it has already been told about its job.
+        knows: &crate::memory::Knowing,
         // What was said in this conversation before now.
         //
         // A local model keeps no session of its own, so this is the only way it
@@ -162,7 +162,7 @@ impl Local {
         // terminal harness is.
         host: Option<(String, tokio::sync::mpsc::UnboundedSender<team::Wants>)>,
     ) -> Result<(Self, Receiver<Event>)> {
-        let remembers = remembers.to_string();
+        let knows = knows.clone();
         let (tx, rx) = channel();
         let (turns, asked) = tokio::sync::mpsc::unbounded_channel();
 
@@ -176,7 +176,7 @@ impl Local {
             Opening {
                 home,
                 asks: asks.to_string(),
-                remembers,
+                knows,
                 so_far,
             },
             host,
@@ -229,8 +229,8 @@ struct Opening {
     home: PathBuf,
     /// How much it asks before acting.
     asks: String,
-    /// What this agent has already been told about its job.
-    remembers: String,
+    /// Who this agent is, and what it has already been told about its job.
+    knows: crate::memory::Knowing,
     /// What was said in this conversation before now. Empty for a new one.
     so_far: Vec<ChatMessage>,
 }
@@ -246,7 +246,7 @@ async fn conversation(
     let Opening {
         home,
         asks,
-        remembers,
+        knows,
         so_far,
     } = opening;
     // Started once for the conversation rather than once per turn. Several of
@@ -261,7 +261,7 @@ async fn conversation(
     let outside = mcp::Servers::open(&home).await;
 
     let mut history = vec![ChatMessage::System {
-        content: opening_instructions(&home, &outside, &remembers, &asks),
+        content: opening_instructions(&home, &outside, &knows, &asks),
     }];
     // And what was already said here, if this conversation has been had before.
     // Trimmed by the same rule as everything else the moment it does not fit,
@@ -771,6 +771,9 @@ async fn errand(
                             tool: name.clone(),
                             args: args.clone(),
                             from: from.clone(),
+                            // A model asking is never the owner, whatever it
+                            // says in the request.
+                            as_owner: false,
                             answer: tell_me,
                         });
                         match sent {
@@ -992,17 +995,31 @@ fn say_plainly(outside: &mcp::Servers, name: &str, args: &serde_json::Value) -> 
 pub(crate) fn opening_instructions(
     home: &std::path::Path,
     outside: &mcp::Servers,
-    remembers: &str,
+    knows: &crate::memory::Knowing,
     asks: &str,
 ) -> String {
+    // Who it is, before anything else. The first "You are" in the prompt is
+    // the one a small model takes for its name, and while the identity rode
+    // in with the notes that sentence was "You are Errand", with "You are
+    // Inbox Watch" two thousand characters later: an agent with a name of its
+    // own introduced itself as Errand. Until it has settled on a name it is
+    // Errand, which is the one thing it can truthfully be called.
+    let who = match knows.identity.trim().is_empty() {
+        true => "You are Errand.".to_string(),
+        false => format!("{}\n\nYou work inside Errand.", knows.identity.trim()),
+    };
     // How much is out there, and never what any of it is called. See
     // `Servers::what_else`: listing the names made a 7B model answer with
     // nothing at all, and taking them out made the same request work.
     // What it already knows, and how to keep knowing things. Before the rest,
     // because it is about the job rather than about the machinery.
-    let notes = match remembers.trim().is_empty() {
+    let notes = match knows.notes.trim().is_empty() {
         true => format!("\n\n{}", crate::memory::HOW_TO_USE_IT),
-        false => format!("\n\n{}\n\n{remembers}", crate::memory::HOW_TO_USE_IT),
+        false => format!(
+            "\n\n{}\n\n{}",
+            crate::memory::HOW_TO_USE_IT,
+            knows.notes.trim()
+        ),
     };
     // Told as well as enforced. The wall in `must_ask` is what actually stops
     // it, but a model that does not know why its tools are refusing it will
@@ -1028,7 +1045,7 @@ pub(crate) fn opening_instructions(
     };
 
     format!(
-        "You are Errand. You have been handed a job, not a design question, and you \
+        "{who} You have been handed a job, not a design question, and you \
          come back having done it.\n\n\
          Do the work before you write a word. Where the request is under-specified, \
          pick the obvious sensible default, act on it, and say what you assumed. A \
@@ -1111,15 +1128,57 @@ mod tests {
         // will spend the turn trying them again in different words.
         let nothing = mcp::Servers::default();
         let here = std::path::Path::new("/tmp/x");
-        let planning = opening_instructions(here, &nothing, "", "plan");
+        let nobody = crate::memory::Knowing::default();
+        let planning = opening_instructions(here, &nothing, &nobody, "plan");
         assert!(planning.contains("PLAN, NOT THE WORK"), "{planning}");
         assert!(planning.contains("Change nothing"));
 
-        let ordinary = opening_instructions(here, &nothing, "", "ask");
+        let ordinary = opening_instructions(here, &nothing, &nobody, "ask");
         assert!(
             !ordinary.contains("PLAN, NOT THE WORK"),
             "an ordinary errand was told it was a plan"
         );
+    }
+
+    #[test]
+    fn an_agent_with_a_name_of_its_own_is_not_first_told_it_is_called_errand() {
+        // What actually happened: the identity rode in with the notes, so the
+        // prompt opened "You are Errand." and said "You are Inbox Watch
+        // (Mail)." two thousand characters later, under YOUR OWN NOTES. The
+        // app's own naming question already knows a model takes the first
+        // name it is given; this is the same fact from the other side.
+        let nothing = mcp::Servers::default();
+        let here = std::path::Path::new("/tmp/x");
+        let knows = crate::memory::Knowing {
+            identity: crate::memory::who_you_are("Inbox Watch", Some("Mail"), None),
+            notes: "What you have already been told about this job:\n- where it goes: Telegram"
+                .into(),
+        };
+        let said = opening_instructions(here, &nothing, &knows, "ask");
+        let first = said.find("You are ").expect("it is told who it is");
+        assert!(
+            said[first..].starts_with("You are Inbox Watch (Mail)."),
+            "the first name it reads is not its own:\n{said}"
+        );
+        assert!(!said.contains("You are Errand"), "{said}");
+        assert!(said.starts_with("WHO YOU ARE"), "{said}");
+
+        // And the notes stay under their own heading, after everything else,
+        // with the list right after the heading rather than the identity
+        // between them.
+        let notes = said.find("YOUR OWN NOTES").expect("the notes heading");
+        let list = said.find("where it goes: Telegram").expect("the notes");
+        let identity = said.find("WHO YOU ARE").expect("who it is");
+        assert!(identity < notes && notes < list, "{said}");
+        assert!(
+            !said[notes..list].contains("WHO YOU ARE"),
+            "the identity is filed among the notes:\n{said}"
+        );
+
+        // Until it has a name, Errand is the one thing it can be called.
+        let unnamed =
+            opening_instructions(here, &nothing, &crate::memory::Knowing::default(), "ask");
+        assert!(unnamed.starts_with("You are Errand."), "{unnamed}");
     }
 
     /// A server offering tools whose schemas cost roughly `each` tokens.
@@ -1257,7 +1316,12 @@ mod tests {
     #[test]
     fn the_model_is_told_the_names_of_everything_it_could_reach_but_not_the_schemas() {
         let nothing = mcp::Servers::default();
-        let bare = opening_instructions(std::path::Path::new("/tmp/x"), &nothing, "", "ask");
+        let bare = opening_instructions(
+            std::path::Path::new("/tmp/x"),
+            &nothing,
+            &crate::memory::Knowing::default(),
+            "ask",
+        );
         assert!(
             !bare.contains("find_tools"),
             "with no servers there is nothing to look up, and saying so invites a wild goose chase"
@@ -1352,6 +1416,68 @@ mod an_aside_leaves_no_trace {
     }
 
     #[tokio::test]
+    async fn an_agent_is_told_who_it_is_before_its_first_request_goes_out() {
+        // The wire is the only place any of this is visible: an agent asked
+        // for a code word its own job description held answered "unknown",
+        // and nothing in the store or on screen showed why.
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_remembers(asked.clone()).await;
+        let home = std::env::temp_dir().join("errand-who-you-are-test");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let settings = LlmSettings {
+            provider: "openai-compat".into(),
+            base_url: where_it_is,
+            model: "pretend".into(),
+            ..Default::default()
+        };
+        let knows = crate::memory::Knowing {
+            identity: crate::memory::who_you_are(
+                "Inbox Watch",
+                Some("Mail"),
+                Some("Reads the unread post. The code word is TANGERINE-41."),
+            ),
+            notes: "What you have already been told about this job:\n- where it goes: Telegram"
+                .into(),
+        };
+        let (mut engine, events) = Local::open(settings, home, "auto", &knows, Vec::new(), None)
+            .expect("a conversation to talk to");
+
+        engine.say("what is your code word", &[]).unwrap();
+        until_it_finishes(&events).await;
+
+        let seen = asked.lock().unwrap().clone();
+        let first = seen.first().expect("one request went out");
+        assert!(
+            first.contains("You are Inbox Watch (Mail)."),
+            "the agent was not told its own name:\n{first}"
+        );
+        assert!(
+            first.contains("TANGERINE-41"),
+            "the job description never reached the model:\n{first}"
+        );
+        let identity = first.find("WHO YOU ARE").expect("the identity is in there");
+        let notes = first
+            .find("YOUR OWN NOTES")
+            .expect("the notes are in there");
+        let request = first
+            .find("what is your code word")
+            .expect("the request is in there");
+        assert!(
+            identity < notes && notes < request,
+            "the identity is not first, or the notes are not after it:\n{first}"
+        );
+        // And the one name it is told is its own. Two "You are" sentences in
+        // one prompt is a model that picks the first, and the first was Errand.
+        let named = first.find("You are ").expect("it is told who it is");
+        assert!(
+            first[named..].starts_with("You are Inbox Watch (Mail)."),
+            "the first name on the wire is not its own:\n{first}"
+        );
+        assert!(!first.contains("You are Errand"), "{first}");
+    }
+
+    #[tokio::test]
     async fn what_the_app_asks_on_its_own_account_is_gone_by_the_next_turn() {
         // What actually happened: an agent finished its first errand, the app
         // asked it who it was so it could be named, and the person's next
@@ -1369,8 +1495,15 @@ mod an_aside_leaves_no_trace {
             model: "pretend".into(),
             ..Default::default()
         };
-        let (mut engine, events) = Local::open(settings, home, "auto", "", Vec::new(), None)
-            .expect("a conversation to talk to");
+        let (mut engine, events) = Local::open(
+            settings,
+            home,
+            "auto",
+            &crate::memory::Knowing::default(),
+            Vec::new(),
+            None,
+        )
+        .expect("a conversation to talk to");
 
         engine.say("the first errand", &[]).unwrap();
         until_it_finishes(&events).await;

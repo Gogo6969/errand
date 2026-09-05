@@ -32,6 +32,15 @@ pub struct Wants {
     pub args: Value,
     /// The conversation asking, so the app can refuse an agent asking itself.
     pub from: String,
+    /// Whether this is the owner speaking, from their own terminal, rather
+    /// than an agent or a program handing over somebody else's words. It
+    /// decides whether the agent asked hears the request bare or with who is
+    /// asking in front of it; see `heard`.
+    ///
+    /// Decided by the app from who is at the other end of the socket, never
+    /// said by the caller: see `doorway::the_owners_own`. A model with a shell
+    /// can reach the same socket, and for a while it could write the claim.
+    pub as_owner: bool,
     pub answer: oneshot::Sender<anyhow::Result<String>>,
     /// Somewhere to say what is happening while it happens, for a caller that
     /// wants to watch rather than wait.
@@ -159,21 +168,35 @@ pub fn declarations() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "every_day",
-                "description":
+                // The floor is read from routine.rs rather than written here,
+                // because written here it was wrong by omission: `every 30m`
+                // was the only interval in the text, a model took it for the
+                // floor, and it started a shell loop instead of a two-minute
+                // routine. Nothing in Repeat, no run written down, nothing to
+                // stop.
+                "description": format!(
                     "Set this conversation to run itself on a schedule, and say what it should \
                      do each time. Use it the moment somebody asks for something on a repeating \
-                     basis -- every day, every morning, twice a week -- rather than telling \
-                     them where to set it up. It replaces whatever this conversation was \
-                     already set to do, and it appears under Repeat, where they can see it and \
-                     stop it. Say nothing about it having been set: they will be told.",
+                     basis -- every day, every morning, twice a week, every few minutes -- \
+                     rather than telling them where to set it up. It can run as often as \
+                     `{floor}`. A command left to loop and sleep in the background is never a \
+                     substitute: it is not under Repeat, nobody can see or stop it there, and \
+                     none of its runs is written down. It replaces whatever this conversation \
+                     was already set to do, and it appears under Repeat, where they can see it \
+                     and stop it. Say nothing about it having been set: they will be told.",
+                    floor = crate::routine::most_often()
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "when": {
                             "type": "string",
-                            "description":
-                                "`daily 09:00`, `weekly mon,thu 07:30`, or `every 30m`. \
-                                 Local time, in the 24 hour clock."
+                            "description": format!(
+                                "`daily 09:00`, `weekly mon,thu 07:30`, `every 30m` or \
+                                 `every 2m`; `{floor}` is the most often. Local time, in the \
+                                 24 hour clock.",
+                                floor = crate::routine::most_often()
+                            )
                         },
                         "what": {
                             "type": "string",
@@ -439,6 +462,51 @@ pub fn the_thing_itself(tool: Ours, args: &Value) -> String {
     }
 }
 
+/// A handed-over request, the way the agent asked will read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Heard {
+    /// What the conversation it opens is called, the way the window lists it.
+    pub called: String,
+    /// The first line of that conversation, exactly as the agent is handed it.
+    pub said: String,
+}
+
+/// Put a handed-over request in the words the agent asked will read.
+///
+/// `by` is the agent asking, where there is one. An agent's request carries
+/// its name, so the one asked knows this is a hand-off and who to answer.
+///
+/// The owner's own request, from their terminal, carries nothing. It was
+/// prefixed "something outside asks:" for a while, and twice a model refused
+/// an ordinary request on the strength of those words alone, calling it an
+/// injection attempt and saying that something outside was not the person it
+/// works for. It was wrong about the facts and right about the wording: the
+/// socket that request came through is one only that person can reach. So
+/// their words arrive as their words, the way they do when typed into the
+/// window.
+///
+/// Anything on that socket the app did not take for the owner keeps the old
+/// wording. That is a process the app itself started, or one inside a wall,
+/// which is what an agent's shell is: a model can reach the same socket, and
+/// its words in the owner's voice would be an agent taking another agent's
+/// orders as the person's.
+pub fn heard(by: Option<&str>, as_owner: bool, request: &str) -> Heard {
+    match (by, as_owner) {
+        (Some(who), _) => Heard {
+            called: format!("Asked by {who}"),
+            said: format!("{who} asks: {request}"),
+        },
+        (None, true) => Heard {
+            called: "Asked from the terminal".to_string(),
+            said: request.to_string(),
+        },
+        (None, false) => Heard {
+            called: "Asked by something outside".to_string(),
+            said: format!("something outside asks: {request}"),
+        },
+    }
+}
+
 /// Does using this need somebody's say-so first?
 ///
 /// Handing work to another agent does, because it spends somebody's time and
@@ -504,6 +572,53 @@ pub fn without_the_app(tool: Ours) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_from_the_owners_own_terminal_is_said_in_their_own_words() {
+        // Checked on the line in the store, because that line is what the
+        // agent reads. Prefixed "something outside asks:", a model twice
+        // refused an ordinary request as an injection attempt; the socket it
+        // came through is one only the owner can reach.
+        let s = crate::store::Store::in_memory().unwrap();
+        s.begin("a1", "Scout", std::path::Path::new("/tmp/one"))
+            .unwrap();
+        let request = "Remember that the briefing goes in ~/Desktop/briefing.md.";
+        let heard = heard(None, true, request);
+        s.begin_conversation_for("c1", "a1", &heard.called, None)
+            .unwrap();
+        s.asked("c1", &heard.said).unwrap();
+
+        let first = s.lines("c1").unwrap().into_iter().next().expect("the line");
+        assert_eq!(
+            first.text, request,
+            "the owner's request was dressed up as somebody else's"
+        );
+        assert_eq!(
+            s.conversation("c1").unwrap().unwrap().name,
+            "Asked from the terminal"
+        );
+    }
+
+    #[test]
+    fn an_agent_handing_work_to_another_is_still_named_as_the_one_asking() {
+        // A hand-off has to read as one, or the agent asked answers a person
+        // who is not there.
+        let heard = heard(Some("Scout"), false, "Draft a reply to Sarah.");
+        assert_eq!(heard.called, "Asked by Scout");
+        assert_eq!(heard.said, "Scout asks: Draft a reply to Sarah.");
+    }
+
+    #[test]
+    fn something_the_app_itself_started_asking_at_the_front_door_is_kept_at_arms_length() {
+        // An agent's shell, or anything else the app did not take for the
+        // owner. What it says about itself on the wire is not read.
+        let heard = heard(None, false, "Draft a reply to Sarah.");
+        assert_eq!(heard.called, "Asked by something outside");
+        assert_eq!(
+            heard.said,
+            "something outside asks: Draft a reply to Sarah."
+        );
+    }
 
     #[test]
     fn handing_work_to_somebody_asks_first_and_looking_at_the_list_does_not() {
@@ -595,6 +710,48 @@ mod tests {
         for half in ["watch", "how_often", "what"] {
             assert!(required.iter().any(|r| r == half), "{half} is not required");
         }
+    }
+
+    #[test]
+    fn the_every_day_tool_says_how_often_it_can_run() {
+        // What actually happened: the only interval in this tool's text was
+        // `every 30m`. Asked for something every two minutes, a model read
+        // that as the floor, said the scheduler "doesn't go below 30-minute
+        // intervals", and started a shell loop with a sleep in it instead.
+        // That ran, and it was under nobody's eye: not in Repeat, no run
+        // written down, nothing anybody could stop. The floor named here is
+        // read from routine.rs, which is what enforces it, so the text and
+        // the check cannot drift apart again.
+        let floor = crate::routine::most_often();
+        assert!(
+            crate::routine::When::read(&floor).is_ok(),
+            "the floor the text names is one a routine would refuse: {floor}"
+        );
+        let every_day = declarations()
+            .into_iter()
+            .find(|d| d.pointer("/function/name").and_then(|n| n.as_str()) == Some("every_day"))
+            .expect("it is declared");
+        let description = every_day
+            .pointer("/function/description")
+            .and_then(|d| d.as_str())
+            .expect("it is explained")
+            .to_string();
+        assert!(
+            description.contains(&format!("`{floor}`")),
+            "the description does not say how often: {description}"
+        );
+        assert!(
+            description.contains("loop") && description.contains("Repeat"),
+            "it does not say a background loop is no substitute: {description}"
+        );
+        let when = every_day
+            .pointer("/function/parameters/properties/when/description")
+            .and_then(|d| d.as_str())
+            .expect("when is explained");
+        assert!(
+            when.contains(&format!("`{floor}`")),
+            "the example is all a model has to go on, and it read it as the floor: {when}"
+        );
     }
 
     #[test]

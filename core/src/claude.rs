@@ -385,6 +385,31 @@ pub fn already_going(session: &str, cwd: &std::path::Path) -> bool {
         .exists()
 }
 
+/// Everything Claude Code is told on top of its own instructions, in order.
+///
+/// Who the agent is comes first, before the errand mode and before the notes.
+/// It rode in with the notes for a while, and so it landed under YOUR OWN
+/// NOTES, between the instructions for keeping notes and the notes themselves:
+/// a name filed as a note. Its own function so the order can be read in a test
+/// without starting Claude Code.
+fn steering(knows: &crate::memory::Knowing, wall: Option<String>) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    let identity = knows.identity.trim();
+    if !identity.is_empty() {
+        parts.push(identity);
+    }
+    parts.push(ERRAND_MODE);
+    parts.push(crate::memory::HOW_TO_USE_IT);
+    let notes = knows.notes.trim();
+    if !notes.is_empty() {
+        parts.push(notes);
+    }
+    if let Some(wall) = &wall {
+        parts.push(wall);
+    }
+    parts.join("\n\n")
+}
+
 impl Claude {
     /// Start a conversation, or pick up the one this thread already had.
     ///
@@ -413,8 +438,8 @@ impl Claude {
         asks: &str,
         doorway: Option<&std::path::Path>,
         model: Option<&str>,
-        // What this agent has already been told about its job, if anything.
-        remembers: &str,
+        // Who this agent is and what it has already been told about its job.
+        knows: &crate::memory::Knowing,
     ) -> Result<(Self, Receiver<Event>)> {
         // Three shapes, and the third is why this is not a bool. Forking asks
         // Claude Code to read one conversation and continue it under a
@@ -442,17 +467,7 @@ impl Claude {
         // the person to grant access the app already has.
         let walled = asks == "auto" && crate::wall::possible();
         // Owned, because it has to outlive the command builder that borrows it.
-        let steering = match remembers.trim().is_empty() {
-            true => format!("{ERRAND_MODE}\n\n{}", crate::memory::HOW_TO_USE_IT),
-            false => format!(
-                "{ERRAND_MODE}\n\n{}\n\n{remembers}",
-                crate::memory::HOW_TO_USE_IT
-            ),
-        };
-        let steering = match walled {
-            true => format!("{steering}\n\n{}", crate::wall::what_the_wall_means(cwd)),
-            false => steering,
-        };
+        let steering = steering(knows, walled.then(|| crate::wall::what_the_wall_means(cwd)));
 
         // Where to reach this app's own two tools, if this conversation has a
         // doorway open. Passed on the command line rather than written into a
@@ -1318,6 +1333,34 @@ fn one_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_is_told_who_it_is_before_anything_else_and_its_notes_under_their_own_heading() {
+        // What actually happened: the identity was joined onto the notes, so
+        // Claude Code read YOUR OWN NOTES, how to keep them, then WHO YOU ARE,
+        // then the list of notes, with the list cut off from its heading.
+        let knows = crate::memory::Knowing {
+            identity: crate::memory::who_you_are("Inbox Watch", Some("Mail"), None),
+            notes: "What you have already been told about this job:\n- where it goes: Telegram"
+                .into(),
+        };
+        let said = steering(&knows, Some("THE WALL".into()));
+        let identity = said.find("WHO YOU ARE").expect("who it is");
+        let mode = said.find("ERRAND MODE.").expect("how to work");
+        let notes = said.find("YOUR OWN NOTES").expect("the notes heading");
+        let list = said.find("where it goes: Telegram").expect("the notes");
+        let wall = said.find("THE WALL").expect("the wall");
+        assert!(
+            identity < mode && mode < notes && notes < list && list < wall,
+            "{said}"
+        );
+        assert!(said.starts_with("WHO YOU ARE"), "{said}");
+
+        // Nothing known is nothing said, not two blank lines.
+        let bare = steering(&crate::memory::Knowing::default(), None);
+        assert!(bare.starts_with("ERRAND MODE."), "{bare}");
+        assert!(bare.ends_with(crate::memory::HOW_TO_USE_IT), "{bare}");
+    }
 
     /// Lines captured from a real run rather than written from memory, which is
     /// the only reason to trust any of this.

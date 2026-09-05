@@ -179,7 +179,18 @@ else
 fi
 
 # ------------------------------------------------------------- tidy up --
-sqlite3 "$STORE" "DELETE FROM agents WHERE id='$AGENT';" 2>/dev/null
+# Everything, not only the agent. The sqlite3 command line does not enforce
+# ON DELETE CASCADE unless asked, so deleting the agent alone left its
+# conversations, lines and runs behind on every run, and the store filled up
+# with rows that belonged to nobody.
+sqlite3 "$STORE" "
+  DELETE FROM spending WHERE conversation IN (SELECT id FROM conversations WHERE agent='$AGENT');
+  DELETE FROM runs WHERE conversation IN (SELECT id FROM conversations WHERE agent='$AGENT');
+  DELETE FROM lines WHERE conversation IN (SELECT id FROM conversations WHERE agent='$AGENT');
+  DELETE FROM memories WHERE agent='$AGENT';
+  DELETE FROM allowed WHERE agent='$AGENT';
+  DELETE FROM conversations WHERE agent='$AGENT';
+  DELETE FROM agents WHERE id='$AGENT';" 2>/dev/null
 rm -rf "$HOME_DIR" 2>/dev/null
 
 say "$PASSED worked, $FAILED failed"
