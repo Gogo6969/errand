@@ -112,6 +112,32 @@ pub fn trim_to_fit(messages: &mut Vec<ChatMessage>, budget: usize) {
         }
     }
 
+    // A tool result whose call went with the trim is a request no provider will
+    // take: "Messages with role 'tool' must be a response to a preceding message
+    // with 'tool_calls'", a 400, and the turn ends there. It killed a five
+    // minute errand that had done all its work and was assembling the answer.
+    //
+    // Dropping the orphan is right rather than clever. The call it answered is
+    // gone, so the result is a reply to a question nobody in the conversation
+    // asked, and it reads that way to the model too.
+    let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut orphan = Vec::new();
+    for (at, message) in messages.iter().enumerate() {
+        match message {
+            ChatMessage::Assistant { tool_calls, .. } => {
+                answered.extend(tool_calls.iter().map(|call| call.id.clone()));
+            }
+            ChatMessage::Tool { tool_call_id, .. } if !answered.contains(tool_call_id) => {
+                orphan.push(at);
+            }
+            _ => {}
+        }
+    }
+    for at in orphan.into_iter().rev() {
+        messages.remove(at);
+        total -= costs.remove(at);
+    }
+
     if total > budget {
         if let Some(last) = messages.last_mut() {
             let content = match last {
@@ -141,10 +167,25 @@ mod tests {
         }
     }
 
-    fn tool_result(said: &str) -> ChatMessage {
+    fn answering(call: &str, said: &str) -> ChatMessage {
         ChatMessage::Tool {
             content: said.to_string(),
-            tool_call_id: "call-1".into(),
+            tool_call_id: call.to_string(),
+        }
+    }
+
+    fn calling(call: &str) -> ChatMessage {
+        ChatMessage::Assistant {
+            content: String::new(),
+            tool_calls: vec![crate::local::ToolCall {
+                id: call.to_string(),
+                kind: "function".into(),
+                function: crate::local::ToolCallFunction {
+                    name: "run_command".into(),
+                    arguments: "{}".into(),
+                },
+            }],
+            reasoning: None,
         }
     }
 
@@ -160,10 +201,13 @@ mod tests {
                 content: "you are an errand".repeat(20),
             },
             user("something asked hours ago"),
-            tool_result(&"old output ".repeat(400)),
+            calling("call-old"),
+            answering("call-old", &"old output ".repeat(400)),
             user("Write ONE pulse file to the disk"),
-            tool_result(&"the output of the write ".repeat(400)),
-            tool_result(&"the output of the check ".repeat(400)),
+            calling("call-write"),
+            answering("call-write", &"the output of the write ".repeat(400)),
+            calling("call-check"),
+            answering("call-check", &"the output of the check ".repeat(400)),
         ];
         trim_to_fit(&mut talk, 600);
 
@@ -177,6 +221,48 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_result_is_never_left_without_the_call_it_answered() {
+        // What actually happened: a five minute errand did all its work, the
+        // trim took the assistant turn that had made a call while keeping the
+        // result that answered it, and the provider refused the whole request
+        // with "Messages with role 'tool' must be a response to a preceding
+        // message with 'tool_calls'". The turn ended there, with everything it
+        // had found thrown away.
+        let mut talk = vec![
+            ChatMessage::System {
+                content: "instructions".into(),
+            },
+            user(&"an old conversation ".repeat(200)),
+            calling("call-old"),
+            answering("call-old", &"what that call returned ".repeat(200)),
+            user("the request being worked on"),
+            calling("call-now"),
+            answering("call-now", "the result of this turn"),
+        ];
+        trim_to_fit(&mut talk, 700);
+
+        let mut offered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for message in &talk {
+            match message {
+                ChatMessage::Assistant { tool_calls, .. } => {
+                    offered.extend(tool_calls.iter().map(|c| c.id.as_str()));
+                }
+                ChatMessage::Tool { tool_call_id, .. } => assert!(
+                    offered.contains(tool_call_id.as_str()),
+                    "a result for {tool_call_id} survived without its call"
+                ),
+                _ => {}
+            }
+        }
+        // And this turn's own work is still there, which is the other half.
+        let kept: Vec<&str> = talk.iter().map(|m| m.content()).collect();
+        assert!(kept
+            .iter()
+            .any(|c| c.contains("the request being worked on")));
+        assert!(kept.iter().any(|c| c.contains("the result of this turn")));
+    }
+
+    #[test]
     fn what_this_turn_already_did_outlives_the_conversation_before_it() {
         // The exact sequence off somebody's disk: write the file, say it
         // landed, make a note, and then the note's result is kept while the
@@ -186,10 +272,16 @@ mod tests {
                 content: "instructions".into(),
             },
             user(&"a conversation from hours ago ".repeat(200)),
-            tool_result(&"and its output ".repeat(200)),
+            calling("call-old"),
+            answering("call-old", &"and its output ".repeat(200)),
             user("Write ONE pulse file"),
-            tool_result("the pulse file was written: errand-pulse-081717.txt"),
-            tool_result("the note was made"),
+            calling("call-write"),
+            answering(
+                "call-write",
+                "the pulse file was written: errand-pulse-081717.txt",
+            ),
+            calling("call-note"),
+            answering("call-note", "the note was made"),
         ];
         trim_to_fit(&mut talk, 700);
         let kept: Vec<&str> = talk.iter().map(|m| m.content()).collect();
@@ -211,9 +303,11 @@ mod tests {
                 content: "instructions".into(),
             },
             user("the oldest thing"),
-            tool_result(&"filler ".repeat(500)),
+            calling("call-old"),
+            answering("call-old", &"filler ".repeat(500)),
             user("the newest thing"),
-            tool_result("small"),
+            calling("call-new"),
+            answering("call-new", "small"),
         ];
         trim_to_fit(&mut talk, 400);
         let kept: Vec<&str> = talk.iter().map(|m| m.content()).collect();
