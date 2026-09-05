@@ -59,8 +59,16 @@ pub fn all() -> Vec<Tool> {
         ),
         tool(
             "fetch_url",
-            "Fetch a web page or API response and return it as text.",
-            json!({ "url": { "type": "string", "description": "The full https:// address" } }),
+            "Fetch a web page or API response and return it as text. Long pages come back in \
+             parts: read what the end of the answer says and ask for the next part if you need it.",
+            json!({
+                "url": { "type": "string", "description": "The full https:// address" },
+                "from": {
+                    "type": "integer",
+                    "description": "Where to start, in characters. Leave it out for the beginning; \
+                                    the end of a cut answer says what to pass here for the rest."
+                }
+            }),
             &["url"],
             false,
         ),
@@ -552,6 +560,11 @@ pub async fn run(
 
         "fetch_url" => {
             let url = get("url");
+            let from = args
+                .get("from")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                .min(usize::MAX as u64) as usize;
             let body = reqwest::Client::new()
                 .get(&url)
                 .header("user-agent", "Errand")
@@ -560,7 +573,7 @@ pub async fn run(
                 .with_context(|| format!("fetching {url}"))?
                 .text()
                 .await?;
-            Ok(cut_to_something_readable(&body))
+            Ok(a_part_of(&body, from))
         }
 
         "write_file" => {
@@ -740,15 +753,69 @@ pub async fn run(
     }
 }
 
+/// How much of anything fetched or printed goes back to the model at once.
+const ROOM: usize = 24_000;
+
 /// Short enough to go back into a context window.
 ///
 /// Cut at the end rather than the middle: a truncated file is still readable
 /// from the top, and a model told plainly that there is more will ask for more.
+///
+/// The count is in characters, which is what the cut is measured in. It used to
+/// report `len()`, so a page with any accented text in it was cut at one number
+/// and told the model a larger one.
 fn cut_to_something_readable(s: &str) -> String {
-    const ROOM: usize = 24_000;
     match s.char_indices().nth(ROOM) {
         None => s.to_string(),
-        Some((at, _)) => format!("{}\n\n[cut here; {} characters in all]", &s[..at], s.len()),
+        Some((at, _)) => format!(
+            "{}\n\n[cut here; {} characters in all]",
+            &s[..at],
+            s.chars().count()
+        ),
+    }
+}
+
+/// One part of something fetched, and how to ask for the next.
+///
+/// A cut that only announces itself is a cut nobody can do anything about. This
+/// one did announce itself, and it was still the wrong answer: an agent asked
+/// for the top five results of a search read the first 24,000 characters of a
+/// 192,000 character reply, which held four of the thirty results, and ranked
+/// those four. Every figure it then reported was exact, which is what made it
+/// dangerous -- the answer looked checked and was quietly missing most of what
+/// it was drawn from, and the only thing the model could have done about it was
+/// fetch the same first part again.
+///
+/// So the notice carries the offset to ask for next, and says the thing a
+/// paging model needs to hear anyway: for a search, asking the server for less
+/// beats reading all of it in pieces.
+fn a_part_of(body: &str, from: usize) -> String {
+    let total = body.chars().count();
+    let Some((start, _)) = body.char_indices().nth(from) else {
+        return match from {
+            0 => body.to_string(),
+            _ => format!(
+                "There is nothing at character {from}: the whole thing is {total} characters."
+            ),
+        };
+    };
+    let rest = &body[start..];
+    let opening = match from {
+        0 => String::new(),
+        _ => format!("[characters {from} onwards, of {total}]\n\n"),
+    };
+    match rest.char_indices().nth(ROOM) {
+        None => format!("{opening}{rest}"),
+        Some((at, _)) => {
+            let next = from + ROOM;
+            format!(
+                "{opening}{}\n\n[cut here: characters {from} to {next} of {total}. For the next \
+                 part, call fetch_url again with the same url and from: {next}. If this is a \
+                 search or an API, asking the server for fewer results is better than reading it \
+                 in parts.]",
+                &rest[..at]
+            )
+        }
     }
 }
 
@@ -768,6 +835,67 @@ fn one_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_page_comes_back_in_parts_that_can_actually_be_asked_for() {
+        // What actually happened: an agent asked for the top five results of a
+        // search read the first part of a 192,000 character reply, which held
+        // four of the thirty results, and ranked those four. It was told the
+        // reply had been cut and could do nothing with that, because there was
+        // no way to ask for the rest.
+        let body = "x".repeat(60_000);
+
+        let first = a_part_of(&body, 0);
+        assert!(
+            first.starts_with("xxxx"),
+            "the first part starts at the top"
+        );
+        assert!(
+            first.contains("characters 0 to 24000 of 60000"),
+            "{}",
+            tail(&first)
+        );
+        assert!(first.contains("from: 24000"), "{}", tail(&first));
+
+        // And that offset is one that works.
+        let second = a_part_of(&body, 24_000);
+        assert!(second.contains("[characters 24000 onwards, of 60000]"));
+        assert!(second.contains("from: 48000"), "{}", tail(&second));
+
+        // The last part says nothing about a next one, because there is none.
+        let last = a_part_of(&body, 48_000);
+        assert!(!last.contains("cut here"), "{}", tail(&last));
+        assert!(!last.contains("from:"), "{}", tail(&last));
+
+        // Past the end is a sentence, not an empty answer or a panic.
+        assert!(a_part_of(&body, 60_000).contains("nothing at character 60000"));
+    }
+
+    #[test]
+    fn something_short_comes_back_whole_and_says_nothing_about_parts() {
+        let said = a_part_of("the whole thing", 0);
+        assert_eq!(said, "the whole thing");
+    }
+
+    #[test]
+    fn the_count_is_in_characters_rather_than_bytes() {
+        // Accented text is more bytes than characters, and the cut is measured
+        // in characters. Reporting the byte length told the model a number that
+        // did not match where it had been cut.
+        let body = "é".repeat(30_000);
+        assert_eq!(body.len(), 60_000, "two bytes each, to make the point");
+        let said = a_part_of(&body, 0);
+        assert!(said.contains("of 30000"), "{}", tail(&said));
+        assert!(!said.contains("60000"), "{}", tail(&said));
+        assert!(cut_to_something_readable(&body).contains("30000 characters in all"));
+    }
+
+    /// The end of a long answer, which is where the notice is.
+    fn tail(s: &str) -> String {
+        s.chars()
+            .skip(s.chars().count().saturating_sub(220))
+            .collect()
+    }
 
     #[test]
     fn anything_that_changes_the_world_is_asked_about_and_anything_that_looks_is_not() {
