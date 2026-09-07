@@ -12,10 +12,11 @@
 //! The asking is deliberate rather than a stream: a model that is handed every
 //! line of a build log has spent its context on a build log.
 //!
-//! They keep running while Errand is open and no longer. A background process
-//! that outlives the only thing that knows about it is not a background
-//! process, it is a leak, and the one thing worse than a command nobody can see
-//! is a command nobody can see or stop.
+//! They keep running for as long as Errand is running, window or no window,
+//! and no longer: quitting stops them. A background process that outlives the
+//! only thing that knows about it is not a background process, it is a leak,
+//! and the one thing worse than a command nobody can see is a command nobody
+//! can see or stop.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -416,10 +417,10 @@ pub fn stop_everything() {
 pub fn in_plain_words(started: &Started) -> String {
     format!(
         "Started, and still running. Its handle is {}. It keeps running while you get on with \
-         something else, and after this errand ends, for as long as Errand is open. Call \
-         check_command with that handle to see what it has printed since you last asked, and \
-         whether it has finished. Do not wait in a loop: do something else, or say what you have \
-         so far and check again next time somebody asks.",
+         something else, and after this errand ends, for as long as Errand is running, window \
+         or no window. Call check_command with that handle to see what it has printed since \
+         you last asked, and whether it has finished. Do not wait in a loop: do something \
+         else, or say what you have so far and check again next time somebody asks.",
         started.handle
     )
 }

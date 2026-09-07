@@ -222,6 +222,7 @@ mod tests {
             outcome: outcome.map(str::to_string),
             anchor: None,
             pictures: Vec::new(),
+            said_by: None,
         }
     }
 

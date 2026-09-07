@@ -1,5 +1,5 @@
 #!/bin/sh
-# Five errands, run against the installed app, before anything is pushed.
+# Six errands, run against the installed app, before anything is pushed.
 #
 # This exists because the tests were green and the app did not work. 374 Rust
 # tests and 363 window checks all pass while somebody trying to do a real thing
@@ -8,7 +8,7 @@
 # out, that a connector times out on a real mailbox, that a routine never fires,
 # or that the answer arrives as a wall of nothing.
 #
-# So: five things somebody would actually ask for, end to end, against
+# So: six things somebody would actually ask for, end to end, against
 # /Applications/Errand.app with its real store. Every one has to pass. If one
 # does not, the build does not go out, and the failure is printed as what
 # happened rather than as a number.
@@ -21,7 +21,7 @@ set -u
 APP="/Applications/Errand.app/Contents/MacOS/errand-app"
 STORE="$HOME/Library/Application Support/Errand/errand.db"
 WHO="Shipping Check"
-# Which engine the five errands run on. Claude Code by default, because that is
+# Which engine the errands run on. Claude Code by default, because that is
 # what most people have; any model in the picker by naming it, because an app
 # that only passes its own gate on one engine has only been tested on one, and
 # because a login that expires should not be able to stop the gate running at
@@ -86,7 +86,7 @@ sqlite3 "$STORE" "
 # A turn that completes at all. Everything else is built on this, and it is
 # what fails when the engine is signed out -- which looked like a working app
 # until somebody typed a paragraph into it.
-printf '\nRunning the five errands on \033[1m%s\033[0m%s\n' "$ENGINE" "$([ -n "$MODEL" ] && echo " ($(printf '%s' "$MODEL" | sed 's/.*"model":"\([^"]*\)".*/\1/'))")"
+printf '\nRunning the six errands on \033[1m%s\033[0m%s\n' "$ENGINE" "$([ -n "$MODEL" ] && echo " ($(printf '%s' "$MODEL" | sed 's/.*"model":"\([^"]*\)".*/\1/'))")"
 
 say "1. It answers a plain question"
 # The whole answer rather than its last line. A model that wraps what it was
@@ -134,10 +134,12 @@ esac
 # The thing this app is for: a job that runs on its own and is written down.
 # Tested through the clock rather than by calling the function, because the
 # clock is the part that has failed.
-say "5. A routine fires on its own and is recorded"
-if [ -z "$AGENT" ]; then
-  lost "no agent to hang a routine on"
-else
+#
+# A routine due in a minute, waited for, read back, and cleared away. A
+# function because the sixth errand is this same test under one more
+# condition, and two copies of a wait loop drift.
+a_routine_fires() {
+  ROUTINE=$(uuidgen | tr 'A-Z' 'a-z')
   NOW=$(python3 -c 'import time;print(int(time.time()*1000))')
   DUE=$(date -v+1M +%H:%M)
   # Never opened, which is what a routine nobody has spoken to looks like. The
@@ -145,7 +147,7 @@ else
   # and setting it on a conversation with no session behind it fails every run.
   sqlite3 "$STORE" "
     INSERT INTO conversations (id, agent, name, opened, started_at, spoke_at, runs_at, runs_what)
-    VALUES ('$ROUTINE', '$AGENT', 'Shipping check', 0, $NOW, $NOW, 'daily $DUE',
+    VALUES ('$ROUTINE', '$AGENT', '$1', 0, $NOW, $NOW, 'daily $DUE',
             'Reply with just the word: fired');" 2>/dev/null
   printf '  waiting for the clock (due %s, checked every 30s)\n' "$DUE"
   UNTIL=$(( $(date +%s) + 240 ))
@@ -176,7 +178,48 @@ else
   sqlite3 "$STORE" "DELETE FROM runs WHERE conversation='$ROUTINE';
                     DELETE FROM lines WHERE conversation='$ROUTINE';
                     DELETE FROM conversations WHERE id='$ROUTINE';" 2>/dev/null
+}
+
+say "5. A routine fires on its own and is recorded"
+if [ -z "$AGENT" ]; then
+  lost "no agent to hang a routine on"
+else
+  a_routine_fires "Shipping check"
 fi
+
+# ---------------------------------------------------------------- six --
+# Closing the window stops nothing. The window hides, the process stays, and
+# the clock inside it keeps ticking. This is the only place that can be
+# proved: a unit test can say what the close handler does and cannot say the
+# real window took it, and for a long time the last window going was the app
+# going, which made "get this out of the way" and "quit" the same click.
+#
+# The window is closed the way a person closes it, through its own close
+# button, by way of System Events. That needs whatever runs this script to be
+# allowed to control the computer (System Settings, Privacy and Security,
+# Accessibility). When it is not, the step says so rather than pretending;
+# it does not press keys, because a keystroke goes to whatever is in front.
+say "6. A routine fires with the window closed"
+CLOSED=$(osascript -e 'tell application "System Events" to tell process "Errand"
+  if (count of windows) is 0 then return "no window"
+  click button 1 of window 1
+  return "closed"
+end tell' 2>&1)
+case "$CLOSED" in
+  closed)
+    sleep 2
+    if pgrep -qf "Errand.app/Contents/MacOS/errand-app"; then
+      won "the window closed and Errand kept running"
+      a_routine_fires "Shipping check, window closed"
+    else
+      lost "closing the window quit Errand, and the routine with it"
+    fi ;;
+  "no window") lost "Errand has no window on screen to close; bring it forward first" ;;
+  *) lost "could not close the window: $CLOSED" ;;
+esac
+# Left the way it was found. `open` on a copy already running is the same as a
+# click on the Dock icon, and that is what brings the window back.
+open -a Errand 2>/dev/null
 
 # ------------------------------------------------------------- tidy up --
 # Everything, not only the agent. The sqlite3 command line does not enforce
@@ -198,4 +241,4 @@ if [ "$FAILED" -gt 0 ]; then
   echo "Do not push. Fix these first."
   exit 1
 fi
-echo "All five worked. This build is worth pushing."
+echo "All six worked. This build is worth pushing."

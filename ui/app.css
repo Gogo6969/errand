@@ -1453,6 +1453,14 @@ body.catching #what { border-color: var(--accent); }
   font-size: 12.5px;
   color: var(--ink-soft);
 }
+/* What keeps a routine running, under the line that says when it is next:
+   a row of its own, so it never lands in among the boxes. */
+#routine-keeps {
+  flex: 1 0 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
 
 /* What somebody else allows, shown here because it is in force here. Set apart
    from Errand's own list and with no button beside it, since a button that
@@ -1653,6 +1661,19 @@ body.catching #what { border-color: var(--accent); }
 .finding[data-how="odd"] .finding-what { color: var(--accent); }
 .finding[data-how="broken"] .finding-what { color: var(--wrong); }
 .finding[data-how="broken"] .finding-fix { border-left-color: var(--wrong); }
+/* The one thing in a finding that can be pressed: the pane its fix is done in. */
+.finding-open {
+  margin: 6px 0 0;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.finding-open:hover { color: var(--ink); border-color: var(--edge); }
 
 /* --------------------------------------------------------- attached -- */
 
@@ -2192,3 +2213,91 @@ a.on-disk {
 }
 #trouble .what { margin: 0; color: var(--ink); font-weight: 500; font-size: 13px; }
 #trouble .fix { margin: 4px 0 0; color: var(--ink-soft); font-size: 13px; }
+
+/* ------------------------------------------------------------- a room -- */
+
+/* Who is in the room, in the header. It gives way before anything else does:
+   it shrinks to nothing rather than push a button off the row, because the
+   same names are one click away in the picker. */
+#members[hidden] { display: none; }
+#members {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+/* Who said it, on an answer in a room. In an ordinary conversation the header
+   says which agent every answer is from; in a room the header names three, so
+   the line has to say which. */
+.said .who {
+  display: block;
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  margin: 0 0 4px;
+}
+
+/* Which member is answering this moment, under the dots. */
+.answering {
+  list-style: none;
+  font-size: 12px;
+  color: var(--ink-soft);
+  padding: 0 4px 6px;
+}
+
+#rooming[hidden] { display: none; }
+#rooming {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--side);
+}
+#rooming .rooming-what,
+#rooming-who,
+#rooming-says { flex: 1 1 100%; margin: 0; }
+#rooming .rooming-what { font-size: 13px; color: var(--ink-soft); }
+#rooming-who { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+#rooming-who label { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; }
+#rooming .rooming-name {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  flex: 1 1 240px;
+}
+#rooming input[type="text"] {
+  padding: 6px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+#rooming input[type="text"]:focus { outline: none; border-color: var(--edge); }
+#rooming button {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+#rooming button:hover { border-color: var(--edge); }
+#rooming-says { font-size: 12px; color: var(--ink-soft); }
+#rooming-says:empty { display: none; }

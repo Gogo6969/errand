@@ -151,12 +151,17 @@
           <div>
             <h2>When Errand runs</h2>
             <p>
-              Everything Errand does on its own it does while it is open: a routine
-              fires from a clock in this app, a watch looks while this window is
-              there, and a command left running stops when this stops. Starting at
-              login is not a machine of its own, and a Mac that is asleep or off is
-              still asleep or off. It is the difference between standing jobs that
-              survive a restart and standing jobs that do not.
+              Closing the window does not stop anything. Errand keeps running in the
+              Dock, and routines, watches, goals and started commands carry on; click
+              the Dock icon to get the window back. Quitting stops them all: Cmd-Q asks
+              first when a routine is due in the next fifteen minutes, Quit from the
+              Dock menu does not. A Mac that is asleep, has its lid down or is off runs
+              nothing, and a routine whose time passed runs the next time Errand is
+              running and, when it is more than ten minutes late, says so. Logging out
+              quits Errand. With the switch below on, a restart or a login brings Errand
+              back, and its routines and watches with it; a goal that was part way
+              through and a command that was running are not picked up, and have to be
+              started again.
             </p>
           </div>
         </div>
@@ -175,6 +180,8 @@
         <button id="pin" type="button" title="Keep at the top">Pin</button>
         <button id="hide" type="button" title="Out of the way, still running">Hide</button>
         <select id="talks" title="Which conversation"></select>
+        <!-- Who is in the room, when this is one. Empty and hidden otherwise. -->
+        <span id="members" hidden title="Who is in this room"></span>
         <select id="engine" title="What answers this agent"></select>
         <button id="repeat" type="button" title="Make this run on a schedule">Repeat</button>
         <button id="watch" type="button" title="Wake this when something changes">Watch</button>
@@ -193,6 +200,24 @@
         <label>Role <input id="whois-title" type="text" autocomplete="off" /></label>
         <label>Handles <input id="whois-about" type="text" autocomplete="off" /></label>
         <button id="whois-save" type="button">Save</button>
+      </aside>
+
+      <!--
+        A room: one conversation with several agents in it. Each one answers in
+        turn and hears what the others said; a line starting with @Name goes to
+        that one alone. Ticked rather than typed, because a name is a thing
+        somebody gets slightly wrong and a box is not.
+      -->
+      <aside id="rooming" hidden>
+        <p class="rooming-what">
+          Pick who is in it. Each one answers in turn and hears what the others
+          said. Start a line with @Name to speak to one of them.
+        </p>
+        <div id="rooming-who"></div>
+        <label class="rooming-name">Called <input id="rooming-name" type="text" placeholder="Their names, unless you say otherwise" autocomplete="off" /></label>
+        <button id="rooming-start" type="button">Start the room</button>
+        <button id="rooming-cancel" type="button">Cancel</button>
+        <p id="rooming-says"></p>
       </aside>
 
       <!--
@@ -230,6 +255,18 @@
         <!-- What was actually asked here, to take rather than retype. -->
         <div id="routine-said" class="from-here" hidden></div>
         <p id="routine-says"></p>
+        <!--
+          What keeps it running and what does not, where the routine is set.
+          The same sentence is on the "When Errand runs" card and in what the
+          agent is told when it sets one; this is the one of the four starts
+          that had nothing, and the person setting a routine is the one about
+          to rely on it.
+        -->
+        <p id="routine-keeps">
+          Runs while Errand is running, window or no window; quitting stops it, and a Mac
+          that is asleep runs nothing. The switch under Settings brings Errand, and this,
+          back after a restart.
+        </p>
         <!--
           What it actually did. The question about a standing job is not when it
           is next but whether it has been working, and three failed mornings

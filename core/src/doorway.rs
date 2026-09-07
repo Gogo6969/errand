@@ -983,6 +983,9 @@ mod tests {
                 "keep_an_eye_on",
                 "over_to_you",
                 "who_else",
+                "save_skill",
+                "run_skill",
+                "skills",
                 // What this Mac can be let at, which is offered whether or not
                 // anything is switched on: a tool nobody can see is a tool
                 // nobody can be told about.

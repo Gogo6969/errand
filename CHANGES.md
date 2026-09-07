@@ -7,6 +7,41 @@ would notice, not something a commit did.
 
 ## 0.3.0
 
+- Several agents can work one problem in a room. Pick "New room…" in the
+  conversation picker, tick who is in it, and everything you say there goes to
+  each of them in turn: the second hears what the first said, and each answer
+  is written into the room under the name of the agent that gave it. Start a
+  line with @Name to speak to one of them. A member can still hand part of the
+  job to another with ask, as before. Who is in it is decided when the room is
+  made: no member can add one, and there is no way to add one afterwards yet.
+  The room takes one thing round at a time; something said while a round is
+  still going is kept in the box and refused until it ends. The room is its
+  own record: who said what, in order. Each member also keeps a conversation
+  of its own for the room, "In the room: <name>", under its own agent, and
+  that is where a question it stops to ask lands.
+- A task done once can be saved as a skill and done again by name. Say "save
+  what we just did as a skill called tidy downloads" and the agent keeps what
+  you asked and the steps it took, from the last turn here that took any. Say
+  "run the skill tidy downloads" and it does the task again in a conversation
+  of its own, "Skill: tidy downloads", handed the original request and those
+  steps as a plan: it follows them where things are the same, changes them
+  where they are not, and says what it did differently. Nothing is replayed
+  blind; every step of the run goes through the same tools and the same
+  permission cards as any other errand. Saving under a name already taken
+  replaces that skill, and "what skills are there" lists them. A skill is one
+  agent's, like its notes.
+- Closing the window does not stop anything. Errand keeps running in the
+  Dock, and routines, watches, goals and started commands carry on; click the
+  Dock icon to get the window back. Quitting stops them all: Cmd-Q asks first
+  when a routine is due in the next fifteen minutes, Quit from the Dock menu
+  does not. A Mac that is asleep, has its lid down, or is off runs nothing; a
+  routine whose time passed runs the next time Errand is running and, when it
+  is more than ten minutes late, says so. Logging out quits Errand. Updating
+  Errand means quitting it and opening the new one, and anything due in
+  between runs late when it comes back. With "Open Errand when I log in" on, a
+  restart brings Errand back, and its routines and watches with it; a goal
+  that was part way through and a command that was running are not picked up,
+  and have to be started again.
 - Your agents can read your Mail and your Calendar, once you switch each one
   on under Settings. Nothing signs in to anything: these read the apps already
   on this Mac, so there is no account, no token and nothing that expires. Both
@@ -29,8 +64,23 @@ would notice, not something a commit did.
   you already have keep the posture they had.
 - A conversation says what day it was. Yesterday's briefing and this morning's
   no longer sit one under the other with nothing between them.
+- An answer that says it wrote a file is checked against the disk. When an
+  agent says it wrote, saved, created or exported something in its own folder
+  or in a folder allowed to it, Errand looks for the file as the answer is
+  written down. If it is not there, or was last changed before the errand
+  began, a line of Errand's own says so underneath, with the path, where it
+  looked and the times. The answer itself is left alone. Nothing outside those
+  folders is looked at, and a path inside a command the agent ran is not a
+  claim.
 - The list of agents says when one has said something you have not read, how
   much, and how long ago.
+- Errand says when macOS will not show its notifications, which used to be a
+  line on stderr that nobody saw. Check this setup has a Notifications line
+  that says whether they are on, and when they are not, a button that opens
+  System Settings at Errand's own entry. And the first time an errand finishes
+  while you are reading something else and nothing could say so, one line in
+  that conversation says why and where to turn them on. Once per launch, not
+  every time.
 - Clicking a notification opens the conversation it was about, rather than
   only bringing the window forward. One about a routine says it was a routine.
   The dock icon counts the agents stopped waiting on you.

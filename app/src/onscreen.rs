@@ -18,18 +18,21 @@
 //! and it refuses. That is a property of the operating system rather than
 //! something to work around, so the failure says so in as many words.
 
+use std::ptr::NonNull;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use block2::RcBlock;
+use errand_core::doctor::Notifying;
 use objc2::rc::Retained;
 use objc2::runtime::Bool;
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, msg_send, AnyThread};
 use objc2_foundation::{NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_user_notifications::{
-    UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+    UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification,
     UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
-    UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+    UNNotificationSettings, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
 
 /// What to do when somebody clicks one of these.
@@ -80,6 +83,35 @@ pub fn ask() {
             | UNAuthorizationOptions::Badge,
         &heard,
     );
+}
+
+/// Whether macOS will put one of these on screen, asked now.
+///
+/// Now rather than remembered from the question at launch, because the answer
+/// changes without the app hearing about it: somebody turns them off in
+/// System Settings a week in, or on again after reading the finding this
+/// feeds, and a check that reported the launch-time answer would be wrong in
+/// both directions. Bounded, because it is asked from the thread that reads
+/// an engine's events, and the system answers in milliseconds when it answers
+/// at all.
+pub fn may_show() -> Notifying {
+    let Some(center) = center() else {
+        return Notifying::Unknown;
+    };
+    let (tell, heard) = std::sync::mpsc::channel();
+    let answer = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
+        let status = unsafe { settings.as_ref() }.authorizationStatus();
+        let _ = tell.send(status);
+    });
+    center.getNotificationSettingsWithCompletionHandler(&answer);
+    match heard.recv_timeout(Duration::from_secs(2)) {
+        Ok(UNAuthorizationStatus::Denied) => Notifying::Refused,
+        Ok(UNAuthorizationStatus::NotDetermined) => Notifying::NotAnswered,
+        // Authorized, and the two quieter kinds that still put something on
+        // screen.
+        Ok(_) => Notifying::Allowed,
+        Err(_) => Notifying::Unknown,
+    }
 }
 
 /// How many agents are stopped waiting on somebody, on the dock icon.

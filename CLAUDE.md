@@ -29,10 +29,10 @@ and obvious in a window:
 None of those is a mistake in the thing that was changed. All of them are a
 mistake about what else was true.
 
-### Before any version goes out: the five errands
+### Before any version goes out: the six errands
 
-`./scripts/before-shipping.sh` runs five real errands against the installed
-`/Applications/Errand.app` and its real store. **All five have to pass before a
+`./scripts/before-shipping.sh` runs six real errands against the installed
+`/Applications/Errand.app` and its real store. **All six have to pass before a
 build is pushed anywhere.** No exceptions, and passing unit tests is not a
 substitute: for weeks every unit test was green while the app itself could not
 finish a single errand, which is the only measure anybody outside this repo
@@ -43,6 +43,8 @@ cares about.
 3. It writes a file and reads it back.
 4. It reads something outside the app, through a connector.
 5. A routine fires on its own, off the clock, and is written down.
+6. A routine fires with the window closed. The window hides and the process
+   stays; the only place that can be proved is the real window.
 
 Run it after installing the new bundle, not before:
 

@@ -1,10 +1,12 @@
 //! Being there when the machine is.
 //!
-//! Everything this app does on its own it does while it is open. Routines fire
-//! from a clock inside the process, watches look while the window is there, and
-//! a background command dies with it. That is said out loud in each of those
-//! places rather than hidden, and it is still the same sentence three times:
-//! close the app and the standing jobs stop being standing.
+//! Everything this app does on its own it does while the process is running.
+//! Routines fire from a clock inside it, watches look from the same clock, and
+//! a started command is its child. Closing the window ends none of that: the
+//! window hides and Errand stays in the Dock. Quitting ends all of it, so does
+//! logging out, and a Mac that is asleep or off runs nothing. That is said out
+//! loud in each of those places rather than hidden, and it is still the same
+//! sentence: quit the app and the standing jobs stop being standing.
 //!
 //! The whole fix is a machine that is not this one, and that is not built. This
 //! is the part of it that is: the app comes back by itself after a restart, so

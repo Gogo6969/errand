@@ -17,8 +17,12 @@ tauri = { version = "2", features = [] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-objc2-user-notifications = { version = "0.3.2", features = ["UNUserNotificationCenter", "UNNotificationRequest", "UNNotificationContent", "UNNotificationTrigger", "UNNotificationResponse", "UNNotification", "block2"] }
+objc2-user-notifications = { version = "0.3.2", features = ["UNUserNotificationCenter", "UNNotificationRequest", "UNNotificationContent", "UNNotificationTrigger", "UNNotificationResponse", "UNNotification", "UNNotificationSettings", "block2"] }
 objc2-foundation = { version = "0.3.2", features = ["NSString", "NSBundle", "NSThread"] }
+# For the one question before quitting. Already compiled into this app through
+# the window toolkit; the features are the alert, the buttons on it, and the
+# modal run that shows it.
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSAlert", "NSApplication", "NSResponder", "NSButton", "NSControl", "NSView"] }
 objc2 = "0.6.4"
 block2 = "0.6.2"
 chrono = "0.4.45"

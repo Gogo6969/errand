@@ -28,9 +28,11 @@ use errand_core::keys;
 use errand_core::local::{find, LlmSettings, Local};
 use errand_core::mcp;
 use errand_core::memory;
+use errand_core::room;
 use errand_core::routine;
 use errand_core::routine::When;
-use errand_core::store::{Settled, NOT_YET_NAMED};
+use errand_core::skill;
+use errand_core::store::{Member, Settled, NOT_YET_NAMED};
 use errand_core::team;
 use errand_core::watch;
 use errand_core::{claude::Claude, Agent, Answer, Conversation, Engine, Event, Line, Store};
@@ -38,6 +40,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod onscreen;
+mod quitting;
 
 /// Everything the window is holding: the conversations that are live, and the
 /// book they are all written into.
@@ -149,6 +152,9 @@ struct Held {
     /// window being in front should not silence it. Focus says the app is on
     /// screen; this says which of forty conversations is.
     looking_at: Mutex<Option<String>>,
+    /// Whether this run of the app has said that macOS will not show its
+    /// notifications. In memory on purpose: once per run, not once ever.
+    told_about_notifications: doctor::Told,
     store: Arc<Store>,
 }
 
@@ -210,19 +216,19 @@ fn beside_everything_else() -> Option<std::path::PathBuf> {
 /// And the reason it is conditional is the same reason: a notification for a
 /// thread you are watching finish is noise, and an app that sends those gets
 /// its notifications turned off, along with the ones that mattered.
-fn tell_them(app: &AppHandle, store: &Store, id: &str, event: &Event) {
+///
+/// Says whether one was put on screen, because putting one on screen is not
+/// the same as anybody seeing it: with notifications off for this app it goes
+/// nowhere, and the caller is the one that can say so instead.
+fn tell_them(app: &AppHandle, store: &Store, id: &str, event: &Event) -> bool {
+    let talk = store.conversation(id).ok().flatten();
     let (title, body) = match event {
         Event::Done { said, .. } => (called(store, id), gist(said)),
         // "Stopped" alone reads as something somebody was watching. A routine
         // stopping is a different fact: nobody was there, and it will not have
         // done the thing it does every morning.
         Event::Failed { why } => {
-            let by_the_clock = store
-                .conversation(id)
-                .ok()
-                .flatten()
-                .and_then(|c| c.runs_at)
-                .is_some();
+            let by_the_clock = talk.as_ref().is_some_and(|c| c.runs_at.is_some());
             let what = match by_the_clock {
                 true => format!("{} stopped, and it was a routine", called(store, id)),
                 false => format!("{} stopped", called(store, id)),
@@ -238,7 +244,7 @@ fn tell_them(app: &AppHandle, store: &Store, id: &str, event: &Event) {
             format!("{} needs you", called(store, id)),
             gist(&ask.asking),
         ),
-        _ => return,
+        _ => return false,
     };
     // Held back only for the conversation actually on screen. Both halves are
     // needed: the window can be in front with something else open, and it can
@@ -248,12 +254,44 @@ fn tell_them(app: &AppHandle, store: &Store, id: &str, event: &Event) {
         .and_then(|w| w.is_focused().ok())
         .unwrap_or(false);
     let held: State<Held> = app.state();
-    let this_one = held.looking_at.lock().unwrap().as_deref() == Some(id);
-    if in_front && this_one {
-        return;
+    let on_screen = held.looking_at.lock().unwrap().clone();
+    let watched = being_watched(
+        on_screen.as_deref(),
+        id,
+        talk.as_ref().and_then(|c| c.asked_by.as_deref()),
+        event,
+    );
+    if in_front && watched {
+        return false;
     }
     onscreen::show(id, &title, &body);
     onscreen::waiting(how_many_are_waiting(&held));
+    true
+}
+
+/// Whether what happened in a conversation happened in front of the person.
+///
+/// The conversation on screen, or one that answers into it. A member of a
+/// room answers in a conversation of its own and its answer is written into
+/// the room, so somebody reading the room watched it arrive, and a
+/// notification for it, three per message in a room of three, is the noise
+/// `tell_them` exists to hold back. The same goes for an agent asked by the
+/// one on screen. A question is not held back that way: the card is in the
+/// member's own conversation and not in the room, which is exactly what the
+/// person cannot see from where they are sitting.
+fn being_watched(
+    on_screen: Option<&str>,
+    id: &str,
+    answers_into: Option<&str>,
+    event: &Event,
+) -> bool {
+    if on_screen == Some(id) {
+        return true;
+    }
+    match event {
+        Event::NeedsYou(_) => false,
+        _ => answers_into.is_some() && answers_into == on_screen,
+    }
 }
 
 /// How many agents are stopped waiting on somebody, for the dock icon.
@@ -777,6 +815,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                                     seq: line.seq,
                                     kind: "note".to_string(),
                                     text: line.text,
+                                    said_by: None,
                                 },
                             );
                         }
@@ -815,6 +854,31 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                     None
                 }
             };
+            // What the answer says it wrote, checked against the disk before
+            // anybody reads it. A routine once reported a file from half an
+            // hour earlier as one it had just written, and later wrote nothing
+            // at all while saying it had; the transcript agreed with it both
+            // times because nothing in here looked. The answer is left as it
+            // is. What the disk says is a line of the app's own underneath it.
+            if let Event::Done { said, .. } = &event {
+                for not_so in errand_core::claims::what_is_not_so(&store, &id, said) {
+                    match store.the_app_says(&id, "note", &not_so) {
+                        Ok(line) => {
+                            let _ = app.emit(
+                                "noted",
+                                Noted {
+                                    conversation: id.clone(),
+                                    seq: line.seq,
+                                    kind: "note".to_string(),
+                                    text: line.text,
+                                    said_by: None,
+                                },
+                            );
+                        }
+                        Err(why) => eprintln!("could not say what {id} claims: {why}"),
+                    }
+                }
+            }
             // A session that is not there is not a fault worth repeating. Left
             // alone, the next turn asks to pick up the same missing session and
             // fails in the same words, for ever. Forgetting that it was ever
@@ -925,7 +989,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 }
             }
 
-            tell_them(&app, &store, &id, &event);
+            let shown = tell_them(&app, &store, &id, &event);
             let _ = app.emit(
                 "happened",
                 Happened {
@@ -934,6 +998,35 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                     event,
                 },
             );
+            // One was put on screen, and with notifications off for this app
+            // it went nowhere, which from the outside is an errand that
+            // finished without a word. Said in the conversation instead, once
+            // per run of the app. After the event it belongs to, so that it
+            // draws underneath that event live the same as it reads back.
+            if shown {
+                let held: State<Held> = app.state();
+                let unsaid =
+                    doctor::nobody_was_told(&held.told_about_notifications, onscreen::may_show);
+                if let Some(line) = unsaid {
+                    match store.the_app_says(&id, "note", &line) {
+                        Ok(line) => {
+                            let _ = app.emit(
+                                "noted",
+                                Noted {
+                                    conversation: id.clone(),
+                                    seq: line.seq,
+                                    kind: "note".to_string(),
+                                    text: line.text,
+                                    said_by: None,
+                                },
+                            );
+                        }
+                        Err(why) => {
+                            eprintln!("could not say in {id} that notifications are off: {why}")
+                        }
+                    }
+                }
+            }
         }
 
         // Nothing more will come, which means the engine has stopped. Left in
@@ -975,39 +1068,40 @@ async fn say(
     // conversation on from a message somebody has only just sent rather than
     // only from ones read back off disk.
 ) -> Result<Option<i64>, String> {
+    // Kept as given, for a room: each member is handed the same pictures.
+    let as_given = attached.clone();
     let pictures = attached
         .map(|these| pictures_from(&these))
         .transpose()?
         .unwrap_or_default();
 
-    // Before the line, because the line points at it. An agent made in the
-    // window is not written down until there is something to write, and this is
-    // that moment.
-    write_it_down_if_new(&app, &held, &id)?;
-    let written = held.store.asked(&id, &text).map_err(|e| e.to_string())?;
-
-    // Kept, beside the store rather than in it. The bytes used to reach the
-    // engine and be thrown away, and the line said "(with a picture)" -- so a
-    // conversation that had been about a picture read afterwards as a
-    // conversation about nothing, and you could never see the one you sent.
-    //
-    // Beside rather than in, because a base64 image in a transcript line is
-    // read back into the window on every reopen and a store that holds a
-    // conversation should not also be an album. And beside the thread's own
-    // folder rather than inside it, because that folder is where the agent
-    // works: a picture kept there is one an errand can overwrite or tidy away.
-    if !pictures.is_empty() {
-        match keep_the_pictures(&app, &id, written.seq, &pictures) {
-            Ok(named) => held
-                .store
-                .pictures_with(&id, written.seq, &named)
-                .map_err(|e| e.to_string())?,
-            // Not fatal. What somebody said is still said, and the errand still
-            // runs with the picture in front of the model; what is lost is
-            // being able to look at it again afterwards, which is worth a line
-            // on stderr rather than a refused message.
-            Err(why) => eprintln!("that picture could not be kept: {why}"),
+    // A room takes one thing round at a time, and the round is claimed before
+    // the line is written, so that a second thing said mid-round is refused
+    // with nothing written down: the words stay in the box for when the round
+    // ends. `room::STILL_ANSWERING` says why two rounds at once cannot be let
+    // happen. The clock is the other way in here, and a routine set on a room
+    // is refused the same way and its run says so.
+    let a_room = held.store.is_a_room(&id).map_err(|e| e.to_string())?;
+    if a_room {
+        claim_the_round(&held.doing, &id)?;
+    }
+    let written = match write_down_what_was_said(&app, &held, &id, &text, &pictures) {
+        Ok(written) => written,
+        Err(why) => {
+            if a_room {
+                held.doing.lock().unwrap().remove(&id);
+            }
+            return Err(why);
         }
+    };
+
+    // A room has no engine of its own. What was said goes round the members,
+    // on a task of this turn's own, so the window gets its line back now and
+    // each answer arrives as the member that gave it finishes.
+    if a_room {
+        let _ = held.store.a_turn_began(&id);
+        tauri::async_runtime::spawn(a_rooms_turn(app.clone(), id.clone(), text, as_given));
+        return Ok(Some(written.seq));
     }
 
     // Typed while the agent was waiting for a button to be pressed. The words
@@ -1054,6 +1148,62 @@ async fn say(
         .ok_or_else(|| "that conversation is not open".to_string())?;
     thread.say(&text, &pictures).map_err(|e| e.to_string())?;
     Ok(Some(written.seq))
+}
+
+/// Write down what somebody said, and keep the pictures that came with it.
+fn write_down_what_was_said(
+    app: &AppHandle,
+    held: &Held,
+    id: &str,
+    text: &str,
+    pictures: &[errand_core::Picture],
+) -> Result<Line, String> {
+    // Before the line, because the line points at it. An agent made in the
+    // window is not written down until there is something to write, and this is
+    // that moment.
+    write_it_down_if_new(app, held, id)?;
+    let written = held.store.asked(id, text).map_err(|e| e.to_string())?;
+
+    // Kept, beside the store rather than in it. The bytes used to reach the
+    // engine and be thrown away, and the line said "(with a picture)" -- so a
+    // conversation that had been about a picture read afterwards as a
+    // conversation about nothing, and you could never see the one you sent.
+    //
+    // Beside rather than in, because a base64 image in a transcript line is
+    // read back into the window on every reopen and a store that holds a
+    // conversation should not also be an album. And beside the thread's own
+    // folder rather than inside it, because that folder is where the agent
+    // works: a picture kept there is one an errand can overwrite or tidy away.
+    if !pictures.is_empty() {
+        match keep_the_pictures(app, id, written.seq, pictures) {
+            Ok(named) => held
+                .store
+                .pictures_with(id, written.seq, &named)
+                .map_err(|e| e.to_string())?,
+            // Not fatal. What somebody said is still said, and the errand still
+            // runs with the picture in front of the model; what is lost is
+            // being able to look at it again afterwards, which is worth a line
+            // on stderr rather than a refused message.
+            Err(why) => eprintln!("that picture could not be kept: {why}"),
+        }
+    }
+    Ok(written)
+}
+
+/// Mark a room as mid-round, or refuse because it already is.
+///
+/// One lock for the look and the mark, because two things said at once, the
+/// person and the clock say, would otherwise both look, both see nothing, and
+/// both start a round. The mark is the same entry `take_it_round` writes each
+/// member's name into and `a_rooms_turn` clears when the round is over, so
+/// there is one fact about whether a room is busy and not two.
+fn claim_the_round(doing: &Mutex<HashMap<String, String>>, room: &str) -> Result<(), String> {
+    let mut doing = doing.lock().unwrap();
+    if doing.contains_key(room) {
+        return Err(room::STILL_ANSWERING.to_string());
+    }
+    doing.insert(room.to_string(), "Taking it round the room".to_string());
+    Ok(())
 }
 
 /// Where the pictures somebody sent are kept.
@@ -1344,7 +1494,7 @@ async fn answer(
         other => return Err(format!("no idea what \"{other}\" means")),
     };
     held.store
-        .answered(&id, &step, in_a_word(said))
+        .answered(&id, &step, said.in_a_word())
         .map_err(|e| e.to_string())?;
 
     // Remembered here rather than handed to the engine. Claude Code would file
@@ -1369,15 +1519,6 @@ async fn answer(
         .get_mut(&id)
         .ok_or_else(|| "that conversation is not open".to_string())?;
     thread.answer(&call, said).map_err(|e| e.to_string())
-}
-
-/// What an answer is called when it is read back later.
-fn in_a_word(said: Answer) -> &'static str {
-    match said {
-        Answer::Yes => "You said yes",
-        Answer::Always => "You said yes, and to stop asking",
-        Answer::No => "You said no",
-    }
 }
 
 /// One thing that could answer a thread.
@@ -2352,6 +2493,29 @@ struct Noted {
     seq: i64,
     kind: String,
     text: String,
+    /// Which member said it, in a room. Nothing everywhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    said_by: Option<String>,
+}
+
+/// Where a room's turn has got to, for the window's dots.
+///
+/// A room has no engine, so none of the seven events arrive for it: nothing
+/// would ever tell the window the turn was over, and the dots would stay.
+#[derive(Clone, Serialize)]
+struct RoomTurn {
+    conversation: String,
+    /// Who is answering this moment, while somebody is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    who: Option<String>,
+    over: bool,
+}
+
+/// What the window is handed when it starts a room.
+#[derive(Serialize)]
+struct Room {
+    name: String,
+    members: Vec<Member>,
 }
 
 /// A conversation's goal, as the window shows it.
@@ -2488,6 +2652,7 @@ async fn keep_at_it(app: &AppHandle, id: &str, said: &str) -> Result<(), String>
                 seq: line.seq,
                 kind: "goal".to_string(),
                 text: line.text,
+                said_by: None,
             },
         );
         return Ok(());
@@ -2747,6 +2912,9 @@ fn answer_what_engines_cannot(
                     Some(team::Ours::EveryDay) => set_it_running(&app, &asked),
                     Some(team::Ours::KeepAnEyeOn) => keep_an_eye_on(&app, &asked),
                     Some(team::Ours::OverToYou) => over_to_you(&app, &asked).await,
+                    Some(team::Ours::SaveSkill) => save_skill(&app, &asked),
+                    Some(team::Ours::RunSkill) => run_skill(&app, &asked).await,
+                    Some(team::Ours::Skills) => list_skills(&app, &asked),
                     // Not one of the app's own, so it may be one of the things
                     // this Mac can be let at.
                     None => match errand_core::connectors::which(&asked.tool) {
@@ -2832,9 +3000,9 @@ fn set_it_running(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
         .unwrap_or_else(|| "at its next turn".to_string());
     Ok(format!(
         "Set. This conversation now runs {}, next on {next}, and says: {what}\n\n\
-         It is under Repeat, where it can be changed or stopped. It runs while Errand is \
-         open; a Mac that is asleep is still asleep.",
-        read.written()
+         It is under Repeat, where it can be changed or stopped. {}",
+        read.written(),
+        routine::WHAT_KEEPS_IT_RUNNING
     ))
 }
 
@@ -3259,6 +3427,111 @@ fn take_it_back(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> 
     })
 }
 
+/// Keep the task just done in this conversation as a skill, by name.
+///
+/// Read from the lines already written down rather than from anything the
+/// model says about what it did: the steps are what happened, and a model
+/// asked to list its own steps leaves out the ones that went wrong. Which
+/// lines make up the task is decided in `skill::from_lines`.
+fn save_skill(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let agent = whose_notebook(app, &asked.from)?;
+    let name = skill::a_name(
+        asked
+            .args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
+    )?;
+    let held: State<Held> = app.state();
+    // A run is a use of a skill, never a lesson. Saving from inside one would
+    // put the run's own plan where the taught request was, which is what
+    // happened the first time a taught request ended with "then save this".
+    if let Some(running) = held
+        .store
+        .conversation(&asked.from)?
+        .and_then(|c| skill::is_a_run(&c.name).map(str::to_string))
+    {
+        return Ok(skill::a_run_cannot_teach_itself(&running));
+    }
+    let lines = held.store.lines(&asked.from)?;
+    let Some(taught) = skill::from_lines(&lines) else {
+        return Ok(skill::NOTHING_TO_KEEP.to_string());
+    };
+    let replaced = held
+        .store
+        .keep_skill(&agent, &name, &taught.request, &taught.steps)?;
+    Ok(skill::kept(&name, &taught, replaced))
+}
+
+/// Everything this agent has been taught.
+fn list_skills(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let agent = whose_notebook(app, &asked.from)?;
+    let held: State<Held> = app.state();
+    Ok(skill::listed(&held.store.skills(&agent)?))
+}
+
+/// Do a saved skill again, in a conversation of its own, and hand back what
+/// it said.
+///
+/// The same arrangement as `ask_teammate`, for the same agent: a conversation
+/// named after the skill, the plan said into it, and the answer collected
+/// when its turn ends. A conversation of its own rather than a turn in this
+/// one, because the run is a record somebody will want to open afterwards
+/// under the skill's name, and because this turn is in the middle of a tool
+/// call and cannot take another. The steps reach the model as words in that
+/// first line and nothing here runs one: every step the run takes goes through
+/// the same tools and cards as any other turn.
+async fn run_skill(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let agent = whose_notebook(app, &asked.from)?;
+    let said = |k: &str| asked.args.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let name = skill::a_name(said("name"))?;
+    let differently = said("differently").to_string();
+
+    let (talk, plan) = {
+        let held: State<Held> = app.state();
+        let Some(found) = held.store.skill(&agent, &name)? else {
+            return Ok(skill::nobody_taught(&name, &held.store.skills(&agent)?));
+        };
+        // A run of the skill told to run the skill would open a conversation
+        // and a process at every turn for ever, ten minutes at a time.
+        if skill::already_running(&held.store, &asked.from, &found.name)? {
+            return Ok(skill::goes_round_in_circles(&found.name));
+        }
+        let talk = uuid::Uuid::new_v4().to_string();
+        held.store.begin_conversation_for(
+            &talk,
+            &agent,
+            &skill::called(&found.name),
+            // The conversation that asked, so the run can be followed back to
+            // where it was started from, and so `already_running` can follow
+            // it. Nothing when the request came from outside the app.
+            Some(asked.from.as_str()).filter(|from| !from.is_empty()),
+        )?;
+        (talk, skill::the_plan(&found, &differently))
+    };
+
+    open_thread(app.clone(), app.state(), talk.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Registered before it is asked, or a fast answer arrives before anybody
+    // is waiting for it.
+    let (finished, done) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let held: State<Held> = app.state();
+        held.watching.lock().unwrap().insert(talk.clone(), finished);
+    }
+    let said = match say(app.clone(), app.state(), talk.clone(), plan, None).await {
+        Ok(_) => wait_for_the_answer(done, asked.along_the_way.clone()).await,
+        Err(why) => Err(anyhow::anyhow!("{why}")),
+    };
+    {
+        let held: State<Held> = app.state();
+        held.watching.lock().unwrap().remove(&talk);
+    }
+    said
+}
+
 /// Everybody else there is, and what each handles.
 fn who_else(app: &AppHandle, from: &str) -> anyhow::Result<String> {
     let held: State<Held> = app.state();
@@ -3411,12 +3684,55 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
 /// this is waiting for. The symptom of that is silence, which reads exactly
 /// like an agent with nothing to say.
 async fn wait_for_the_answer(
+    done: tokio::sync::mpsc::UnboundedReceiver<Event>,
+    along_the_way: Option<tokio::sync::mpsc::UnboundedSender<errand_core::team::Meanwhile>>,
+) -> anyhow::Result<String> {
+    Ok(match what_came_back(done, along_the_way).await {
+        Came::Said(said) => said,
+        Came::Asked { to, so_far } => format!(
+            "It stopped to ask permission to {to} and there was nobody to answer, so it did \
+             not finish. What it got to: {so_far}"
+        ),
+        Came::Failed(why) => format!("It could not: {why}"),
+        Came::Stopped(so_far) => {
+            format!("It stopped before it finished. What it got to: {so_far}")
+        }
+        Came::TooLong(so_far) => {
+            format!("It did not finish within ten minutes. What it got to: {so_far}")
+        }
+    })
+}
+
+/// How a conversation somebody was waiting on came out.
+///
+/// Kept apart from the sentence an agent is handed, because two callers want
+/// two different sentences: an agent in a tool call reads "It could not: ..."
+/// as its result and carries on, and a room writes the same failure down as a
+/// line of the app's own with the member's name in it. One string for both
+/// would have the room telling the person "It could not" with no it.
+enum Came {
+    /// It finished, and this is what it said.
+    Said(String),
+    /// It stopped to ask permission to do something, and nobody was there.
+    Asked {
+        to: String,
+        so_far: String,
+    },
+    Failed(String),
+    /// Its pump went away before it finished.
+    Stopped(String),
+    /// Ten minutes passed.
+    TooLong(String),
+}
+
+/// Collect what a conversation said, until its turn ends or ten minutes pass.
+async fn what_came_back(
     mut done: tokio::sync::mpsc::UnboundedReceiver<Event>,
     // Where to say what is happening, for a caller watching rather than
     // waiting. Nothing for an engine: a model handed a commentary on somebody
     // else's work puts all of it in its context and none of it is the answer.
     along_the_way: Option<tokio::sync::mpsc::UnboundedSender<errand_core::team::Meanwhile>>,
-) -> anyhow::Result<String> {
+) -> Came {
     use std::time::Duration;
     // Shared with the collecting task, so that giving up still reports what was
     // said before the deadline. An agent that worked for nine minutes and then
@@ -3479,34 +3795,317 @@ async fn wait_for_the_answer(
                 // it while somebody is sitting there throws the errand away and
                 // tells them nobody could answer, which is not true.
                 Event::NeedsYou(ask) if along_the_way.is_none() => {
-                    return format!(
-                        "It stopped to ask permission to {} and there was nobody to answer, so \
-                         it did not finish. What it got to: {}",
-                        ask.asking,
-                        so_far()
-                    )
+                    return Came::Asked {
+                        to: ask.asking,
+                        so_far: so_far(),
+                    }
                 }
-                Event::Done { .. } => return so_far().trim().to_string(),
-                Event::Failed { why } => return format!("It could not: {why}"),
+                Event::Done { .. } => return Came::Said(so_far().trim().to_string()),
+                Event::Failed { why } => return Came::Failed(why),
                 _ => {}
             }
         }
         // The conversation's pump has gone, which is not an answer either.
-        format!(
-            "It stopped before it finished. What it got to: {}",
-            so_far()
-        )
+        Came::Stopped(so_far())
     };
 
-    Ok(
-        match tokio::time::timeout(Duration::from_secs(600), collect).await {
-            Ok(answer) => answer,
-            Err(_) => format!(
-                "It did not finish within ten minutes. What it got to: {}",
-                said.lock().unwrap()
-            ),
+    match tokio::time::timeout(Duration::from_secs(600), collect).await {
+        Ok(came) => came,
+        Err(_) => Came::TooLong(said.lock().unwrap().clone()),
+    }
+}
+
+/// One thing said in a room, taken round to whoever it was said to.
+///
+/// On a task of its own, because `say` has to hand the window its line back
+/// now and the answers take as long as the members take. The bookkeeping an
+/// engine's reader does at the end of a turn is done here instead, because a
+/// room has no engine of its own: without it a routine set on a room counted
+/// as still running for ever, and its run was never written down as ended.
+async fn a_rooms_turn(app: AppHandle, room: String, said: String, attached: Option<Vec<String>>) {
+    let outcome = match take_it_round(&app, &room, &said, attached).await {
+        Ok(()) => "done".to_string(),
+        Err(why) => {
+            let _ = say_in_the_room(
+                &app,
+                &room,
+                None,
+                "note",
+                &format!("That could not be taken round the room: {why}"),
+            );
+            why.to_string()
+        }
+    };
+    let held: State<Held> = app.state();
+    held.running.lock().unwrap().remove(&room);
+    held.doing.lock().unwrap().remove(&room);
+    let _ = held.store.a_turn_ended(&room);
+    let run = held.mid_run.lock().unwrap().remove(&room);
+    if let Some(run) = run {
+        let _ = held.store.a_run_ended(run, &outcome);
+    }
+    let _ = app.emit(
+        "room_turn",
+        RoomTurn {
+            conversation: room,
+            who: None,
+            over: true,
         },
-    )
+    );
+}
+
+/// Take one thing said round the room, member by member.
+///
+/// In turn and never at once: each member reads the room as it stands when
+/// its turn comes, so the second hears what the first said. That is the whole
+/// difference between a room and three answers to the same question, and it
+/// is why the lines are read again inside the loop rather than once before it.
+async fn take_it_round(
+    app: &AppHandle,
+    room: &str,
+    said: &str,
+    attached: Option<Vec<String>>,
+) -> anyhow::Result<()> {
+    let (members, name) = {
+        let held: State<Held> = app.state();
+        let name = held
+            .store
+            .conversation(room)?
+            .map(|c| c.name)
+            .unwrap_or_default();
+        (held.store.members(room)?, name)
+    };
+    let to: Vec<Member> = match room::addressed(said, &members) {
+        room::Addressed::Everyone => members.clone(),
+        room::Addressed::One(one) => vec![one.clone()],
+        room::Addressed::Nobody(who) => {
+            say_in_the_room(
+                app,
+                room,
+                None,
+                "note",
+                &room::nobody_called(&who, &members),
+            )?;
+            return Ok(());
+        }
+    };
+    for member in to {
+        {
+            let held: State<Held> = app.state();
+            held.doing
+                .lock()
+                .unwrap()
+                .insert(room.to_string(), format!("{} is answering", member.name));
+        }
+        let _ = app.emit(
+            "room_turn",
+            RoomTurn {
+                conversation: room.to_string(),
+                who: Some(member.name.clone()),
+                over: false,
+            },
+        );
+        let words = {
+            let held: State<Held> = app.state();
+            let lines = held.store.lines(room)?;
+            room::what_they_hear(
+                &name,
+                &members,
+                &member,
+                &room::unheard(&lines, &member.agent),
+            )
+        };
+        let who = member.name.as_str();
+        let (kind, by, text) = match a_members_talk(app, room, &name, &member) {
+            Ok(talk) => match answer_from(app, &talk, words, attached.clone()).await {
+                Ok(Came::Said(text)) if text.trim().is_empty() => {
+                    ("note", None, format!("{who} had nothing to add."))
+                }
+                Ok(Came::Said(text)) => ("said", Some(member.agent.as_str()), text),
+                // The question is a card in the member's own conversation, and
+                // the member is still parked on it. Said plainly where to go,
+                // and that what comes after lands there: this round has moved
+                // on, and nothing is collecting for the room any more.
+                Ok(Came::Asked { to, so_far }) => (
+                    "note",
+                    None,
+                    format!(
+                        "{who} stopped to ask permission to {to}, and nothing in a room can \
+                         answer that for you. Open the conversation \"{}\" under {who} to \
+                         answer it; what it says after that lands there, not here.{}",
+                        room::called(&name),
+                        got_to(&so_far)
+                    ),
+                ),
+                Ok(Came::Failed(why)) => ("note", None, format!("{who} could not answer: {why}")),
+                Ok(Came::Stopped(so_far)) => (
+                    "note",
+                    None,
+                    format!("{who} stopped before it finished.{}", got_to(&so_far)),
+                ),
+                Ok(Came::TooLong(so_far)) => (
+                    "note",
+                    None,
+                    format!(
+                        "{who} did not finish within ten minutes.{}",
+                        got_to(&so_far)
+                    ),
+                ),
+                Err(why) => ("note", None, format!("{who} could not be asked: {why}")),
+            },
+            Err(why) => ("note", None, format!("{who} could not be asked: {why}")),
+        };
+        say_in_the_room(app, room, by, kind, &text)?;
+    }
+    Ok(())
+}
+
+/// The tail of a sentence about a turn that did not finish: what it had said
+/// by then, where it had said anything.
+fn got_to(so_far: &str) -> String {
+    match so_far.trim() {
+        "" => String::new(),
+        some => format!(" What it got to: {some}"),
+    }
+}
+
+/// The conversation a member takes part in a room through: the one it has, or
+/// a new one named after the room and pointing back at it.
+fn a_members_talk(
+    app: &AppHandle,
+    room: &str,
+    name: &str,
+    member: &Member,
+) -> anyhow::Result<String> {
+    let held: State<Held> = app.state();
+    if let Some(talk) = &member.talk {
+        if held.store.conversation(talk)?.is_some() {
+            return Ok(talk.clone());
+        }
+    }
+    let talk = uuid::Uuid::new_v4().to_string();
+    held.store
+        .begin_conversation_for(&talk, &member.agent, &room::called(name), Some(room))?;
+    held.store.takes_part_through(room, &member.agent, &talk)?;
+    Ok(talk)
+}
+
+/// Say something into a member's own conversation and wait for its turn to
+/// end. The same arrangement `ask_teammate` uses: registered as waiting before
+/// anything is said, or a fast answer arrives before anybody is listening.
+async fn answer_from(
+    app: &AppHandle,
+    talk: &str,
+    words: String,
+    attached: Option<Vec<String>>,
+) -> anyhow::Result<Came> {
+    open_thread(app.clone(), app.state(), talk.to_string())
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (finished, done) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let held: State<Held> = app.state();
+        held.watching
+            .lock()
+            .unwrap()
+            .insert(talk.to_string(), finished);
+    }
+    let came = match say_later(app.clone(), talk.to_string(), words, attached).await {
+        Ok(_) => Ok(what_came_back(done, None).await),
+        Err(why) => Err(anyhow::anyhow!("{why}")),
+    };
+    {
+        let held: State<Held> = app.state();
+        held.watching.lock().unwrap().remove(talk);
+    }
+    came
+}
+
+/// `say`, behind a box, so that a room's round can say something to a member
+/// from inside a turn that `say` itself started.
+///
+/// Called directly, the compiler chases `say` into `a_rooms_turn` and back
+/// into `say` for ever deciding whether the future can cross threads, and
+/// gives up. A boxed future says so on its face, which ends the chase.
+fn say_later(
+    app: AppHandle,
+    id: String,
+    text: String,
+    attached: Option<Vec<String>>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<i64>, String>> + Send>> {
+    Box::pin(async move { say(app.clone(), app.state(), id, text, attached).await })
+}
+
+/// A line into a room, written down and put on screen, with its author.
+fn say_in_the_room(
+    app: &AppHandle,
+    room: &str,
+    by: Option<&str>,
+    kind: &str,
+    text: &str,
+) -> anyhow::Result<()> {
+    let held: State<Held> = app.state();
+    let line = held.store.said_in_room(room, by, kind, text)?;
+    let _ = app.emit(
+        "noted",
+        Noted {
+            conversation: room.to_string(),
+            seq: line.seq,
+            kind: kind.to_string(),
+            text: line.text,
+            said_by: line.said_by,
+        },
+    );
+    Ok(())
+}
+
+/// Start a room: one conversation with several agents in it.
+///
+/// Filed under the first agent named, because a conversation has one agent
+/// and that is where the picker lists it. The rest are members, and so is the
+/// first. Only the window can call this: nothing a member can call reaches
+/// the members table, which is what "no member can add members" rests on.
+#[tauri::command]
+async fn make_room(
+    held: State<'_, Held>,
+    id: String,
+    agents: Vec<String>,
+    name: String,
+) -> Result<Room, String> {
+    room::at_least_two(&agents).map_err(|e| e.to_string())?;
+    let mut named = Vec::new();
+    for agent in &agents {
+        let known = held
+            .store
+            .agent(agent)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("there is no agent here with the id {agent}"))?;
+        named.push(Member {
+            agent: known.id,
+            name: known.name,
+            talk: None,
+        });
+    }
+    let name = match name.trim() {
+        "" => room::a_name_for(&named),
+        some => some.to_string(),
+    };
+    held.store
+        .begin_conversation(&id, &agents[0], &name)
+        .map_err(|e| e.to_string())?;
+    for agent in &agents {
+        held.store.join(&id, agent).map_err(|e| e.to_string())?;
+    }
+    Ok(Room {
+        name,
+        members: held.store.members(&id).map_err(|e| e.to_string())?,
+    })
+}
+
+/// Who is in a conversation, when it is a room. Empty for any other.
+#[tauri::command]
+async fn members(held: State<'_, Held>, id: String) -> Result<Vec<Member>, String> {
+    held.store.members(&id).map_err(|e| e.to_string())
 }
 
 /// Watch the clock, and run what is due.
@@ -3568,7 +4167,7 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
             .into_iter()
             .filter_map(|c| {
                 let when = When::read(c.runs_at.as_deref()?).ok()?;
-                let next = when.next_after(counting_from(&c, now))?;
+                let next = when.next_after(routine::counting_from(&c, now))?;
                 // Late by more than a schedule's own patience is worth saying
                 // out loud. Ten minutes is arbitrary and only decides whether
                 // the run announces itself as late.
@@ -3662,7 +4261,17 @@ async fn a_routines_turn(
             let _ = thread.stop();
         }
     }
-    open_thread(app.clone(), app.state(), conversation.clone()).await?;
+    // A room has no engine of its own to open: `say` takes what is said round
+    // the members, each on an engine of its own.
+    let a_room = {
+        let held: State<Held> = app.state();
+        held.store
+            .is_a_room(&conversation)
+            .map_err(|e| e.to_string())?
+    };
+    if !a_room {
+        open_thread(app.clone(), app.state(), conversation.clone()).await?;
+    }
     let said = match late {
         None => what,
         Some(due) => format!(
@@ -3956,7 +4565,7 @@ async fn routines(held: State<'_, Held>) -> Result<Vec<Routine>, String> {
             let when = When::read(&at).ok()?;
             Some(Routine {
                 due: when
-                    .next_after(counting_from(&c, now))
+                    .next_after(routine::counting_from(&c, now))
                     .map(|d| d.timestamp_millis()),
                 conversation: c.id,
                 agent: c.agent,
@@ -3968,22 +4577,6 @@ async fn routines(held: State<'_, Held>) -> Result<Vec<Routine>, String> {
             })
         })
         .collect())
-}
-
-/// The moment a routine's next run is counted from.
-///
-/// Its last run, or the moment the schedule was set. Not "now" -- a routine
-/// whose time passed while the app was closed is overdue, and treating it as
-/// though it had only just been set would quietly move it to tomorrow.
-fn counting_from(
-    c: &errand_core::Conversation,
-    now: chrono::DateTime<chrono::Local>,
-) -> chrono::DateTime<chrono::Local> {
-    use chrono::TimeZone;
-    c.ran_at
-        .or(Some(c.started_at))
-        .and_then(|ms| chrono::Local.timestamp_millis_opt(ms).single())
-        .unwrap_or(now)
 }
 
 /// Open a link somewhere that is not this window.
@@ -4241,7 +4834,38 @@ async fn look_again(held: State<'_, Held>, id: String) -> Result<(), String> {
 #[tauri::command]
 async fn checkup(app: AppHandle, held: State<'_, Held>) -> Result<Vec<doctor::Finding>, String> {
     let here = where_things_live(&app)?;
-    Ok(doctor::everything(&held.store, &here, &here).await)
+    // Off the runtime's own threads: it waits on the system's answer, which
+    // is quick and is still a wait.
+    let may = tauri::async_runtime::spawn_blocking(onscreen::may_show)
+        .await
+        .unwrap_or(doctor::Notifying::Unknown);
+    Ok(doctor::everything(&held.store, &here, &here, may).await)
+}
+
+/// Open System Settings at the pane a finding says its fix is done in.
+///
+/// That scheme and nothing else. A command that opens whatever it is handed
+/// opens `file:///` and worse, and though this one is only ever called with an
+/// address the app's own checks made up, the check here is the one thing that
+/// still holds if that stops being true. The scheme can open Settings at a
+/// pane and can do nothing else.
+#[tauri::command]
+async fn open_settings(pane: String) -> Result<(), String> {
+    if !a_settings_pane(&pane) {
+        return Err("that is not a pane of System Settings".into());
+    }
+    std::process::Command::new("open")
+        .arg(pane.trim())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Is this an address that opens System Settings at a pane, and only that?
+fn a_settings_pane(pane: &str) -> bool {
+    pane.trim()
+        .to_lowercase()
+        .starts_with("x-apple.systempreferences:")
 }
 
 /// Write a conversation out as Markdown and show it in the Finder.
@@ -4656,6 +5280,27 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        // Closing the window hides it and stops nothing. Without this the last
+        // window going is the app going, which made "close the window" and
+        // "quit" the same thing, and every standing job in here died with a
+        // click meant to get a window out of the way. The clock, the engines
+        // and the started commands all live in this process, not in the
+        // window, and the Dock icon stays because nothing about the app's
+        // activation changes.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .menu(the_menu)
+        .on_menu_event(|app, event| {
+            if event.id() == quitting::QUIT_ITEM {
+                quit_or_ask(app);
+            }
+        })
         .setup(|app| {
             let here = where_things_live(&app.handle().clone())?;
             // Before the store is opened and before anything is swept up. Two
@@ -4697,6 +5342,7 @@ pub fn run() {
                 sized: Mutex::new(HashMap::new()),
                 mid_run: Mutex::new(HashMap::new()),
                 looking_at: Mutex::new(None),
+                told_about_notifications: doctor::Told::default(),
                 store: Arc::new(store),
             });
             // The receiving end is parked here and started on Ready, for the
@@ -4719,6 +5365,8 @@ pub fn run() {
             open_thread,
             conversations,
             start_conversation,
+            make_room,
+            members,
             call_it,
             forget_conversation,
             looking_at,
@@ -4745,6 +5393,7 @@ pub fn run() {
             outside,
             carry_on,
             checkup,
+            open_settings,
             whats_running,
             stop_a_command,
             look_for_models,
@@ -4797,8 +5446,8 @@ pub fn run() {
         // with "notifications are not allowed for this application", which
         // sounds like a decision somebody made and is really just a question
         // asked too soon.
-        .run(|app, event| {
-            if matches!(event, tauri::RunEvent::Ready) {
+        .run(|app, event| match event {
+            tauri::RunEvent::Ready => {
                 // Everything here runs inside a callback the system makes
                 // across a C boundary, and a panic cannot cross one of those:
                 // it aborts the whole process instead. So the app died at
@@ -4818,14 +5467,162 @@ pub fn run() {
                     );
                 }
             }
+            // The last window going is not the app going. The window is hidden
+            // rather than destroyed above, so this is the belt to that brace:
+            // a code of None is the runtime asking because its window count
+            // reached nought, and the answer is no. Anything with a code is
+            // `app.exit`, which is Quit, and is let through.
+            tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } => api.prevent_exit(),
+            // A click on the Dock icon, or `open -a Errand` on a copy already
+            // running, when there is no window to be seen: the one the window
+            // hides from is brought back. With a window showing the system
+            // brings the app forward by itself and says so, and there is
+            // nothing to do.
+            tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } => bring_the_window_back(app),
             // A command left running outlives the errand that started it, and
             // that is the point of it. It must not outlive the only thing that
             // knows it exists: a process nobody can see or stop is worse than
             // one that ended early, and the tool says so before it starts one.
-            if matches!(event, tauri::RunEvent::Exit) {
-                errand_core::jobs::stop_everything();
-            }
+            tauri::RunEvent::Exit => errand_core::jobs::stop_everything(),
+            _ => {}
         });
+}
+
+/// The menu bar: Tauri's own, with its Quit replaced.
+///
+/// Tauri's Quit is the system's predefined one, which sends `terminate:`
+/// straight to the application. Nothing in this process hears that before it
+/// is on its way out, so a question before quitting cannot be asked from it.
+/// A menu is all or nothing, so the whole of it is built here; every other
+/// item is the predefined one Tauri would have put in the same place, and the
+/// Window and Help menus keep the ids Tauri looks for to hand them to the
+/// system.
+fn the_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{
+        AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu, HELP_SUBMENU_ID,
+        WINDOW_SUBMENU_ID,
+    };
+    let info = app.package_info();
+    let about = AboutMetadata {
+        name: Some(info.name.clone()),
+        version: Some(info.version.to_string()),
+        ..Default::default()
+    };
+    let quit = MenuItem::with_id(
+        app,
+        quitting::QUIT_ITEM,
+        format!("Quit {}", info.name),
+        true,
+        Some("CmdOrCtrl+Q"),
+    )?;
+    Menu::with_items(
+        app,
+        &[
+            &Submenu::with_items(
+                app,
+                info.name.clone(),
+                true,
+                &[
+                    &PredefinedMenuItem::about(app, None, Some(about))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::services(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::hide(app, None)?,
+                    &PredefinedMenuItem::hide_others(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &quit,
+                ],
+            )?,
+            &Submenu::with_items(
+                app,
+                "File",
+                true,
+                &[&PredefinedMenuItem::close_window(app, None)?],
+            )?,
+            &Submenu::with_items(
+                app,
+                "Edit",
+                true,
+                &[
+                    &PredefinedMenuItem::undo(app, None)?,
+                    &PredefinedMenuItem::redo(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::cut(app, None)?,
+                    &PredefinedMenuItem::copy(app, None)?,
+                    &PredefinedMenuItem::paste(app, None)?,
+                    &PredefinedMenuItem::select_all(app, None)?,
+                ],
+            )?,
+            &Submenu::with_items(
+                app,
+                "View",
+                true,
+                &[&PredefinedMenuItem::fullscreen(app, None)?],
+            )?,
+            &Submenu::with_id_and_items(
+                app,
+                WINDOW_SUBMENU_ID,
+                "Window",
+                true,
+                &[
+                    &PredefinedMenuItem::minimize(app, None)?,
+                    &PredefinedMenuItem::maximize(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::close_window(app, None)?,
+                ],
+            )?,
+            &Submenu::with_id_and_items(app, HELP_SUBMENU_ID, "Help", true, &[])?,
+        ],
+    )
+}
+
+/// Quit, or ask first when a routine is due soon.
+///
+/// From the Quit item and nowhere else. Quit from the Dock's menu, logging out
+/// and shutting down all go through the system's `terminate:`, which nothing
+/// here hears in time, so those quit without a question; the app says as much
+/// where the login switch is.
+///
+/// `app.exit` rather than ending the process: it goes through the runtime's
+/// own exit, which is what reaches `Exit` above and stops the commands that
+/// were started.
+fn quit_or_ask(app: &AppHandle) {
+    let now = chrono::Local::now();
+    let due = {
+        let held: State<Held> = app.state();
+        let named: Vec<(String, Conversation)> = held
+            .store
+            .routines()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (called(&held.store, &c.id), c))
+            .collect();
+        let running = held.running.lock().unwrap().clone();
+        routine::due_within(&named, &running, now, quitting::MINUTES_OF_NOTICE)
+    };
+    let quit = match due {
+        None => true,
+        Some(soon) => quitting::asked(&quitting::the_question(&soon, now)),
+    };
+    if quit {
+        app.exit(0);
+    }
+}
+
+/// The window, back on screen and in front.
+///
+/// Not called `show`: there is already a command called `hide` in here, and it
+/// is about an agent, not the window.
+fn bring_the_window_back(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 /// Run something that must not be able to take the app with it, and say what it
@@ -4861,10 +5658,7 @@ fn everything_that_waits_for_the_app(app: &AppHandle) {
     onscreen::listen();
     let go = app.clone();
     onscreen::on_click(move |conversation| {
-        if let Some(window) = go.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.set_focus();
-        }
+        bring_the_window_back(&go);
         let _ = go.emit("go_to", conversation);
     });
     // Started here rather than in setup, so neither looks at the
@@ -4927,6 +5721,73 @@ fn everything_that_waits_for_the_app(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_room_takes_one_thing_round_at_a_time_and_refuses_a_second_until_the_round_ends() {
+        // What actually happened, before this: a second message into a room
+        // mid-round replaced the first round's waiting on the member, the
+        // first round wrote the member down as stopped while it was still
+        // answering, and the second wrote the member's answer to the first
+        // message down as the answer to its own.
+        let doing: Arc<Mutex<HashMap<String, String>>> = Arc::default();
+        assert!(claim_the_round(&doing, "room").is_ok());
+        assert_eq!(
+            claim_the_round(&doing, "room").unwrap_err(),
+            room::STILL_ANSWERING
+        );
+        // A member's name written over the mark, which is what take_it_round
+        // does as it goes round, is still the round.
+        doing
+            .lock()
+            .unwrap()
+            .insert("room".into(), "Scout is answering".into());
+        assert!(claim_the_round(&doing, "room").is_err());
+        // Another room is another room.
+        assert!(claim_the_round(&doing, "other").is_ok());
+        // The round ends the way a_rooms_turn ends it, and the next is let in.
+        doing.lock().unwrap().remove("room");
+        assert!(claim_the_round(&doing, "room").is_ok());
+    }
+
+    #[test]
+    fn an_answer_into_the_conversation_on_screen_is_not_announced_but_a_question_is() {
+        // A member of a room answers in a conversation of its own, and the
+        // person reading the room watched the answer arrive: three
+        // notifications per message in a room of three was the fault.
+        let done = Event::Done {
+            said: "Up 2% since.".into(),
+            cost: None,
+        };
+        let failed = Event::Failed {
+            why: "not answering".into(),
+        };
+        let question = Event::NeedsYou(errand_core::engine::NeedsYou {
+            asking: "run rm -rf build".into(),
+            detail: "rm -rf build".into(),
+            tool: "Bash".into(),
+            call: "c1".into(),
+            step: "s1".into(),
+            can_remember: false,
+            rule: String::new(),
+            allows: String::new(),
+        });
+        // The conversation itself, on screen.
+        assert!(being_watched(Some("room"), "room", None, &done));
+        // A member's conversation, answering into the room on screen.
+        assert!(being_watched(Some("room"), "member", Some("room"), &done));
+        assert!(being_watched(Some("room"), "member", Some("room"), &failed));
+        // Its question is a card the person cannot see from the room.
+        assert!(!being_watched(
+            Some("room"),
+            "member",
+            Some("room"),
+            &question
+        ));
+        // Somewhere else on screen, or nothing on screen, and it is announced.
+        assert!(!being_watched(Some("other"), "member", Some("room"), &done));
+        assert!(!being_watched(None, "member", Some("room"), &done));
+        assert!(!being_watched(None, "member", None, &done));
+    }
 
     #[test]
     fn a_socket_name_is_made_from_an_id_that_is_shorter_than_the_cut() {
@@ -5193,6 +6054,26 @@ mod tests {
             "not a url at all",
         ] {
             assert!(!worth_opening(bad), "would have opened {bad:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_pane_of_system_settings_is_opened_from_a_finding() {
+        assert!(a_settings_pane(doctor::NOTIFICATION_SETTINGS));
+        assert!(
+            a_settings_pane(
+                "  X-Apple.SystemPreferences:com.apple.Notifications-Settings.extension"
+            ),
+            "trimmed first, however it is cased"
+        );
+        for bad in [
+            "https://example.com",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "open x-apple.systempreferences:com.apple.Notifications-Settings.extension",
+            "",
+        ] {
+            assert!(!a_settings_pane(bad), "would have opened {bad:?}");
         }
     }
 

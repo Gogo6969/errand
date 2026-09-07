@@ -18,9 +18,39 @@
 //! happen, and the hour that happens twice does not run twice. Both are handled
 //! by asking for the next occurrence strictly after the last one.
 
+use std::collections::HashSet;
+
 use anyhow::{bail, Result};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Timelike, Weekday};
 use serde::{Deserialize, Serialize};
+
+use crate::store::Conversation;
+
+/// What a standing job needs in order to run, in the words every one of them
+/// uses.
+///
+/// One phrase rather than five, because five drifted: a watch said "while
+/// Errand is open", a goal said the same, a started command said "for as long
+/// as Errand is open", and the day closing the window stopped being closing
+/// the app all of them were wrong in the same way. The window can be closed.
+/// The process is what has to be there.
+pub const WHILE_RUNNING: &str = "while Errand is running, window or no window";
+
+/// What a routine is told when it is set, about what keeps it running and what
+/// does not.
+///
+/// Said in the confirmation rather than in a settings card nobody opens,
+/// because this is the moment somebody is deciding to rely on it. Every clause
+/// is a case that was actually asked about: the window, quitting, sleep, the
+/// lid, logging out, a restart. The ten minutes is the clock's own patience
+/// before a run calls itself late, named here so this does not promise a
+/// sentence the commonest case never gets.
+pub const WHAT_KEEPS_IT_RUNNING: &str = "Closing the window does not stop it: Errand keeps \
+     running in the Dock. Quitting Errand does, and Cmd-Q asks first when a run is due in the \
+     next fifteen minutes. A Mac that is asleep, has its lid down or is off runs nothing; a \
+     run whose time passed happens the next time Errand is running and, when it is more than \
+     ten minutes late, says so. With Open Errand when I log in switched on under Settings, a \
+     restart brings it back.";
 
 /// When a routine wants to run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +309,65 @@ pub fn arriving_late(due: DateTime<Local>, now: DateTime<Local>) -> String {
     format!("(This is late: it was due {when} and nothing was running then.)")
 }
 
+/// The moment a routine's next run is counted from.
+///
+/// Its last run, or the moment the schedule was set. Not "now" -- a routine
+/// whose time passed while the app was closed is overdue, and treating it as
+/// though it had only just been set would quietly move it to tomorrow.
+pub fn counting_from(c: &Conversation, now: DateTime<Local>) -> DateTime<Local> {
+    c.ran_at
+        .or(Some(c.started_at))
+        .and_then(|ms| Local.timestamp_millis_opt(ms).single())
+        .unwrap_or(now)
+}
+
+/// A routine due soon enough that quitting now would cut in front of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueSoon {
+    /// Who runs it: the agent's name, as a person knows it.
+    pub who: String,
+    /// When it is due. Already past, for one whose tick has not come round.
+    pub at: DateTime<Local>,
+}
+
+/// Which routine, if any, is due within the next `minutes`.
+///
+/// The judgement behind the question Cmd-Q asks, kept here and pure so it can
+/// be tested without an event loop. `routines` are the conversations with a
+/// schedule, each with the name of the agent that runs it; `still_running` are
+/// the ids with a run going this moment.
+///
+/// One switched off is not a reason to stay open: Pause under Repeat sets
+/// `routine_off`, and the clock walks past it. One still running is not
+/// either, because the clock will not start it again on top of itself, and a
+/// turn that quitting cuts short is already said so in the conversation when
+/// Errand comes back. One overdue, whose time has passed and whose tick has not
+/// come round, is due now and not tomorrow.
+///
+/// The soonest of several, because the question has room for one name, and
+/// the one about to be missed is the one that matters.
+pub fn due_within(
+    routines: &[(String, Conversation)],
+    still_running: &HashSet<String>,
+    now: DateTime<Local>,
+    minutes: i64,
+) -> Option<DueSoon> {
+    let horizon = now + Duration::minutes(minutes);
+    routines
+        .iter()
+        .filter(|(_, c)| !c.routine_off && c.runs_what.is_some())
+        .filter(|(_, c)| !still_running.contains(&c.id))
+        .filter_map(|(who, c)| {
+            let when = When::read(c.runs_at.as_deref()?).ok()?;
+            let at = when.next_after(counting_from(c, now))?;
+            (at <= horizon).then(|| DueSoon {
+                who: who.clone(),
+                at,
+            })
+        })
+        .min_by_key(|due| due.at)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,6 +574,142 @@ mod tests {
                 "{said}: thirty minutes is still the example: {refused}"
             );
         }
+    }
+
+    /// A routine as the clock sees one: an agent's name and the conversation
+    /// that carries the schedule, last run at `ran`.
+    fn a_routine(who: &str, runs_at: &str, ran: &str) -> (String, Conversation) {
+        (
+            who.to_string(),
+            Conversation {
+                id: who.to_lowercase().replace(' ', "-"),
+                runs_at: Some(runs_at.to_string()),
+                runs_what: Some("the briefing".to_string()),
+                ran_at: Some(at(ran).timestamp_millis()),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn a_routine_due_within_the_next_while_is_named_with_the_minute_it_is_due() {
+        // Cmd-Q at four minutes to eight, with the briefing at eight. The
+        // question needs the name and the time, and nothing else about it.
+        let scout = a_routine("Trend Scout", "daily 08:00", "2026-09-04 08:00:20");
+        let due = due_within(&[scout], &HashSet::new(), at("2026-09-05 07:56:00"), 15)
+            .expect("four minutes away is within fifteen");
+        assert_eq!(due.who, "Trend Scout");
+        assert_eq!(due.at, at("2026-09-05 08:00:00"));
+
+        // One whose time has passed and whose tick has not come round is due
+        // now, not tomorrow: quitting in that ten-second gap loses the run
+        // exactly as surely as quitting a minute before it.
+        let scout = a_routine("Trend Scout", "daily 08:00", "2026-09-04 08:00:20");
+        let due = due_within(&[scout], &HashSet::new(), at("2026-09-05 08:00:10"), 15)
+            .expect("overdue is due");
+        assert_eq!(due.at, at("2026-09-05 08:00:00"));
+    }
+
+    #[test]
+    fn nothing_due_soon_means_quitting_asks_nothing() {
+        // An app that asks "are you sure" every time teaches people to press
+        // Return without reading, and then the one time it mattered is lost in
+        // the habit.
+        let scout = a_routine("Trend Scout", "daily 08:00", "2026-09-04 08:00:20");
+        assert_eq!(
+            due_within(&[scout], &HashSet::new(), at("2026-09-05 06:00:00"), 15),
+            None,
+            "two hours away is not soon"
+        );
+        // An ordinary conversation with no schedule is not a routine at all.
+        let plain = ("Scout".to_string(), Conversation::default());
+        assert_eq!(
+            due_within(&[plain], &HashSet::new(), at("2026-09-05 07:56:00"), 15),
+            None
+        );
+        // And a schedule nobody can read is not one either, rather than a
+        // question about a routine that will never fire.
+        let (who, mut broken) = a_routine("Trend Scout", "daily 08:00", "2026-09-04 08:00:20");
+        broken.runs_at = Some("sometimes".to_string());
+        assert_eq!(
+            due_within(
+                &[(who, broken)],
+                &HashSet::new(),
+                at("2026-09-05 07:56:00"),
+                15
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_routine_switched_off_or_paused_is_not_a_reason_to_stay_open() {
+        // Pause under Repeat sets `routine_off`, and the clock walks past it;
+        // asking somebody to stay open for a run that will not happen is the
+        // nag this question is at pains not to be.
+        let (who, mut scout) = a_routine("Trend Scout", "daily 08:00", "2026-09-04 08:00:20");
+        scout.routine_off = true;
+        assert_eq!(
+            due_within(
+                &[(who.clone(), scout.clone())],
+                &HashSet::new(),
+                at("2026-09-05 07:56:00"),
+                15
+            ),
+            None
+        );
+        // One still running is not started again on top of itself, so it is
+        // not due; what quitting does to the run under way is said in the
+        // conversation when Errand comes back.
+        scout.routine_off = false;
+        let running: HashSet<String> = [scout.id.clone()].into_iter().collect();
+        assert_eq!(
+            due_within(&[(who, scout)], &running, at("2026-09-05 07:56:00"), 15),
+            None
+        );
+    }
+
+    #[test]
+    fn the_soonest_of_several_due_routines_is_the_one_named() {
+        // Room for one name, and the one about to be missed is the one that
+        // matters. Listed later on purpose, so order in the store decides
+        // nothing.
+        let later = a_routine("Disk Watch", "daily 08:05", "2026-09-04 08:05:20");
+        let sooner = a_routine("Trend Scout", "daily 08:00", "2026-09-04 08:00:20");
+        let due = due_within(
+            &[later, sooner],
+            &HashSet::new(),
+            at("2026-09-05 07:56:00"),
+            15,
+        )
+        .expect("both are within fifteen minutes");
+        assert_eq!(due.who, "Trend Scout");
+        assert_eq!(due.at, at("2026-09-05 08:00:00"));
+    }
+
+    #[test]
+    fn what_a_routine_is_told_says_what_stops_it_and_what_does_not() {
+        // The cases somebody actually asks about, each named: the window,
+        // quitting, sleep, the lid, being off, and a restart. "It runs while
+        // Errand is open" answered none of them and was wrong about the first.
+        for case in [
+            "Closing the window",
+            "Dock",
+            "Quitting",
+            "Cmd-Q",
+            "asleep",
+            "lid",
+            "off",
+            "late",
+            "log in",
+        ] {
+            assert!(WHAT_KEEPS_IT_RUNNING.contains(case), "nothing about {case}");
+        }
+        assert!(!WHAT_KEEPS_IT_RUNNING.contains("while Errand is open"));
+        assert_eq!(
+            WHILE_RUNNING,
+            "while Errand is running, window or no window"
+        );
     }
 
     #[test]

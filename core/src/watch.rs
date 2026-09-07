@@ -189,8 +189,9 @@ impl Watch {
         };
         format!(
             "This {what}. At most once every {WAKE_NO_OFTENER_THAN} minutes, and at most \
-             {WAKES_A_DAY} times a day. It only looks while Errand is open, so something \
-             that changes overnight is something you hear about in the morning."
+             {WAKES_A_DAY} times a day. It only looks {running}, so something that changes \
+             while Errand is quit is something you hear about when it is opened again.",
+            running = crate::routine::WHILE_RUNNING
         )
     }
 }
@@ -628,7 +629,7 @@ pub fn what_to_say(watch: &Watch, was: Option<&str>, now: &str, since: Option<&s
 /// Whether something can be dropped into the middle of a sentence and still
 /// leave a sentence. Agent names are the first thing somebody said, cut short,
 /// so most of them cannot.
-fn reads_as_a_name(said: &str) -> bool {
+pub fn reads_as_a_name(said: &str) -> bool {
     let said = said.trim();
     !said.is_empty()
         && said.chars().count() <= 32
@@ -903,6 +904,11 @@ mod tests {
         assert!(said.contains("every 10 minutes"), "{said}");
         assert!(said.contains("Bitcoin Desk"), "{said}");
         assert!(said.contains("24 times a day"), "{said}");
-        assert!(said.contains("only looks while Errand is open"), "{said}");
+        // Not "while Errand is open": the window can be closed now, and the
+        // sentence has to say which of the two the watch needs.
+        assert!(
+            said.contains("only looks while Errand is running, window or no window"),
+            "{said}"
+        );
     }
 }

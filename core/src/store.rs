@@ -283,6 +283,37 @@ pub struct Memory {
     pub told_at: i64,
 }
 
+/// One agent in a room, and the conversation of its own it takes part through.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    pub agent: String,
+    /// What the agent is called now. Read with the row rather than kept in
+    /// it, so an agent that settles on a name after joining is named here too.
+    pub name: String,
+    /// The member's own conversation for this room, once it has been spoken
+    /// to in it. Nothing until then, and nothing again if that conversation is
+    /// deleted: the next turn simply opens another.
+    pub talk: Option<String>,
+}
+
+/// A task taught once, to be done again by name.
+///
+/// The agent is not on it because a skill is only ever read through its
+/// agent: `skill` and `skills` take the agent, the way `recall` does, and a
+/// row handed back with the agent on it would tempt somebody to run one
+/// agent's skill in another's conversation, where its paths do not exist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Skill {
+    /// What it is called, exactly as it was saved. Looked up without regard
+    /// to case, so the name a model types back need not match a capital.
+    pub name: String,
+    /// What the person asked, the first time.
+    pub request: String,
+    /// The steps that answered it, in the order they were taken.
+    pub steps: Vec<crate::skill::Step>,
+    pub made_at: i64,
+}
+
 /// One line of a conversation, as it will be shown again tomorrow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Line {
@@ -313,6 +344,11 @@ pub struct Line {
     /// read afterwards as a conversation about nothing.
     #[serde(default)]
     pub pictures: Vec<String>,
+    /// Which agent said this, in a room. Nothing everywhere else: the
+    /// conversation has one agent and the line is that agent's, or the
+    /// person's, or the app's, and the kind already says which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub said_by: Option<String>,
 }
 
 pub struct Store {
@@ -805,6 +841,48 @@ const CHANGES: &[&str] = &[
     // saying why -- which reads exactly like an app still thinking about it,
     // for ever.
     "ALTER TABLE conversations ADD COLUMN in_flight INTEGER NOT NULL DEFAULT 0;",
+    // 23
+    //
+    // Who is in a room, and which conversation of their own each one takes
+    // part through. A conversation belongs to one agent, and that is not a
+    // thing to loosen: its id is the engine's session id, and a session is
+    // one agent's. So a room is an ordinary conversation, owned by the first
+    // member, with this table naming everybody in it, and a line in one says
+    // who said it because the conversation's own agent is no longer the only
+    // answer.
+    //
+    // `talk` lets go rather than cascades: deleting a member's own
+    // conversation should not throw it out of the room, and the next turn
+    // opens it another.
+    "CREATE TABLE IF NOT EXISTS members (
+         conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+         agent        TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+         talk         TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+         joined_at    INTEGER NOT NULL,
+         PRIMARY KEY (conversation, agent)
+     );
+     ALTER TABLE lines ADD COLUMN said_by TEXT;",
+    // 24
+    //
+    // A task taught once and done again by name: what was asked, and the
+    // steps that answered it, as they were written down in the conversation.
+    // One agent's, like a note, because the steps name that agent's folders
+    // and tools and would send another agent looking for files it does not
+    // have. The name is the key, and it is compared without regard to case:
+    // "save this as Tidy" and "run the skill tidy" are one skill, and two
+    // rows differing only in a capital would be found by neither.
+    //
+    // `steps` is JSON rather than a table of its own because the steps are
+    // only ever read back whole, in order, to be handed to a model as a plan.
+    "CREATE TABLE IF NOT EXISTS skills (
+         id      TEXT PRIMARY KEY,
+         agent   TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+         name    TEXT NOT NULL COLLATE NOCASE,
+         request TEXT NOT NULL,
+         steps   TEXT NOT NULL,
+         made_at INTEGER NOT NULL,
+         UNIQUE(agent, name)
+     );",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -1231,6 +1309,68 @@ impl Store {
         Ok(gone > 0)
     }
 
+    /// Keep an errand as a skill under a name, replacing whatever that name
+    /// held. True when something was replaced.
+    ///
+    /// Replacing rather than refusing, for the same reason a note is: saving
+    /// again under the same name is how a skill is corrected, and a model told
+    /// "that name is taken" invents a second name for the same task. The
+    /// name kept is the one just given, so a skill saved as "tidy" and saved
+    /// again as "Tidy" is called "Tidy" from then on.
+    pub fn keep_skill(
+        &self,
+        agent: &str,
+        name: &str,
+        request: &str,
+        steps: &[crate::skill::Step],
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let was_there: i64 = conn.query_row(
+            "SELECT count(*) FROM skills WHERE agent = ? AND name = ?",
+            params![agent, name],
+            |r| r.get(0),
+        )?;
+        conn.execute(
+            "INSERT INTO skills (id, agent, name, request, steps, made_at)
+                  VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(agent, name) DO UPDATE SET
+                  name = excluded.name,
+                  request = excluded.request,
+                  steps = excluded.steps,
+                  made_at = excluded.made_at",
+            params![
+                uuid_like(&format!("skill{agent}{}", name.to_lowercase())),
+                agent,
+                name,
+                request,
+                serde_json::to_string(steps)?,
+                now()
+            ],
+        )?;
+        Ok(was_there > 0)
+    }
+
+    /// One agent's skill by name, whatever the case it is asked for in.
+    pub fn skill(&self, agent: &str, name: &str) -> Result<Option<Skill>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT name, request, steps, made_at FROM skills WHERE agent = ? AND name = ?",
+        )?;
+        let mut rows = q.query_map(params![agent, name], read_skill)?;
+        rows.next().transpose().map_err(Into::into)
+    }
+
+    /// Everything one agent has been taught, newest first.
+    pub fn skills(&self, agent: &str) -> Result<Vec<Skill>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT name, request, steps, made_at FROM skills
+              WHERE agent = ? ORDER BY made_at DESC, name",
+        )?;
+        let rows = q.query_map([agent], read_skill)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Start a conversation that carries on from another one.
     ///
     /// Everything up to and including `up_to` is copied, and nothing at all is
@@ -1288,7 +1428,7 @@ impl Store {
     /// where this program says things, and putting it anywhere else means
     /// somebody has to go and look for it.
     pub fn noted(&self, conversation: &str, said: &str) -> Result<()> {
-        self.append(conversation, "ended", said, None, None)?;
+        self.append(conversation, "ended", said, None, None, None)?;
         Ok(())
     }
 
@@ -1742,7 +1882,13 @@ impl Store {
             let Some(talk) = self.conversation(&id)? else {
                 break;
             };
-            chain.push(talk.agent);
+            // A room's agent is only the member it is filed under, and it is
+            // not waiting on anything: the app takes the room's messages round
+            // and collects the answers. Counted, it stopped a member handing
+            // work to the one member the room happened to be filed under.
+            if !self.is_a_room(&id)? {
+                chain.push(talk.agent);
+            }
             at = talk.asked_by;
         }
         Ok(chain)
@@ -1884,6 +2030,24 @@ impl Store {
             [conversation],
         )?;
         Ok(())
+    }
+
+    /// When the turn now going began: the moment somebody, or the clock, last
+    /// said something in this conversation.
+    ///
+    /// Read off the last line of theirs rather than kept as a flag beside
+    /// `in_flight`, because it is the one time nothing else needs and the line
+    /// already carries it. What it is for is telling a file this turn wrote
+    /// from one an earlier run left behind, which is the difference between
+    /// work done and work claimed.
+    pub fn when_the_turn_began(&self, conversation: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT at FROM lines WHERE conversation = ? AND kind = 'mine'
+              ORDER BY seq DESC LIMIT 1",
+        )?;
+        let mut rows = q.query_map([conversation], |r| r.get::<_, i64>(0))?;
+        rows.next().transpose().map_err(Into::into)
     }
 
     /// Say that it has ended, however it ended.
@@ -2069,7 +2233,7 @@ impl Store {
     pub fn lines(&self, conversation: &str) -> Result<Vec<Line>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
-            "SELECT seq, at, kind, text, call, tool, outcome, anchor, pictures
+            "SELECT seq, at, kind, text, call, tool, outcome, anchor, pictures, said_by
                FROM lines WHERE conversation = ? ORDER BY seq",
         )?;
         let rows = q.query_map([conversation], |r| {
@@ -2083,6 +2247,7 @@ impl Store {
                 outcome: r.get(6)?,
                 anchor: r.get(7)?,
                 pictures: named(r.get::<_, Option<String>>(8)?),
+                said_by: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2094,7 +2259,7 @@ impl Store {
     /// it were not written here it would exist only on the screen -- which is
     /// exactly where it was before this file existed.
     pub fn asked(&self, conversation: &str, text: &str) -> Result<Line> {
-        self.append(conversation, "mine", text, None, None)
+        self.append(conversation, "mine", text, None, None, None)
     }
 
     /// Say that a line somebody wrote has pictures with it.
@@ -2149,7 +2314,7 @@ impl Store {
                 Ok(None)
             }
             Event::Said { text, settled } if *settled => self
-                .append(conversation, "said", text, None, None)
+                .append(conversation, "said", text, None, None, None)
                 .map(Some),
             Event::Said { .. } => Ok(None),
             Event::Doing(step) => self
@@ -2159,6 +2324,7 @@ impl Store {
                     &step.what,
                     Some(&step.call),
                     Some(&step.tool),
+                    None,
                 )
                 .map(Some),
             // The outcome goes onto the step it belongs to rather than onto a
@@ -2197,6 +2363,7 @@ impl Store {
                             &ask.asking,
                             Some(&ask.step),
                             Some(&ask.tool),
+                            None,
                         )
                         .map(Some),
                     _ => Ok(None),
@@ -2204,7 +2371,7 @@ impl Store {
             }
             Event::Done { .. } => Ok(None),
             Event::Failed { why } => self
-                .append(conversation, "ended", why, None, None)
+                .append(conversation, "ended", why, None, None, None)
                 .map(Some),
         }
     }
@@ -2325,7 +2492,74 @@ impl Store {
     /// would be a small lie in the one place a person goes to find out what
     /// actually happened.
     pub fn the_app_says(&self, conversation: &str, kind: &str, text: &str) -> Result<Line> {
-        self.append(conversation, kind, text, None, None)
+        self.append(conversation, kind, text, None, None, None)
+    }
+
+    /// Write down something said in a room, and by whom.
+    ///
+    /// `by` is the member that said it, or nothing for a line of the app's
+    /// own. Everywhere else the conversation's agent is the author of every
+    /// answer in it; in a room that agent is only the first member, so an
+    /// answer written without its author would be filed under the wrong name
+    /// the moment the conversation is read back.
+    pub fn said_in_room(
+        &self,
+        room: &str,
+        by: Option<&str>,
+        kind: &str,
+        text: &str,
+    ) -> Result<Line> {
+        self.append(room, kind, text, None, None, by)
+    }
+
+    /// Put an agent in a room. Saying so twice is once.
+    pub fn join(&self, room: &str, agent: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO members (conversation, agent, joined_at) VALUES (?, ?, ?)",
+            params![room, agent, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Who is in a room, in the order they joined. Empty for any conversation
+    /// that is not one.
+    pub fn members(&self, room: &str) -> Result<Vec<Member>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT m.agent, a.name, m.talk
+               FROM members m JOIN agents a ON a.id = m.agent
+              WHERE m.conversation = ?
+              ORDER BY m.joined_at, m.rowid",
+        )?;
+        let rows = q.query_map([room], |r| {
+            Ok(Member {
+                agent: r.get(0)?,
+                name: r.get(1)?,
+                talk: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Is this conversation a room: more than one agent in it?
+    pub fn is_a_room(&self, conversation: &str) -> Result<bool> {
+        let members: i64 = self.conn.lock().unwrap().query_row(
+            "SELECT count(*) FROM members WHERE conversation = ?",
+            [conversation],
+            |r| r.get(0),
+        )?;
+        Ok(members > 1)
+    }
+
+    /// Remember which conversation of its own a member takes part in a room
+    /// through, so the next turn goes to the same one and the member keeps
+    /// its own memory of the room.
+    pub fn takes_part_through(&self, room: &str, agent: &str, talk: &str) -> Result<()> {
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE members SET talk = ? WHERE conversation = ? AND agent = ?",
+            params![talk, room, agent],
+        )?;
+        Self::only_if_it_is_there(changed, "member")
     }
 
     /// The same, for a line an answer will arrive against later.
@@ -2342,7 +2576,7 @@ impl Store {
         text: &str,
         about: &str,
     ) -> Result<Line> {
-        self.append(conversation, kind, text, Some(about), None)
+        self.append(conversation, kind, text, Some(about), None, None)
     }
 
     fn append(
@@ -2352,6 +2586,7 @@ impl Store {
         text: &str,
         call: Option<&str>,
         tool: Option<&str>,
+        said_by: Option<&str>,
     ) -> Result<Line> {
         let at = now();
         let conn = self.conn.lock().unwrap();
@@ -2365,9 +2600,9 @@ impl Store {
             |r| r.get(0),
         )?;
         conn.execute(
-            "INSERT INTO lines (conversation, seq, at, kind, text, call, tool)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![conversation, seq, at, kind, text, call, tool],
+            "INSERT INTO lines (conversation, seq, at, kind, text, call, tool, said_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![conversation, seq, at, kind, text, call, tool, said_by],
         )?;
         // Both: the list of agents is ordered by when the agent last spoke,
         // and an agent does not speak -- its conversations do.
@@ -2390,6 +2625,7 @@ impl Store {
             outcome: None,
             anchor: None,
             pictures: Vec::new(),
+            said_by: said_by.map(str::to_string),
         })
     }
 }
@@ -2562,6 +2798,23 @@ fn points_at_nothing(conn: &Connection) -> Result<i64> {
 
 pub fn beside(data_dir: &Path) -> PathBuf {
     data_dir.join("errand.db")
+}
+
+/// One skill, from a row that selected its columns in order.
+///
+/// Steps that do not read back as steps are an error rather than an empty
+/// list: a skill with no steps would run as a bare request, which is not
+/// what was saved, and nothing would say so.
+fn read_skill(r: &rusqlite::Row) -> rusqlite::Result<Skill> {
+    let steps: String = r.get(2)?;
+    Ok(Skill {
+        name: r.get(0)?,
+        request: r.get(1)?,
+        steps: serde_json::from_str(&steps).map_err(|why| {
+            rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(why))
+        })?,
+        made_at: r.get(3)?,
+    })
 }
 
 /// One note, from a row that selected its columns in order.
@@ -2745,6 +2998,116 @@ mod tests {
             tool: "Bash".into(),
             call: call.into(),
         })
+    }
+
+    #[test]
+    fn a_room_remembers_who_is_in_it_and_who_said_what() {
+        // A conversation has one agent, and every answer in it used to be that
+        // agent's. In a room that is only the first member, so a line carries
+        // its author and the members are a table of their own.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a", "/tmp/a");
+        one(&s, "b", "/tmp/b");
+        s.settled_on(
+            "a",
+            &Settled {
+                name: "Trend Scout".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        s.settled_on(
+            "b",
+            &Settled {
+                name: "Disk Watch".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        s.begin_conversation("room", "a", "Disk day").unwrap();
+        assert!(!s.is_a_room("room").unwrap(), "one agent is not a room");
+        s.join("room", "a").unwrap();
+        s.join("room", "b").unwrap();
+        s.join("room", "b").unwrap();
+        assert!(s.is_a_room("room").unwrap());
+        assert!(
+            !s.is_a_room("a").unwrap(),
+            "an ordinary conversation became a room"
+        );
+
+        let members = s.members("room").unwrap();
+        let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Trend Scout", "Disk Watch"],
+            "not in the order they joined"
+        );
+        assert!(members.iter().all(|m| m.talk.is_none()));
+
+        s.asked("room", "Is the disk full?").unwrap();
+        s.said_in_room("room", Some("b"), "said", "Not yet.")
+            .unwrap();
+        s.said_in_room("room", None, "note", "Trend Scout could not answer.")
+            .unwrap();
+        let lines = s.lines("room").unwrap();
+        let authors: Vec<Option<&str>> = lines.iter().map(|l| l.said_by.as_deref()).collect();
+        assert_eq!(authors, [None, Some("b"), None]);
+        // And everywhere else nothing changes: a line has no author.
+        assert!(s.lines("a").unwrap().iter().all(|l| l.said_by.is_none()));
+    }
+
+    #[test]
+    fn a_member_takes_part_through_a_conversation_of_its_own_that_can_be_deleted() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a", "/tmp/a");
+        one(&s, "b", "/tmp/b");
+        s.begin_conversation("room", "a", "Disk day").unwrap();
+        s.join("room", "a").unwrap();
+        s.join("room", "b").unwrap();
+        assert!(
+            s.takes_part_through("room", "c", "talk-c").is_err(),
+            "a stranger was given a seat"
+        );
+        s.begin_conversation_for("talk-b", "b", "In the room: Disk day", Some("room"))
+            .unwrap();
+        s.takes_part_through("room", "b", "talk-b").unwrap();
+        let b = &s.members("room").unwrap()[1];
+        assert_eq!(b.talk.as_deref(), Some("talk-b"));
+
+        // Deleting the member's own conversation does not throw it out of the
+        // room: the seat stays and the next turn opens another.
+        s.forget_conversation("talk-b").unwrap();
+        let b = &s.members("room").unwrap()[1];
+        assert_eq!(b.talk, None);
+        assert_eq!(s.members("room").unwrap().len(), 2);
+
+        // Deleting the room takes the seats with it.
+        s.begin_conversation("other", "a", "Second").unwrap();
+        s.forget_conversation("room").unwrap();
+        assert!(s.members("room").unwrap().is_empty());
+        assert_eq!(s.points_at_nothing().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_member_of_a_room_may_hand_work_to_the_member_the_room_is_filed_under() {
+        // The room is filed under its first member, and that member is not
+        // waiting on anything: the app takes the room's messages round.
+        // Counted in the chain, "Disk Watch asks Trend Scout" inside a room was
+        // refused as going round in circles.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a", "/tmp/a");
+        one(&s, "b", "/tmp/b");
+        s.begin_conversation("room", "a", "Disk day").unwrap();
+        s.join("room", "a").unwrap();
+        s.join("room", "b").unwrap();
+        s.begin_conversation_for("talk-b", "b", "In the room: Disk day", Some("room"))
+            .unwrap();
+        let waiting = s.who_is_waiting("talk-b").unwrap();
+        assert_eq!(waiting, ["b"], "the room's agent was counted as waiting");
+        // While a real hand-off still is.
+        s.begin_conversation_for("asked-a", "a", "Asked by Disk Watch", Some("talk-b"))
+            .unwrap();
+        assert_eq!(s.who_is_waiting("asked-a").unwrap(), ["a", "b"]);
     }
 
     #[test]
@@ -3647,6 +4010,125 @@ mod tests {
 
         assert!(s.recall("a2", "invoice template", 5).unwrap().is_empty());
         assert!(s.remembers("a2", 10).unwrap().is_empty());
+    }
+
+    fn two_steps() -> Vec<crate::skill::Step> {
+        vec![
+            crate::skill::Step {
+                what: "Running ls ~/Downloads".into(),
+                tool: "run_command".into(),
+                outcome: "a.pdf".into(),
+                refused: false,
+            },
+            crate::skill::Step {
+                what: "Running mv ~/Downloads/*.pdf ~/Papers".into(),
+                tool: "run_command".into(),
+                outcome: String::new(),
+                refused: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_skill_kept_under_a_name_comes_back_with_its_steps_in_order_and_saving_again_replaces_it() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        assert!(s.skill("a1", "tidy").unwrap().is_none());
+        assert!(s.skills("a1").unwrap().is_empty());
+
+        let replaced = s
+            .keep_skill("a1", "tidy", "Tidy the Downloads folder", &two_steps())
+            .unwrap();
+        assert!(!replaced, "there was nothing to replace yet");
+
+        let kept = s.skill("a1", "tidy").unwrap().expect("it was kept");
+        assert_eq!(kept.name, "tidy");
+        assert_eq!(kept.request, "Tidy the Downloads folder");
+        assert_eq!(
+            kept.steps,
+            two_steps(),
+            "the steps came back changed or out of order"
+        );
+        assert!(kept.made_at > 0);
+
+        // Saving again under the same name is the correction, the way a note
+        // is. Refused, a model invents a second name for the same task.
+        let replaced = s
+            .keep_skill("a1", "tidy", "Tidy the Desktop", &two_steps()[..1])
+            .unwrap();
+        assert!(replaced, "it did not say it replaced the old one");
+        let all = s.skills("a1").unwrap();
+        assert_eq!(all.len(), 1, "it kept both: {all:?}");
+        assert_eq!(all[0].request, "Tidy the Desktop");
+        assert_eq!(all[0].steps.len(), 1);
+    }
+
+    #[test]
+    fn a_skill_is_found_whatever_the_case_its_name_is_asked_for_in() {
+        // "save this as Tidy" and "run the skill tidy" are one skill. Two rows
+        // differing only in a capital would be found by neither request.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.keep_skill("a1", "Tidy Downloads", "Tidy it", &two_steps())
+            .unwrap();
+        assert!(s.skill("a1", "tidy downloads").unwrap().is_some());
+        assert!(s.skill("a1", "TIDY DOWNLOADS").unwrap().is_some());
+
+        // And saving under the other case is the same skill, called by the
+        // name it was saved under last.
+        assert!(s
+            .keep_skill("a1", "tidy downloads", "Tidy it again", &two_steps())
+            .unwrap());
+        let all = s.skills("a1").unwrap();
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert_eq!(all[0].name, "tidy downloads");
+    }
+
+    #[test]
+    fn one_agents_skills_are_never_found_by_another() {
+        // The steps name one agent's folder and tools, and would send another
+        // agent looking for files it does not have.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.begin("a2", "Other", Path::new("/tmp/two")).unwrap();
+        s.keep_skill("a1", "tidy", "Tidy it", &two_steps()).unwrap();
+        assert!(s.skill("a2", "tidy").unwrap().is_none());
+        assert!(s.skills("a2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_an_agent_takes_its_skills_with_it() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.keep_skill("a1", "tidy", "Tidy it", &two_steps()).unwrap();
+        s.forget("a1").unwrap();
+        let left: i64 = s
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM skills", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "the agent is gone and its skills are still there");
+        assert_eq!(s.points_at_nothing().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_skill_whose_steps_do_not_read_back_is_an_error_rather_than_a_bare_request() {
+        // A skill with no steps would run as its request alone, which is not
+        // what was saved, and nothing would say so.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO skills (id, agent, name, request, steps, made_at)
+                 VALUES ('x', 'a1', 'broken', 'Do it', 'not json', 1)",
+                [],
+            )
+            .unwrap();
+        assert!(s.skill("a1", "broken").is_err());
+        assert!(s.skills("a1").is_err());
     }
 
     #[test]

@@ -103,8 +103,9 @@ pub fn all() -> Vec<Tool> {
                 "Start a command that keeps running, and get a handle back instead of waiting \
                  for it. Use this for anything that will not be over in a minute or two: a \
                  build, a download, a long script, a server. It keeps running while you do \
-                 something else and after this errand ends, for as long as Errand is open. \
-                 Check what it has printed with check_command. Not for anything on a schedule, \
+                 something else and after this errand ends, for as long as Errand is running, \
+                 window or no window. Check what it has printed with check_command. Not for \
+                 anything on a schedule, \
                  however often: a command that loops and sleeps is not under Repeat and nobody \
                  can see or stop it there. Use every_day for that; it runs as often as `{}`.",
                 crate::routine::most_often()

@@ -18,6 +18,7 @@
 pub mod allowing;
 pub mod atlogin;
 pub mod changes;
+pub mod claims;
 pub mod claude;
 pub mod connectors;
 pub mod doctor;
@@ -36,9 +37,11 @@ pub mod wall;
 pub mod local;
 pub mod mcp;
 pub mod memory;
+pub mod room;
 pub mod routine;
 pub mod schedules;
 pub mod shape;
+pub mod skill;
 pub mod team;
 pub mod watch;
 

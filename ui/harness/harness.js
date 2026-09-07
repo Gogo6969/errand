@@ -69,6 +69,15 @@ export const FIXTURE = {
       { id: "talk-overnight", agent: "agent-bitcoin", name: "Ran overnight", opened: true },
       { id: "talk-cut-off", agent: "agent-bitcoin", name: "Cut off", opened: true },
       { id: "talk-tired", agent: "agent-bitcoin", name: "Asked over and over", opened: true },
+      // A room, filed under this agent because it was the first one in.
+      { id: "talk-room", agent: "agent-bitcoin", name: "Bitcoin room", opened: false },
+    ],
+  },
+  // Who is in each room. Anything not listed here is an ordinary conversation.
+  members: {
+    "talk-room": [
+      { agent: "agent-bitcoin", name: "Bitcoin Desk", talk: null },
+      { agent: "agent-unnamed", name: "Show me the latest Bitcoin news", talk: null },
     ],
   },
   // What is stopping errands working. Nothing by default: the check that needs
@@ -108,6 +117,12 @@ export const FIXTURE = {
         tool: null,
         outcome: null,
       },
+    ],
+    // A room: the person asks, and each member answers under its own name.
+    "talk-room": [
+      { seq: 1, at: 1, kind: "mine", text: "Where is the price, and is it news?", call: null, tool: null, outcome: null },
+      { seq: 2, at: 2, kind: "said", text: "About $77,700.", call: null, tool: null, outcome: null, said_by: "agent-bitcoin" },
+      { seq: 3, at: 3, kind: "said", text: "Nothing new since yesterday.", call: null, tool: null, outcome: null, said_by: "agent-unnamed" },
     ],
     "talk-1": [
       { seq: 1, at: 1, kind: "mine", text: "Show me the latest Bitcoin news", call: null, tool: null, outcome: null },
@@ -186,6 +201,12 @@ export const FIXTURE = {
       fix: "Check the command in ~/.claude.json still exists." },
     { what: "Models on the network", how: "odd", said: "everything found is bound to this machine only",
       fix: "Start Ollama with OLLAMA_HOST=0.0.0.0." },
+    // The one whose fix is done in System Settings, so it carries the pane to
+    // open. The refusal used to be a line on stderr, which is nowhere.
+    { what: "Notifications", how: "odd",
+      said: "off for Errand in macOS, so an errand that finishes while you are reading something else finishes quietly",
+      fix: "Open System Settings, then Notifications, then Errand, and switch Allow notifications on.",
+      settings: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.errandai.errand" },
   ],
   whats_running: [
     { conversation: "talk-3", agent: "agent-bitcoin", who: "Bitcoin Desk", talk: "Asked by Day Check",
@@ -209,7 +230,7 @@ export const FIXTURE = {
   watches: {
     watches: "~/Downloads every 10m",
     what: "Sort these and tell me the total",
-    means: "This looks at ~/Downloads every 10 minutes and wakes Bitcoin Desk when what is there changes. It compares the names and sizes of the files one level down, ignoring part-downloaded ones. At most once every 15 minutes, and at most 24 times a day. It only looks while Errand is open, so something that changes overnight is something you hear about in the morning.",
+    means: "This looks at ~/Downloads every 10 minutes and wakes Bitcoin Desk when what is there changes. It compares the names and sizes of the files one level down, ignoring part-downloaded ones. At most once every 15 minutes, and at most 24 times a day. It only looks while Errand is running, window or no window, so something that changes while Errand is quit is something you hear about when it is opened again.",
     looked_at: 1788000000000,
     woke_at: null,
     woke_today: 0,
@@ -221,7 +242,7 @@ export const FIXTURE = {
     means:
       "The agent works towards this on its own and says at the end of every turn whether it is done. " +
       "It gets at most 8 turns, it stops early if it says the same thing is left twice running, and it " +
-      "stops if it stops reporting at all. It only runs while Errand is open. The goal is: Get the tests passing",
+      "stops if it stops reporting at all. It only runs while Errand is running, window or no window. The goal is: Get the tests passing",
     tries: 3,
     at_most: 8,
     left: "two of them still fail on a timeout",
@@ -389,6 +410,17 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.conversations[args.agent] || []);
           case "lines":
             return Promise.resolve(fixture.lines[args.id] || []);
+          case "members":
+            return Promise.resolve(fixture.members?.[args.id] || []);
+          case "make_room":
+            return Promise.resolve({
+              name: args.name || `A room of ${args.agents.length}`,
+              members: args.agents.map((id) => ({
+                agent: id,
+                name: fixture.agents.find((a) => a.id === id)?.name || id,
+                talk: null,
+              })),
+            });
           case "engines":
             return Promise.resolve(
               fixture.offered.map((o) => ({ engine: o.engine, name: o.label, settings: o.settings })),

@@ -150,6 +150,14 @@ const GRANTED: &[&str] = &[
     // entirely a question. Putting a permission card in front of it would be
     // asking whether it may ask.
     "mcp__errand__over_to_you",
+    // Saving and listing reach this agent's own records and nothing else.
+    // Running one opens a conversation for the same agent on the same
+    // posture, and every step the run takes goes through the same cards as
+    // any other turn: a card in front of run_skill itself would be asking
+    // whether it may start the job somebody just asked for by name.
+    "mcp__errand__save_skill",
+    "mcp__errand__run_skill",
+    "mcp__errand__skills",
 ];
 
 /// A thread's conversation with Claude Code.

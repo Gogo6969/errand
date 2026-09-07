@@ -196,7 +196,8 @@ pub fn what_it_means(what: &str) -> String {
         "The agent works towards this on its own and says at the end of every turn whether \
          it is done. It gets at most {AT_MOST_TRIES} turns, it stops early if it says the same \
          thing is left twice running, and it stops if it stops reporting at all. It only \
-         runs while Errand is open. The goal is: {what}"
+         runs {running}. The goal is: {what}",
+        running = crate::routine::WHILE_RUNNING
     )
 }
 
@@ -313,6 +314,11 @@ mod tests {
     fn what_it_will_cost_is_said_in_numbers_before_anybody_agrees_to_it() {
         let said = what_it_means("get the tests passing");
         assert!(said.contains(&AT_MOST_TRIES.to_string()), "{said}");
-        assert!(said.contains("only runs while Errand is open"), "{said}");
+        // The window can be closed now; the sentence says the process is what
+        // it needs, not the window.
+        assert!(
+            said.contains("only runs while Errand is running, window or no window"),
+            "{said}"
+        );
     }
 }

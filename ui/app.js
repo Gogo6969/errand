@@ -170,6 +170,13 @@ const el = {
   find: document.getElementById("find"),
   reach: document.getElementById("reach"),
   talks: document.getElementById("talks"),
+  members: document.getElementById("members"),
+  rooming: document.getElementById("rooming"),
+  roomingWho: document.getElementById("rooming-who"),
+  roomingName: document.getElementById("rooming-name"),
+  roomingStart: document.getElementById("rooming-start"),
+  roomingCancel: document.getElementById("rooming-cancel"),
+  roomingSays: document.getElementById("rooming-says"),
   repeat: document.getElementById("repeat"),
   granted: document.getElementById("granted"),
   granting: document.getElementById("granting"),
@@ -578,13 +585,19 @@ async function show(id) {
     // the same row on disk. An errand started from outside stops at its first
     // question, and drawing that as expired made it unanswerable while the
     // engine sat there waiting.
-    const [lines, live] = await Promise.all([
+    const [lines, live, , members] = await Promise.all([
       invoke("lines", { id }),
       invoke("still_going", { id }).catch(() => false),
       // Before the lines are read, since reading one asks whether it is still
       // being waited on.
       whatIsStillWaiting(),
+      // Who is in it, when it is a room. Asked here rather than with every
+      // conversation in the list, because it is one question about the one
+      // being opened. Nothing, when the app cannot say: a conversation that
+      // cannot be told to be a room is an ordinary one.
+      invoke("members", { id }).catch(() => []),
     ]);
+    t.members = members || [];
     t.messages = lines.map((line) => fromStore(line, live));
     t.loaded = true;
   }
@@ -602,6 +615,7 @@ async function show(id) {
   el.watching.hidden = true;
   el.aiming.hidden = true;
   el.costing.hidden = true;
+  el.rooming.hidden = true;
   if (a) {
     drawMark(a);
     drawPinned(a);
@@ -609,6 +623,7 @@ async function show(id) {
     drawEngines(a);
   }
   drawTalks();
+  drawRoom(t);
   drawThreads();
   drawMessages();
   pickItBackUp(id);
@@ -658,8 +673,104 @@ function drawTalks() {
   another.value = "+";
   another.textContent = "New conversation…";
   el.talks.append(another);
+  // Beside it, because a room is a way of starting talking, and this is
+  // where somebody goes to start.
+  const room = document.createElement("option");
+  room.value = "room";
+  room.textContent = "New room…";
+  el.talks.append(room);
   el.talks.hidden = !a;
 }
+
+/**
+ * Who is in the room, in the header, and a composer that says how to speak to
+ * one of them. Nothing and the ordinary words for a conversation that is not
+ * a room, which is nearly all of them.
+ */
+function drawRoom(t) {
+  const names = (t?.members || []).map((m) => m.name);
+  const aRoom = names.length > 1;
+  el.members.hidden = !aRoom;
+  el.members.textContent = aRoom ? `Room: ${namedTogether(names)}` : "";
+  el.what.placeholder = aRoom
+    ? "Say it to everyone, or start with @Name to say it to one of them"
+    : "What would you like done?";
+}
+
+/** Names the way somebody would say them: "A", "A and B", "A, B and C". */
+function namedTogether(names) {
+  if (names.length <= 1) return names.join("");
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/** What an agent is called, by id, or something honest once it has gone. */
+function nameOf(agent) {
+  return agents.get(agent)?.name || "an agent no longer here";
+}
+
+/**
+ * A room: one conversation with several agents in it.
+ *
+ * Ticked rather than typed, because a name is a thing somebody gets slightly
+ * wrong and a box is not. Everybody with a name is offered: an agent that has
+ * not settled on one is called by its first errand and is not written down
+ * until something is said to it, so there is nothing yet to seat.
+ */
+function offerARoom() {
+  const a = whose();
+  el.roomingSays.textContent = "";
+  el.roomingName.value = "";
+  const named = [...agents.values()].filter((one) => one.name !== NOT_YET_NAMED && !one.hidden);
+  el.roomingWho.replaceChildren(
+    ...named.map((one) => {
+      const label = document.createElement("label");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = one.id;
+      box.checked = one.id === a?.id;
+      label.append(box, document.createTextNode(one.name));
+      return label;
+    }),
+  );
+  el.rooming.hidden = false;
+  // The picker goes back to the conversation that is open: "New room…" is a
+  // thing to do, not a place to be.
+  el.talks.value = showing;
+}
+
+/** Start the room that was ticked, and open it. */
+async function startTheRoom() {
+  const a = whose();
+  const ticked = [...el.roomingWho.querySelectorAll("input:checked")].map((box) => box.value);
+  // The open agent first, so the room is filed under it and turns up in the
+  // picker somebody is already looking at.
+  const chosen = [...new Set([...(a && ticked.includes(a.id) ? [a.id] : []), ...ticked])];
+  if (chosen.length < 2) {
+    el.roomingSays.textContent = "Pick at least two agents.";
+    return;
+  }
+  const id = uuid();
+  let room;
+  try {
+    room = await invoke("make_room", { id, agents: chosen, name: el.roomingName.value.trim() });
+  } catch (why) {
+    el.roomingSays.textContent = String(why);
+    return;
+  }
+  talks.set(
+    id,
+    asTalk({ id, agent: chosen[0], name: room.name }, { loaded: true, members: room.members }),
+  );
+  el.rooming.hidden = true;
+  await show(id);
+  el.what.focus();
+}
+
+el.roomingStart.addEventListener("click", startTheRoom);
+el.roomingCancel.addEventListener("click", () => {
+  el.rooming.hidden = true;
+  el.talks.value = showing;
+});
 
 /**
  * One agent, as the page holds it.
@@ -695,6 +806,11 @@ function asTalk(c, keeping) {
     repeats: !!c.runs_at,
     messages: keeping?.messages ?? [],
     working: keeping?.working ?? false,
+    // Who is in it, when it is a room. Empty for a conversation with one
+    // agent, which is nearly all of them.
+    members: keeping?.members ?? [],
+    // Which member is answering this moment, in a room.
+    answering: keeping?.answering ?? "",
     // Carried like the rest of what is going on. Left out, clicking the agent
     // while an answer was arriving threw away the sentence being written and
     // put the working dots back under a half-finished line.
@@ -760,6 +876,9 @@ function fromStoreLine(line, live = false) {
         // drawn, so opening a conversation with forty screenshots in it does
         // not put forty screenshots in memory before a word is on screen.
         pictures: line.pictures || [],
+        // Who said it, in a room. A line on disk carries the id; the name is
+        // looked up once here, from the agents already loaded.
+        who: line.kind === "said" && line.said_by ? nameOf(line.said_by) : "",
       };
     case "asking":
       // A question that was answered is settled history. One that was not is
@@ -1170,6 +1289,9 @@ function drawMessages() {
     el.messages.append(writing);
   } else if (t.working) {
     el.messages.append(thinking());
+    // Which member, in a room: three agents are waiting to speak and dots
+    // alone do not say whose turn it is.
+    if (t.answering) el.messages.append(note("li", `${t.answering} is answering`, "answering"));
   }
   el.messages.scrollTop = el.messages.scrollHeight;
 }
@@ -1179,6 +1301,9 @@ function draw(m) {
   switch (m.kind) {
     case "said":
       node.className = "said";
+      // Which member said it, in a room. Nowhere else: the header already
+      // names the one agent every other answer is from.
+      if (m.who) node.append(note("span", m.who, "who"));
       node.append(render(m.text), doneWith(m));
       return node;
     // Your own words are shown exactly as you typed them. Reading somebody's
@@ -1639,6 +1764,18 @@ listen("handing_over", ({ payload }) => {
   drawThreads();
 });
 
+// A room's turn, which no engine reports: who is answering this moment, and
+// when the round is over. A room has no engine, so none of the seven events
+// ever arrive for it, and without this the dots stayed under a room for ever.
+listen("room_turn", ({ payload }) => {
+  const t = talks.get(payload.conversation);
+  if (!t) return;
+  t.working = !payload.over;
+  t.answering = payload.over ? "" : payload.who || "";
+  if (showing === payload.conversation) drawMessages();
+  drawThreads();
+});
+
 listen("happened", ({ payload }) => {
   const t = talks.get(payload.conversation);
   if (!t) return;
@@ -1935,15 +2072,31 @@ function drawAttached() {
   );
 }
 
+/** What the window says when something is said into a room mid-round. */
+const ROOM_STILL_ANSWERING =
+  "The room is still answering. It takes one thing round at a time; say it again when the round is over.";
+
 el.form.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = el.what.value.trim();
-  // Sent is not half typed. Without this the draft comes back the next time
-  // this conversation is opened, under the message it already became.
-  halfTyped.delete(showing);
   // A picture on its own is a question: "what is this". So something has to be
   // said, but it does not have to be typed.
   if (!text && !attached.length) return;
+  // A room takes one thing round at a time. Refused here, with the words left
+  // in the box, rather than sent: the app refuses it too, but by then the box
+  // is empty and the line is on screen as though it went.
+  const t = talking();
+  if (t && t.members.length > 1 && t.working) {
+    const last = t.messages[t.messages.length - 1];
+    if (!(last?.kind === "ended" && last.text === ROOM_STILL_ANSWERING)) {
+      t.messages.push({ kind: "ended", failed: false, text: ROOM_STILL_ANSWERING });
+      drawMessages();
+    }
+    return;
+  }
+  // Sent is not half typed. Without this the draft comes back the next time
+  // this conversation is opened, under the message it already became.
+  halfTyped.delete(showing);
   el.what.value = "";
   el.what.style.height = "auto";
   sayIt(text || "What is this?");
@@ -2569,6 +2722,7 @@ function openTheTalkMenu(t, x, y) {
 
 el.talks.addEventListener("change", async () => {
   if (el.talks.value === "+") return alsoAsk();
+  if (el.talks.value === "room") return offerARoom();
   await show(el.talks.value);
 });
 
@@ -3373,6 +3527,19 @@ async function checkup() {
         fix.textContent = f.fix;
         box.append(fix);
       }
+      // Where the fix is done, when that is a pane of System Settings. Opened
+      // for them rather than described: "Notifications, then Errand" is four
+      // levels down a screen most people have never opened.
+      if (f.settings) {
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "finding-open";
+        open.textContent = "Open System Settings";
+        open.addEventListener("click", () =>
+          invoke("open_settings", { pane: f.settings }).catch((why) => complain(String(why))),
+        );
+        box.append(open);
+      }
       return box;
     }),
   );
@@ -3982,7 +4149,7 @@ function sayWhatItWouldDo() {
     ? `it will ask this agent to ${what.replace(/^(please\s+)?/i, "")}.`
     : "it will wake this agent. Say what it should do, above.";
   el.watchPlain.textContent =
-    `It will ${looking} ${howOftenInWords()}, while Errand is open. ${changed}, ${then}`;
+    `It will ${looking} ${howOftenInWords()}, while Errand is running, window or no window. ${changed}, ${then}`;
 }
 
 async function drawWatch({ leaveTheFields = false } = {}) {
@@ -4909,7 +5076,8 @@ const WHAT_THIS_IS = [
   [
     "Repeat · the same errand every morning",
     "Give it a time and something to say, and it says it on its own. It runs " +
-      "while Errand is open, which is what the switch under Settings is about.",
+      "for as long as Errand is running, window or no window; the switch under " +
+      "Settings brings Errand back after a restart.",
   ],
   [
     "Watch · wake it when something changes",

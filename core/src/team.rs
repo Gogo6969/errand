@@ -213,11 +213,13 @@ pub fn declarations() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "keep_an_eye_on",
-                "description":
+                "description": format!(
                     "Wake this conversation when a folder, a file or a web page changes, and \
                      say what to do then. Use it for `tell me when this changes` rather than \
                      checking over and over yourself. It appears under Watch, where they can \
-                     see it and stop it. It only looks while Errand is open.",
+                     see it and stop it. It only looks {}.",
+                    crate::routine::WHILE_RUNNING
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -297,6 +299,73 @@ pub fn declarations() -> Vec<Value> {
                 "parameters": { "type": "object", "properties": {} }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "save_skill",
+                "description":
+                    "Keep the task just done in this conversation as a skill, so it can be \
+                     done again by name with run_skill. Use it when somebody says to save, \
+                     remember or keep what was just done as a skill. It keeps what they \
+                     asked and the steps taken to answer it, from the last turn here that \
+                     took any; nothing is kept from a turn that only talked. Saying a name \
+                     that is already taken replaces that skill. Say nothing about how it \
+                     is stored: tell them the name and that run_skill runs it.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description":
+                                "What to call it, in a few words, like `tidy downloads` or \
+                                 `weekly report`. This is what run_skill is called with."
+                        }
+                    },
+                    "required": ["name"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "run_skill",
+                "description":
+                    "Do a saved skill again, by name, and wait for the result. Use it when \
+                     somebody says to run, do or repeat a skill, or asks for a task by the \
+                     name it was saved under. It starts a conversation of its own under this \
+                     agent, called `Skill: <name>`, handed the original request and the \
+                     steps taken then as a plan to follow and adapt, and it answers with \
+                     what that run said. Call skills first if you are not sure of the name.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The skill's name, as it was saved"
+                        },
+                        "differently": {
+                            "type": "string",
+                            "description":
+                                "What should be different this time, if anything was said: \
+                                 another folder, another date, one more thing to do. Left \
+                                 out when it is to be done just as before."
+                        }
+                    },
+                    "required": ["name"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "skills",
+                "description":
+                    "List the skills saved for this agent: each name, what it does and how \
+                     many steps it has. Call it before run_skill when the name is not \
+                     certain, and when somebody asks what can be run again.",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        }),
     ]
 }
 
@@ -320,6 +389,9 @@ pub enum Ours {
     EveryDay,
     KeepAnEyeOn,
     OverToYou,
+    SaveSkill,
+    RunSkill,
+    Skills,
 }
 
 impl Ours {
@@ -334,6 +406,9 @@ impl Ours {
             Ours::EveryDay => "every_day",
             Ours::KeepAnEyeOn => "keep_an_eye_on",
             Ours::OverToYou => "over_to_you",
+            Ours::SaveSkill => "save_skill",
+            Ours::RunSkill => "run_skill",
+            Ours::Skills => "skills",
         }
     }
 }
@@ -349,6 +424,9 @@ pub fn ours(tool: &str) -> Option<Ours> {
         "every_day" => Some(Ours::EveryDay),
         "keep_an_eye_on" => Some(Ours::KeepAnEyeOn),
         "over_to_you" => Some(Ours::OverToYou),
+        "save_skill" => Some(Ours::SaveSkill),
+        "run_skill" => Some(Ours::RunSkill),
+        "skills" => Some(Ours::Skills),
         _ => None,
     }
 }
@@ -415,6 +493,15 @@ pub fn in_plain_words(tool: Ours, args: &Value) -> String {
             "" => "Forgetting a note".to_string(),
             about => format!("Forgetting what it knew about {}", about.replace('_', " ")),
         },
+        Ours::SaveSkill => match get("name") {
+            "" => "Keeping this as a skill".to_string(),
+            name => format!("Keeping this as a skill called {name}"),
+        },
+        Ours::RunSkill => match get("name") {
+            "" => "Running a skill".to_string(),
+            name => format!("Running the skill {name}"),
+        },
+        Ours::Skills => "Looking at the skills saved here".to_string(),
     }
 }
 
@@ -459,6 +546,14 @@ pub fn the_thing_itself(tool: Ours, args: &Value) -> String {
         // Nothing, and deliberately: an empty rule in the allowlist means the
         // whole tool, which for a tool that only looks is the right grant.
         Ours::WhoElse => String::new(),
+        // The name, for the two that take one: an "always" on running a
+        // skill is agreeing to that skill, not to every skill there will be.
+        Ours::SaveSkill | Ours::RunSkill => args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        Ours::Skills => String::new(),
     }
 }
 
@@ -542,6 +637,14 @@ pub fn asks_first(tool: Ours) -> bool {
         // asking. A permission card in front of a request to come and do
         // something is two questions where one was meant.
         Ours::OverToYou => false,
+        // Saving and listing reach this agent's own records and nothing else.
+        // Running one is not delegation: it opens a conversation for the same
+        // agent on the same posture, and every step the run takes goes
+        // through the same cards as any other turn. A card in front of
+        // run_skill itself would be asking whether it may start the job
+        // somebody just asked for by name, and the steps are shown to the
+        // model as a plan to follow, never run blind.
+        Ours::SaveSkill | Ours::RunSkill | Ours::Skills => false,
     }
 }
 
@@ -565,6 +668,10 @@ pub fn without_the_app(tool: Ours) -> &'static str {
         Ours::OverToYou => {
             "There is nobody at a window here to hand anything to. Say what somebody would \
              have to do, and stop there."
+        }
+        Ours::SaveSkill | Ours::RunSkill | Ours::Skills => {
+            "There is nowhere to keep skills here. This is an engine with no app behind it, \
+             so do the task yourself and say what you would have saved."
         }
     }
 }
@@ -771,12 +878,62 @@ mod tests {
                 "every_day",
                 "keep_an_eye_on",
                 "over_to_you",
-                "who_else"
+                "who_else",
+                "save_skill",
+                "run_skill",
+                "skills"
             ]
         );
         assert!(declared.iter().all(|d| d["type"] == "function"));
         assert!(
             ours("ask").is_some() && ours("who_else").is_some() && ours("run_command").is_none()
         );
+        // Every declared tool has a name the app can route, whichever engine
+        // called it. The failure this catches is the symmetric one: a tool
+        // declared and routed nowhere errors identically on both engines.
+        for name in named {
+            assert!(
+                which_of_ours(name).is_some_and(|tool| tool.name() == name),
+                "{name} is declared and not one of ours"
+            );
+            assert_eq!(
+                which_of_ours(&format!("mcp__{DOORWAY}__{name}")).map(Ours::name),
+                Some(name)
+            );
+        }
+    }
+
+    #[test]
+    fn a_skill_is_saved_run_and_listed_without_stopping_to_ask_and_a_card_would_name_the_skill() {
+        // Saving and listing reach one agent's own records. Running one is
+        // the same agent on the same posture, and every step of the run goes
+        // through the same cards as any other turn; a card in front of the
+        // run itself would ask whether it may start the job somebody just
+        // asked for by name. GRANTED in claude.rs has to agree, and does, or
+        // the test there fails.
+        assert!(!asks_first(Ours::SaveSkill));
+        assert!(!asks_first(Ours::RunSkill));
+        assert!(!asks_first(Ours::Skills));
+
+        let saving = json!({ "name": "tidy downloads" });
+        assert_eq!(
+            in_plain_words(Ours::SaveSkill, &saving),
+            "Keeping this as a skill called tidy downloads"
+        );
+        assert_eq!(the_thing_itself(Ours::SaveSkill, &saving), "tidy downloads");
+        let running = json!({ "name": "tidy downloads", "differently": "the Desktop" });
+        assert_eq!(
+            in_plain_words(Ours::RunSkill, &running),
+            "Running the skill tidy downloads"
+        );
+        // An "always" on running a skill is agreeing to that skill, not to
+        // every skill there will be.
+        assert_eq!(the_thing_itself(Ours::RunSkill, &running), "tidy downloads");
+        assert_eq!(
+            in_plain_words(Ours::Skills, &json!({})),
+            "Looking at the skills saved here"
+        );
+        assert_eq!(the_thing_itself(Ours::Skills, &json!({})), "");
+        assert!(without_the_app(Ours::RunSkill).contains("no app behind it"));
     }
 }

@@ -225,12 +225,12 @@ export async function setupCheck() {
   await new Promise((r) => setTimeout(r, 250));
 
   check("running it opens the panel", !panel.hidden, `hidden=${panel.hidden}`);
-  // Three from the app and three the window answers for itself, and the count
+  // Four from the app and three the window answers for itself, and the count
   // has to be of all of them: a check that reported only half the setup would
   // be a check somebody trusted for the wrong half.
   check(
     "it counts everything it checked, including what only the window can answer",
-    /2 of 6 things want attention/.test(panel.textContent),
+    /3 of 7 things want attention/.test(panel.textContent),
     panel.textContent.slice(0, 70),
   );
   check(
@@ -247,6 +247,36 @@ export async function setupCheck() {
     "a broken thing and an odd thing are told apart",
     panel.querySelector('[data-how="broken"]') && panel.querySelector('[data-how="odd"]'),
     [...panel.querySelectorAll("[data-how]")].map((f) => f.dataset.how).join(","),
+  );
+
+  // Notifications off used to be a line on stderr. Here it is a finding that
+  // says where to turn them on, with the pane opened for them: "Notifications,
+  // then Errand" is four levels down a screen most people have never opened.
+  const notifying = [...panel.querySelectorAll(".finding")].find((f) =>
+    f.querySelector(".finding-what")?.textContent === "Notifications",
+  );
+  check(
+    "notifications being off says where to turn them on",
+    ["System Settings", "Notifications", "Errand"].every((w) =>
+      notifying?.querySelector(".finding-fix")?.textContent.includes(w),
+    ),
+    notifying?.querySelector(".finding-fix")?.textContent,
+  );
+  const opens = notifying?.querySelector("button.finding-open");
+  check("and offers to open that pane", !!opens, opens?.textContent || "no button");
+  const before = asked.length;
+  opens?.click();
+  await new Promise((r) => setTimeout(r, 100));
+  const opened = asked.slice(before).find((a) => a.name === "open_settings");
+  check(
+    "pressing it opens System Settings at Errand's own entry, through the app",
+    opened?.args?.pane?.startsWith("x-apple.systempreferences:") && opened.args.pane.endsWith("?id=com.errandai.errand"),
+    JSON.stringify(opened?.args),
+  );
+  check(
+    "a finding with nowhere to open has no button",
+    panel.querySelectorAll("button.finding-open").length === 1,
+    `${panel.querySelectorAll("button.finding-open").length} buttons`,
   );
   return found;
 }
@@ -1338,10 +1368,12 @@ export async function watching() {
     says.includes("every 10 minutes") && says.includes("24 times a day"),
     says.slice(0, 90),
   );
+  // Not "while Errand is open": the window can be closed now, and a sentence
+  // that said the watch needed the window would send people to keep one open.
   check(
-    "it admits it only looks while the app is open",
-    says.includes("only looks while Errand is open"),
-    says.slice(-70),
+    "it admits it only looks while Errand is running, window or no window",
+    says.includes("only looks while Errand is running, window or no window"),
+    says.slice(-110),
   );
   check("it says when it last looked", says.includes("Last looked at"), says.slice(-70));
   check(
@@ -1815,11 +1847,14 @@ export async function stepsDoNotOverlap() {
 /**
  * Coming back by itself after a restart.
  *
- * Everything this app does on its own it does while it is open, and the switch
- * that changes that is only worth having if it says what is true. The failure
- * to guard is a switch showing what it last remembered rather than what the
+ * Everything this app does on its own it does while the process is running,
+ * window or no window, and the switch that brings it back after a restart is
+ * only worth having if the card beside it says what is true. The failure to
+ * guard is a switch showing what it last remembered rather than what the
  * system will actually do, which is a thing somebody finds out about at a
- * login, days later, by a routine not running.
+ * login, days later, by a routine not running. The card had its own version of
+ * that: it went on saying the jobs stopped "while it is open" was over, after
+ * closing the window had stopped meaning that.
  */
 export async function openingAtLogin() {
   const found = [];
@@ -1833,13 +1868,37 @@ export async function openingAtLogin() {
 
   check("there is a way to have Errand open at login", box && !box.disabled, box ? `disabled=${box.disabled}` : "missing");
   check("it starts off, because nobody asked for it yet", box && !box.checked, `checked=${box?.checked}`);
-  // The limitation this does not fix, said where the switch is rather than
-  // discovered on the first morning the Mac was asleep.
+  // What closing the window does and what it does not, said where the switch
+  // is rather than discovered on the first morning the Mac was asleep.
   const explains = card ? card.textContent : "";
   check(
-    "it says what this does not fix",
-    /asleep|off/.test(explains) && /while it is open/.test(explains),
-    explains.slice(0, 120),
+    "it says closing the window stops nothing, and where Errand stays",
+    /Closing the window does not stop anything/.test(explains) && /Dock/.test(explains),
+    explains.slice(0, 140),
+  );
+  check(
+    "it says what does stop it: quitting, logging out, a Mac asleep or off",
+    /Quit/.test(explains) && /[Ll]ogging out/.test(explains) && /asleep/.test(explains) && /off/.test(explains),
+    explains.slice(140, 520),
+  );
+  check(
+    "it no longer says the jobs only run while the window is open",
+    !/while it is open/.test(explains),
+    explains.slice(0, 140),
+  );
+  // What a restart brings back and what it does not. "All of it" included
+  // started commands, which quitting kills and nothing restarts.
+  check(
+    "it says a restart brings routines and watches back, and a command has to be started again",
+    /routines and watches with it/.test(explains) && /started again/.test(explains) && !/brings all of it back/.test(explains),
+    explains.slice(400, 800),
+  );
+  // A run only calls itself late past ten minutes, so "says it is late" was
+  // a promise the commonest case never kept.
+  check(
+    "it says when a late run says so: past ten minutes",
+    /more than ten minutes late/.test(explains) && !/says it is late/.test(explains),
+    explains.slice(300, 600),
   );
 
   box.checked = true;
@@ -2049,6 +2108,20 @@ export async function repeatingWhatWasAsked() {
 
   document.getElementById("repeat").click();
   await new Promise((r) => setTimeout(r, 250));
+
+  // The panel where a routine is set is the one of the four starts that said
+  // nothing about what keeps it running; the person setting one is the one
+  // about to rely on it.
+  const keeps = document.getElementById("routine-keeps");
+  check(
+    "it says what keeps a routine running and what stops it, where the routine is set",
+    keeps &&
+      keeps.offsetParent !== null &&
+      /window or no window/.test(keeps.textContent) &&
+      /[Qq]uitting/.test(keeps.textContent) &&
+      /asleep/.test(keeps.textContent),
+    keeps ? keeps.textContent.trim() : "missing",
+  );
 
   check("what was asked here is offered", offered && !offered.hidden, offered ? `hidden=${offered.hidden}` : "missing");
   const chips = [...(offered?.querySelectorAll(".from-here-one") || [])];
@@ -2572,7 +2645,11 @@ export async function settingAWatchExplainsItself() {
   check("what it will ask the agent to do", /tell me what is new/.test(said), said);
   // The limitation that decides whether it works at all, said where it is set
   // rather than found out on the first morning.
-  check("and that it only looks while Errand is open", /while Errand is open/.test(said), said);
+  check(
+    "and that it only looks while Errand is running, window or no window",
+    /while Errand is running, window or no window/.test(said),
+    said,
+  );
 
   // A web address reads as reading a page, not as looking in a folder.
   at.value = "https://example.com/prices";
@@ -3675,5 +3752,160 @@ export async function seeingItBeforeYouSendIt() {
     trouble.hidden,
     `hidden=${trouble.hidden}`,
   );
+  return found;
+}
+
+/**
+ * A room: several agents in one conversation.
+ *
+ * Hand-off is one-to-one and lands in a conversation nobody was in. A room is
+ * the other thing people do with a team, and the window has to say three
+ * things it never had to before: who is in it, who said each line, and who is
+ * answering this second.
+ */
+export async function aRoomOfSeveral() {
+  const found = [];
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  await openTalk("talk-room");
+  const members = document.getElementById("members");
+  const everybody = "Room: Bitcoin Desk and Show me the latest Bitcoin news";
+  found.push({
+    what: "a room names its members in the header",
+    ok: !members.hidden && members.textContent === everybody,
+    saw: members.hidden ? "hidden" : members.textContent,
+  });
+  const whos = [...document.querySelectorAll("#messages .said .who")].map((w) => w.textContent);
+  found.push({
+    what: "every answer in a room says which member gave it",
+    ok: whos.join("|") === "Bitcoin Desk|Show me the latest Bitcoin news",
+    saw: whos.join("|") || "no names",
+  });
+  const onMine = document.querySelectorAll("#messages .mine .who").length;
+  found.push({
+    what: "what the person said carries no name",
+    ok: onMine === 0,
+    saw: `${onMine} labels on your own lines`,
+  });
+  const what = document.getElementById("what");
+  found.push({
+    what: "the composer says how to speak to one member",
+    ok: /@Name/.test(what.placeholder),
+    saw: what.placeholder,
+  });
+
+  tell("room_turn", { conversation: "talk-room", who: "Bitcoin Desk", over: false });
+  const answering = document.querySelector("#messages .answering");
+  found.push({
+    what: "while a member is answering, the room says which one",
+    ok:
+      !!document.querySelector("#messages .thinking") &&
+      answering?.textContent === "Bitcoin Desk is answering",
+    saw: answering?.textContent || "nothing under the dots",
+  });
+  // A room takes one thing round at a time. Two rounds at once in one room
+  // wrote a member down as stopped while it was still answering, and wrote
+  // its answer to the first message down as the answer to the second.
+  const saidBefore = asked.filter((a) => a.name === "say").length;
+  what.value = "And the volume?";
+  document.getElementById("composer").requestSubmit();
+  await settle(100);
+  const refused = [...document.querySelectorAll("#messages .ended")].pop();
+  found.push({
+    what: "something said mid-round is kept in the box and refused, without asking the app",
+    ok:
+      what.value === "And the volume?" &&
+      asked.filter((a) => a.name === "say").length === saidBefore &&
+      /still answering/.test(refused?.textContent || "") &&
+      !refused.classList.contains("failed"),
+    saw: `box: ${JSON.stringify(what.value)}; ${refused?.textContent || "nothing said"}`,
+  });
+  document.getElementById("composer").requestSubmit();
+  await settle(100);
+  found.push({
+    what: "and pressing Return again does not say it twice",
+    ok: document.querySelectorAll("#messages .ended").length === 1,
+    saw: `${document.querySelectorAll("#messages .ended").length} lines`,
+  });
+  what.value = "";
+  tell("noted", {
+    conversation: "talk-room",
+    seq: 9,
+    kind: "said",
+    text: "Up 2% since.",
+    said_by: "agent-bitcoin",
+  });
+  const last = [...document.querySelectorAll("#messages .said")].pop();
+  found.push({
+    what: "an answer arriving live is labelled the same as one read back",
+    ok: last?.querySelector(".who")?.textContent === "Bitcoin Desk" && /Up 2% since/.test(last.textContent),
+    saw: last?.textContent.slice(0, 60) || "nothing drawn",
+  });
+  tell("room_turn", { conversation: "talk-room", over: true });
+  found.push({
+    what: "when the round is over the dots go",
+    ok: !document.querySelector("#messages .thinking") && !document.querySelector("#messages .answering"),
+    saw: document.querySelector("#messages .thinking") ? "still thinking" : "no dots",
+  });
+
+  await openTalk("talk-2");
+  found.push({
+    what: "an ordinary conversation names no members and asks plainly",
+    ok: members.hidden && what.placeholder === "What would you like done?",
+    saw: `${members.hidden ? "hidden" : members.textContent}; ${what.placeholder}`,
+  });
+
+  const picker = document.getElementById("talks");
+  const offered = [...picker.options].some((o) => o.value === "room" && o.textContent === "New room…");
+  found.push({
+    what: "the picker offers a new room",
+    ok: offered,
+    saw: [...picker.options].map((o) => o.textContent).join(", "),
+  });
+  picker.value = "room";
+  picker.dispatchEvent(new Event("change"));
+  await settle(200);
+  const rooming = document.getElementById("rooming");
+  const boxes = [...rooming.querySelectorAll("#rooming-who input")];
+  found.push({
+    what: "choosing it lists every named agent to tick, with the open one ticked",
+    ok:
+      !rooming.hidden &&
+      boxes.length === FIXTURE.agents.length &&
+      boxes.find((b) => b.value === "agent-bitcoin")?.checked === true &&
+      picker.value === "talk-2",
+    saw: rooming.hidden
+      ? "panel hidden"
+      : `${boxes.length} to tick, ticked: ${boxes.filter((b) => b.checked).map((b) => b.value).join(",")}, picker on ${picker.value}`,
+  });
+  const before = asked.length;
+  document.getElementById("rooming-start").click();
+  await settle(200);
+  const says = document.getElementById("rooming-says");
+  found.push({
+    what: "one agent ticked is not a room, and it says so rather than asking the app",
+    ok: !asked.slice(before).some((a) => a.name === "make_room") && /at least two/.test(says.textContent),
+    saw: says.textContent || "nothing said",
+  });
+  for (const b of boxes) b.checked = true;
+  document.getElementById("rooming-name").value = "Desk and news";
+  document.getElementById("rooming-start").click();
+  await settle(400);
+  const made = asked.slice(before).find((a) => a.name === "make_room");
+  found.push({
+    what: "starting it asks the app for a room of those agents, the open one first",
+    ok:
+      !!made &&
+      made.args.agents.join(",") === "agent-bitcoin,agent-unnamed" &&
+      made.args.name === "Desk and news",
+    saw: made ? `${made.args.agents.join(",")} called ${made.args.name}` : "the app was not asked",
+  });
+  found.push({
+    what: "and opens it, members in the header and the picker on it",
+    ok:
+      rooming.hidden &&
+      members.textContent === everybody &&
+      picker.selectedOptions[0]?.textContent === "Desk and news",
+    saw: `${rooming.hidden ? "panel closed" : "panel open"}; ${members.textContent}; picker on ${picker.selectedOptions[0]?.textContent}`,
+  });
   return found;
 }

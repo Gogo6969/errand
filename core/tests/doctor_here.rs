@@ -15,7 +15,10 @@ async fn what_is_wrong_with_this_setup() {
         .join("Library/Application Support/Errand");
     let store = Store::open(&errand_core::store::beside(&here)).expect("the real store");
 
-    for said in doctor::everything(&store, &here, &here).await {
+    // Whether macOS shows this app's notifications is a thing only the app can
+    // ask, from inside its own bundle; a test has no bundle to ask from.
+    let may = doctor::Notifying::Unknown;
+    for said in doctor::everything(&store, &here, &here, may).await {
         println!(
             "{:8} {:34} {}",
             format!("{:?}", said.how).to_uppercase(),

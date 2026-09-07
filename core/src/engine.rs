@@ -103,6 +103,23 @@ pub enum Answer {
     No,
 }
 
+impl Answer {
+    /// What the answer is called when the step is read back later.
+    ///
+    /// Written on the `asking` line's outcome, and read there by anything
+    /// that has to know what was decided: a skill keeps a step somebody said
+    /// no to out of its plan by recognising these exact words. One place for
+    /// them, because a fixture that said "Not allowed" while the app wrote
+    /// "You said no" tested a sentence the store never held.
+    pub fn in_a_word(self) -> &'static str {
+        match self {
+            Answer::Yes => "You said yes",
+            Answer::Always => "You said yes, and to stop asking",
+            Answer::No => "You said no",
+        }
+    }
+}
+
 /// Everything an engine is allowed to say.
 ///
 /// Not `Eq`: one of these carries an amount of money, and money is not a thing
