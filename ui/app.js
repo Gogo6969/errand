@@ -564,6 +564,77 @@ async function openAgent(agent) {
   return show(theirs[0].id);
 }
 
+/**
+ * An agent this window has never heard of.
+ *
+ * Agents are made outside the window all the time: `errand-app ask` in a
+ * terminal, a script, another agent starting a room, the clock. The app tells
+ * the window what happens in their conversations the same as any other, but
+ * the window only knew the agents it read when it opened, so the first sign
+ * of life from a new one was dropped with `if (!t) return` and the agent did
+ * not appear down the side until Errand was quit and opened again. Reading
+ * the agents again instead, and drawing the side. Null when the app has no
+ * such agent either.
+ */
+async function meetAgent(id) {
+  let listed;
+  try {
+    listed = await invoke("agents");
+  } catch {
+    return null;
+  }
+  // In the app's order, which is what a relaunch would show: pinned first,
+  // then whoever spoke most recently. The side is drawn in the order agents
+  // were met, and merely adding the new one put it at the bottom, where in a
+  // window the height of this one it is below the fold and might as well not
+  // have appeared. Anything the app no longer lists is kept, at the end, so
+  // whatever is on screen stays on screen.
+  const known = new Map(agents);
+  agents.clear();
+  for (const a of listed) agents.set(a.id, asAgent(a, known.get(a.id)));
+  for (const [theirId, a] of known) if (!agents.has(theirId)) agents.set(theirId, a);
+  // What is new, read again too, and the side drawn from it: the row of an
+  // agent that has just answered from a terminal said "Nothing said yet".
+  await whatIsNew();
+  return agents.get(id) || null;
+}
+
+/** The fetches out for conversations this window is meeting, by id. */
+const meeting = new Map();
+
+/**
+ * A conversation this window has never heard of: whose it is, and every
+ * conversation of theirs, so the picker is right as well as the side. One
+ * fetch shared by every event that arrives while it is out, because the first
+ * line of a new conversation is followed by the rest of it at once. Null when
+ * the app has no such conversation either.
+ */
+function meet(conversation) {
+  const known = talks.get(conversation);
+  if (known) return Promise.resolve(known);
+  if (!meeting.has(conversation)) {
+    const fetching = (async () => {
+      try {
+        const agent = await invoke("conversation_agent", { id: conversation });
+        if (!agent) return null;
+        if (!agents.has(agent) && !(await meetAgent(agent))) return null;
+        for (const c of await invoke("conversations", { agent })) {
+          talks.set(c.id, asTalk(c, talks.get(c.id)));
+        }
+        drawThreads();
+        if (agent === showingAgent) drawTalks();
+        return talks.get(conversation) || null;
+      } catch {
+        return null;
+      } finally {
+        meeting.delete(conversation);
+      }
+    })();
+    meeting.set(conversation, fetching);
+  }
+  return meeting.get(conversation);
+}
+
 /** Show a conversation, fetching what was said in it the first time. */
 async function show(id) {
   const t = talks.get(id);
@@ -1696,9 +1767,9 @@ listen("go_to", async ({ payload }) => {
   if (talks.has(id)) await show(id);
 });
 
-listen("settled", ({ payload }) => {
+listen("settled", async ({ payload }) => {
   const [id, on] = payload;
-  const t = agents.get(id);
+  const t = agents.get(id) || (await meetAgent(id));
   if (!t) return;
   t.name = on.name;
   t.title = on.title;
@@ -1746,8 +1817,8 @@ listen("handed_back", ({ payload }) => {
   if (showing === payload.conversation) drawMessages();
 });
 
-listen("handing_over", ({ payload }) => {
-  const t = talks.get(payload.conversation);
+listen("handing_over", async ({ payload }) => {
+  const t = talks.get(payload.conversation) || (await meet(payload.conversation));
   if (!t) return;
   stillWaiting.add(payload.handover);
   t.working = false;
@@ -1776,8 +1847,8 @@ listen("room_turn", ({ payload }) => {
   drawThreads();
 });
 
-listen("happened", ({ payload }) => {
-  const t = talks.get(payload.conversation);
+listen("happened", async ({ payload }) => {
+  const t = talks.get(payload.conversation) || (await meet(payload.conversation));
   if (!t) return;
 
   switch (payload.kind) {
@@ -1896,6 +1967,14 @@ listen("happened", ({ payload }) => {
     drawThreads();
   }
   if (payload.conversation === showing) drawMessages();
+  // A turn that ended somewhere nobody is looking has left something unread,
+  // and the count under the agent's name is the app's, not this window's:
+  // asked for again, rather than left at whatever it was when the window last
+  // had a reason to ask. Without this, an agent asked from a terminal sat
+  // under "Nothing said yet" with its answer on disk.
+  if ((payload.kind === "done" || payload.kind === "failed") && payload.conversation !== showing) {
+    whatIsNew();
+  }
 });
 
 /**

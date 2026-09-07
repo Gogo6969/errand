@@ -205,7 +205,7 @@
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
 
-  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut, aCall, stepsDoNotOverlap, openingAtLogin, sayingWhatThisIs, repeatingWhatWasAsked, whatElseIsAllowed, whatChangedInThisOne, theMenuOnAnAgent, settingAWatchExplainsItself, handingItOver, whatAgentsCanReach, whenThingsHappened, somethingYouHaveNotRead, whatYouTypedStaysPut, namingAndDeletingAConversation, aNotificationThatLeadsSomewhere, pausingARoutineAndSeeingHowItWent, findingWhereTheWordsAre, whatALongCommandIsPrinting, picturesYouCanSee, theQuestionBeforeDeletingIsReadable, aTurnTheAppWasClosedDuring, aPictureAnAgentMade, allowingSomethingOnce, seeingItBeforeYouSendIt, aRoomOfSeveral, firstRun } =
+  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut, aCall, stepsDoNotOverlap, openingAtLogin, sayingWhatThisIs, repeatingWhatWasAsked, whatElseIsAllowed, whatChangedInThisOne, theMenuOnAnAgent, settingAWatchExplainsItself, handingItOver, whatAgentsCanReach, whenThingsHappened, somethingYouHaveNotRead, whatYouTypedStaysPut, namingAndDeletingAConversation, aNotificationThatLeadsSomewhere, pausingARoutineAndSeeingHowItWent, findingWhereTheWordsAre, whatALongCommandIsPrinting, picturesYouCanSee, theQuestionBeforeDeletingIsReadable, aTurnTheAppWasClosedDuring, aPictureAnAgentMade, allowingSomethingOnce, seeingItBeforeYouSendIt, aRoomOfSeveral, madeOutsideTheWindow, firstRun } =
     await import(`./checks.js${fresh}`);
   // A first run is looked at on its own, because there is nothing else in it.
   if (brandNew) {
@@ -263,6 +263,7 @@
     ["allowingSomethingOnce", allowingSomethingOnce],
     ["seeingItBeforeYouSendIt", seeingItBeforeYouSendIt],
     ["aRoomOfSeveral", aRoomOfSeveral],
+    ["madeOutsideTheWindow", madeOutsideTheWindow],
     ["aiming", aiming],
     ["whichModels", whichModels],
     ["questionsStillOpen", questionsStillOpen],

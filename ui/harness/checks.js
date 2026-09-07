@@ -3909,3 +3909,104 @@ export async function aRoomOfSeveral() {
   });
   return found;
 }
+
+/**
+ * An agent made outside the window.
+ *
+ * `errand-app ask` in a terminal, a script, another agent starting a room,
+ * the clock: all of them make agents and conversations the window was never
+ * told about, and the app then tells the window what happens in them the same
+ * as any other. The window used to know only the agents it read when it
+ * opened, and dropped the rest on the floor, so a new agent did not appear
+ * down the side until Errand was quit and opened again.
+ */
+export async function madeOutsideTheWindow() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const rows = () => [...document.getElementById("threads").children].map((li) => li.textContent);
+  const before = rows().length;
+
+  // Made behind the window's back: in the store, not in the page. First in
+  // the list the app hands back, because it has just spoken and that is the
+  // app's order.
+  FIXTURE.agents.unshift({
+    ...FIXTURE.agents[0],
+    id: "agent-outside",
+    name: "Made in the terminal",
+    started_at: 9,
+    spoke_at: 9,
+  });
+  FIXTURE.conversations["agent-outside"] = [
+    { id: "talk-outside", agent: "agent-outside", name: "First", opened: true },
+  ];
+  const asks = asked.length;
+  // Two at once, the way a turn arrives: the first line, then the rest of it
+  // before anybody could have answered the first.
+  tell("happened", { conversation: "talk-outside", seq: 9001, kind: "said", text: "Hello ", settled: false });
+  tell("happened", { conversation: "talk-outside", seq: 9002, kind: "said", text: "Hello from outside", settled: true });
+  await new Promise((r) => setTimeout(r, 300));
+
+  check(
+    "an agent made outside the window appears down the side at its first word",
+    rows().some((r) => r.includes("Made in the terminal")),
+    `${rows().length} rows, was ${before}`,
+  );
+  check(
+    "at the top, where a relaunch would put it, rather than below the fold",
+    rows()[0]?.includes("Made in the terminal"),
+    rows()[0]?.slice(0, 40) || "no rows",
+  );
+  // Its answer lands after the window met it, which is the order things
+  // happen in: the app reports something unread only once the turn is done.
+  window.__TAURI__.nowUnread("agent-outside", 1, Date.now());
+  tell("happened", { conversation: "talk-outside", seq: 9003, kind: "done" });
+  await new Promise((r) => setTimeout(r, 300));
+  check(
+    "and once its answer lands the row says what is new, not that nothing has been said",
+    /1 new/.test(rows()[0] || "") && !/Nothing said yet/.test(rows()[0] || ""),
+    rows()[0]?.slice(0, 60) || "no rows",
+  );
+  const since = asked.slice(asks).map((a) => a.name);
+  check(
+    "having asked the app whose conversation that is, and read the agents again",
+    since.includes("conversation_agent") && since.includes("agents"),
+    since.join(", ") || "the app was not asked",
+  );
+  check(
+    "once, not once per line that arrived while it was asking",
+    since.filter((n) => n === "conversation_agent").length === 1,
+    `asked ${since.filter((n) => n === "conversation_agent").length} times`,
+  );
+
+  // The same for an agent that settles its name before the window has met it,
+  // which is what the first answer of a new agent does.
+  FIXTURE.agents.unshift({
+    ...FIXTURE.agents[0],
+    id: "agent-outside-named",
+    name: "Made by a script",
+    started_at: 10,
+    spoke_at: 10,
+  });
+  tell("settled", [
+    "agent-outside-named",
+    { name: "Made by a script", title: null, about: null, mark: null, hue: null },
+  ]);
+  await new Promise((r) => setTimeout(r, 300));
+  check(
+    "and one that settles its name before the window has met it appears too",
+    rows()[0]?.includes("Made by a script"),
+    `${rows().length} rows`,
+  );
+
+  // One the app has never heard of either is left alone, and asked about once.
+  const stray = asked.length;
+  tell("happened", { conversation: "talk-nowhere", seq: 9004, kind: "said", text: "?", settled: true });
+  await new Promise((r) => setTimeout(r, 300));
+  check(
+    "one the app does not have either is asked about and then left alone",
+    rows().length === before + 2 &&
+      asked.slice(stray).filter((a) => a.name === "conversation_agent").length === 1,
+    `${rows().length} rows; asked ${asked.slice(stray).map((a) => a.name).join(", ") || "nothing"}`,
+  );
+  return found;
+}
