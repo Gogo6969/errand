@@ -125,8 +125,13 @@ esac
 # what it could not reach rather than hanging or lying.
 say "4. It reads something outside the app"
 FOUR=$("$APP" ask "$WHO" "Use your unread_mail tool once with at_most 1, and reply in one line with exactly what it returned." 2>/dev/null | tr "\n" " ")
+# Either shape of a true answer: "nothing unread" when the inbox is clear, or
+# the mail itself when it is not. The second used to fail the gate, because a
+# model that repeats a mail line word for word -- From so-and-so, subject
+# such-and-such, in INBOX -- says none of "unread" or "Mail", and the check
+# read a connector that had plainly worked as one that had said nothing.
 case "$FOUR" in
-  *nread*|*unread*|*Mail*) won "the connector answered" ;;
+  *nread*|*unread*|*Mail*|*From\ *|*[Ss]ubject*|*INBOX*|*Inbox*) won "the connector answered" ;;
   *) lost "the connector said nothing usable: ${FOUR:-nothing at all}" ;;
 esac
 
