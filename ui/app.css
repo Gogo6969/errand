@@ -612,6 +612,7 @@ main > aside, main > #title, main > #composer { flex: none; }
 #title .tile,
 #pin,
 #hide,
+#pause,
 #repeat,
 #watch,
 #goal,
@@ -1224,7 +1225,7 @@ body.catching #what { border-color: var(--accent); }
 #thread-name:hover { background: var(--card); border-color: var(--rule); }
 #thread-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-#pin, #hide {
+#pin, #hide, #pause {
   border: 1px solid var(--rule);
   background: transparent;
   color: var(--ink-soft);
@@ -1234,8 +1235,11 @@ body.catching #what { border-color: var(--accent); }
   border-radius: 7px;
   cursor: pointer;
 }
-#pin:hover, #hide:hover { color: var(--ink); border-color: var(--edge); }
+#pin:hover, #hide:hover, #pause:hover { color: var(--ink); border-color: var(--edge); }
 #pin[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+/* Paused is the one state here that means nothing will happen, and it should
+   not look like a preference. The same red as a watch that has given up. */
+#pause[aria-pressed="true"] { color: var(--wrong); border-color: var(--wrong); }
 #hide[aria-pressed="true"] { color: var(--ink); }
 #pin:focus-visible, #hide:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
@@ -1975,6 +1979,10 @@ body.in-a-call #what {
 #threads li .last.new {
   color: var(--ink-soft);
 }
+/* A paused agent, down the side: the mark goes grey and the line says so, so
+   the list answers "which of these are actually running" without a click. */
+#threads li.paused .tile { filter: grayscale(1); opacity: 0.55; }
+#threads li .last.paused { color: var(--wrong); }
 
 /* How a routine has actually been going. Three failed mornings should read as
    three failed mornings, not as a quiet conversation. */

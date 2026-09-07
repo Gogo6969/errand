@@ -2611,6 +2611,20 @@ async fn keep_at_it(app: &AppHandle, id: &str, said: &str) -> Result<(), String>
     let (Some(what), None) = (talk.goal.as_deref(), talk.goal_over.as_deref()) else {
         return Ok(());
     };
+    // Nor for a paused agent. Pause is the one switch for everything an agent
+    // does on its own, and a goal carrying itself on after somebody pressed
+    // it would be the app deciding that a goal is not "on its own".
+    {
+        let held: State<Held> = app.state();
+        let paused = held
+            .store
+            .agent(&talk.agent)
+            .map_err(|e| e.to_string())?
+            .is_some_and(|a| a.paused_at.is_some());
+        if paused {
+            return Ok(());
+        }
+    }
 
     let next = goal::read(said, talk.goal_tries, talk.goal_left.as_deref());
     let over = match &next {
@@ -5068,17 +5082,75 @@ async fn hide(
 /// Stop it, whatever it is in the middle of. The thread itself is kept.
 #[tauri::command]
 async fn stop(held: State<'_, Held>, id: String) -> Result<(), String> {
+    stop_it(&held, &id)
+}
+
+/// Stop one conversation, whatever it is in the middle of.
+fn stop_it(held: &Held, id: &str) -> Result<(), String> {
     // The doorway goes with it. A socket that outlives the conversation behind
     // it is a way in to something that is no longer there.
-    held.doorways.lock().unwrap().remove(&id);
+    held.doorways.lock().unwrap().remove(id);
     // Nothing else will say the turn is over. The engine releases a turn when
     // it reaches an ending, and a killed process never reaches one, so without
     // this a stopped conversation stays "working" in the window forever and the
     // clock quietly skips it every morning after.
-    held.running.lock().unwrap().remove(&id);
-    held.doing.lock().unwrap().remove(&id);
-    if let Some(mut thread) = held.live.lock().unwrap().remove(&id) {
+    held.running.lock().unwrap().remove(id);
+    held.doing.lock().unwrap().remove(id);
+    if let Some(mut thread) = held.live.lock().unwrap().remove(id) {
         thread.stop().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Pause an agent, or start it again.
+///
+/// One switch for everything it does on its own. Paused, the clock walks past
+/// its routines and its watches, a goal stops carrying on, and whatever it is
+/// in the middle of is stopped, run and all, so its history does not read as
+/// still going. Nothing it has is thrown away, and spoken to it still answers:
+/// a paused agent is one that waits to be asked.
+#[tauri::command]
+async fn pause(
+    app: AppHandle,
+    held: State<'_, Held>,
+    id: String,
+    paused: bool,
+) -> Result<(), String> {
+    write_it_down_if_new(&app, &held, &id)?;
+    let now = chrono::Local::now().timestamp_millis();
+    held.store
+        .pause(&id, paused, now)
+        .map_err(|e| e.to_string())?;
+    if !paused {
+        return Ok(());
+    }
+    let theirs = held.store.conversations(&id).map_err(|e| e.to_string())?;
+    for c in theirs {
+        let going = held.running.lock().unwrap().contains(&c.id)
+            || held.live.lock().unwrap().contains_key(&c.id);
+        if !going {
+            continue;
+        }
+        stop_it(&held, &c.id)?;
+        // A run the clock started is closed here, with the reason, or it
+        // stays open forever and reads as a morning that never ended.
+        let run = held.mid_run.lock().unwrap().remove(&c.id);
+        if let Some(run) = run {
+            let _ = held.store.a_run_ended(run, "paused by you");
+        }
+        // The window is told the way the engine would have told it, so a
+        // conversation it is showing stops saying "Working" without it having
+        // to guess which of the agent's conversations were going.
+        let _ = app.emit(
+            "happened",
+            Happened {
+                conversation: c.id.clone(),
+                seq: None,
+                event: Event::Failed {
+                    why: "Paused. It will not run on its own until you start it again.".to_string(),
+                },
+            },
+        );
     }
     Ok(())
 }
@@ -5430,6 +5502,7 @@ pub fn run() {
             rename,
             pin,
             hide,
+            pause,
             stop,
             forget
         ])

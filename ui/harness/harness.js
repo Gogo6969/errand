@@ -553,6 +553,12 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             }
             return Promise.resolve(out);
           }
+          case "pause": {
+            const a = fixture.agents.find((x) => x.id === args.id);
+            if (!a) return Promise.reject("there is no such agent");
+            a.paused_at = args.paused ? 1 : null;
+            return Promise.resolve(null);
+          }
           case "conversation_agent":
             return Promise.resolve(
               Object.entries(fixture.conversations).find(([, talks]) =>

@@ -20,7 +20,7 @@
 //! originate in the window, and if those two can interleave badly the stored
 //! conversation is not the one anybody had.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -266,6 +266,9 @@ pub struct Agent {
     /// the model to run as. Nothing means the engine's own default, which for
     /// Claude is whatever that person's CLI is set to.
     pub engine_settings: Option<String>,
+    /// When somebody paused it. Nothing runs on its own while this is set:
+    /// not its routines, not its watches, not a goal. Spoken to, it answers.
+    pub paused_at: Option<i64>,
 }
 
 /// One thing an agent has written down about how its own job is done.
@@ -883,6 +886,10 @@ const CHANGES: &[&str] = &[
          made_at INTEGER NOT NULL,
          UNIQUE(agent, name)
      );",
+    // When somebody paused it, or nothing. A paused agent runs nothing on its
+    // own: the clock walks past its routines and its watches, and a goal
+    // stops carrying on. It still answers when spoken to.
+    "ALTER TABLE agents ADD COLUMN paused_at INTEGER;",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -1743,12 +1750,14 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Every conversation that is watching something and has not stopped.
+    /// Every conversation that is watching something and has not stopped, and
+    /// whose agent has not been paused.
     pub fn watching(&self) -> Result<Vec<Conversation>> {
+        let paused = self.paused_agents()?;
         Ok(self
             .every_conversation()?
             .into_iter()
-            .filter(|c| c.watches.is_some() && c.paused.is_none())
+            .filter(|c| c.watches.is_some() && c.paused.is_none() && !paused.contains(&c.agent))
             .collect())
     }
 
@@ -2157,6 +2166,7 @@ impl Store {
                     goal, goal_at, goal_tries, goal_left, goal_over, routine_off
                FROM conversations
               WHERE runs_at IS NOT NULL AND runs_what IS NOT NULL AND routine_off = 0
+                AND agent NOT IN (SELECT id FROM agents WHERE paused_at IS NOT NULL)
               ORDER BY spoke_at DESC",
         )?;
         let rows = q.query_map([], read_conversation)?;
@@ -2200,7 +2210,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
             "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
-                    cwd, model, started_at, spoke_at, engine, engine_settings
+                    cwd, model, started_at, spoke_at, engine, engine_settings,
+                    paused_at
                FROM agents ORDER BY pinned DESC, spoke_at DESC",
         )?;
         let rows = q.query_map([], |r| {
@@ -2220,6 +2231,7 @@ impl Store {
                 spoke_at: r.get(12)?,
                 engine: r.get(13)?,
                 engine_settings: r.get(14)?,
+                paused_at: r.get(15)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2428,6 +2440,26 @@ impl Store {
             params![pinned as i64, conversation],
         )?;
         Self::only_if_it_is_there(changed, "agent")
+    }
+
+    /// Stop it acting on its own, or let it again. Everything it has is kept:
+    /// the routines stay set, the watches stay set, and the clock simply
+    /// walks past them until this is switched back.
+    pub fn pause(&self, agent: &str, paused: bool, now: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE agents SET paused_at = ? WHERE id = ?",
+            params![paused.then_some(now), agent],
+        )?;
+        Self::only_if_it_is_there(changed, "agent")
+    }
+
+    /// The agents that are paused, by id.
+    pub fn paused_agents(&self) -> Result<HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare("SELECT id FROM agents WHERE paused_at IS NOT NULL")?;
+        let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<HashSet<_>>>()?)
     }
 
     /// Take it out of the list. It keeps working; it is only out of the way.
@@ -2692,7 +2724,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
             "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
-                    cwd, model, started_at, spoke_at, engine, engine_settings
+                    cwd, model, started_at, spoke_at, engine, engine_settings,
+                    paused_at
                FROM agents
               WHERE name LIKE ?1 ESCAPE '\\'
                  OR COALESCE(about, '') LIKE ?1 ESCAPE '\\'
@@ -2723,6 +2756,7 @@ impl Store {
                 spoke_at: r.get(12)?,
                 engine: r.get(13)?,
                 engine_settings: r.get(14)?,
+                paused_at: r.get(15)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -3477,6 +3511,55 @@ mod tests {
 
         s.routine_off(&id, false).unwrap();
         assert_eq!(s.routines().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_paused_agent_is_walked_past_by_the_clock_and_keeps_everything_it_had() {
+        // Pausing an agent is the one switch for everything it does on its
+        // own. Before this there was a Pause under Repeat for one routine at a
+        // time, and stopping a bot with three routines and a watch meant
+        // finding and switching off four things, then finding them again.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("desk", NOT_YET_NAMED, Path::new("/tmp/desk"))
+            .unwrap();
+        let id = s.conversations("desk").unwrap()[0].id.clone();
+        s.runs(&id, Some("daily 07:00"), Some("What moved overnight"))
+            .unwrap();
+        s.begin_conversation("desk-eyes", "desk", "Eyes").unwrap();
+        s.watch("desk-eyes", Some("~/Downloads every 10m"), Some("Tell me"))
+            .unwrap();
+        assert_eq!(s.routines().unwrap().len(), 1);
+        assert_eq!(s.watching().unwrap().len(), 1);
+
+        s.pause("desk", true, 1_000).unwrap();
+        assert!(
+            s.routines().unwrap().is_empty(),
+            "a paused agent's routine still ran"
+        );
+        assert!(
+            s.watching().unwrap().is_empty(),
+            "a paused agent's watch was still looked at"
+        );
+        assert_eq!(s.paused_agents().unwrap().len(), 1);
+        assert_eq!(s.agent("desk").unwrap().unwrap().paused_at, Some(1_000));
+        // Nothing about it was thrown away: the routine is still set and not
+        // switched off, the watch is still set and not stopped.
+        let still = s.conversations("desk").unwrap();
+        let routine = still.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(routine.runs_at.as_deref(), Some("daily 07:00"));
+        assert!(!routine.routine_off);
+        let eyes = still.iter().find(|c| c.id == "desk-eyes").unwrap();
+        assert_eq!(eyes.watches.as_deref(), Some("~/Downloads every 10m"));
+        assert!(eyes.paused.is_none());
+
+        s.pause("desk", false, 2_000).unwrap();
+        assert_eq!(s.routines().unwrap().len(), 1);
+        assert_eq!(s.watching().unwrap().len(), 1);
+        assert_eq!(s.agent("desk").unwrap().unwrap().paused_at, None);
+
+        // An agent that is not there is said to be not there, not quietly
+        // nothing.
+        assert!(s.pause("nobody", true, 3_000).is_err());
     }
 
     #[test]

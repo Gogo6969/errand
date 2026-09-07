@@ -208,6 +208,7 @@ const el = {
   routineSays: document.getElementById("routine-says"),
   pin: document.getElementById("pin"),
   hide: document.getElementById("hide"),
+  pause: document.getElementById("pause"),
   whois: document.getElementById("whois"),
   whoisName: document.getElementById("whois-name"),
   whoisTitle: document.getElementById("whois-title"),
@@ -861,6 +862,9 @@ function asAgent(a, keeping) {
     asks: a.asks || "auto",
     pinned: !!a.pinned,
     hidden: !!a.hidden,
+    // Nothing runs on its own while this is set. Read from when it was set,
+    // which is what the app keeps.
+    paused: !!a.paused_at,
     engine: a.model || "",
     on: a.engine || "claude",
     onSettings: a.engine_settings || null,
@@ -1080,6 +1084,11 @@ function openTheMenu(a, x, y) {
     await invoke("pin", { id: a.id, pinned: a.pinned });
   });
 
+  item(a.paused ? "Start again" : "Pause", async () => {
+    closeTheMenu();
+    await setPaused(a, !a.paused);
+  });
+
   item("Who this is", async () => {
     closeTheMenu();
     // Its own profile, which means opening it first: the panel edits whoever
@@ -1238,6 +1247,7 @@ function drawThreads() {
       };
       li.append(tile(kindFor(a), busy(a.id), a.hue));
       if (a.pinned) li.classList.add("pinned");
+      if (a.paused) li.classList.add("paused");
 
       const words = document.createElement("span");
       words.className = "words";
@@ -1266,19 +1276,25 @@ function drawThreads() {
       // was asked.
       last.textContent = hit
         ? hit.snippet
-        : waitingOn(a.id)
-        ? "Waiting on you"
-          : busy(a.id)
-            ? "Working…"
-            : // Something happened here and nobody has seen it. This takes the
-            // line for as long as that is true, because it is the one thing
-            // about an agent somebody cannot work out by looking at the list,
-            // and it is the whole reason to leave errands running.
-              news
-              ? `${news.lines} new · ${howLongAgo(news.at)}`
-              : a.about || "Nothing said yet";
+        : // Paused comes before everything else about it. A question it was
+          // asking was asked by a turn that pausing stopped, what is new in it
+          // can wait, and that nothing more will arrive cannot.
+          a.paused
+          ? "Paused"
+          : waitingOn(a.id)
+            ? "Waiting on you"
+            : busy(a.id)
+              ? "Working…"
+              : // Something happened here and nobody has seen it. This takes
+                // the line for as long as that is true, because it is the one
+                // thing about an agent somebody cannot work out by looking at
+                // the list, and it is the whole reason to leave errands running.
+                news
+                ? `${news.lines} new · ${howLongAgo(news.at)}`
+                : a.about || "Nothing said yet";
       if (hit) last.classList.add("hit");
-      if (waitingOn(a.id)) last.classList.add("waiting");
+      if (a.paused && !hit) last.classList.add("paused");
+      else if (waitingOn(a.id)) last.classList.add("waiting");
       if (news && !waitingOn(a.id) && !busy(a.id)) last.classList.add("new");
 
       words.append(name, last);
@@ -2703,12 +2719,58 @@ el.hide.addEventListener("click", async () => {
   await invoke("hide", { id: t.id, hidden: t.hidden });
 });
 
-/** The two toggles, saying which way they are. */
+el.pause.addEventListener("click", async () => {
+  const t = whose();
+  if (!t) return;
+  await setPaused(t, !t.paused);
+});
+
+/**
+ * Pause an agent, or start it again.
+ *
+ * One switch for everything it does on its own. There was a Pause under
+ * Repeat, for one routine at a time, and stopping a bot with three routines
+ * and a watch meant finding and switching off four things and then finding
+ * them again. Paused, the clock walks past all of it, a goal stops carrying
+ * on, and whatever it is in the middle of is stopped. Spoken to, it still
+ * answers. Nothing it has is thrown away.
+ */
+async function setPaused(a, paused) {
+  const was = a.paused;
+  a.paused = paused;
+  // Shown as paused at once, and its conversations as stopped: the app stops
+  // them and says so, but the row should not go on saying "Working" for the
+  // half second that takes.
+  if (paused) {
+    for (const t of talks.values()) if (t.agent === a.id && t.working) itHasStopped(t);
+  }
+  if (a.id === showingAgent) {
+    drawPinned(a);
+    drawMark(a);
+    drawMessages();
+  }
+  drawThreads();
+  try {
+    await invoke("pause", { id: a.id, paused });
+  } catch (why) {
+    a.paused = was;
+    if (a.id === showingAgent) drawPinned(a);
+    drawThreads();
+    complain(String(why));
+  }
+}
+
+/** The three toggles, saying which way they are. */
 function drawPinned(t) {
   el.pin.textContent = t.pinned ? "Pinned" : "Pin";
   el.pin.setAttribute("aria-pressed", String(t.pinned));
   el.hide.textContent = t.hidden ? "Hidden" : "Hide";
   el.hide.setAttribute("aria-pressed", String(t.hidden));
+  el.pause.textContent = t.paused ? "Paused" : "Pause";
+  el.pause.setAttribute("aria-pressed", String(t.paused));
+  el.pause.title = t.paused
+    ? "Paused. Nothing runs on its own until you start it again"
+    : "Nothing runs on its own until you start it again";
 }
 
 /**
@@ -3333,6 +3395,12 @@ function whatCouldBeDone() {
   add("What changed in this one", "since the version before it", () => whatChanged(), true);
   add("What it has cost", "today and this month", () => whatItCost(), true);
   add("Check this setup", "what is wrong, and what to do", () => checkup());
+  add(
+    whose()?.paused ? "Start this agent again" : "Pause this agent",
+    "nothing runs on its own until you start it again",
+    () => setPaused(whose(), !whose().paused),
+    !!whose(),
+  );
   add("What is running", "everywhere, not just here", () => whatsRunning());
   add(
     "Carry this on in a new conversation",

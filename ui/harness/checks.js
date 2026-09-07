@@ -4010,3 +4010,83 @@ export async function madeOutsideTheWindow() {
   );
   return found;
 }
+
+/**
+ * Pausing an agent.
+ *
+ * One switch for everything it does on its own, in the header beside Pin and
+ * Hide, in the menu on its row, and in the palette. And the state has to be
+ * readable down the side without a click: which of these are actually
+ * running is the question the list is for.
+ */
+export async function pausingAnAgent() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  const rowOf = (id) => [...document.querySelectorAll("#threads li")].find((li) => li.dataset.agent === id);
+  const button = document.getElementById("pause");
+
+  // Whoever is open: the header's buttons act on the agent on screen.
+  const open = document.querySelector('#threads li[aria-current="true"]')?.dataset.agent || "";
+  const talk = document.getElementById("talks").value;
+  check("the header offers Pause beside Pin and Hide", button && !button.hidden && button.textContent === "Pause", button?.textContent || "no button");
+
+  // Working, so that pausing has something to stop.
+  tell("happened", { conversation: talk, seq: 9101, kind: "started", session: talk, model: "test" });
+  await settle(150);
+  const working = rowOf(open)?.querySelector(".last")?.textContent || "";
+
+  const asks = asked.length;
+  button.click();
+  await settle(300);
+  const row = rowOf(open);
+  const line = row?.querySelector(".last")?.textContent || "";
+  check(
+    "pressing it asks the app to pause that agent",
+    asked.slice(asks).some((a) => a.name === "pause" && a.args.id === open && a.args.paused === true),
+    asked.slice(asks).map((a) => a.name).join(", ") || "the app was not asked",
+  );
+  check("and the button says so, pressed", button.textContent === "Paused" && button.getAttribute("aria-pressed") === "true", `${button.textContent} pressed=${button.getAttribute("aria-pressed")}`);
+  check("the row down the side says Paused, in place of Working", row?.classList.contains("paused") && line === "Paused", `was "${working}", now "${line}"`);
+  check("and its conversation no longer shows as working", !document.querySelector("#composer.working, #messages .working"), "no working marker");
+
+  // The menu on the row offers the way back.
+  row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 200 }));
+  await settle(150);
+  const menu = document.getElementById("menu");
+  const items = [...menu.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent);
+  check("the menu on a paused agent offers Start again", items.includes("Start again"), items.join(" | "));
+  const again = [...menu.querySelectorAll('[role="menuitem"]')].find((b) => b.textContent === "Start again");
+  const before = asked.length;
+  again?.click();
+  await settle(300);
+  check(
+    "and pressing it asks the app to start it again",
+    asked.slice(before).some((a) => a.name === "pause" && a.args.id === open && a.args.paused === false),
+    asked.slice(before).map((a) => a.name).join(", ") || "the app was not asked",
+  );
+  const back = rowOf(open);
+  check(
+    "after which the row and the button read as running again",
+    !back?.classList.contains("paused") && back?.querySelector(".last")?.textContent !== "Paused" && button.textContent === "Pause",
+    `${back?.querySelector(".last")?.textContent} / ${button.textContent}`,
+  );
+
+  // The menu on an agent that is not paused offers Pause.
+  back.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 200 }));
+  await settle(150);
+  const offered = [...menu.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent);
+  check("and the menu on a running agent offers Pause", offered.includes("Pause"), offered.join(" | "));
+  document.body.click();
+  await settle(100);
+
+  // The palette has it too, worded for the state it is in.
+  // Opened the way somebody would: through the palette.
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  await settle(200);
+  const palette = [...document.querySelectorAll("#palette-list li")].map((li) => li.textContent);
+  check("the palette offers to pause this agent", palette.some((p) => p.startsWith("Pause this agent")), palette.find((p) => /agent/.test(p)) || `${palette.length} entries`);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await settle(100);
+  return found;
+}

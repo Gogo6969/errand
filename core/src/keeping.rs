@@ -243,6 +243,7 @@ mod tests {
             spoke_at: 0,
             engine: "claude".into(),
             engine_settings: None,
+            paused_at: None,
         }
     }
 
