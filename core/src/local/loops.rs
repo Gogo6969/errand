@@ -1833,8 +1833,11 @@ mod an_aside_leaves_no_trace {
                 waited.elapsed() < std::time::Duration::from_secs(20),
                 "the step never started"
             );
+            // The command's own step, by the id the server gave it. The engine
+            // says other things as steps too, a retry under a loaded machine
+            // among them, and those finish on their own.
             match events.try_recv() {
-                Ok(Event::Doing(_)) => break,
+                Ok(Event::Doing(step)) if step.call == "call-1" => break,
                 Ok(_) => {}
                 Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
             }
@@ -1846,7 +1849,9 @@ mod an_aside_leaves_no_trace {
         loop {
             match events.try_recv() {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-                Ok(Event::Did { .. }) => panic!("the step it was stopped in finished anyway"),
+                Ok(Event::Did { call, outcome }) if call == "call-1" => {
+                    panic!("the step it was stopped in finished anyway: {outcome}")
+                }
                 _ => {
                     assert!(
                         stopped.elapsed() < std::time::Duration::from_secs(5),
