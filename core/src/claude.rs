@@ -681,6 +681,15 @@ impl Claude {
         });
 
         let ended = tx.clone();
+        // Where an aside borrows a way to answer from, for as long as the
+        // process is there to be copied. Emptied the moment its output ends.
+        // A sender kept by the task that writes to it held the channel open
+        // after the process died: the app never heard, a turn in the middle
+        // of running was never ended, and the next thing said was the one
+        // marked as stopped part way.
+        let for_an_aside: Arc<Mutex<Option<std::sync::mpsc::Sender<Event>>>> =
+            Arc::new(Mutex::new(Some(tx.clone())));
+        let gone_quiet = for_an_aside.clone();
         let asked = waiting.clone();
         let watching_for_the_end = still_wanted.clone();
         handle.spawn(async move {
@@ -734,9 +743,9 @@ impl Claude {
                     why: in_words(&also_heard.lock().unwrap()),
                 });
             }
+            gone_quiet.lock().unwrap().take();
         });
 
-        let told = tx.clone();
         let off_the_record = OffTheRecord {
             claude: where_claude_is(),
             cwd: cwd.to_path_buf(),
@@ -759,6 +768,10 @@ impl Claude {
                     // engine. Answered alongside, a reply to the person would
                     // arrive while the app was still reading the aside's.
                     Turn::Aside(question) => {
+                        // Nothing to answer into once the process has gone.
+                        let Some(told) = for_an_aside.lock().unwrap().clone() else {
+                            continue;
+                        };
                         let events = match off_the_record.ask(&question).await {
                             Ok(said) => vec![
                                 Event::Said {
