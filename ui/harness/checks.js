@@ -4099,3 +4099,70 @@ export async function pausingAnAgent() {
   await settle(100);
   return found;
 }
+
+/**
+ * A handover that stops waiting, and an agent paused from somewhere else.
+ *
+ * A handover told nobody: nothing down the side said an agent was waiting on
+ * a sign-in, and a card whose agent had gone kept buttons that told a call
+ * nobody was making. And an agent that paused because it was asked to never
+ * showed it here.
+ */
+export async function aHandoverThatStopsWaiting() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  // In a conversation with nothing else waiting in it, so the side is saying
+  // what this card is doing and not what another one is.
+  await openTalk("talk-outside");
+  const open = document.querySelector('#threads li[aria-current="true"]')?.dataset.agent || "";
+  const where = document.getElementById("talks").value;
+  const said = () =>
+    [...document.querySelectorAll("#threads li")]
+      .find((li) => li.dataset.agent === open)
+      ?.querySelector(".last")?.textContent || "";
+
+  tell("handing_over", {
+    conversation: where,
+    seq: 9700,
+    handover: "h-ends",
+    what: "Turn on Full Disk Access for Errand",
+    why: "",
+    where: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
+  });
+  await settle(200);
+  check("a handover says Waiting on you down the side, as a question does", said() === "Waiting on you", said());
+  const card = [...document.querySelectorAll("#messages .handover")].pop();
+  const link = card?.querySelector("a.detail");
+  check(
+    "a pane of System Settings is offered as a link, the same as a page",
+    link?.textContent.startsWith("x-apple.systempreferences:"),
+    link?.textContent || "no link",
+  );
+
+  tell("handover_ended", { conversation: where, handover: "h-ends" });
+  await settle(200);
+  const after = [...document.querySelectorAll("#messages .handover")].pop();
+  check(
+    "when it stops waiting, the card says so",
+    /stopped waiting/.test(after?.textContent || ""),
+    (after?.textContent || "").slice(0, 90),
+  );
+  check("and the side stops saying Waiting on you", said() !== "Waiting on you", said());
+  const before = asked.length;
+  after?.querySelector(".choices button")?.click();
+  await settle(300);
+  check(
+    "and pressing it says the answer into the conversation instead of into a call that has gone",
+    asked.slice(before).some((a) => a.name === "say" && /Carry on/.test(a.args?.text || "")),
+    asked.slice(before).map((a) => a.name).join(", ") || "nothing was asked",
+  );
+
+  tell("paused", { agent: open, paused: true });
+  await settle(150);
+  check("an agent paused from somewhere else reads Paused down the side", said() === "Paused", said());
+  tell("paused", { agent: open, paused: false });
+  await settle(150);
+  check("and one started again from somewhere else reads as running", said() !== "Paused", said());
+  return found;
+}

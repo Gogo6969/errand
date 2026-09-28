@@ -467,8 +467,16 @@ function theRowFor(nth) {
 }
 
 function waitingOn(agent) {
+  // A handover is waiting on somebody as much as a question is. Only questions
+  // counted, so an agent that needed a sign-in said nothing down the side.
   return [...talks.values()].some(
-    (t) => t.agent === agent && t.messages.some((m) => m.kind === "asking" && !m.answered),
+    (t) =>
+      t.agent === agent &&
+      t.messages.some(
+        (m) =>
+          !m.answered &&
+          (m.kind === "asking" || (m.kind === "over_to_you" && stillWaiting.has(m.handover))),
+      ),
   );
 }
 
@@ -981,7 +989,9 @@ function fromStoreLine(line, live = false) {
     // screen to answer it with.
     case "over_to_you": {
       const [what, ...rest] = String(line.text).split("\n");
-      const where = rest.find((one) => /^https?:\/\//.test(one)) || "";
+      // A pane of System Settings is where most handovers send somebody, and
+      // reading one back used to fold its link into the words as text.
+      const where = rest.find((one) => /^(https?:\/\/|x-apple\.systempreferences:)/.test(one)) || "";
       const still = stillWaiting.has(line.call);
       return {
         kind: "over_to_you",
@@ -1500,7 +1510,12 @@ function handItOver(m) {
     link.textContent = m.where;
     link.onclick = (e) => {
       e.preventDefault();
-      invoke("show_in_browser", { url: m.where }).catch(() => {});
+      // Said on the link when it will not open. It used to be dropped, so a
+      // link that did nothing looked exactly like one that had.
+      invoke("show_in_browser", { url: m.where }).catch((why) => {
+        link.title = String(why);
+        link.classList.add("refused");
+      });
     };
     words.append(link);
   }
@@ -1539,9 +1554,11 @@ function handItOver(m) {
         if (!waiting) return sayIt(carryOn);
         try {
           await invoke("handed_back", { handover: m.handover, how });
-        } catch (why) {
-          m.answered = String(why);
-          drawMessages();
+        } catch {
+          // It stopped waiting between the card being drawn and the press, so
+          // the answer goes into the conversation instead of nowhere.
+          m.stillThere = false;
+          sayIt(carryOn);
         }
       };
       return b;
@@ -1831,6 +1848,29 @@ listen("handed_back", ({ payload }) => {
   const m = t.messages.find((one) => one.handover === payload.handover);
   if (m && m.answered == null) m.answered = payload.how;
   if (showing === payload.conversation) drawMessages();
+});
+
+// A handover that stopped waiting on its own, or whose conversation was
+// stopped. Its card keeps its buttons, and they now say the answer into the
+// conversation: pressing one used to tell a call that had already gone.
+listen("handover_ended", ({ payload }) => {
+  stillWaiting.delete(payload.handover);
+  const t = talks.get(payload.conversation);
+  if (!t) return;
+  const m = t.messages.find((one) => one.handover === payload.handover);
+  if (m) m.stillThere = false;
+  if (showing === payload.conversation) drawMessages();
+  drawThreads();
+});
+
+// An agent paused or started again from somewhere other than this window: by
+// asking it to, or from a terminal.
+listen("paused", ({ payload }) => {
+  const a = agents.get(payload.agent);
+  if (!a || a.paused === payload.paused) return;
+  a.paused = payload.paused;
+  if (a.id === showingAgent) drawPinned(a);
+  drawThreads();
 });
 
 listen("handing_over", async ({ payload }) => {

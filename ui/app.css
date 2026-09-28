@@ -866,6 +866,8 @@ main > aside, main > #title, main > #composer { flex: none; }
   text-decoration: none;
 }
 .handover a.detail:hover { text-decoration: underline; }
+/* A link the Mac would not open, said on the link itself. */
+.handover a.detail.refused { color: var(--faint); text-decoration: line-through; }
 
 /* ------------------------------------------------------------ asking -- */
 

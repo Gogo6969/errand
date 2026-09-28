@@ -692,7 +692,47 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         // be saying it about one that may not.
         let mut its_own_schedules: std::collections::HashSet<String> =
             std::collections::HashSet::new();
-        while let Ok(event) = events.recv() {
+        let current = || {
+            let held: State<Held> = app.state();
+            let now = held.opening.lock().unwrap().get(&id).copied();
+            now == Some(opening)
+        };
+        let mut said_it_died = false;
+        loop {
+            let event = match events.recv() {
+                Ok(event) => event,
+                // Nothing more will come. If this is still the conversation's
+                // engine and a turn was going, the turn ended here and nothing
+                // else will say so: the clock went on skipping that routine
+                // every tick until a restart, the window said "Working" for
+                // good, and whoever was waiting on it waited ten minutes.
+                // Told as a failure, through everything a failure goes through.
+                Err(_) => {
+                    let going = {
+                        let held: State<Held> = app.state();
+                        let going = held.running.lock().unwrap().contains(&id)
+                            || held.doing.lock().unwrap().contains_key(&id);
+                        going
+                    };
+                    if current() && going && !said_it_died {
+                        said_it_died = true;
+                        Event::Failed {
+                            why:
+                                "The engine stopped part way through, so this turn did not finish."
+                                    .to_string(),
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            };
+            // From an engine that has been put away, whether stopped, paused,
+            // or replaced by a routine's own: nothing it says now is part of
+            // the conversation. Read, it put "Writing" back after Stop, and a
+            // replaced engine's ending closed the new run's claim.
+            if !current() {
+                continue;
+            }
             // An agent in the middle of settling on a name is answering us, not
             // whoever is at the window.
             if settling.lock().unwrap().contains_key(&id) {
@@ -898,6 +938,8 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 let held: State<Held> = app.state();
                 held.running.lock().unwrap().remove(&id);
                 held.doing.lock().unwrap().remove(&id);
+                // Whatever it was waiting on, it is not waiting any more.
+                onscreen::waiting(how_many_are_waiting(&held));
                 // However it ended. The mark is only about whether one was
                 // going, so a failure clears it as surely as an answer does.
                 let _ = store.a_turn_ended(&id);
@@ -1516,11 +1558,27 @@ async fn answer(
         }
     }
 
-    let mut live = held.live.lock().unwrap();
-    let thread = live
-        .get_mut(&id)
-        .ok_or_else(|| "that conversation is not open".to_string())?;
-    thread.answer(&call, said).map_err(|e| e.to_string())
+    {
+        let mut live = held.live.lock().unwrap();
+        let thread = live
+            .get_mut(&id)
+            .ok_or_else(|| "that conversation is not open".to_string())?;
+        thread.answer(&call, said).map_err(|e| e.to_string())?;
+    }
+    // Answered, so it is no longer waiting on anybody, and the dock stops
+    // saying so. The badge was only ever set when a notification went out, so
+    // a question answered at eight left a 1 on the icon all day.
+    {
+        let mut doing = held.doing.lock().unwrap();
+        if doing
+            .get(&id)
+            .is_some_and(|now| now.starts_with("Waiting on you"))
+        {
+            doing.insert(id.clone(), "Writing".to_string());
+        }
+    }
+    onscreen::waiting(how_many_are_waiting(&held));
+    Ok(())
 }
 
 /// One thing that could answer a thread.
@@ -2191,17 +2249,27 @@ async fn use_engine(
         .into_iter()
         .map(|c| c.id)
         .collect();
-    {
-        let mut live = held.live.lock().unwrap();
-        let mut doors = held.doorways.lock().unwrap();
-        for conversation in theirs {
-            // Both, and for the same reason: an agent moved onto a local model
-            // reaches these tools in process and has no use for a socket, and
-            // one moved back gets a fresh doorway when it is next opened.
-            doors.remove(&conversation);
-            if let Some(mut was) = live.remove(&conversation) {
-                let _ = was.stop();
-            }
+    for conversation in theirs {
+        // One in the middle of a turn is stopped and says so, like any other
+        // stop: it used to be stopped in silence and went on saying "Working"
+        // with half a sentence on screen, and the next turn was appended to it.
+        if mid_turn(&held, &conversation) {
+            stop_and_say(
+                &app,
+                &held,
+                &conversation,
+                "stopped because its engine was changed",
+                "Stopped, because what answers this agent was changed.",
+            );
+            continue;
+        }
+        // Both, and for the same reason: an agent moved onto a local model
+        // reaches these tools in process and has no use for a socket, and one
+        // moved back gets a fresh doorway when it is next opened.
+        held.doorways.lock().unwrap().remove(&conversation);
+        let was = held.live.lock().unwrap().remove(&conversation);
+        if let Some(mut was) = was {
+            let _ = was.stop();
         }
     }
 
@@ -2298,9 +2366,7 @@ async fn look_around(app: &AppHandle) -> Result<(), String> {
                 // said something into a conversation mid-answer would be two
                 // people talking at once.
                 let held: State<Held> = app.state();
-                let busy = held.running.lock().unwrap().contains(&c.id)
-                    || held.doing.lock().unwrap().contains_key(&c.id)
-                    || held.looking.lock().unwrap().contains(&c.id);
+                let busy = mid_turn(&held, &c.id) || held.looking.lock().unwrap().contains(&c.id);
                 let due = match c.looked_at {
                     None => true,
                     Some(then) => now.timestamp_millis() - then >= watch.every * 60 * 1000,
@@ -2934,7 +3000,21 @@ fn answer_what_engines_cannot(
                     // Not one of the app's own, so it may be one of the things
                     // this Mac can be let at.
                     None => match errand_core::connectors::which(&asked.tool) {
-                        Some(job) => reach_for_it(&app, job, &asked),
+                        // On a thread of its own. A connector waits on Mail
+                        // or Chrome for up to a minute, and on a runtime
+                        // worker that wait held up engine readers, the clock
+                        // and the window's own commands behind it.
+                        Some(job) => {
+                            let (app, from, args) =
+                                (app.clone(), asked.from.clone(), asked.args.clone());
+                            tauri::async_runtime::spawn_blocking(move || {
+                                reach_for_it(&app, job, &from, &args)
+                            })
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err(anyhow::anyhow!("that stopped part way through"))
+                            })
+                        }
                         None => Err(anyhow::anyhow!("there is no {} here", asked.tool)),
                     },
                 };
@@ -3029,8 +3109,12 @@ fn set_it_running(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
 /// ask is confined to its own folder, and this reaches outside it on purpose.
 /// So an unconnected one is refused in a sentence rather than answered, and the
 /// sentence says where the switch is.
-fn reach_for_it(app: &AppHandle, job: &'static str, asked: &team::Wants) -> anyhow::Result<String> {
-    let args = &asked.args;
+fn reach_for_it(
+    app: &AppHandle,
+    job: &'static str,
+    from: &str,
+    args: &serde_json::Value,
+) -> anyhow::Result<String> {
     let wanted = errand_core::connectors::needs(job);
     let on = {
         let held: State<Held> = app.state();
@@ -3046,7 +3130,7 @@ fn reach_for_it(app: &AppHandle, job: &'static str, asked: &team::Wants) -> anyh
              on under Settings, and it takes effect at once."
         );
     }
-    if nobody_would_be_asked(app, job, asked) {
+    if nobody_would_be_asked(app, job, from, args) {
         anyhow::bail!(errand_core::connectors::NOBODY_NAMED_IT);
     }
     errand_core::connectors::run(job, args)
@@ -3056,9 +3140,9 @@ fn reach_for_it(app: &AppHandle, job: &'static str, asked: &team::Wants) -> anyh
 ///
 /// Read from the store, because the person's own words are the lines they
 /// wrote, and a page an agent read is never one of them.
-fn nobody_would_be_asked(app: &AppHandle, job: &str, asked: &team::Wants) -> bool {
+fn nobody_would_be_asked(app: &AppHandle, job: &str, from: &str, args: &serde_json::Value) -> bool {
     let held: State<Held> = app.state();
-    let Ok(Some(talk)) = held.store.conversation(&asked.from) else {
+    let Ok(Some(talk)) = held.store.conversation(from) else {
         return false;
     };
     let Ok(Some(agent)) = held.store.agent(&talk.agent) else {
@@ -3066,7 +3150,7 @@ fn nobody_would_be_asked(app: &AppHandle, job: &str, asked: &team::Wants) -> boo
     };
     let they_said: Vec<String> = held
         .store
-        .lines(&asked.from)
+        .lines(from)
         .unwrap_or_default()
         .into_iter()
         .filter(|line| line.kind == "mine")
@@ -3076,7 +3160,7 @@ fn nobody_would_be_asked(app: &AppHandle, job: &str, asked: &team::Wants) -> boo
         &agent.engine,
         &agent.asks,
         job,
-        &asked.args,
+        args,
         &they_said,
     )
 }
@@ -3157,7 +3241,15 @@ async fn looking_at(held: State<'_, Held>, id: Option<String>) -> Result<(), Str
 /// Never the last one an agent has: the store refuses, and the refusal says
 /// what to do instead rather than only that it would not.
 #[tauri::command]
-async fn forget_conversation(held: State<'_, Held>, id: String) -> Result<(), String> {
+async fn forget_conversation(
+    app: AppHandle,
+    held: State<'_, Held>,
+    id: String,
+) -> Result<(), String> {
+    // Stopped first. Deleted in the middle of an errand, its engine went on
+    // running commands with nothing on screen, and a question it stopped on
+    // could never be answered.
+    let _ = stop_it(&app, &held, &id, "deleted");
     held.store
         .forget_conversation(&id)
         .map_err(|e| e.to_string())
@@ -3312,6 +3404,15 @@ async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Str
                 where_at: where_at.to_string(),
             },
         );
+        // Told the way a question is: a banner unless this conversation is in
+        // front of them, the badge, and "Waiting on you" down the side. A
+        // handover used to tell nobody, so one made while the window was
+        // closed sat ten minutes unseen and then gave up.
+        held.doing
+            .lock()
+            .unwrap()
+            .insert(asked.from.clone(), format!("Waiting on you: {what}"));
+        tell_them_it_is_theirs(app, &held.store, &asked.from, what);
     }
 
     // Ten minutes, the same as everything else here waits, and for the same
@@ -3321,6 +3422,30 @@ async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Str
     {
         let held: State<Held> = app.state();
         held.handovers.lock().unwrap().remove(&handover);
+        // No longer waiting on anybody, if nothing else has taken the
+        // conversation over in the meantime.
+        {
+            let mut doing = held.doing.lock().unwrap();
+            if doing
+                .get(&asked.from)
+                .is_some_and(|now| now.starts_with("Waiting on you"))
+            {
+                doing.insert(asked.from.clone(), "Writing".to_string());
+            }
+        }
+        onscreen::waiting(how_many_are_waiting(&held));
+    }
+    // Its card is told when it stopped waiting on its own, so the buttons
+    // offer to say it into the conversation rather than into a call that
+    // has gone.
+    if back.is_err() {
+        let _ = app.emit(
+            "handover_ended",
+            HandoverEnded {
+                conversation: asked.from.clone(),
+                handover: handover.clone(),
+            },
+        );
     }
     match back {
         Ok(Ok(word)) if word == "done" => Ok(format!(
@@ -3350,6 +3475,20 @@ async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Str
              there."
         )),
     }
+}
+
+/// Tell somebody an agent needs their hands, the way a question is told.
+fn tell_them_it_is_theirs(app: &AppHandle, store: &Store, id: &str, what: &str) {
+    let in_front = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_focused().ok())
+        .unwrap_or(false);
+    let held: State<Held> = app.state();
+    let on_screen = held.looking_at.lock().unwrap().clone();
+    if !(in_front && on_screen.as_deref() == Some(id)) {
+        onscreen::show(id, &format!("{} needs you", called(store, id)), &gist(what));
+    }
+    onscreen::waiting(how_many_are_waiting(&held));
 }
 
 /// What a handover's answer starts with when it was typed rather than pressed.
@@ -3407,9 +3546,11 @@ async fn handed_back(held: State<'_, Held>, handover: String, how: String) -> Re
             let _ = tell.send(how);
             Ok(())
         }
-        // Answered twice, or answered after it gave up. Neither is worth an
-        // error in front of somebody who just pressed a button.
-        None => Ok(()),
+        // Answered after it gave up, or after the conversation was stopped.
+        // Said, so the window can put the answer into the conversation
+        // instead: pressing "I have done it" on a card whose agent had already
+        // moved on used to look like it worked and do nothing at all.
+        None => Err("that is no longer waiting".into()),
     }
 }
 
@@ -4224,7 +4365,11 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
                 // Not if the last run is still going. A routine that takes
                 // longer than its own interval is ordinary, and starting it on
                 // top of itself puts two turns in one conversation racing.
-                let busy = held.running.lock().unwrap().contains(&c.id);
+                // Any turn at all, not only the clock's own: a person's errand
+                // in the same conversation used to be stopped mid-answer for
+                // the routine, and a routine waiting on a handover had the
+                // next run's text taken as the person's reply to it.
+                let busy = mid_turn(&held, &c.id);
                 (next <= now && !busy).then_some((c.id.clone(), what, late))
             })
             .collect()
@@ -4290,6 +4435,23 @@ async fn a_routines_turn(
     late: Option<chrono::DateTime<chrono::Local>>,
     now: chrono::DateTime<chrono::Local>,
 ) -> Result<(), String> {
+    // Checked again here, because a turn can have started since the tick
+    // looked. Closing the engine below would cut it off, and saying the
+    // routine's text into a conversation parked on a handover answers the
+    // handover with it: on 7 September "Write one small pulse file" was taken
+    // as somebody's reply to "stop the pulse entry".
+    {
+        let held: State<Held> = app.state();
+        if a_handover_waiting_in(&held, &conversation).is_some() {
+            return Err("it was waiting on you for a handover, so this run was skipped".into());
+        }
+        if mid_turn(&held, &conversation) {
+            return Err(
+                "something else was still going in its conversation, so this run was skipped"
+                    .into(),
+            );
+        }
+    }
     let turn = {
         let held: State<Held> = app.state();
         Turn::claim(held.running.clone(), conversation.clone())
@@ -4451,12 +4613,22 @@ fn let_the_wall_know(held: &Held, agent: &str) {
     };
     let folders = held.store.folders_allowed(agent).unwrap_or_default();
     errand_core::wall::also_allow(std::path::Path::new(&a.cwd), folders);
+    close_what_is_idle(held, agent);
+}
+
+/// Close this agent's engines that are doing nothing, so the next message
+/// opens them again with whatever changed: a new wall, a new name.
+///
+/// Idle means no turn at all. It used to mean "not one of the clock's", so an
+/// engine in the middle of a person's errand, or parked on a handover while
+/// they granted a permission, was closed under them.
+fn close_what_is_idle(held: &Held, agent: &str) {
     let open: Vec<String> = held.live.lock().unwrap().keys().cloned().collect();
     for id in open {
         let theirs = matches!(held.store.conversation(&id), Ok(Some(c)) if c.agent == agent);
-        let busy = held.running.lock().unwrap().contains(&id);
-        if theirs && !busy {
-            if let Some(mut thread) = held.live.lock().unwrap().remove(&id) {
+        if theirs && !mid_turn(held, &id) {
+            let was = held.live.lock().unwrap().remove(&id);
+            if let Some(mut thread) = was {
                 let _ = thread.stop();
             }
         }
@@ -4979,9 +5151,18 @@ async fn show_in_browser(url: String) -> Result<(), String> {
 /// there is.
 fn worth_opening(url: &str) -> bool {
     let url = url.trim().to_lowercase();
-    ["http://", "https://", "mailto:"]
-        .iter()
-        .any(|s| url.starts_with(s))
+    // And a pane of System Settings, the commonest place a handover sends
+    // somebody. The card showed the link and pressing it did nothing, because
+    // this refused it and the window kept the refusal to itself. The scheme
+    // opens Settings at a pane and can do nothing else.
+    [
+        "http://",
+        "https://",
+        "mailto:",
+        "x-apple.systempreferences:",
+    ]
+    .iter()
+    .any(|s| url.starts_with(s))
 }
 
 /// What the engine answering this conversation turned up with.
@@ -5112,12 +5293,28 @@ async fn hide(
 
 /// Stop it, whatever it is in the middle of. The thread itself is kept.
 #[tauri::command]
-async fn stop(held: State<'_, Held>, id: String) -> Result<(), String> {
-    stop_it(&held, &id)
+async fn stop(app: AppHandle, held: State<'_, Held>, id: String) -> Result<(), String> {
+    stop_it(&app, &held, &id, "stopped by you")
 }
 
-/// Stop one conversation, whatever it is in the middle of.
-fn stop_it(held: &Held, id: &str) -> Result<(), String> {
+/// Stop one conversation, whatever it is in the middle of, and leave nothing
+/// of the turn behind.
+///
+/// Stopping used to take away the engine and two marks and leave the rest: a
+/// handover still parked, so the next thing typed went into a call nobody was
+/// making; whoever was waiting on the conversation, left to wait out ten
+/// minutes; the clock's run open for ever; the turn still marked in flight, so
+/// the next launch offered to run it again; the commands it had started still
+/// running; the badge still counting it. And the engine's last few events were
+/// still read after it, putting "Writing" back for good.
+fn stop_it(app: &AppHandle, held: &Held, id: &str, why: &str) -> Result<(), String> {
+    // Anything the old engine still has on its way is ignored from here on.
+    *held
+        .opening
+        .lock()
+        .unwrap()
+        .entry(id.to_string())
+        .or_insert(0) += 1;
     // The doorway goes with it. A socket that outlives the conversation behind
     // it is a way in to something that is no longer there.
     held.doorways.lock().unwrap().remove(id);
@@ -5127,10 +5324,110 @@ fn stop_it(held: &Held, id: &str) -> Result<(), String> {
     // clock quietly skips it every morning after.
     held.running.lock().unwrap().remove(id);
     held.doing.lock().unwrap().remove(id);
+    held.settling.lock().unwrap().remove(id);
+    let parked: Vec<String> = held
+        .handovers
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, (whose, _))| whose == id)
+        .map(|(handover, _)| handover.clone())
+        .collect();
+    for handover in parked {
+        held.handovers.lock().unwrap().remove(&handover);
+        let _ = app.emit(
+            "handover_ended",
+            HandoverEnded {
+                conversation: id.to_string(),
+                handover,
+            },
+        );
+    }
+    let waiting = held.watching.lock().unwrap().remove(id);
+    if let Some(waiting) = waiting {
+        let _ = waiting.send(Event::Failed {
+            why: format!("It was {why}."),
+        });
+    }
+    let run = held.mid_run.lock().unwrap().remove(id);
+    if let Some(run) = run {
+        let _ = held.store.a_run_ended(run, why);
+    }
+    let _ = held.store.a_turn_ended(id);
+    errand_core::jobs::stop_everything_from(id);
     if let Some(mut thread) = held.live.lock().unwrap().remove(id) {
         thread.stop().map_err(|e| e.to_string())?;
     }
+    onscreen::waiting(how_many_are_waiting(held));
     Ok(())
+}
+
+/// Stop a conversation that is in the middle of a turn, and say so in it.
+///
+/// Written down as well as shown, so the conversation read back later says
+/// what happened rather than ending in the middle of a sentence.
+fn stop_and_say(app: &AppHandle, held: &Held, id: &str, why: &str, said: &str) {
+    if let Err(problem) = stop_it(app, held, id, why) {
+        eprintln!("could not stop {id}: {problem}");
+    }
+    let ended = Event::Failed {
+        why: said.to_string(),
+    };
+    let seq = held
+        .store
+        .happened(id, &ended)
+        .ok()
+        .flatten()
+        .map(|line| line.seq);
+    let _ = app.emit(
+        "happened",
+        Happened {
+            conversation: id.to_string(),
+            seq,
+            event: ended,
+        },
+    );
+}
+
+/// Whether a turn is going in this conversation, whoever started it.
+///
+/// `running` alone was the clock's record of its own runs. A person's turn, a
+/// goal's and a delegated one were never in it, so a routine that came due cut
+/// straight through whatever was being done in its conversation, and a change
+/// to what an agent may write in closed an engine in the middle of an answer.
+/// `doing` is written by the events of every turn, and a handover parked in a
+/// conversation is a turn waiting on somebody.
+fn mid_turn(held: &Held, id: &str) -> bool {
+    a_turn_is_going(
+        &held.running.lock().unwrap(),
+        &held.doing.lock().unwrap(),
+        a_handover_waiting_in(held, id).is_some(),
+        id,
+    )
+}
+
+/// The same, from the three records it reads.
+fn a_turn_is_going(
+    running: &std::collections::HashSet<String>,
+    doing: &HashMap<String, String>,
+    parked: bool,
+    id: &str,
+) -> bool {
+    running.contains(id) || doing.contains_key(id) || parked
+}
+
+/// A handover that stopped waiting, so its card can say so.
+#[derive(Clone, Serialize)]
+struct HandoverEnded {
+    conversation: String,
+    handover: String,
+}
+
+/// An agent paused or started again, from wherever that was decided.
+#[derive(Clone, Serialize)]
+struct Paused {
+    agent: String,
+    paused: bool,
 }
 
 /// Pause an agent, or start it again.
@@ -5152,48 +5449,50 @@ async fn pause(
     held.store
         .pause(&id, paused, now)
         .map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "paused",
+        Paused {
+            agent: id.clone(),
+            paused,
+        },
+    );
     if !paused {
         return Ok(());
     }
     let theirs = held.store.conversations(&id).map_err(|e| e.to_string())?;
     for c in theirs {
-        let going = held.running.lock().unwrap().contains(&c.id)
-            || held.live.lock().unwrap().contains_key(&c.id);
-        if !going {
-            continue;
+        // Only a conversation actually in the middle of something. An idle
+        // one was given a red "Paused" line of its own, for nothing, and it
+        // was gone again the next time the conversation was opened.
+        if mid_turn(&held, &c.id) {
+            stop_and_say(
+                &app,
+                &held,
+                &c.id,
+                "paused by you",
+                "Paused. It will not run on its own until you start it again.",
+            );
         }
-        stop_it(&held, &c.id)?;
-        // A run the clock started is closed here, with the reason, or it
-        // stays open forever and reads as a morning that never ended.
-        let run = held.mid_run.lock().unwrap().remove(&c.id);
-        if let Some(run) = run {
-            let _ = held.store.a_run_ended(run, "paused by you");
-        }
-        // The window is told the way the engine would have told it, so a
-        // conversation it is showing stops saying "Working" without it having
-        // to guess which of the agent's conversations were going.
-        let _ = app.emit(
-            "happened",
-            Happened {
-                conversation: c.id.clone(),
-                seq: None,
-                event: Event::Failed {
-                    why: "Paused. It will not run on its own until you start it again.".to_string(),
-                },
-            },
-        );
     }
     Ok(())
 }
 
 /// Forget a thread and everything said in it.
 #[tauri::command]
-async fn forget(held: State<'_, Held>, id: String) -> Result<(), String> {
-    held.doorways.lock().unwrap().remove(&id);
-    held.running.lock().unwrap().remove(&id);
-    held.doing.lock().unwrap().remove(&id);
-    if let Some(mut thread) = held.live.lock().unwrap().remove(&id) {
-        let _ = thread.stop();
+async fn forget(app: AppHandle, held: State<'_, Held>, id: String) -> Result<(), String> {
+    // Every conversation of it, not the one that shares its id. Only that one
+    // was stopped, so an agent deleted in the middle of a routine in another
+    // conversation ran its tools to the end, writing into rows that were gone.
+    let theirs: Vec<String> = held
+        .store
+        .conversations(&id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| c.id)
+        .chain(std::iter::once(id.clone()))
+        .collect();
+    for conversation in theirs {
+        let _ = stop_it(&app, &held, &conversation, "deleted");
     }
     held.store.forget(&id).map_err(|e| e.to_string())
 }
@@ -5825,6 +6124,35 @@ fn everything_that_waits_for_the_app(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_person_s_turn_and_a_parked_handover_both_keep_the_clock_away() {
+        // The clock used to count only its own runs as busy, so a routine that
+        // came due cut through a person's errand, and one due while a handover
+        // was parked answered it with the routine's own text.
+        let mut running = std::collections::HashSet::new();
+        let mut doing = HashMap::new();
+        assert!(!a_turn_is_going(&running, &doing, false, "c"));
+
+        doing.insert("c".to_string(), "Writing".to_string());
+        assert!(
+            a_turn_is_going(&running, &doing, false, "c"),
+            "a person's turn was not busy"
+        );
+
+        doing.clear();
+        assert!(
+            a_turn_is_going(&running, &doing, true, "c"),
+            "a parked handover was not busy"
+        );
+
+        running.insert("c".to_string());
+        assert!(
+            a_turn_is_going(&running, &doing, false, "c"),
+            "the clock's own run was not busy"
+        );
+        assert!(!a_turn_is_going(&running, &doing, false, "another"));
+    }
 
     #[test]
     fn a_room_takes_one_thing_round_at_a_time_and_refuses_a_second_until_the_round_ends() {
