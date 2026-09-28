@@ -2890,7 +2890,15 @@ export function headerFitsOnOneRow() {
   // Only what is on screen. A hidden child measures zero and would otherwise
   // count as a row of its own, which is a test failing at its own reflection.
   const showing = [...title.children].filter((c) => c.getBoundingClientRect().width > 0);
-  const tops = new Set(showing.map((c) => Math.round(c.getBoundingClientRect().top / 10)));
+  // By each one's middle, which is the same for everything on a row because
+  // the row centres them. By its top, a shorter one on the same row (a room's
+  // names, fifteen pixels high) counted as a row of its own.
+  const tops = new Set(
+    showing.map((c) => {
+      const box = c.getBoundingClientRect();
+      return Math.round((box.top + box.height / 2) / 20);
+    }),
+  );
   const tools = document.getElementById("reach").getBoundingClientRect();
   const bar = title.getBoundingClientRect();
   return {
@@ -4288,6 +4296,65 @@ export async function whatAnAgentRemembers() {
   check("and one holding a key is refused, saying why", /password or a key/.test(says) && document.getElementById("note-text").value.includes("sk-"), says || "nothing said");
   document.getElementById("thread-name").click();
   await settle(100);
+  return found;
+}
+
+/**
+ * A room whose members can change, whose members are offered behind @, and
+ * whose round can be stopped.
+ *
+ * Members were fixed when a room was made, a name typed slightly wrong went
+ * to nobody, and Stop left the member answering running and the round going.
+ */
+export async function changingARoom() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  await openTalk("talk-room");
+  const header = document.getElementById("members");
+  check("a room's members are a button in the header", header.tagName === "BUTTON" && !header.hidden, `${header.tagName} hidden=${header.hidden}`);
+  header.click();
+  await settle(200);
+  const boxes = [...document.querySelectorAll("#rooming-who input")];
+  const ticked = boxes.filter((b) => b.checked).map((b) => b.value).sort();
+  check(
+    "pressing it offers everybody, with the ones in the room ticked",
+    !document.getElementById("rooming").hidden && ticked.join(",") === "agent-bitcoin,agent-unnamed" && document.getElementById("rooming-start").textContent === "Change who is in it",
+    `${ticked.join(",")} / ${document.getElementById("rooming-start").textContent}`,
+  );
+  const another = boxes.find((b) => !b.checked);
+  if (another) another.checked = true;
+  const changing = asked.length;
+  document.getElementById("rooming-start").click();
+  await settle(300);
+  const changed = asked.slice(changing).find((a) => a.name === "set_members");
+  check("and changing it asks the app, with the new one in", changed?.args?.room === "talk-room" && changed?.args?.agents?.length === 3, JSON.stringify(changed?.args || "nothing asked"));
+  check("and the header names three now", /,/.test(header.textContent) && document.getElementById("rooming").hidden, header.textContent);
+
+  // Behind @, as it is typed.
+  const box = document.getElementById("what");
+  box.value = "@bit";
+  box.dispatchEvent(new Event("input"));
+  await settle(150);
+  const offered = document.getElementById("slash");
+  check("typing @ in a room offers its members", !offered.hidden && /@Bitcoin Desk/.test(offered.textContent), `hidden=${offered.hidden}: ${offered.textContent}`);
+  offered.querySelector("li")?.click();
+  await settle(100);
+  check("and choosing one puts the name in the box", box.value === "@Bitcoin Desk ", JSON.stringify(box.value));
+  box.value = "";
+  box.dispatchEvent(new Event("input"));
+
+  // Stopped from the palette while a member answers.
+  tell("room_turn", { conversation: "talk-room", who: "Bitcoin Desk", over: false });
+  await settle(150);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  await settle(200);
+  const stopping = asked.length;
+  [...document.querySelectorAll("#palette-list li")].find((li) => li.textContent.startsWith("Stop what it is doing"))?.click();
+  await settle(300);
+  check("a room answering can be stopped", asked.slice(stopping).some((a) => a.name === "stop" && a.args?.id === "talk-room"), JSON.stringify(asked.slice(stopping).map((a) => a.name)));
+  tell("room_turn", { conversation: "talk-room", who: null, over: true });
+  await settle(150);
   return found;
 }
 

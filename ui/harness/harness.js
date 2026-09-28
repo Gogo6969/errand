@@ -685,6 +685,15 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             fixture.conversations[id] = [{ id, agent: id, name: "First", opened: false }];
             return Promise.resolve(id);
           }
+          // Who is in a room, changed the way the app changes it.
+          case "set_members": {
+            fixture.members[args.room] = args.agents.map((id) => ({
+              agent: id,
+              name: fixture.agents.find((a) => a.id === id)?.name || id,
+              talk: null,
+            }));
+            return Promise.resolve({ name: "Bitcoin room", members: fixture.members[args.room] });
+          }
           case "save_agent":
             return Promise.resolve("/Users/you/Desktop/Bitcoin Desk.errand.json");
           case "skills_of":

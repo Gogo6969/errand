@@ -4505,7 +4505,17 @@ async fn take_it_round(
             return Ok(());
         }
     };
+    // Stop moves this on, so a round that was stopped asks nobody further.
+    let generation = |app: &AppHandle| {
+        let held: State<Held> = app.state();
+        let now = held.opening.lock().unwrap().get(room).copied().unwrap_or(0);
+        now
+    };
+    let began = generation(app);
     for member in to {
+        if generation(app) != began {
+            break;
+        }
         {
             let held: State<Held> = app.state();
             held.doing
@@ -4716,6 +4726,69 @@ async fn make_room(
     Ok(Room {
         name,
         members: held.store.members(&id).map_err(|e| e.to_string())?,
+    })
+}
+
+/// Change who is in a room.
+///
+/// Members were fixed when a room was made, so a room that needed one more
+/// voice, or one fewer, had to be made again from nothing. Not while it is
+/// answering: a member taken out half way round would be asked anyway. The
+/// change is written into the room, so the members hear it the next time they
+/// are asked, and so the history says who was there when.
+#[tauri::command]
+async fn set_members(
+    app: AppHandle,
+    held: State<'_, Held>,
+    room: String,
+    agents: Vec<String>,
+) -> Result<Room, String> {
+    room::at_least_two(&agents).map_err(|e| e.to_string())?;
+    if held.doing.lock().unwrap().contains_key(&room) {
+        return Err("The room is answering. Change who is in it when the round is over.".into());
+    }
+    let talk = held
+        .store
+        .conversation(&room)
+        .map_err(|e| e.to_string())?
+        .ok_or("there is no such room")?;
+    let before: Vec<String> = held
+        .store
+        .members(&room)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|m| m.agent)
+        .collect();
+    for agent in &agents {
+        if before.contains(agent) {
+            continue;
+        }
+        held.store
+            .agent(agent)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("there is no agent here with the id {agent}"))?;
+        held.store.join(&room, agent).map_err(|e| e.to_string())?;
+    }
+    for agent in before.iter().filter(|agent| !agents.contains(agent)) {
+        held.store.leave(&room, agent).map_err(|e| e.to_string())?;
+    }
+    if !agents.contains(&talk.agent) {
+        held.store
+            .file_under(&room, &agents[0])
+            .map_err(|e| e.to_string())?;
+    }
+    let members = held.store.members(&room).map_err(|e| e.to_string())?;
+    let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
+    let _ = say_in_the_room(
+        &app,
+        &room,
+        None,
+        "note",
+        &format!("Now in the room: {}.", room::named_together(&names)),
+    );
+    Ok(Room {
+        name: talk.name,
+        members,
     })
 }
 
@@ -6070,6 +6143,16 @@ async fn hide(
 /// Stop it, whatever it is in the middle of. The thread itself is kept.
 #[tauri::command]
 async fn stop(app: AppHandle, held: State<'_, Held>, id: String) -> Result<(), String> {
+    // A room's round is its members answering, each in a conversation of its
+    // own. Stopping the room stopped nothing that was running: the member
+    // answering went on, and the round went on to the next.
+    if held.store.is_a_room(&id).unwrap_or(false) {
+        for member in held.store.members(&id).unwrap_or_default() {
+            if let Some(talk) = member.talk.filter(|talk| mid_turn(&held, talk)) {
+                let _ = stop_it(&app, &held, &talk, "stopped by you");
+            }
+        }
+    }
     stop_it(&app, &held, &id, "stopped by you")
 }
 
@@ -6569,6 +6652,7 @@ pub fn run() {
             load_agent,
             limits,
             set_limits,
+            set_members,
             say,
             answer,
             engines,

@@ -924,8 +924,53 @@ function offerARoom() {
   el.talks.value = showing;
 }
 
-/** Start the room that was ticked, and open it. */
+/**
+ * The room open on screen, when the panel is changing who is in it rather
+ * than making a new one.
+ */
+let roomBeingChanged = null;
+
+/**
+ * Change who is in the room that is open.
+ *
+ * Members were fixed when a room was made, so a room that needed one more
+ * voice, or one fewer, had to be made again from nothing. The same ticks as
+ * making one, with the ones in it already ticked.
+ */
+function changeTheRoom() {
+  const t = talking();
+  if (!t || (t.members || []).length < 2) return;
+  if (!el.rooming.hidden && roomBeingChanged === t.id) {
+    el.rooming.hidden = true;
+    roomBeingChanged = null;
+    return;
+  }
+  offerARoom();
+  roomBeingChanged = t.id;
+  const inIt = new Set(t.members.map((m) => m.agent));
+  for (const box of el.roomingWho.querySelectorAll("input")) box.checked = inIt.has(box.value);
+  // Every member gets a box, whether or not it would be offered for a new
+  // room: one hidden from the list, or not yet named, had none, and saving
+  // took it out of the room without anybody unticking it.
+  const offered = new Set([...el.roomingWho.querySelectorAll("input")].map((box) => box.value));
+  for (const m of t.members.filter((m) => !offered.has(m.agent))) {
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = m.agent;
+    box.checked = true;
+    label.append(box, document.createTextNode(m.name));
+    el.roomingWho.append(label);
+  }
+  el.roomingName.closest("label").hidden = true;
+  el.roomingStart.textContent = "Change who is in it";
+}
+
+el.members.addEventListener("click", changeTheRoom);
+
+/** Start the room that was ticked, and open it; or change the one open. */
 async function startTheRoom() {
+  if (roomBeingChanged) return changeWhoIsInIt();
   const a = whose();
   const ticked = [...el.roomingWho.querySelectorAll("input:checked")].map((box) => box.value);
   // The open agent first, so the room is filed under it and turns up in the
@@ -952,9 +997,37 @@ async function startTheRoom() {
   el.what.focus();
 }
 
+async function changeWhoIsInIt() {
+  const t = talks.get(roomBeingChanged);
+  if (!t) return;
+  const ticked = [...el.roomingWho.querySelectorAll("input:checked")].map((box) => box.value);
+  if (ticked.length < 2) {
+    el.roomingSays.textContent = "A room needs at least two agents in it.";
+    return;
+  }
+  let room;
+  try {
+    room = await invoke("set_members", { room: t.id, agents: ticked });
+  } catch (why) {
+    el.roomingSays.textContent = String(why);
+    return;
+  }
+  t.members = room.members;
+  leaveChangingTheRoom();
+  drawRoom(t);
+}
+
+/** Back to making rooms, the panel's ordinary job. */
+function leaveChangingTheRoom() {
+  roomBeingChanged = null;
+  el.rooming.hidden = true;
+  el.roomingName.closest("label").hidden = false;
+  el.roomingStart.textContent = "Start the room";
+}
+
 el.roomingStart.addEventListener("click", startTheRoom);
 el.roomingCancel.addEventListener("click", () => {
-  el.rooming.hidden = true;
+  leaveChangingTheRoom();
   el.talks.value = showing;
 });
 
@@ -3198,6 +3271,7 @@ function aSkillCalledFor(text, all) {
  */
 async function offerSkills() {
   const typed = el.what.value;
+  if (typed.startsWith("@")) return offerMembers(typed);
   const a = whose();
   if (!a || !typed.startsWith("/") || typed.includes("\n")) {
     el.slash.hidden = true;
@@ -3226,6 +3300,34 @@ async function offerSkills() {
 }
 
 el.what.addEventListener("input", offerSkills);
+
+/**
+ * In a room, the members, as soon as a line starts with @. A name typed
+ * slightly wrong went to nobody, and the room said so after the fact.
+ */
+function offerMembers(typed) {
+  const t = talking();
+  const members = t?.members || [];
+  const word = typed.slice(1).toLowerCase();
+  const fits = members.filter((m) => m.name.toLowerCase().startsWith(word) && !typed.includes(" "));
+  if (members.length < 2 || !fits.length) {
+    el.slash.hidden = true;
+    return;
+  }
+  el.slash.replaceChildren(
+    ...fits.map((m) => {
+      const li = document.createElement("li");
+      li.append(note("span", `@${m.name}`, "skill-name"), note("span", "just this one", "skill-what"));
+      li.onclick = () => {
+        el.what.value = `@${m.name} `;
+        el.slash.hidden = true;
+        el.what.focus();
+      };
+      return li;
+    }),
+  );
+  el.slash.hidden = false;
+}
 
 /**
  * What this agent has written down, and a way to correct or take back each.
@@ -6232,8 +6334,10 @@ function aStandingJob(one) {
 
 /** A number of tokens the way somebody would say it: 950, 12.4k, 1.3M. */
 function tokensSaid(n) {
+  // One place after the point, and none when it would be nought.
+  const onePlace = (x) => x.toFixed(1).replace(/\.0$/, "");
   if (n < 1000) return String(n);
-  if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
+  if (n < 10000) return `${onePlace(n / 1000)}k`;
   if (n < 1000000) return `${Math.round(n / 1000)}k`;
-  return `${(n / 1000000).toFixed(1)}M`;
+  return `${onePlace(n / 1000000)}M`;
 }

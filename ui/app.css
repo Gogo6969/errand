@@ -2314,7 +2314,15 @@ a.on-disk {
   white-space: nowrap;
   font-size: 12px;
   color: var(--ink-soft);
+  /* A button, because pressing it changes who is in the room, and still read
+     as the names it is. */
+  background: none;
+  border: 0;
+  padding: 0;
+  font-family: inherit;
+  cursor: pointer;
 }
+#members:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
 
 /* Who said it, on an answer in a room. In an ordinary conversation the header
    says which agent every answer is from; in a room the header names three, so

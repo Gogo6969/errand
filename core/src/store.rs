@@ -296,11 +296,17 @@ pub struct Limits {
 
 /// A number of tokens the way somebody would say it: 950, 12.4k, 1.3M.
 pub fn tokens_in_words(n: i64) -> String {
+    // One place after the point, and none when it would be nought: a limit
+    // of a thousand read "1.0k".
+    let one_place = |x: f64| {
+        let said = format!("{x:.1}");
+        said.strip_suffix(".0").map(str::to_string).unwrap_or(said)
+    };
     match n {
         n if n < 1_000 => n.to_string(),
-        n if n < 10_000 => format!("{:.1}k", n as f64 / 1_000.0),
+        n if n < 10_000 => format!("{}k", one_place(n as f64 / 1_000.0)),
         n if n < 1_000_000 => format!("{}k", (n as f64 / 1_000.0).round() as i64),
-        n => format!("{:.1}M", n as f64 / 1_000_000.0),
+        n => format!("{}M", one_place(n as f64 / 1_000_000.0)),
     }
 }
 
@@ -3052,6 +3058,27 @@ impl Store {
         Ok(())
     }
 
+    /// Take an agent out of a room. Its own conversation of the room stays,
+    /// because what it said there is its history.
+    pub fn leave(&self, room: &str, agent: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM members WHERE conversation = ? AND agent = ?",
+            params![room, agent],
+        )?;
+        Ok(())
+    }
+
+    /// File a conversation under another agent: a room whose first member has
+    /// left it is filed under somebody still in it, so it stays in a list
+    /// somebody looks at.
+    pub fn file_under(&self, conversation: &str, agent: &str) -> Result<()> {
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE conversations SET agent = ? WHERE id = ?",
+            params![agent, conversation],
+        )?;
+        Self::only_if_it_is_there(changed, "conversation")
+    }
+
     /// Who is in a room, in the order they joined. Empty for any conversation
     /// that is not one.
     pub fn members(&self, room: &str) -> Result<Vec<Member>> {
@@ -4116,7 +4143,7 @@ mod tests {
         s.used("scout", &talk, &used(200_000), 20).unwrap();
         assert_eq!(
             s.over_its_limit("scout", 0).unwrap().as_deref(),
-            Some("It has used 1.1M tokens this month, and its limit is 1.0M.")
+            Some("It has used 1.1M tokens this month, and its limit is 1M.")
         );
         // Counted from the start of the month it is asked about.
         assert_eq!(s.over_its_limit("scout", 15).unwrap(), None);
@@ -4143,6 +4170,32 @@ mod tests {
         assert_eq!(tokens_in_words(12_400), "12k");
         assert_eq!(tokens_in_words(7_573), "7.6k");
         assert_eq!(tokens_in_words(1_279_777), "1.3M");
+        assert_eq!(tokens_in_words(1_000), "1k");
+        assert_eq!(tokens_in_words(5_000_000), "5M");
+    }
+
+    #[test]
+    fn somebody_can_leave_a_room_and_it_stays_filed_under_somebody_in_it() {
+        let s = Store::in_memory().unwrap();
+        for one in ["a", "b", "c"] {
+            s.make_sure_it_exists(one, NOT_YET_NAMED, Path::new("/tmp/x"))
+                .unwrap();
+        }
+        s.begin_conversation("room", "a", "Our room").unwrap();
+        for one in ["a", "b", "c"] {
+            s.join("room", one).unwrap();
+        }
+        s.leave("room", "a").unwrap();
+        let left: Vec<String> = s
+            .members("room")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.agent)
+            .collect();
+        assert_eq!(left, ["b", "c"]);
+        s.file_under("room", "b").unwrap();
+        assert_eq!(s.conversation("room").unwrap().unwrap().agent, "b");
+        assert!(s.is_a_room("room").unwrap());
     }
 
     #[test]

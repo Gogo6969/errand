@@ -40,6 +40,15 @@ pub enum Addressed<'a> {
 }
 
 /// A room needs two different agents, or it is a conversation.
+/// Names the way somebody would say them: "A", "A and B", "A, B and C".
+pub fn named_together(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 pub fn at_least_two(agents: &[String]) -> anyhow::Result<()> {
     let mut distinct: Vec<&str> = agents.iter().map(String::as_str).collect();
     distinct.sort_unstable();
@@ -230,6 +239,14 @@ fn listed(names: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_are_put_together_the_way_somebody_would_say_them() {
+        let names = |these: &[&str]| these.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(named_together(&names(&["Scout"])), "Scout");
+        assert_eq!(named_together(&names(&["Scout", "Desk"])), "Scout and Desk");
+        assert_eq!(named_together(&names(&["A", "B", "C"])), "A, B and C");
+    }
 
     fn member(agent: &str, name: &str) -> Member {
         Member {
