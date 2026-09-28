@@ -201,6 +201,21 @@
         <label>Role <input id="whois-title" type="text" autocomplete="off" /></label>
         <label>Handles <input id="whois-about" type="text" autocomplete="off" /></label>
         <button id="whois-save" type="button">Save</button>
+        <!--
+          What it has written down, read into every conversation it has. Here,
+          where somebody looks to overrule it, because a wrong note is repeated
+          to the model every time and nothing else on screen showed it.
+        -->
+        <details id="notes">
+          <summary id="notes-summary">What it remembers</summary>
+          <ul id="notes-list"></ul>
+          <form id="note-new">
+            <label>About <input id="note-about" type="text" placeholder="dentist" autocomplete="off" /></label>
+            <label>Note <input id="note-text" type="text" placeholder="Dr Weber, only on Tuesdays" autocomplete="off" /></label>
+            <button type="submit">Write it down</button>
+          </form>
+          <p id="notes-says"></p>
+        </details>
       </aside>
 
       <!--

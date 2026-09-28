@@ -4236,6 +4236,66 @@ export async function aHandoverThatStopsWaiting() {
 }
 
 /**
+ * What an agent remembers, seen and corrected where somebody overrules it.
+ *
+ * Nineteen notes across ten agents were read into every conversation, and none
+ * could be seen or fixed from the window.
+ */
+export async function whatAnAgentRemembers() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  await openTalk("talk-2");
+  document.getElementById("thread-name").click();
+  await settle(300);
+  const rows = () => [...document.querySelectorAll("#notes-list li")];
+  check("its notes are listed under who it is", rows().length === 2 && /Coinbase/.test(rows()[0].textContent), rows().map((li) => li.textContent).join(" | "));
+  check("and the heading says how many", document.getElementById("notes-summary").textContent === "What it remembers (2)", document.getElementById("notes-summary").textContent);
+
+  // Corrected in place.
+  rows()[0].querySelector("button").click();
+  await settle(100);
+  const box = rows()[0].querySelector("input");
+  check("changing one puts its words in a box", box?.value === "Prices from Coinbase, not Binance", box?.value || "no box");
+  box.value = "Prices from Kraken";
+  const before = asked.length;
+  [...rows()[0].querySelectorAll("button")].find((b) => b.textContent === "Keep")?.click();
+  await settle(250);
+  const kept = asked.slice(before).find((a) => a.name === "note_down");
+  check(
+    "and keeping it writes the correction under the same handle",
+    kept?.args?.agent === "agent-bitcoin" && kept?.args?.about === "exchange" && kept?.args?.note === "Prices from Kraken",
+    JSON.stringify(kept?.args || "nothing written"),
+  );
+
+  // Taken back.
+  const forgetting = asked.length;
+  [...rows()[1].querySelectorAll("button")].find((b) => b.textContent === "Forget")?.click();
+  await settle(250);
+  const gone = asked.slice(forgetting).find((a) => a.name === "unnote");
+  check("forgetting one asks the app to take it back", gone?.args?.about === "report_time", JSON.stringify(gone?.args || "nothing asked"));
+
+  // Written by the person, under the same rules as the agent's own.
+  document.getElementById("notes").open = true;
+  document.getElementById("note-about").value = "Dentist";
+  document.getElementById("note-text").value = "Dr Weber, only on Tuesdays";
+  const adding = asked.length;
+  document.getElementById("note-new").requestSubmit();
+  await settle(250);
+  const added = asked.slice(adding).find((a) => a.name === "note_down");
+  check("a note can be written down from here", added?.args?.about === "Dentist" && /Tuesdays/.test(added?.args?.note || ""), JSON.stringify(added?.args || "nothing written"));
+  document.getElementById("note-about").value = "deepseek";
+  document.getElementById("note-text").value = "key sk-abcdefghijklmnopqrstuvwx";
+  document.getElementById("note-new").requestSubmit();
+  await settle(250);
+  const says = document.getElementById("notes-says").textContent;
+  check("and one holding a key is refused, saying why", /password or a key/.test(says) && document.getElementById("note-text").value.includes("sk-"), says || "nothing said");
+  document.getElementById("thread-name").click();
+  await settle(100);
+  return found;
+}
+
+/**
  * A turn the window did not start.
  *
  * The clock, a watch, a goal, another agent and the terminal all start turns,

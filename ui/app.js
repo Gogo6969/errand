@@ -227,6 +227,12 @@ const el = {
   whoisTitle: document.getElementById("whois-title"),
   whoisAbout: document.getElementById("whois-about"),
   whoisSave: document.getElementById("whois-save"),
+  notesSummary: document.getElementById("notes-summary"),
+  notesList: document.getElementById("notes-list"),
+  noteNew: document.getElementById("note-new"),
+  noteAbout: document.getElementById("note-about"),
+  noteText: document.getElementById("note-text"),
+  notesSays: document.getElementById("notes-says"),
   reachable: document.getElementById("reachable"),
 };
 
@@ -2852,6 +2858,104 @@ el.name.addEventListener("click", () => {
   el.whoisAbout.value = t.about;
   el.whois.hidden = false;
   el.whoisName.focus();
+  drawNotes();
+});
+
+/**
+ * What this agent has written down, and a way to correct or take back each.
+ *
+ * Read into every conversation it has, so a note that is wrong is wrong every
+ * time, and nothing on screen used to show one.
+ */
+async function drawNotes() {
+  const a = whose();
+  if (!a) return;
+  el.notesSays.textContent = "";
+  let notes = [];
+  try {
+    notes = await invoke("notes", { agent: a.id });
+  } catch (why) {
+    el.notesSays.textContent = String(why);
+    return;
+  }
+  el.notesSummary.textContent = notes.length ? `What it remembers (${notes.length})` : "What it remembers";
+  el.notesList.replaceChildren(
+    ...(notes.length
+      ? notes.map((one) => aNote(a, one))
+      : [note("li", "Nothing yet. It writes things down when it learns something worth keeping, and you can too.")]),
+  );
+}
+
+function aNote(a, one) {
+  const li = document.createElement("li");
+  const about = note("span", one.about, "note-about");
+  const text = note("span", one.note, "note-text");
+  const change = document.createElement("button");
+  change.type = "button";
+  change.textContent = "Change";
+  change.onclick = () => {
+    const box = document.createElement("input");
+    box.type = "text";
+    box.value = one.note;
+    box.setAttribute("aria-label", `What it remembers about ${one.about}`);
+    const keep = document.createElement("button");
+    keep.type = "button";
+    keep.textContent = "Keep";
+    keep.onclick = async () => {
+      if (await writeItDown(a, one.about, box.value)) drawNotes();
+    };
+    box.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") keep.click();
+      if (e.key === "Escape") drawNotes();
+    });
+    text.replaceWith(box);
+    change.replaceWith(keep);
+    box.focus();
+  };
+  const forget = document.createElement("button");
+  forget.type = "button";
+  forget.textContent = "Forget";
+  forget.onclick = async () => {
+    try {
+      await invoke("unnote", { agent: a.id, about: one.about });
+    } catch (why) {
+      el.notesSays.textContent = String(why);
+      return;
+    }
+    drawNotes();
+  };
+  li.append(about, text, change, forget);
+  return li;
+}
+
+/** Write a note down, saying in the panel why not when the app refuses it. */
+async function writeItDown(a, about, text) {
+  try {
+    await invoke("note_down", { agent: a.id, about, note: text });
+    return true;
+  } catch (why) {
+    // The same rules as a note the agent writes, a key included, and the
+    // reason is worth reading: it says what to leave out.
+    el.notesSays.textContent = String(why);
+    return false;
+  }
+}
+
+el.noteNew.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const a = whose();
+  if (!a) return;
+  const about = el.noteAbout.value.trim();
+  const text = el.noteText.value.trim();
+  if (!about || !text) {
+    el.notesSays.textContent = "Say what it is about and what to remember.";
+    return;
+  }
+  if (await writeItDown(a, about, text)) {
+    el.noteAbout.value = "";
+    el.noteText.value = "";
+    drawNotes();
+  }
 });
 
 el.whoisSave.addEventListener("click", async () => {

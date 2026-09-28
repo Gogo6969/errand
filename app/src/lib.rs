@@ -3484,6 +3484,52 @@ async fn how_it_has_been_going(
         .map_err(|e| e.to_string())
 }
 
+/// What an agent has written down, most told first.
+///
+/// Read into every conversation it has, and visible nowhere: nineteen notes
+/// across ten agents, and a wrong one was repeated to the model every time
+/// with nothing on screen saying so.
+#[tauri::command]
+async fn notes(
+    held: State<'_, Held>,
+    agent: String,
+) -> Result<Vec<errand_core::store::Memory>, String> {
+    held.store.remembers(&agent, 500).map_err(|e| e.to_string())
+}
+
+/// Write a note down, or correct one, as the person rather than the agent.
+///
+/// Held to the same rules as a note the agent writes, a key included: a note
+/// is read into every conversation, and one holding a secret would repeat it
+/// to the model each time.
+#[tauri::command]
+async fn note_down(
+    held: State<'_, Held>,
+    agent: String,
+    about: String,
+    note: String,
+) -> Result<(), String> {
+    let about = memory::a_handle(&about).map_err(|e| e.to_string())?;
+    let note = memory::a_note(&note).map_err(|e| e.to_string())?;
+    held.store
+        .remember(&agent, &about, &note)
+        .map_err(|e| e.to_string())?;
+    // Notes are read when a conversation opens, so one already open would go
+    // on with the old note in front of it.
+    close_what_is_idle(&held, &agent);
+    Ok(())
+}
+
+/// Take a note back.
+#[tauri::command]
+async fn unnote(held: State<'_, Held>, agent: String, about: String) -> Result<(), String> {
+    held.store
+        .forget_note(&agent, &about)
+        .map_err(|e| e.to_string())?;
+    close_what_is_idle(&held, &agent);
+    Ok(())
+}
+
 /// How many runs the history shows at a time, and asks for again for more.
 const RUNS_AT_A_TIME: i64 = 20;
 
@@ -6092,6 +6138,9 @@ pub fn run() {
             hits,
             routine_off,
             how_it_has_been_going,
+            notes,
+            note_down,
+            unnote,
             say,
             answer,
             engines,

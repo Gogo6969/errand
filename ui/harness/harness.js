@@ -348,6 +348,13 @@ export const FIXTURE = {
       on: false,
     },
   ],
+  // What two agents have written down.
+  notes: {
+    "agent-bitcoin": [
+      { about: "exchange", note: "Prices from Coinbase, not Binance", told: 3, told_at: 1 },
+      { about: "report_time", note: "Send the summary before 08:00", told: 1, told_at: 2 },
+    ],
+  },
   what_it_cost: {
     today: [{ agent: "agent-bitcoin", who: "Bitcoin Desk", dollars: 0.19, turns: 1, errands: 1 }],
     this_month: [
@@ -627,6 +634,14 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.goal_of);
           case "allowances":
             return Promise.resolve(fixture.allowances);
+          // What an agent remembers, and the same refusal the app gives a note
+          // that holds a key.
+          case "notes":
+            return Promise.resolve(fixture.notes?.[args.agent] || []);
+          case "note_down":
+            return /sk-[A-Za-z0-9]{20,}/.test(args.note || "")
+              ? Promise.reject("that looks like a password or a key, and notes are read into every conversation. Leave it out.")
+              : Promise.resolve(null);
           // What the engine allows out of its own settings files, which this
           // app can show and cannot take back.
           case "also_allowed":
