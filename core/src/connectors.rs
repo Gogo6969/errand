@@ -1203,7 +1203,10 @@ fn what_is_on(when: &str) -> Result<String> {
         crate::diary::Access::Refused => crate::diary::REFUSED,
     };
     let said = through_the_calendar_app(over)?;
-    Ok(format!("{said}\n\n{THE_OLD_WAY} {why_not}"))
+    Ok(format!(
+        "{said}\n\n{THE_OLD_WAY} {why_not} {}",
+        crate::diary::TRY_AGAIN
+    ))
 }
 
 /// Everything on from the start of today, over this many days, from EventKit.

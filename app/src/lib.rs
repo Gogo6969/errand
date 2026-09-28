@@ -4038,7 +4038,14 @@ fn keep_an_eye_on(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
     let read = watch::Watch::read(&together)?;
 
     let held: State<Held> = app.state();
-    may_watch(&held, &asked.from, &read).map_err(anyhow::Error::msg)?;
+    may_watch(&held, &asked.from, &read).map_err(|why| {
+        // Said to an agent, which cannot see the switch, so it is also told
+        // how to find out when it has changed.
+        match why == errand_core::diary::REFUSED {
+            true => anyhow::anyhow!("{why} {}", errand_core::diary::TRY_AGAIN),
+            false => anyhow::Error::msg(why),
+        }
+    })?;
     held.store.watch(&asked.from, Some(&together), Some(what))?;
     Ok(format!(
         "Set. {}\n\nIt is under Watch, where it can be changed or stopped.",

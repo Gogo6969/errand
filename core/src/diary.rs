@@ -62,6 +62,16 @@ pub const REFUSED: &str = "macOS has not let Errand read calendars. That is chan
     System Settings, Privacy & Security, Calendars, by giving Errand Full Access: Add Events \
     Only lets it add to them and not read them.";
 
+/// What an agent is told besides, so that it tries again rather than asking.
+///
+/// macOS is asked every time, so the moment the switch changes the next try
+/// works. An agent told only where the switch was asked the person instead:
+/// "Have you granted Errand Full Access to Calendars yet?", a question the
+/// app answers on every try and the person should never have to.
+pub const TRY_AGAIN: &str = "This is asked of macOS every time, so once it has been changed, \
+    trying again works at once. Try again when they next say anything, rather than asking \
+    them whether they have done it.";
+
 /// What is said while the question is on screen and nobody has answered it.
 pub const ASKING: &str = "macOS is asking whether Errand may read calendars, in a dialog of its \
     own, and nothing can be read from them until somebody answers it.";
