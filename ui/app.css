@@ -609,6 +609,11 @@ main > aside, main > #title, main > #composer { flex: none; }
 @media (max-width: 700px) {
   #title { flex-wrap: wrap; }
 }
+/* And wherever it does not fit, which the window measures rather than guesses.
+   The width it needs changes with what the buttons say and what the pickers
+   hold, and between 700 and 920 pixels Goal, Allowed and Tools sat past the
+   edge with nothing to show they were there. */
+#title.wraps { flex-wrap: wrap; }
 #title .tile,
 #pin,
 #hide,

@@ -1439,9 +1439,12 @@ export async function watching() {
   return found;
 }
 
-/** Everything in the header on one row, which is what a header is. */
-/** The width below which the header is meant to wrap, from app.css. */
-const WRAPS_BELOW = 700;
+/**
+ * The width from which the header has room for one row. Below it the window
+ * wraps it when, and only when, it does not fit, and what is judged there is
+ * that nothing is past the edge.
+ */
+const ONE_ROW_FROM = 1100;
 
 /**
  * A sentence being written looks like a sentence being written.
@@ -2883,18 +2886,6 @@ export async function whatAgentsCanReach() {
 }
 
 export function headerFitsOnOneRow() {
-  // A media query reads the viewport, not the element, so this cannot be
-  // judged by widening anything on the page: run narrow, it measures a header
-  // that is wrapping exactly as it was told to, and reports the app broken.
-  // Rather than pass on a test it did not run, it says it could not run.
-  if (window.innerWidth <= WRAPS_BELOW) {
-    return {
-      rows: 0,
-      at: window.innerWidth,
-      tooNarrowToJudge: true,
-      toolsInside: document.getElementById("reach").getBoundingClientRect().width > 0,
-    };
-  }
   const title = document.getElementById("title");
   // Only what is on screen. A hidden child measures zero and would otherwise
   // count as a row of its own, which is a test failing at its own reflection.
@@ -2906,7 +2897,12 @@ export function headerFitsOnOneRow() {
     rows: tops.size,
     // Said out loud, because "one row" is only a claim about a width.
     at: Math.round(bar.width),
+    // Narrower than this it may wrap, and that is not a failure: a second
+    // row is readable, and a button past the edge is not there at all.
+    tooNarrowToJudge: window.innerWidth < ONE_ROW_FROM,
     toolsInside: tools.width > 0 && tools.right <= bar.right - 17,
+    // Judged at every width.
+    pastTheEdge: showing.filter((c) => c.getBoundingClientRect().right > bar.right + 1).map((c) => c.id || c.className),
   };
 }
 

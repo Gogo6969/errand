@@ -300,13 +300,20 @@
     // has no idea. Not judged is not failed.
     ok: header.tooNarrowToJudge || header.rows === 1,
     saw: header.tooNarrowToJudge
-      ? `cannot be judged: this window is ${header.at}px, below the width where wrapping is meant to happen. Widen it and run again.`
+      ? `not judged: this window is ${innerWidth}px, narrower than the room one row needs, where the header wraps when it does not fit`
       : `${header.rows} row(s) at ${header.at}px`,
   });
   found.push({
     what: "Tools is inside the header rather than past its edge",
-    ok: header.tooNarrowToJudge || header.toolsInside,
+    ok: header.toolsInside,
     saw: String(header.toolsInside),
+  });
+  // At any width: between 700 and 920 pixels Goal, Allowed and Tools sat past
+  // the edge with nothing to show they were there.
+  found.push({
+    what: "nothing in the header is past its edge, at this width",
+    ok: header.pastTheEdge.length === 0,
+    saw: header.pastTheEdge.length ? header.pastTheEdge.join(", ") : `${header.rows} row(s) at ${innerWidth}px`,
   });
 
   const failed = found.filter((f) => !f.ok);

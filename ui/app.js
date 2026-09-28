@@ -39,6 +39,47 @@ const { listen } = window.__TAURI__.event;
  * redraw and every conversation switch, and the next turn's first word was
  * appended to it.
  */
+/**
+ * The header on one row while everything in it fits, and on two once it does
+ * not.
+ *
+ * Measured rather than set at a width, because the width it needs changes
+ * with what the buttons say and what the pickers hold. Between 700 and 920
+ * pixels Goal, Allowed and Tools sat past the edge. Put off until the observer
+ * has finished, because changing the layout inside the observer that watches
+ * it is a loop WebKit reports as an error, and errors here are said in the
+ * conversation. A timer rather than the next frame, which never comes while
+ * the window is not being drawn.
+ */
+function keepTheHeaderInside() {
+  const title = document.getElementById("title");
+  if (!title || typeof ResizeObserver === "undefined") return;
+  let pending = false;
+  const measure = () => {
+    pending = false;
+    title.classList.remove("wraps");
+    if (title.scrollWidth > title.clientWidth + 1) title.classList.add("wraps");
+  };
+  const soon = () => {
+    if (pending) return;
+    pending = true;
+    setTimeout(measure, 0);
+  };
+  const watching = new ResizeObserver(soon);
+  watching.observe(title);
+  for (const child of title.children) watching.observe(child);
+  // And when what is in it changes: a name or a picker filled in can need more
+  // room without any box the observer is watching changing size.
+  new MutationObserver(soon).observe(title, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ["hidden"],
+  });
+}
+keepTheHeaderInside();
+
 function itHasStopped(talk) {
   if (!talk) return;
   talk.working = false;
