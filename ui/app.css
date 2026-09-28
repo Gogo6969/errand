@@ -2046,6 +2046,11 @@ body.in-a-call #what {
 #limit-says:empty { display: none; }
 
 /* Skills offered as a line starting with / is typed. */
+/* It sets a display of its own, which outranks the hidden attribute: without
+   this the skills list stayed on screen, stale, after the / that opened it
+   was gone. */
+#slash[hidden] { display: none; }
+
 #slash {
   list-style: none;
   margin: 0 18px;
