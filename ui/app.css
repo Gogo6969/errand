@@ -633,11 +633,28 @@ main > aside, main > #title, main > #composer { flex: none; }
      which is a whole sentence and was taking 236px of a row that has eight
      other things in it. */
   max-width: 190px;
-  min-width: 3ch;
+  /* Never so short it cannot be read: "Inb..." was all there was of Inbox
+     Watch. The header wraps its buttons to a second row before this. */
+  min-width: 12ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* What it is for, under its name, where no button competes for the room. */
+#purpose {
+  margin: 0;
+  padding: 0 18px 10px 50px;
+  border-bottom: 1px solid var(--rule);
+  color: var(--ink-soft);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#purpose[hidden] { display: none; }
+#purpose .role { color: var(--ink); font-weight: 500; }
+#title:has(+ #purpose:not([hidden])) { border-bottom: none; padding-bottom: 6px; }
 
 /* The pickers give way second. Their widths are set where they are styled,
    further down: a second max-width here loses to that one and looks for all
@@ -1130,6 +1147,21 @@ main > aside, main > #title, main > #composer { flex: none; }
   display: block;
 }
 #threads .nothing:hover { background: none; }
+/* How many are hidden, at the bottom of the list, and the way to them. */
+#threads li.the-hidden { display: block; padding: 6px 10px; cursor: default; }
+#threads li.the-hidden:hover { background: none; }
+#threads li.the-hidden button {
+  border: none;
+  background: none;
+  padding: 2px 0;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+#threads li.the-hidden button:hover { color: var(--ink); text-decoration: underline; }
+#threads li.the-hidden button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#threads li.is-hidden { opacity: .62; }
 
 /* -------------------------------------------------- what to do with -- */
 
@@ -1213,6 +1245,7 @@ body.catching #what { border-color: var(--accent); }
    the same as one that did, and the difference has to be visible. */
 .server.broken .server-name { color: var(--wrong); }
 .server.broken .server-what { color: var(--wrong-soft); }
+.server-fix { margin: 4px 0 0; color: var(--ink-soft); font-size: 12.5px; line-height: 1.45; }
 
 /* ------------------------------------------------------------- agents -- */
 

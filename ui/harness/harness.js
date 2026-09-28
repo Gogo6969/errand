@@ -402,7 +402,13 @@ export const FIXTURE = {
   },
   outside: [
     { name: "peekaboo", from: "~/.claude.json", tools: ["see", "click", "type"], trouble: null },
-    { name: "mempalace", from: "~/.claude.json", tools: [], trouble: "starting it: No such file or directory" },
+    {
+      name: "mempalace",
+      from: "~/.claude.json",
+      tools: [],
+      trouble: "starting it: No such file or directory",
+      fix: "The program it starts is not on this Mac any more. It is set up under \"mempalace\" in ~/.claude.json.",
+    },
   ],
 };
 

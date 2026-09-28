@@ -138,13 +138,8 @@ pub async fn tools_from_outside(cwd: &Path) -> Vec<Finding> {
             Some((_, why)) => found.push(Finding::broken(
                 &format!("Tool server: {}", server.name),
                 why.clone(),
-                // The failure that actually happened: an upgrade removed the
-                // Python a virtual environment was built on, leaving a
-                // directory full of dangling symlinks.
-                "Its tools are absent from every agent, which looks exactly like an \
-                 agent choosing not to use them. Check the command in ~/.claude.json \
-                 still exists: an interpreter inside a virtual environment stops \
-                 existing when the one it was built from is upgraded away.",
+                // The same advice the Tools panel gives, from one place.
+                crate::mcp::what_to_do(&server.name, why),
             )),
             None => {
                 let count = running

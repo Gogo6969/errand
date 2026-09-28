@@ -6214,6 +6214,8 @@ struct Outside {
     tools: Vec<String>,
     /// Why not, in words, when it did not.
     trouble: Option<String>,
+    /// And what to do about it.
+    fix: Option<String>,
 }
 
 /// The tools this thread can reach, whichever engine is answering it.
@@ -6258,6 +6260,9 @@ async fn outside(held: State<'_, Held>, id: String) -> Result<Vec<Outside>, Stri
                     .filter(|t| t.server == server.name)
                     .map(|t| t.own_name.clone())
                     .collect(),
+                fix: trouble
+                    .as_deref()
+                    .map(|why| mcp::what_to_do(&server.name, why)),
                 name: server.name,
                 from: server.from,
                 trouble,

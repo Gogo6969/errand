@@ -164,6 +164,7 @@ const el = {
   menu: document.getElementById("menu"),
   messages: document.getElementById("messages"),
   name: document.getElementById("thread-name"),
+  purpose: document.getElementById("purpose"),
   engine: document.getElementById("engine"),
   sweeping: document.getElementById("sweeping"),
   setup: document.getElementById("setup"),
@@ -806,6 +807,7 @@ async function show(id) {
     drawMark(a);
     drawPinned(a);
     el.name.textContent = a.name;
+    drawPurpose(a);
     drawEngines(a);
   }
   drawTalks();
@@ -1099,6 +1101,30 @@ el.roomingCancel.addEventListener("click", () => {
   leaveChangingTheRoom();
   el.talks.value = showing;
 });
+
+/**
+ * What an agent is for, on the line under its name: its role, and what it
+ * handles in its own words, which its own model wrote after its first errand.
+ * Before that it has nothing to say, and the line says when it will.
+ */
+function drawPurpose(a) {
+  el.purpose.replaceChildren();
+  if (!a) {
+    el.purpose.hidden = true;
+    return;
+  }
+  if (!a.title && !a.about) {
+    el.purpose.textContent =
+      a.name === NOT_YET_NAMED ? "It says what it is for once its first errand is done." : "";
+    el.purpose.title = "";
+    el.purpose.hidden = !el.purpose.textContent;
+    return;
+  }
+  if (a.title) el.purpose.append(note("span", a.title, "role"));
+  if (a.about) el.purpose.append(`${a.title ? " \u00b7 " : ""}${a.about}`);
+  el.purpose.title = [a.title, a.about].filter(Boolean).join(": ");
+  el.purpose.hidden = false;
+}
 
 /**
  * One agent, as the page holds it.
@@ -1493,21 +1519,25 @@ document.addEventListener("keydown", (e) => {
 window.addEventListener("resize", closeTheMenu);
 el.threads.addEventListener("scroll", closeTheMenu);
 
+/** Whether the agents somebody hid are shown, under the row that counts them. */
+let showingTheHidden = false;
+
 function drawThreads() {
-  // Hidden ones are out of the way, not gone: a search still finds them,
-  // because "where did that go" is exactly when somebody looks.
+  // Hidden ones are out of the way, not gone: a search still finds them, and
+  // so does the row at the bottom that says how many there are. With only the
+  // search, "where did it go" had no answer anybody could see.
   const listed = [...agents.values()].filter((a) =>
     narrowedTo ? narrowedTo.has(a.id) : !a.hidden,
   );
-  if (!listed.length) {
+  const hiddenOnes = narrowedTo ? [] : [...agents.values()].filter((a) => a.hidden);
+  if (!listed.length && !hiddenOnes.length) {
     const none = document.createElement("li");
     none.className = "nothing";
     none.textContent = "Nothing matches that.";
     el.threads.replaceChildren(none);
     return;
   }
-  el.threads.replaceChildren(
-    ...listed.map((a) => {
+  const rowFor = (a) => {
       const li = document.createElement("li");
       li.setAttribute("aria-current", String(a.id === showingAgent));
       // Which agent this row is, on the row. Everything that acts on one had
@@ -1585,9 +1615,32 @@ function drawThreads() {
       // A mark on the row itself, not only in the line under the name, so a
       // list of forty can be skimmed rather than read.
       if (news && !waitingOn(a.id)) li.classList.add("has-new");
+      if (a.hidden) li.classList.add("is-hidden");
       return li;
-    }),
+  };
+  el.threads.replaceChildren(
+    ...listed.map(rowFor),
+    ...(hiddenOnes.length ? [theHiddenRow(hiddenOnes.length)] : []),
+    ...(showingTheHidden ? hiddenOnes.map(rowFor) : []),
   );
+}
+
+/** The row at the bottom of the list that says how many are hidden, and shows them. */
+function theHiddenRow(count) {
+  const li = document.createElement("li");
+  li.className = "the-hidden";
+  const show = document.createElement("button");
+  show.type = "button";
+  show.textContent = showingTheHidden ? `Hidden (${count}), put away` : `Hidden (${count})`;
+  show.title = "Agents you hid: out of the list, and still running whatever they run";
+  show.setAttribute("aria-expanded", String(showingTheHidden));
+  show.onclick = (e) => {
+    e.stopPropagation();
+    showingTheHidden = !showingTheHidden;
+    drawThreads();
+  };
+  li.append(show);
+  return li;
 }
 
 // ------------------------------------------------------------ messages --
@@ -2162,6 +2215,7 @@ listen("settled", async ({ payload }) => {
   t.hue = on.hue;
   if (id === showingAgent) {
     el.name.textContent = t.name;
+    drawPurpose(t);
     drawMark(t);
   }
   drawThreads();
@@ -3139,6 +3193,9 @@ el.reach.addEventListener("click", async () => {
           ? s.tools.join(", ")
           : "started, but offers nothing";
       box.append(what);
+      // What to do about it, under what went wrong. Red alone told somebody
+      // something was broken and nothing about whether or how to mend it.
+      if (s.trouble && s.fix) box.append(note("p", s.fix, "server-fix"));
       return box;
     }),
   );
@@ -3504,6 +3561,7 @@ el.whoisSave.addEventListener("click", async () => {
   t.about = el.whoisAbout.value.trim();
   el.whois.hidden = true;
   el.name.textContent = t.name;
+  drawPurpose(t);
   drawThreads();
   await invoke("rename", { id: t.id, name: t.name, title: t.title, about: t.about });
 });
@@ -3573,6 +3631,10 @@ function drawPinned(t) {
   el.pin.setAttribute("aria-pressed", String(t.pinned));
   el.hide.textContent = t.hidden ? "Hidden" : "Hide";
   el.hide.setAttribute("aria-pressed", String(t.hidden));
+  // Where it went, said where it was sent from.
+  el.hide.title = t.hidden
+    ? "Hidden: find it under Hidden at the bottom of the list, or by searching. Press to show it again"
+    : "Out of the way, still running. It stays under Hidden at the bottom of the list";
   el.pause.textContent = t.paused ? "Paused" : "Pause";
   el.pause.setAttribute("aria-pressed", String(t.paused));
   el.pause.title = t.paused
@@ -3691,7 +3753,9 @@ el.repeat.addEventListener("click", async () => {
   const mine = (await invoke("routines")).find((r) => r.conversation === t.id);
   theRoutineShown = mine || null;
   el.routineAt.value = mine?.at || "";
-  el.routineWhat.value = mine?.what || "";
+  // Filled in with this conversation's task, so that saving without typing
+  // anything simply repeats it.
+  el.routineWhat.value = mine?.what || theTaskHere(t);
   el.routineSays.textContent = sayWhen(mine);
   el.routinePause.textContent = mine?.off ? "Start again" : "Pause";
   el.routinePause.hidden = !mine;
@@ -3711,20 +3775,52 @@ el.repeat.addEventListener("click", async () => {
  * again from memory -- which is how a routine ends up being a slightly
  * different job from the one that was tested.
  *
- * Offered rather than filled in. Neither the first thing asked nor the last is
- * reliably the right one: the first is usually the fullest and the last is
- * often "yes, that one". The person who refined it knows which, and nobody
- * else can.
+ * Offered beside the one Repeat fills in, which is the first: neither the
+ * first thing asked nor the last is reliably the right one, the first is
+ * usually the fullest and the last is often "yes, that one", and the person
+ * who refined it is the one who knows which.
  *
  * @param {HTMLElement} where the row to draw them in
  * @param {HTMLInputElement} into the box a chosen one goes into
  */
+/**
+ * What this conversation was for, the way a routine is told it: the first
+ * thing asked here.
+ *
+ * Filled in when Repeat opens on a conversation with nothing repeating yet.
+ * Asked what a routine should do each time, with an empty box, somebody who
+ * only wanted this task again had nothing to go on: a preset that simply
+ * repeats it is what they expected, and the chips beside it were not read as
+ * one.
+ */
+function theTaskHere(t) {
+  const first = t?.messages.find(
+    (m) => m.kind === "mine" && !m.text.startsWith(NOT_ASKED_BY_ANYBODY),
+  );
+  return first ? withoutWhoAsked(first.text) : "";
+}
+
+/**
+ * A request without the words saying who asked it: "something outside asks:"
+ * for the terminal, or an agent's name and "asks:". They say who, in the
+ * conversation; in a routine, repeated, they would be the routine asking.
+ */
+function withoutWhoAsked(text) {
+  const outside = "something outside asks: ";
+  if (text.startsWith(outside)) return text.slice(outside.length);
+  for (const a of agents.values()) {
+    const by = `${a.name} asks: `;
+    if (text.startsWith(by)) return text.slice(by.length);
+  }
+  return text;
+}
+
 function offerWhatWasAskedHere(where, into) {
   const t = talking();
   const asked = t
     ? t.messages
         .filter((m) => m.kind === "mine" && !m.text.startsWith(NOT_ASKED_BY_ANYBODY))
-        .map((m) => m.text)
+        .map((m) => withoutWhoAsked(m.text))
     : [];
   // Newest first, because the refined one is nearer the bottom, and without
   // repeats: asking the same thing twice is ordinary and two identical chips

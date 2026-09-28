@@ -10,8 +10,9 @@
     "windows": [
       {
         "title": "Errand",
-        "width": 1000,
-        "height": 720,
+        "width": 1280,
+        "height": 820,
+        "center": true,
         "minWidth": 640,
         "minHeight": 480,
         "titleBarStyle": "Overlay",

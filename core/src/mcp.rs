@@ -326,6 +326,48 @@ pub struct Servers {
     pub trouble: Vec<(String, String)>,
 }
 
+/// What somebody can do about a server that did not start, in words.
+///
+/// The Tools panel said why in red and nothing else: "starting the peekaboo
+/// server: No such file or directory", with nothing to say that the file is
+/// Claude Code's settings, which entry, or that deleting it is a fine answer.
+pub fn what_to_do(name: &str, trouble: &str) -> String {
+    let lower = trouble.to_lowercase();
+    if lower.contains("not reached from here yet") {
+        return "Agents on Claude Code reach this one themselves. Agents on any other model \
+                cannot yet, because Errand only starts servers that run on this Mac. Nothing \
+                needs doing unless one of those agents needs its tools."
+            .to_string();
+    }
+    if lower.contains("no such file or directory") {
+        return format!(
+            "The program it starts is not on this Mac any more. It is set up under \"{name}\" \
+             in ~/.claude.json, which is Claude Code's own settings file: reinstall that \
+             program, or delete that entry if you no longer use it. Until then its tools are \
+             missing for every agent."
+        );
+    }
+    if lower.contains("permission denied") {
+        return format!(
+            "The program it starts is there but may not be run. Check the command under \
+             \"{name}\" in ~/.claude.json, and that the file it names is executable."
+        );
+    }
+    if lower.starts_with("it started but") {
+        return "It started and then did not answer. It may still be installing itself, or be \
+                waiting to be signed in: open this panel again in a minute, and if it keeps \
+                saying this, run its command from ~/.claude.json in a terminal to see what it \
+                says."
+            .to_string();
+    }
+    format!(
+        "Its tools are missing for every agent, which looks exactly like an agent choosing \
+         not to use them. Check the command under \"{name}\" in ~/.claude.json still exists: \
+         an interpreter inside a virtual environment stops existing when the one it was built \
+         from is upgraded away."
+    )
+}
+
 impl Servers {
     /// Start everything configured for this directory and ask what it offers.
     ///
@@ -556,6 +598,30 @@ fn in_words(content: Option<&Value>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_server_that_did_not_start_says_what_to_do_about_it() {
+        // The two the Tools panel showed in red on a real Mac, with nothing
+        // to say whether or how to mend either.
+        let gone = what_to_do(
+            "peekaboo",
+            "starting the peekaboo server: No such file or directory (os error 2)",
+        );
+        assert!(gone.contains("\"peekaboo\" in ~/.claude.json"), "{gone}");
+        assert!(
+            gone.contains("reinstall") && gone.contains("delete that entry"),
+            "{gone}"
+        );
+        let remote = what_to_do("replit", "http servers are not reached from here yet");
+        assert!(
+            remote.contains("Agents on Claude Code reach this one"),
+            "{remote}"
+        );
+        assert!(remote.contains("Nothing needs doing"), "{remote}");
+        // And something nobody has seen yet still gets somewhere to look.
+        let other = what_to_do("odd", "something else entirely");
+        assert!(other.contains("\"odd\" in ~/.claude.json"), "{other}");
+    }
+
     use super::*;
 
     #[test]

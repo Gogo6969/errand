@@ -1303,6 +1303,11 @@ export async function whatItCanReach() {
     panel.querySelector(".server.broken") ? "shown" : "missing",
   );
   check(
+    "and says what to do about it, under what went wrong",
+    panel.querySelector(".server.broken .server-fix")?.textContent.includes("~/.claude.json"),
+    panel.querySelector(".server.broken .server-fix")?.textContent || "no advice",
+  );
+  check(
     "what the engine itself brought is listed too",
     ["Skills", "Kinds of helper", "Plugins", "Commands"].every((h) =>
       panel.textContent.includes(h),
@@ -2154,6 +2159,13 @@ export async function repeatingWhatWasAsked() {
     keeps ? keeps.textContent.trim() : "missing",
   );
 
+  // Somebody who only wants this task again should not have to type it, or
+  // know that the chips below are the way to get it.
+  check(
+    "with nothing repeating here yet, what to do is filled in with this conversation's task",
+    box.value === "Show me the latest Bitcoin news",
+    JSON.stringify(box.value),
+  );
   check("what was asked here is offered", offered && !offered.hidden, offered ? `hidden=${offered.hidden}` : "missing");
   const chips = [...(offered?.querySelectorAll(".from-here-one") || [])];
   check("there is at least one to take", chips.length > 0, `${chips.length} offered`);
@@ -4566,6 +4578,26 @@ export async function anOpenQuestion() {
     box.placeholder === "What would you like done?" && replies.hidden,
     `${box.placeholder} / hidden=${replies.hidden}`,
   );
+  // Repeat fills in the task without the words saying who asked it: in a
+  // routine they would be the routine asking.
+  FIXTURE.lines["talk-from-outside"] = [
+    line(1, "mine", "something outside asks: Use the GitHub search API to count the stars"),
+    line(2, "said", "412 stars."),
+  ];
+  FIXTURE.conversations["agent-outside"].push({ id: "talk-from-outside", agent: "agent-outside", name: "From outside", opened: true });
+  await openTalk("talk-from-outside");
+  await settle(150);
+  document.getElementById("repeat").click();
+  await settle(250);
+  const task = document.getElementById("routine-what").value;
+  check(
+    "a task asked from outside is repeated as the task, without who asked it",
+    task === "Use the GitHub search API to count the stars",
+    JSON.stringify(task),
+  );
+  document.getElementById("repeat").click();
+  await settle(100);
+
   // Hidden meaning out of sight, not only marked so. The skills list was
   // marked hidden and stayed on screen, because a display of its own
   // outranked the attribute; checks that read the attribute all passed.
@@ -4577,6 +4609,57 @@ export async function anOpenQuestion() {
       `hidden=${it.hidden}, display=${getComputedStyle(it).display}`,
     );
   }
+  return found;
+}
+
+/**
+ * What an agent is for, under its name, and where a hidden one went.
+ *
+ * The name was squeezed to "Inb..." by the buttons beside it, and what an agent
+ * handled was on screen only in a box behind it. And a hidden agent could be
+ * found again only by searching for it, which nothing said.
+ */
+export async function whatItIsForAndWhereItWent() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  const owner = Object.entries(FIXTURE.conversations).find(([, list]) => list.some((c) => c.id === "talk-1"))[0];
+  await openTalk("talk-1");
+  tell("settled", [owner, { name: "Bitcoin Desk", title: "Markets", about: "I watch the price and the news that moves it.", mark: "chart", hue: "gold" }]);
+  await settle(150);
+  const purpose = document.getElementById("purpose");
+  check(
+    "what it is for is on the line under its name",
+    !purpose.hidden &&
+      getComputedStyle(purpose).display !== "none" &&
+      purpose.textContent === "Markets \u00b7 I watch the price and the news that moves it.",
+    `hidden=${purpose.hidden}: ${purpose.textContent}`,
+  );
+  const name = document.getElementById("thread-name");
+  check(
+    "and its name is not squeezed to a few letters",
+    name.scrollWidth <= name.clientWidth + 1 || name.clientWidth >= 90,
+    `${name.clientWidth}px of ${name.scrollWidth}px`,
+  );
+
+  const list = document.getElementById("threads");
+  // By which agent the row is, not by what it says: another agent in the list
+  // is called "Bitcoin Desk copy".
+  const rowOf = () => list.querySelector(`li[data-agent="${owner}"]`);
+  document.getElementById("hide").click();
+  await settle(150);
+  const hiddenRow = list.querySelector("li.the-hidden button");
+  check("hiding it says how many are hidden, at the bottom of the list", /Hidden \(\d+\)/.test(hiddenRow?.textContent || ""), hiddenRow?.textContent || "no row");
+  check("and it is out of the list", !rowOf(), rowOf() ? "still listed" : "out");
+  hiddenRow?.click();
+  await settle(120);
+  check("pressing that row shows it again, marked as hidden", rowOf()?.classList.contains("is-hidden"), rowOf()?.className || "not shown");
+  list.querySelector("li.the-hidden button")?.click();
+  await settle(120);
+  check("and pressing it again puts it away", !rowOf(), rowOf() ? "still shown" : "put away");
+  document.getElementById("hide").click();
+  await settle(150);
+  check("showing it in the list again takes the row away when nothing else is hidden", !list.querySelector("li.the-hidden") || /Hidden/.test(list.textContent), list.querySelector("li.the-hidden")?.textContent || "gone");
   return found;
 }
 
