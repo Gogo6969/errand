@@ -308,6 +308,18 @@ fn inside(home: &Path, said: &str) -> Result<std::path::PathBuf> {
     let mut real = at.clone();
     let mut rest: Vec<std::ffi::OsString> = Vec::new();
     while !real.exists() {
+        // A link that points at nothing is not a file about to be written. It
+        // looked like one, because `exists` follows the link and finds nothing
+        // at the end, so the check walked up past it, found the folder, and
+        // passed; then the write followed the link to wherever it pointed. The
+        // file tools run in the app, outside the wall, so that was a write
+        // anywhere the person can write, made by a link a walled command is
+        // free to leave in its own folder.
+        anyhow::ensure!(
+            real.symlink_metadata().is_err(),
+            "{said} goes through a link that points at nothing, and a write there would land \
+             wherever the link says rather than in the working directory"
+        );
         match (real.file_name().map(|n| n.to_os_string()), real.parent()) {
             (Some(name), Some(up)) => {
                 rest.push(name);
@@ -326,6 +338,23 @@ fn inside(home: &Path, said: &str) -> Result<std::path::PathBuf> {
         "{said} leads outside the working directory"
     );
     Ok(real)
+}
+
+/// Write a file at exactly this path, never through a link at the end of it.
+///
+/// `inside` has already resolved the path, so the last part is a real file or
+/// nothing. This makes sure it is still that when the write happens: a command
+/// running at the same moment could put a link there between the check and the
+/// write, and an ordinary write would follow it out of the folder.
+fn write_here(at: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(at)?;
+    std::io::Write::write_all(&mut file, contents)
 }
 
 /// The command, wrapped so it cannot write outside where it belongs.
@@ -596,7 +625,8 @@ pub async fn run(
             if let Some(parent) = at.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
-            std::fs::write(&at, get("contents")).map_err(|why| why_that_failed(why, &at, home))?;
+            write_here(&at, get("contents").as_bytes())
+                .map_err(|why| why_that_failed(why, &at, home))?;
             Ok(format!("Written: {}", at.display()))
         }
 
@@ -659,7 +689,7 @@ pub async fn run(
                  it so there is only one place it can mean.",
                 at.display()
             );
-            std::fs::write(&at, was.replacen(&from, &get("to"), 1))
+            write_here(&at, was.replacen(&from, &get("to"), 1).as_bytes())
                 .map_err(|why| why_that_failed(why, &at, home))?;
             Ok(format!("Changed: {}", at.display()))
         }
@@ -1003,6 +1033,54 @@ mod tests {
         );
         assert!(inside(&home, "notes.txt").is_ok());
         assert!(inside(&home, "a/b/notes.txt").is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_link_that_points_at_nothing_cannot_carry_a_write_out_of_the_folder() {
+        // The file tools run in the app, outside the wall, and a walled command
+        // is free to leave a link in its own folder. A link to a file that did
+        // not exist yet passed the check as a file about to be written, and
+        // the write followed it out.
+        let home = std::env::temp_dir().join(format!("errand-link-home-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("errand-link-out-{}", std::process::id()));
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::remove_dir_all(&outside).ok();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let target = outside.join("planted.txt");
+        std::os::unix::fs::symlink(&target, home.join("notes.md")).unwrap();
+
+        let said = run(
+            "write_file",
+            &json!({ "path": "notes.md", "contents": "anything" }),
+            &home,
+            "a-conversation",
+        )
+        .await;
+        assert!(said.is_err(), "the write went through: {said:?}");
+        assert!(
+            !target.exists(),
+            "the link carried the write out of the folder"
+        );
+
+        // A link to a real file inside the folder is still a file inside it.
+        std::fs::write(home.join("real.md"), "before").unwrap();
+        std::os::unix::fs::symlink(home.join("real.md"), home.join("alias.md")).unwrap();
+        run(
+            "write_file",
+            &json!({ "path": "alias.md", "contents": "after" }),
+            &home,
+            "a-conversation",
+        )
+        .await
+        .expect("a link that stays inside is fine");
+        assert_eq!(
+            std::fs::read_to_string(home.join("real.md")).unwrap(),
+            "after"
+        );
+
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::remove_dir_all(&outside).ok();
     }
 
     #[tokio::test]

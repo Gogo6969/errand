@@ -472,12 +472,60 @@ async fn scan_targets(hosts: Vec<String>) -> Vec<DetectedBackend> {
         .collect()
 }
 
-pub async fn list_models(settings: &LlmSettings) -> Result<Vec<String>> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(2500))
-        .danger_accept_invalid_certs(true)
+/// A client for asking a model server something, checking its certificate
+/// unless the server is on this Mac or this network.
+///
+/// Those are the servers with self-signed certificates, and the only ones where
+/// not checking was ever the point. Every other address is somebody's hosted
+/// service, and these requests carry the key for it: a certificate nobody
+/// checked is a key handed to whoever answered, which on a café's network or
+/// behind an intercepting proxy is not the provider. The requests that send a
+/// conversation already checked; these were the ones that sent the key first,
+/// every time a list was opened or a model server was added.
+pub(crate) fn a_client(base_url: &str, timeout: Duration) -> Option<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .danger_accept_invalid_certs(on_this_network(base_url))
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+        .ok()
+}
+
+/// Whether an address is on this Mac or on this network, by what it says.
+///
+/// Read from the address alone, never by looking the name up: this decides
+/// whether a certificate is checked, and a name that is looked up can be made
+/// to say anything by whoever answers the lookup.
+pub(crate) fn on_this_network(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url.trim()) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            let [a, b, ..] = ip.octets();
+            // The shared range Tailscale and carrier networks hand out.
+            let shared = a == 100 && (64..=127).contains(&b);
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || shared
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            let first = ip.segments()[0];
+            ip.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+        Err(_) => {
+            let name = host.trim_end_matches('.').to_ascii_lowercase();
+            !name.contains('.')
+                || [".local", ".localhost", ".lan", ".home.arpa", ".internal"]
+                    .iter()
+                    .any(|ending| name.ends_with(ending))
+        }
+    }
+}
+
+pub async fn list_models(settings: &LlmSettings) -> Result<Vec<String>> {
+    let client = a_client(&settings.base_url, Duration::from_millis(2500)).unwrap_or_default();
     // Which protocol first, because it decides the address and the header, and
     // only then who is serving. Asking them the other way round is how a
     // backend somebody set to the second format got asked in the first one.
@@ -503,11 +551,7 @@ pub async fn query_model_caps(
     api_key: Option<&str>,
     model: &str,
 ) -> Result<ModelCaps> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .danger_accept_invalid_certs(true)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = a_client(base_url, Duration::from_secs(5)).unwrap_or_default();
     match provider {
         "ollama" => caps_via_ollama(&client, base_url, model).await,
         "llamacpp" => caps_via_llamacpp(&client, base_url, api_key, model).await,
@@ -683,11 +727,7 @@ pub async fn settle(
     api_key: Option<&str>,
     wire: &str,
 ) -> Result<(String, Vec<String>)> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(12))
-        .danger_accept_invalid_certs(true)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = a_client(base_url, Duration::from_secs(12)).unwrap_or_default();
 
     let plain = base_url.trim_end_matches('/').to_string();
     // The shape this address implies first, then the other one. There are only
@@ -855,13 +895,8 @@ pub async fn probe_alive(settings: &LlmSettings) -> bool {
     } else {
         Duration::from_millis(1500)
     };
-    let client = match reqwest::Client::builder()
-        .timeout(budget)
-        .danger_accept_invalid_certs(true)
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
+    let Some(client) = a_client(&settings.base_url, budget) else {
+        return false;
     };
     let base = settings.base_url.trim_end_matches('/');
     match settings.provider.as_str() {
@@ -910,6 +945,37 @@ pub async fn probe_alive(settings: &LlmSettings) -> bool {
 #[cfg(test)]
 mod the_same_place_tests {
     use super::*;
+
+    #[test]
+    fn a_hosted_model_server_has_its_certificate_checked_and_one_on_this_network_does_not() {
+        // These requests carry the key. A hosted service's certificate is
+        // checked, so the key cannot be handed to whoever intercepts it; a
+        // server on the person's own network usually has a self-signed one,
+        // and refusing it would make it unreachable.
+        for hosted in [
+            "https://api.deepseek.com/v1",
+            "https://api.moonshot.ai/v1",
+            "https://api.z.ai/api/paas/v4",
+            "https://8.8.8.8/v1",
+            "https://example.com.",
+        ] {
+            assert!(!on_this_network(hosted), "{hosted} was treated as local");
+        }
+        for local in [
+            "http://192.168.1.25:8081",
+            "https://10.0.0.4:8443/v1",
+            "https://127.0.0.1:11434",
+            "https://[::1]:8080",
+            "https://[fd12::7]/v1",
+            "https://olares.local/v1",
+            "https://model-box:8443",
+            "https://100.101.102.103/v1",
+        ] {
+            assert!(on_this_network(local), "{local} was treated as hosted");
+        }
+        // Something that is not an address at all is not trusted either.
+        assert!(!on_this_network("not an address"));
+    }
 
     #[test]
     fn an_address_and_the_one_it_actually_answers_at_are_one_place() {

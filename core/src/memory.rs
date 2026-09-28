@@ -151,8 +151,12 @@ pub fn looks_like_a_secret(note: &str) -> bool {
         "sk-ant-",
         "sk-proj-",
         "sk-live-",
+        "sk_live_",
+        "sk_test_",
+        "rk_live_",
         "ghp_",
         "github_pat_",
+        "glpat-",
         "xoxb-",
         "xoxp-",
         "aws_secret",
@@ -160,26 +164,85 @@ pub fn looks_like_a_secret(note: &str) -> bool {
     if known_shapes.iter().any(|shape| lower.contains(shape)) {
         return true;
     }
-    // Or a long unbroken run of key-ish characters sitting next to a word that
-    // says what it is. Either alone is ordinary: a path is long and unbroken,
-    // and "the password is in 1Password" is a sentence worth keeping.
-    let named = [
-        "password",
-        "api key",
-        "api_key",
-        "secret",
-        "token",
-        "passphrase",
-    ]
-    .iter()
-    .any(|word| lower.contains(word));
-    named
-        && note.split_whitespace().any(|word| {
-            word.chars().count() >= 20
-                && word
+    // Each word as it would be copied, without the quotes, backticks, brackets
+    // and full stop a sentence puts around it. A key in backticks, or one that
+    // ended the sentence, used to be one "word" with punctuation in it and so
+    // not a key at all.
+    let words: Vec<&str> = note
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c: char| "`'\"()[]{}<>*.,;:!?".contains(c)))
+        .collect();
+    let keyish = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    };
+    // Shapes that are a key whatever is said around them. `sk-` is the start
+    // of the keys this app itself is given, for DeepSeek and Kimi and others
+    // like them; it is also inside ordinary words ("task-list"), so it counts
+    // only at the start of a word with a key's length after it.
+    let shaped = words.iter().any(|word| {
+        let after = |prefix: &str| {
+            word.strip_prefix(prefix)
+                .is_some_and(|rest| rest.len() >= 20 && keyish(rest))
+        };
+        after("sk-")
+            || after("sk_")
+            || after("hf_")
+            || after("gsk_")
+            || after("xai-")
+            || a_token(word)
+    });
+    if shaped {
+        return true;
+    }
+    // Or a long run of key-ish characters beside a word that says what it is.
+    // Either alone is ordinary: a path is long and unbroken, and "the password
+    // is in 1Password" is a sentence worth keeping.
+    let said_what_it_is = lower.contains("api key")
+        || lower.contains("api_key")
+        || lower.split(|c: char| !c.is_alphanumeric()).any(|word| {
+            matches!(
+                word,
+                "password"
+                    | "passwort"
+                    | "kennwort"
+                    | "secret"
+                    | "token"
+                    | "passphrase"
+                    | "credential"
+                    | "credentials"
+                    | "bearer"
+                    | "key"
+                    | "apikey"
+            )
+        });
+    said_what_it_is
+        && words.iter().any(|word| {
+            let long = word.chars().count() >= 20 && word.chars().any(|c| c.is_ascii_digit());
+            // One dot allowed, for keys issued as an id and a secret joined by
+            // one, the way Z.ai's are.
+            let joined = match word.split_once('.') {
+                Some((id, secret)) => keyish(id) && keyish(secret) && !secret.contains('.'),
+                None => keyish(word),
+            };
+            long && joined
+        })
+}
+
+/// Whether a word is a signed token of the kind services hand out: three
+/// parts in URL-safe base64 joined by dots, the first of which always begins
+/// the same way because it is JSON.
+fn a_token(word: &str) -> bool {
+    let parts: Vec<&str> = word.split('.').collect();
+    word.len() >= 40
+        && word.starts_with("eyJ")
+        && parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part
                     .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-                && word.chars().any(|c| c.is_ascii_digit())
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '=')
         })
 }
 
@@ -367,6 +430,17 @@ mod tests {
             "the api key is sk-ant-api03-abcdefghijklmnop",
             "token: ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "password is Hunter2xxxxxxxxxxxxxxxxxxx9",
+            // Invented, every one, and split in two so that no key scanner
+            // reads one as real: GitHub refused a push over the joined form.
+            // The keys this app itself is given, and the ways a sentence
+            // wraps one: plain, in backticks, and ending the sentence.
+            concat!("DeepSeek key: sk", "-3b1f0c2d9e8a7b6c5d4e3f2a1b0c9d8e"),
+            concat!("API key is `sk", "-3b1f0c2d9e8a7b6c5d4e3f2a1b0c9d8e`."),
+            concat!("Moonshot: sk", "-Abc123Def456Ghi789Jkl012Mno345Pqr678"),
+            concat!("the stripe secret is sk_", "live_51H8abcdefghijklmnopqrstu"),
+            "Das Passwort ist Sommer2026SonneStrandMeer",
+            "bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+            "The z.ai key is 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d.AbCdEfGhIjKlMnOp",
         ] {
             let said = a_note(secret);
             assert!(said.is_err(), "{secret:?} was written down in the clear");
@@ -386,6 +460,12 @@ mod tests {
             "The password for the export is in 1Password under Acme",
             "Use /Users/somebody/Documents/templates/invoice-acme-2026.docx",
             "The API key lives in the environment as ACME_KEY",
+            // Long and unbroken, and nothing to do with a key.
+            "Release from commit 3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a on Fridays",
+            "Agent 0ccce5c5-f456-48e2-83bc-630417321116 handles the mail",
+            "The monkey sanctuary opens at 09:00 on weekdays",
+            "Keep the task-list in ~/Documents/task-list-2026-autumn-edition.md",
+            "The key point is that the briefing goes out before 08:00",
         ] {
             assert!(a_note(fine).is_ok(), "{fine:?} was refused");
         }

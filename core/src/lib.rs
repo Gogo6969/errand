@@ -46,4 +46,15 @@ pub mod team;
 pub mod watch;
 
 pub use engine::{Answer, Brought, Engine, Event, NeedsYou, Picture, Step};
+
+/// Where Errand keeps everything: the store, the keys, and every agent's folder.
+///
+/// One definition that the app and this crate both read. It was worked out in
+/// three places, and the wall that keeps agents away from the keys has to name
+/// exactly the folder the keys are in: a copy that drifted would leave the keys
+/// readable behind a wall that looked right.
+pub fn where_errand_lives() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join("Library/Application Support/Errand"))
+}
 pub use store::{Agent, Conversation, Line, Store};

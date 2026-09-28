@@ -196,6 +196,31 @@ pub fn asks_first(job: &str, args: &Value, they_said: &[String]) -> bool {
     !they_named_it(url, they_said)
 }
 
+/// Whether the app has to refuse a page itself, because nothing else will ask.
+///
+/// `asks_first` is the rule, and the local engine applies it before any tool
+/// runs, in every posture. Claude Code asks with cards of its own, and on an
+/// agent set never to ask it shows none: the rule this module exists for was
+/// never applied on that engine, so a page could name an address and have it
+/// opened in the person's signed-in Chrome with nobody asked. There is nobody
+/// to ask there by design, so an address they did not name is refused, in a
+/// sentence that says how to get it read.
+pub fn refused_without_asking(
+    engine: &str,
+    asks: &str,
+    job: &str,
+    args: &Value,
+    they_said: &[String],
+) -> bool {
+    engine == "claude" && asks == "auto" && asks_first(job, args, they_said)
+}
+
+/// What an agent is told when that happens.
+pub const NOBODY_NAMED_IT: &str = "That address did not come from them: it is in nothing they \
+    wrote in this conversation, and this agent is set to act without asking, so there is \
+    nobody to ask whether to open it in their signed-in browser. Say which address you want to \
+    read and why. If they paste it into the conversation, it can be read.";
+
 /// Whether an address is one the person put there themselves.
 ///
 /// The host and not the whole address, because somebody who says "read the
@@ -207,35 +232,58 @@ pub fn asks_first(job: &str, args: &Value, they_said: &[String]) -> bool {
 /// A host has to have a dot in it to count, or an address on `http://intranet`
 /// would be waved through by the word "intranet" appearing in a sentence.
 pub fn they_named_it(url: &str, they_said: &[String]) -> bool {
-    let Some(host) = host_of(&url.to_lowercase()) else {
+    let Some(host) = host_of(url) else {
         return false;
     };
+    let host = host.trim_start_matches("www.");
     if !host.contains('.') || host.len() < 4 {
         return false;
     }
-    they_said
-        .iter()
-        .any(|said| said.to_lowercase().contains(&host))
+    // The same host, or a part of the site they named. Compared as names, not
+    // as text: "hub.com" is inside "github.com" and is somebody else entirely.
+    they_said.iter().any(|said| {
+        hosts_in(said).iter().any(|named| {
+            let named = named.trim_start_matches("www.");
+            host == named || host.ends_with(&format!(".{named}"))
+        })
+    })
 }
 
-/// The host part of an address, lowercased already by the caller.
-fn host_of(lower: &str) -> Option<String> {
-    let after = lower.split_once("//")?.1;
-    let host = after
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default()
-        .rsplit('@')
-        .next()
-        .unwrap_or_default();
-    let host = match host.strip_prefix('[') {
-        Some(rest) => rest.split(']').next().unwrap_or_default(),
-        None => host.split(':').next().unwrap_or_default(),
-    };
-    match host.is_empty() {
-        true => None,
-        false => Some(host.to_string()),
-    }
+/// The host names in something a person wrote, whether they wrote whole
+/// addresses or just `example.com`.
+fn hosts_in(said: &str) -> Vec<String> {
+    said.split(|c: char| c.is_whitespace() || "<>()[]{}\"'`,;".contains(c))
+        .filter_map(|word| {
+            let word = word.trim_matches(|c: char| ".:!?".contains(c));
+            if word.is_empty() {
+                return None;
+            }
+            let as_given = match word.contains("://") {
+                true => word.to_string(),
+                false => format!("https://{word}"),
+            };
+            let host = host_of(&as_given)?;
+            (host.contains('.') && host.chars().any(|c| c.is_ascii_alphabetic())).then_some(host)
+        })
+        .collect()
+}
+
+/// The host part of an address, as a browser reads it.
+///
+/// Read by the same rules Chrome follows rather than by splitting on slashes.
+/// The two disagreed, and the disagreement was the hole: `\` is a slash to a
+/// browser, so `http://127.0.0.1:8080\@github.com/` was read here as github.com
+/// and opened by Chrome as this Mac; `127.1` and `2130706433` are both
+/// 127.0.0.1 to a browser and were ordinary names here.
+fn host_of(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    let host = parsed
+        .host_str()?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_lowercase();
+    (!host.is_empty()).then_some(host)
 }
 
 /// Which connector has to be on for a job to answer.
@@ -1323,6 +1371,12 @@ pub fn only_the_web(url: &str) -> Result<String> {
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         bail!("`{url}` has a space or a line break in it, so it is not one address");
     }
+    // A backslash is a slash to a browser and not to anything that reads the
+    // address as text, so an address with one in it can be two different
+    // places at once. No page anybody means to open needs one.
+    if url.contains('\\') {
+        bail!("`{url}` has a backslash in it, which a browser reads as a slash; write the address the ordinary way");
+    }
     let lower = url.to_lowercase();
     if !lower.starts_with("http://") && !lower.starts_with("https://") {
         bail!(
@@ -2333,6 +2387,54 @@ fn ask_the_mac(app: &str, script: &str, patience: Duration) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_page_nobody_named_is_refused_on_the_one_engine_that_never_asks() {
+        let args = json!({ "url": "https://mail.example.com/unsubscribe?all=1" });
+        let they_said =
+            vec!["Read the council's bin page at https://council.gov.uk/bins".to_string()];
+        // Claude Code set never to ask shows no card, so the app refuses.
+        assert!(refused_without_asking(
+            "claude",
+            "auto",
+            "read_web_page",
+            &args,
+            &they_said
+        ));
+        // Every other case already asks: a card on Claude Code, or the local
+        // loop's own rule before the tool is ever reached.
+        assert!(!refused_without_asking(
+            "claude",
+            "ask",
+            "read_web_page",
+            &args,
+            &they_said
+        ));
+        assert!(!refused_without_asking(
+            "local",
+            "auto",
+            "read_web_page",
+            &args,
+            &they_said
+        ));
+        // And an address they typed is theirs, whatever the engine.
+        let theirs = json!({ "url": "https://council.gov.uk/bins/week" });
+        assert!(!refused_without_asking(
+            "claude",
+            "auto",
+            "read_web_page",
+            &theirs,
+            &they_said
+        ));
+        // Mail and the diary never leave the Mac, so they are never refused.
+        assert!(!refused_without_asking(
+            "claude",
+            "auto",
+            "unread_mail",
+            &json!({}),
+            &they_said
+        ));
+    }
+
     use super::*;
 
     /// A tab of ours, for the scripts that take one.
@@ -2675,6 +2777,13 @@ mod tests {
             "http://[fd00::1]/",
             "https://printer.local/status",
             "https://user:pass@127.0.0.1/",
+            // Read the way Chrome reads them: a backslash is a slash, and
+            // these are all 127.0.0.1 or this Mac.
+            "http://127.0.0.1:8080\\@github.com/../admin/reset",
+            "http://127.1/",
+            "http://2130706433/",
+            "http://0x7f.1/",
+            "http://localhost./",
         ] {
             assert!(
                 only_the_web(refused).is_err(),
@@ -3242,6 +3351,16 @@ mod tests {
             "http://intranet/admin",
             &["check the intranet".to_string()]
         ));
+        // Names are compared as names. "hub.com" is inside "github.com" and is
+        // somebody else entirely; a part of the site they named is theirs.
+        let github = ["see what is new on github.com today".to_string()];
+        assert!(!they_named_it("https://hub.com/steal", &github));
+        assert!(they_named_it("https://api.github.com/repos", &github));
+        assert!(they_named_it(
+            "https://www.bbc.co.uk/news",
+            &["what is on bbc.co.uk?".to_string()]
+        ));
+        assert!(!they_named_it("https://github.com.evil.example/", &github));
     }
 
     #[test]

@@ -505,8 +505,8 @@ impl Claude {
         let claude = where_claude_is();
         let claude = claude.to_string_lossy();
         let mut command = match walled {
-            true => crate::wall::around(&claude, cwd),
-            false => tokio::process::Command::new(claude.as_ref()),
+            true => crate::wall::around(&claude, cwd, crate::wall::Inside::ClaudeCode { doorway }),
+            false => crate::wall::kept_out(&claude, doorway),
         };
         // And the person's own PATH for everything it runs, so the tools they
         // have in a terminal are the tools their agent has.

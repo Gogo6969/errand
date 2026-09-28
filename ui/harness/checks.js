@@ -3565,9 +3565,18 @@ export async function aPictureAnAgentMade() {
   );
   check("its alt text is what the agent called it", img?.alt === "John Ternus", img?.alt);
 
-  // One on the web needs nothing from the app and is used directly.
-  const web = render("![a chart](https://example.com/c.png)").querySelector("img.drawn");
-  check("one on the web is used as it is", web?.src === "https://example.com/c.png", web?.src);
+  // One on the web waits to be asked for: drawing an address is loading it,
+  // and the address is the model's to choose.
+  const onTheWeb = render("![a chart](https://example.com/c.png)");
+  const waiting = onTheWeb.querySelector("button.picture-elsewhere");
+  check(
+    "one on the web is not fetched until somebody asks, and says where it is from",
+    !onTheWeb.querySelector("img.drawn") && /example\.com/.test(waiting?.textContent || ""),
+    waiting?.textContent || "no button",
+  );
+  waiting?.click();
+  const shown = onTheWeb.querySelector("img.drawn");
+  check("and asking for it shows it", shown?.src === "https://example.com/c.png", shown?.src || "nothing shown");
 
   // A file an answer points at is worth reaching, and revealing one in Finder
   // cannot run anything.

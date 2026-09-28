@@ -2077,6 +2077,21 @@ body.in-a-call #what {
   display: block;
   object-fit: cover;
 }
+/* A picture on the web, waiting to be asked for. Quiet, because most answers
+   with one in are about something else, and plainly a button, because it is
+   the one thing here that reaches out of the Mac when pressed. */
+.picture-elsewhere {
+  align-self: flex-start;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink-soft);
+  background: none;
+  border: 1px dashed var(--edge);
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.picture-elsewhere:hover { color: var(--ink); border-color: var(--ink-soft); }
 .picture-gone {
   color: var(--faint);
   font-size: 12px;

@@ -202,8 +202,7 @@ fn where_things_live(_app: &AppHandle) -> Result<std::path::PathBuf, String> {
 /// which reads as "Errand is not running" while it plainly is. This is what
 /// Tauri's own resolver returns on a Mac, and this app is a Mac app.
 fn beside_everything_else() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join("Library/Application Support/Errand"))
+    errand_core::where_errand_lives()
 }
 
 /// Say on screen that an errand has ended, if nobody was there to see it end.
@@ -2932,7 +2931,7 @@ fn answer_what_engines_cannot(
                     // Not one of the app's own, so it may be one of the things
                     // this Mac can be let at.
                     None => match errand_core::connectors::which(&asked.tool) {
-                        Some(job) => reach_for_it(&app, job, &asked.args),
+                        Some(job) => reach_for_it(&app, job, &asked),
                         None => Err(anyhow::anyhow!("there is no {} here", asked.tool)),
                     },
                 };
@@ -3027,11 +3026,8 @@ fn set_it_running(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
 /// ask is confined to its own folder, and this reaches outside it on purpose.
 /// So an unconnected one is refused in a sentence rather than answered, and the
 /// sentence says where the switch is.
-fn reach_for_it(
-    app: &AppHandle,
-    job: &'static str,
-    args: &serde_json::Value,
-) -> anyhow::Result<String> {
+fn reach_for_it(app: &AppHandle, job: &'static str, asked: &team::Wants) -> anyhow::Result<String> {
+    let args = &asked.args;
     let wanted = errand_core::connectors::needs(job);
     let on = {
         let held: State<Held> = app.state();
@@ -3047,7 +3043,39 @@ fn reach_for_it(
              on under Settings, and it takes effect at once."
         );
     }
+    if nobody_would_be_asked(app, job, asked) {
+        anyhow::bail!(errand_core::connectors::NOBODY_NAMED_IT);
+    }
     errand_core::connectors::run(job, args)
+}
+
+/// Whether this page would open with nobody asked, at an address nobody typed.
+///
+/// Read from the store, because the person's own words are the lines they
+/// wrote, and a page an agent read is never one of them.
+fn nobody_would_be_asked(app: &AppHandle, job: &str, asked: &team::Wants) -> bool {
+    let held: State<Held> = app.state();
+    let Ok(Some(talk)) = held.store.conversation(&asked.from) else {
+        return false;
+    };
+    let Ok(Some(agent)) = held.store.agent(&talk.agent) else {
+        return false;
+    };
+    let they_said: Vec<String> = held
+        .store
+        .lines(&asked.from)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|line| line.kind == "mine")
+        .map(|line| line.text)
+        .collect();
+    errand_core::connectors::refused_without_asking(
+        &agent.engine,
+        &agent.asks,
+        job,
+        &asked.args,
+        &they_said,
+    )
 }
 
 /// Where some words were actually found, line by line.

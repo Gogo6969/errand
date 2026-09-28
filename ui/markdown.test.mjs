@@ -117,6 +117,18 @@ test("a link that is not one of the kinds worth following stays as the text it w
   assert.match(out.textContent, /\[click me\]\(javascript:alert\(1\)\)/);
 });
 
+test("a picture on the web is not fetched until somebody asks for it", () => {
+  // Drawing an address is loading it, and the address is the model's: a mail
+  // it read could ask it to pack what it had just read into one.
+  const out = drawn("Here: ![the chart](https://example.com/c.png?d=secret)");
+  const loaded = out.all("img").filter((img) => /^https?:/.test(img.src || ""));
+  assert.equal(loaded.length, 0, "a picture on the web was loaded as it was drawn");
+  const asking = out.all("button");
+  assert.equal(asking.length, 1);
+  assert.match(asking[0].textContent, /example\.com/);
+  assert.match(asking[0].textContent, /the chart/);
+});
+
 test("markup in what the model wrote never becomes markup", () => {
   const out = drawn('An <img src=x onerror="alert(2)"> and a <script>alert(3)</script>.');
   assert.equal(out.all("img").length, 0);

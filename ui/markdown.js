@@ -299,7 +299,30 @@ function picture(src, alt) {
   img.alt = alt || "";
   img.loading = "lazy";
   if (/^https?:/i.test(src)) {
-    img.src = src;
+    // Not fetched until somebody asks for it. Drawing an address is loading
+    // it, and the address is the model's: a mail or a page it read could ask
+    // it to put what it had just read into one, and the window would send
+    // that to whoever the address named the moment the line appeared, with no
+    // tool, no card and nothing to see. Asked for, it is the person's request.
+    let host = "the web";
+    try {
+      host = new URL(src).host || host;
+    } catch {
+      // An address the browser cannot read is shown by what it says it is.
+    }
+    const show = document.createElement("button");
+    show.type = "button";
+    show.className = "picture-elsewhere";
+    show.textContent = alt ? `Show "${alt}" from ${host}` : `Show the picture from ${host}`;
+    show.title = src;
+    show.onclick = () => {
+      img.src = src;
+      show.replaceWith(img);
+    };
+    img.onclick = () => {
+      if (img.src) window.dispatchEvent(new CustomEvent("look-closer", { detail: { url: img.src, name: alt } }));
+    };
+    return show;
   } else {
     ask("a_local_picture", { path: src })
       .then((url) => {

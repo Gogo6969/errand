@@ -50,13 +50,8 @@ pub struct Ready {
 /// with the ready ones first, because a list is read from the top and the top
 /// is where the thing you can use right now belongs.
 pub async fn what_can_answer(provider: &str, base_url: &str, models: &[String]) -> Vec<Ready> {
-    let client = match reqwest::Client::builder()
-        .timeout(TO_ANSWER)
-        .danger_accept_invalid_certs(true)
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return every_one_of_them(models),
+    let Some(client) = super::find::a_client(base_url, TO_ANSWER) else {
+        return every_one_of_them(models);
     };
     let base = base_url.trim_end_matches('/');
 

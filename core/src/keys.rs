@@ -19,8 +19,7 @@ use anyhow::{Context, Result};
 /// A key that travels inside a database nobody thought of as secret is how keys
 /// end up somewhere they were never meant to be.
 fn where_keys_live() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join("Library/Application Support/Errand/keys"))
+    Some(crate::where_errand_lives()?.join("keys"))
 }
 
 /// The file for one backend.
