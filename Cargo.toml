@@ -12,3 +12,11 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
+
+# macOS 27's loader refuses a library that was stripped of its debug info when
+# it was linked for macOS 12 or later: "mis-aligned LINKEDIT string pool". The
+# app is built for 12.0, so every proc macro the release build made failed to
+# load and the build stopped at the first crate that used one. Build-time
+# pieces are left unstripped; none of them ships.
+[profile.release.build-override]
+strip = "none"
