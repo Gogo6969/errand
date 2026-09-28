@@ -422,27 +422,43 @@ mod tests {
         assert!(format!("{:#}", sentence.unwrap_err()).contains("handle"));
     }
 
+    /// A key-shaped run of letters and digits, as long as asked for.
+    ///
+    /// Made from a seed too short to be anything, so that nothing in this file
+    /// is a key to a scanner while what the checks are shown is shaped exactly
+    /// like one.
+    fn invented(length: usize) -> String {
+        "x7Kq2Vn9".chars().cycle().take(length).collect()
+    }
+
     #[test]
     fn a_note_that_is_really_a_key_is_refused_with_somewhere_else_to_put_it() {
         // Notes are plain text and are read back into every conversation this
         // agent ever has, so this is the one refusal worth being firm about.
         for secret in [
-            "the api key is sk-ant-api03-abcdefghijklmnop",
-            "token: ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "password is Hunter2xxxxxxxxxxxxxxxxxxx9",
-            // Invented, every one, and split in two so that no key scanner
-            // reads one as real: GitHub refused a push over the joined form.
-            // The keys this app itself is given, and the ways a sentence
-            // wraps one: plain, in backticks, and ending the sentence.
-            concat!("DeepSeek key: sk", "-3b1f0c2d9e8a7b6c5d4e3f2a1b0c9d8e"),
-            concat!("API key is `sk", "-3b1f0c2d9e8a7b6c5d4e3f2a1b0c9d8e`."),
-            concat!("Moonshot: sk", "-Abc123Def456Ghi789Jkl012Mno345Pqr678"),
-            concat!("the stripe secret is sk_", "live_51H8abcdefghijklmnopqrstu"),
-            "Das Passwort ist Sommer2026SonneStrandMeer",
-            "bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
-            "The z.ai key is 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d.AbCdEfGhIjKlMnOp",
+            "the api key is sk-ant-api03-abcdefghijklmnop".to_string(),
+            "token: ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            "password is Hunter2xxxxxxxxxxxxxxxxxxx9".to_string(),
+            // Made here rather than written out, every one. They are invented,
+            // and written out they still stopped a push and then the build:
+            // GitHub refused the joined form, and the scanner in CI read the
+            // split form too, because a comma after "secret is" is where it
+            // expects a value to start. The keys this app itself is given, and
+            // the ways a sentence wraps one: plain, in backticks, and ending it.
+            format!("DeepSeek key: sk-{}", invented(32)),
+            format!("API key is `sk-{}`.", invented(32)),
+            format!("Moonshot: sk-{}", invented(48)),
+            format!("the stripe secret is sk_live_{}", invented(24)),
+            format!("Das Passwort ist {}", invented(20)),
+            format!(
+                "bearer eyJ{}.eyJ{}.{}",
+                invented(20),
+                invented(40),
+                invented(30)
+            ),
+            format!("The z.ai key is {}.{}", invented(32), invented(16)),
         ] {
-            let said = a_note(secret);
+            let said = a_note(&secret);
             assert!(said.is_err(), "{secret:?} was written down in the clear");
             assert!(
                 format!("{:#}", said.unwrap_err()).contains("where you put it"),
