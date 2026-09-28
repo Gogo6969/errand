@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::Event;
@@ -124,6 +124,9 @@ pub struct Conversation {
     /// Switched off without being thrown away. The schedule and what it says
     /// are still here, and the clock walks past it.
     pub routine_off: bool,
+    /// When the schedule was set or switched back on, which a routine that has
+    /// not run since is counted from.
+    pub routine_set_at: Option<i64>,
     /// The conversation that asked for this one, if it was delegated.
     pub asked_by: Option<String>,
     /// The conversation this one carries on from, if it does. Kept for ever,
@@ -890,6 +893,15 @@ const CHANGES: &[&str] = &[
     // own: the clock walks past its routines and its watches, and a goal
     // stops carrying on. It still answers when spoken to.
     "ALTER TABLE agents ADD COLUMN paused_at INTEGER;",
+    // When the schedule was set, or switched back on. A routine counted from
+    // when its conversation began instead, so one set or edited in a
+    // conversation a week old ran at once and said it was late.
+    "ALTER TABLE conversations ADD COLUMN routine_set_at INTEGER;",
+    // When the turn now going began: the first thing said, not the last. The
+    // check on what an agent says it wrote dated a turn from the last line
+    // typed, so a follow-up typed mid-errand made a file written a minute
+    // earlier look like it came from before the errand.
+    "ALTER TABLE conversations ADD COLUMN turn_began_at INTEGER;",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -1332,21 +1344,24 @@ impl Store {
         steps: &[crate::skill::Step],
     ) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        let was_there: i64 = conn.query_row(
-            "SELECT count(*) FROM skills WHERE agent = ? AND name = ?",
-            params![agent, name],
-            |r| r.get(0),
-        )?;
+        // By the id, which folds case in every alphabet. The name's own
+        // comparison folds only English letters, so "Übersicht" could not be
+        // found as "übersicht", and saving it again failed on the id.
+        let id = skill_id(agent, name);
+        let was_there: i64 =
+            conn.query_row("SELECT count(*) FROM skills WHERE id = ?", [&id], |r| {
+                r.get(0)
+            })?;
         conn.execute(
             "INSERT INTO skills (id, agent, name, request, steps, made_at)
                   VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT(agent, name) DO UPDATE SET
+             ON CONFLICT(id) DO UPDATE SET
                   name = excluded.name,
                   request = excluded.request,
                   steps = excluded.steps,
                   made_at = excluded.made_at",
             params![
-                uuid_like(&format!("skill{agent}{}", name.to_lowercase())),
+                id,
                 agent,
                 name,
                 request,
@@ -1361,9 +1376,9 @@ impl Store {
     pub fn skill(&self, agent: &str, name: &str) -> Result<Option<Skill>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
-            "SELECT name, request, steps, made_at FROM skills WHERE agent = ? AND name = ?",
+            "SELECT name, request, steps, made_at FROM skills WHERE agent = ? AND id = ?",
         )?;
-        let mut rows = q.query_map(params![agent, name], read_skill)?;
+        let mut rows = q.query_map(params![agent, skill_id(agent, name)], read_skill)?;
         rows.next().transpose().map_err(Into::into)
     }
 
@@ -1418,9 +1433,11 @@ impl Store {
             params![new_id, name, now, from, at_anchor],
         )?;
         doing.execute(
+            // Pictures and who said what too: a room carried on read as though
+            // the person had said everything, and its pictures were gone.
             "INSERT INTO lines
-                  (conversation, seq, at, kind, text, call, tool, outcome, anchor)
-             SELECT ?1, seq, at, kind, text, call, tool, outcome, anchor
+                  (conversation, seq, at, kind, text, call, tool, outcome, anchor, pictures, said_by)
+             SELECT ?1, seq, at, kind, text, call, tool, outcome, anchor, pictures, said_by
                FROM lines WHERE conversation = ?2 AND seq <= ?3",
             params![new_id, from, up_to],
         )?;
@@ -1847,7 +1864,7 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at
                FROM conversations",
         )?;
         let rows = q.query_map([], read_conversation)?;
@@ -1912,7 +1929,7 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at
                FROM conversations WHERE agent = ? ORDER BY spoke_at DESC",
         )?;
         let rows = q.query_map([agent], read_conversation)?;
@@ -1928,7 +1945,7 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at
                FROM conversations WHERE id = ?",
         )?;
         let mut rows = q.query_map([id], read_conversation)?;
@@ -2026,8 +2043,9 @@ impl Store {
     /// however long it happened to be since.
     pub fn runs(&self, conversation: &str, at: Option<&str>, what: Option<&str>) -> Result<()> {
         let changed = self.conn.lock().unwrap().execute(
-            "UPDATE conversations SET runs_at = ?, runs_what = ?, ran_at = NULL WHERE id = ?",
-            params![at, what, conversation],
+            "UPDATE conversations SET runs_at = ?, runs_what = ?, ran_at = NULL, routine_set_at = ?
+              WHERE id = ?",
+            params![at, what, now(), conversation],
         )?;
         Self::only_if_it_is_there(changed, "conversation")
     }
@@ -2035,8 +2053,11 @@ impl Store {
     /// Say that a turn has started in this conversation.
     pub fn a_turn_began(&self, conversation: &str) -> Result<()> {
         self.conn.lock().unwrap().execute(
-            "UPDATE conversations SET in_flight = 1 WHERE id = ?",
-            [conversation],
+            "UPDATE conversations
+                SET turn_began_at = CASE WHEN in_flight = 0 THEN ?1 ELSE turn_began_at END,
+                    in_flight = 1
+              WHERE id = ?2",
+            params![now(), conversation],
         )?;
         Ok(())
     }
@@ -2051,6 +2072,17 @@ impl Store {
     /// work done and work claimed.
     pub fn when_the_turn_began(&self, conversation: &str) -> Result<Option<i64>> {
         let conn = self.conn.lock().unwrap();
+        let began: Option<i64> = conn
+            .query_row(
+                "SELECT turn_began_at FROM conversations WHERE id = ?",
+                [conversation],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        if began.is_some() {
+            return Ok(began);
+        }
         let mut q = conn.prepare(
             "SELECT at FROM lines WHERE conversation = ? AND kind = 'mine'
               ORDER BY seq DESC LIMIT 1",
@@ -2097,8 +2129,14 @@ impl Store {
     /// routine is destroyed here: the clock simply walks past it.
     pub fn routine_off(&self, conversation: &str, off: bool) -> Result<()> {
         let changed = self.conn.lock().unwrap().execute(
-            "UPDATE conversations SET routine_off = ? WHERE id = ?",
-            params![i64::from(off), conversation],
+            // Switched back on, it counts from now: the runs it was off for are
+            // not owed, and the first of them used to run the moment it was
+            // switched on, saying it was late.
+            "UPDATE conversations
+                SET routine_off = ?1,
+                    routine_set_at = CASE WHEN ?1 = 0 THEN ?2 ELSE routine_set_at END
+              WHERE id = ?3",
+            params![i64::from(off), now(), conversation],
         )?;
         Self::only_if_it_is_there(changed, "conversation")
     }
@@ -2163,7 +2201,7 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at
                FROM conversations
               WHERE runs_at IS NOT NULL AND runs_what IS NOT NULL AND routine_off = 0
                 AND agent NOT IN (SELECT id FROM agents WHERE paused_at IS NOT NULL)
@@ -2187,7 +2225,7 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at
                FROM conversations
               WHERE runs_at IS NOT NULL AND runs_what IS NOT NULL
               ORDER BY spoke_at DESC",
@@ -2238,7 +2276,36 @@ impl Store {
     }
 
     pub fn agent(&self, id: &str) -> Result<Option<Agent>> {
-        Ok(self.agents()?.into_iter().find(|t| t.id == id))
+        // One row by its key. It read and sorted every agent to find one, and
+        // it is asked on every event an engine sends.
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare_cached(
+            "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
+                    cwd, model, started_at, spoke_at, engine, engine_settings,
+                    paused_at
+               FROM agents WHERE id = ?",
+        )?;
+        let mut rows = q.query_map([id], |r| {
+            Ok(Agent {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                title: r.get(2)?,
+                about: r.get(3)?,
+                mark: r.get(4)?,
+                hue: r.get(5)?,
+                asks: r.get(6)?,
+                pinned: r.get::<_, i64>(7)? != 0,
+                hidden: r.get::<_, i64>(8)? != 0,
+                cwd: r.get(9)?,
+                model: r.get(10)?,
+                started_at: r.get(11)?,
+                spoke_at: r.get(12)?,
+                engine: r.get(13)?,
+                engine_settings: r.get(14)?,
+                paused_at: r.get(15)?,
+            })
+        })?;
+        rows.next().transpose().map_err(Into::into)
     }
 
     /// Everything said in a thread, in the order it was said.
@@ -2345,8 +2412,14 @@ impl Store {
             Event::Did { call, outcome } => {
                 let conn = self.conn.lock().unwrap();
                 conn.execute(
-                    "UPDATE lines SET outcome = ? WHERE conversation = ? AND call = ?
-                       AND kind IN ('doing', 'asking')",
+                    // The newest step with that id. A server that sends no ids
+                    // gets ones that start again every turn, and the outcome
+                    // of the fifth turn's step was written over the first's.
+                    "UPDATE lines SET outcome = ?1
+                      WHERE conversation = ?2 AND call = ?3 AND kind IN ('doing', 'asking')
+                        AND seq = (SELECT max(seq) FROM lines
+                                    WHERE conversation = ?2 AND call = ?3
+                                      AND kind IN ('doing', 'asking'))",
                     params![outcome, conversation, call],
                 )?;
                 Ok(None)
@@ -2363,7 +2436,10 @@ impl Store {
             Event::NeedsYou(ask) => {
                 let conn = self.conn.lock().unwrap();
                 let turned = conn.execute(
-                    "UPDATE lines SET kind = 'asking' WHERE conversation = ? AND call = ? AND kind = 'doing'",
+                    "UPDATE lines SET kind = 'asking'
+                      WHERE conversation = ?1 AND call = ?2 AND kind = 'doing'
+                        AND seq = (SELECT max(seq) FROM lines
+                                    WHERE conversation = ?1 AND call = ?2 AND kind = 'doing')",
                     params![conversation, &ask.step],
                 )?;
                 drop(conn);
@@ -2451,7 +2527,16 @@ impl Store {
             "UPDATE agents SET paused_at = ? WHERE id = ?",
             params![paused.then_some(now), agent],
         )?;
-        Self::only_if_it_is_there(changed, "agent")
+        Self::only_if_it_is_there(changed, "agent")?;
+        // Started again, its routines count from now, for the same reason one
+        // switched back on under Repeat does.
+        if !paused {
+            conn.execute(
+                "UPDATE conversations SET routine_set_at = ? WHERE agent = ? AND runs_at IS NOT NULL",
+                params![now, agent],
+            )?;
+        }
+        Ok(())
     }
 
     /// The agents that are paused, by id.
@@ -2813,8 +2898,10 @@ impl Store {
     pub fn answered(&self, conversation: &str, step: &str, said: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE lines SET outcome = ?
-              WHERE conversation = ? AND call = ? AND kind = 'asking'",
+            "UPDATE lines SET outcome = ?1
+              WHERE conversation = ?2 AND call = ?3 AND kind = 'asking'
+                AND seq = (SELECT max(seq) FROM lines
+                            WHERE conversation = ?2 AND call = ?3 AND kind = 'asking')",
             params![said, conversation, step],
         )?;
         Ok(())
@@ -2873,6 +2960,15 @@ fn read_memory(r: &rusqlite::Row) -> rusqlite::Result<Memory> {
 /// A word has to keep at least one letter or digit after the filtering. One
 /// like `--` survives the character filter and then tokenises to an empty
 /// phrase, which the index rejects outright.
+/// Words a search is better without.
+const SAYS_NOTHING: &[&str] = &[
+    "the", "and", "for", "what", "where", "when", "which", "who", "how", "why", "is", "are", "was",
+    "were", "it", "its", "of", "to", "in", "on", "at", "by", "or", "an", "as", "be", "do", "does",
+    "did", "my", "our", "your", "this", "that", "these", "those", "with", "from", "about", "there",
+    "here", "have", "has", "had", "can", "could", "should", "would", "will", "not", "no", "yes",
+    "me", "we", "you", "i", "a", "so", "if", "then", "than", "into",
+];
+
 fn as_a_query(said: &str) -> String {
     let mut words: Vec<String> = said
         .split_whitespace()
@@ -2881,13 +2977,27 @@ fn as_a_query(said: &str) -> String {
                 .filter(|c| c.is_alphanumeric() || *c == '_')
                 .collect::<String>()
         })
-        .filter(|word| word.chars().count() >= 3 && word.chars().any(char::is_alphanumeric))
-        .map(|word| format!("\"{word}\"*"))
+        .filter(|word| word.chars().count() >= 2 && word.chars().any(char::is_alphanumeric))
+        // Words that say nothing about what is wanted. With them, "what is the
+        // wifi password" matched every note that had "the" in it.
+        .filter(|word| !SAYS_NOTHING.contains(&word.to_lowercase().as_str()))
+        // Short words exactly, longer ones as the start of a word: "db" and
+        // "ip" are worth finding, and would match half the language as
+        // prefixes.
+        .map(|word| match word.chars().count() >= 4 {
+            true => format!("\"{word}\"*"),
+            false => format!("\"{word}\""),
+        })
         .collect();
     // Enough to say what is wanted. A hundred-word question is not a better
     // search, it is a search that matches everything.
     words.truncate(8);
     words.join(" OR ")
+}
+
+/// The one id a skill has, whatever case its name is written in.
+fn skill_id(agent: &str, name: &str) -> String {
+    uuid_like(&format!("skill{agent}{}", name.trim().to_lowercase()))
 }
 
 /// A stable id from something that identifies the row.
@@ -2915,6 +3025,7 @@ fn read_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
         runs_what: r.get(7)?,
         ran_at: r.get(8)?,
         routine_off: r.get::<_, i64>(30).unwrap_or(0) != 0,
+        routine_set_at: r.get(31)?,
         asked_by: r.get(9)?,
         came_from: r.get(10)?,
         carries_on: r.get::<_, i64>(11)? != 0,
@@ -3943,6 +4054,111 @@ mod tests {
     }
 
     #[test]
+    fn a_skill_is_found_whatever_case_its_name_is_written_in() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        let steps: Vec<crate::skill::Step> = Vec::new();
+        s.keep_skill("a1", "Übersicht", "make the overview", &steps)
+            .unwrap();
+        assert!(s.skill("a1", "übersicht").unwrap().is_some());
+        assert!(s.skill("a1", "ÜBERSICHT").unwrap().is_some());
+        let again = s
+            .keep_skill("a1", "übersicht", "make it again", &steps)
+            .expect("saving it again is not an error");
+        assert!(again, "saving it again was not seen as the same skill");
+        assert_eq!(s.skills("a1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_outcome_lands_on_the_newest_step_with_that_id() {
+        // A server that sends no ids gets ones that begin again every turn.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.happened("a1", &step("call-0-0", "the first turn's step"))
+            .unwrap();
+        s.happened(
+            "a1",
+            &Event::Did {
+                call: "call-0-0".into(),
+                outcome: "the first outcome".into(),
+            },
+        )
+        .unwrap();
+        s.happened("a1", &step("call-0-0", "the fifth turn's step"))
+            .unwrap();
+        s.happened(
+            "a1",
+            &Event::Did {
+                call: "call-0-0".into(),
+                outcome: "the fifth outcome".into(),
+            },
+        )
+        .unwrap();
+        let steps: Vec<Line> = s
+            .lines("a1")
+            .unwrap()
+            .into_iter()
+            .filter(|l| l.kind == "doing")
+            .collect();
+        assert_eq!(steps[0].outcome.as_deref(), Some("the first outcome"));
+        assert_eq!(steps[1].outcome.as_deref(), Some("the fifth outcome"));
+    }
+
+    #[test]
+    fn a_question_finds_the_note_it_is_about_and_not_every_note_with_the_in_it() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.remember("a1", "where_the_briefing_goes", "Telegram, not email")
+            .unwrap();
+        s.remember(
+            "a1",
+            "invoice_template",
+            "Use the Acme template in Documents",
+        )
+        .unwrap();
+        s.remember("a1", "wifi", "The wifi password is written on the router")
+            .unwrap();
+        let found = s.recall("a1", "what is the wifi password", 5).unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].about, "wifi");
+    }
+
+    #[test]
+    fn a_turn_is_dated_from_its_first_request_and_not_the_last_thing_typed() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.a_turn_began("a1").unwrap();
+        let began = s.when_the_turn_began("a1").unwrap().expect("a start");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // Something typed while it works is part of the same turn.
+        s.a_turn_began("a1").unwrap();
+        assert_eq!(s.when_the_turn_began("a1").unwrap(), Some(began));
+        s.a_turn_ended("a1").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        s.a_turn_began("a1").unwrap();
+        assert!(s.when_the_turn_began("a1").unwrap().unwrap() > began);
+    }
+
+    #[test]
+    fn a_room_carried_on_keeps_who_said_what() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.asked("a1", "Where is the price?").unwrap();
+        s.append(
+            "a1",
+            "said",
+            "About $77,700.",
+            None,
+            None,
+            Some("agent-bitcoin"),
+        )
+        .unwrap();
+        s.carry_on("fork", "a1", 2, "Again", None).unwrap();
+        let kept = s.lines("fork").unwrap();
+        assert_eq!(kept[1].said_by.as_deref(), Some("agent-bitcoin"));
+    }
+
+    #[test]
     fn carrying_a_conversation_on_copies_what_came_before_and_removes_nothing() {
         // The whole safety of going back to an earlier point: it makes a
         // second conversation rather than shortening the first, so being wrong
@@ -4206,8 +4422,8 @@ mod tests {
             .unwrap()
             .execute(
                 "INSERT INTO skills (id, agent, name, request, steps, made_at)
-                 VALUES ('x', 'a1', 'broken', 'Do it', 'not json', 1)",
-                [],
+                 VALUES (?, 'a1', 'broken', 'Do it', 'not json', 1)",
+                [skill_id("a1", "broken")],
             )
             .unwrap();
         assert!(s.skill("a1", "broken").is_err());

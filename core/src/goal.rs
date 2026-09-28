@@ -124,8 +124,17 @@ pub fn read(said: &str, tries: i64, before: Option<&str>) -> Next {
     let line = line.trim();
 
     // "done" and nothing else. A line that says done and then keeps talking is
-    // an agent hedging, and hedging counts as not done.
-    if line.eq_ignore_ascii_case("done") {
+    // an agent hedging, and hedging counts as not done. The full stop and the
+    // emphasis a model writes around it are not talking: "GOAL: done." was
+    // read as not done, took another paid turn, and then stopped as going in
+    // circles, because it said the same thing twice.
+    let bare = line
+        .trim_matches(|c: char| "*_`~".contains(c))
+        .trim()
+        .trim_end_matches(['.', '!'])
+        .trim_matches(|c: char| "*_`~".contains(c))
+        .trim();
+    if bare.eq_ignore_ascii_case("done") {
         return Next::Done;
     }
 
@@ -158,9 +167,18 @@ pub fn read(said: &str, tries: i64, before: Option<&str>) -> Next {
 /// throwing away a perfectly good report over a "hope that helps" would be
 /// pedantry that costs another turn.
 fn last_marker(said: &str) -> Option<&str> {
-    said.lines()
-        .rev()
-        .find_map(|line| line.trim().strip_prefix(MARKER))
+    said.lines().rev().find_map(|line| {
+        // Read past the dressing a model puts on a line it was told to write:
+        // "**GOAL:** done" and "> GOAL: done" are the line, and were taken as
+        // no line at all, which ended the goal for having gone quiet.
+        let line = line
+            .trim()
+            .trim_start_matches(|c: char| "*_`> ".contains(c));
+        let (marker, rest) = line.split_at_checked(MARKER.len())?;
+        marker
+            .eq_ignore_ascii_case(MARKER)
+            .then(|| rest.trim_start_matches(|c: char| "*_`".contains(c)))
+    })
 }
 
 /// Whether two accounts of what is left are the same thing said twice.
@@ -209,6 +227,29 @@ mod tests {
     fn an_agent_saying_it_is_done_ends_the_goal() {
         assert_eq!(read("all sorted\nGOAL: done", 0, None), Next::Done);
         assert_eq!(read("GOAL: DONE", 3, Some("something")), Next::Done);
+    }
+
+    #[test]
+    fn done_written_with_a_full_stop_or_in_bold_is_still_done() {
+        // "GOAL: done." was read as not done, took another paid turn, and then
+        // stopped as going in circles for saying the same thing twice.
+        for said in [
+            "GOAL: done.",
+            "**GOAL:** done",
+            "GOAL: **done**",
+            "> GOAL: done",
+            "goal: Done!",
+        ] {
+            assert_eq!(
+                read(&format!("all of it\n{said}"), 0, None),
+                Next::Done,
+                "{said:?}"
+            );
+        }
+        assert!(!matches!(
+            read("GOAL: done, apart from the invoices", 0, None),
+            Next::Done
+        ));
     }
 
     #[test]

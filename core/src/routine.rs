@@ -21,7 +21,9 @@
 use std::collections::HashSet;
 
 use anyhow::{bail, Result};
-use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Timelike, Weekday};
+use chrono::{
+    DateTime, Datelike, Days, Duration, Local, LocalResult, NaiveDate, NaiveTime, TimeZone, Weekday,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::store::Conversation;
@@ -69,6 +71,13 @@ pub enum When {
 /// loop wearing a schedule.
 pub const FEWEST_MINUTES: i64 = 1;
 
+/// The longest a routine can wait between runs, in minutes: a year and a day.
+///
+/// A number any longer is not a schedule, and a large enough one overflowed the
+/// clock's arithmetic: `every 999999999d` was accepted, and then every tick
+/// stopped on it before reaching any other routine or any watch.
+pub const MOST_MINUTES: i64 = 366 * 24 * 60;
+
 /// The most often a routine can run, written the way a schedule is written.
 ///
 /// One place, read both by `read` when it refuses and by the tool text an
@@ -85,33 +94,38 @@ pub fn most_often() -> String {
 
 impl When {
     /// Read a schedule the way somebody would write one.
+    ///
+    /// All of it or none of it. Words it did not understand used to be left
+    /// out, and what was stored and shown was the text as written: `weekly
+    /// mon-fri 09:00` ran on Mondays only, and `every 30m 09:00-17:00` ran
+    /// round the clock, forty-eight times a day where sixteen were meant, while
+    /// the panel read back exactly what the person had asked for.
     pub fn read(said: &str) -> Result<Self> {
         let said = said.trim().to_lowercase();
         let mut words = said.split_whitespace();
-        match words.next() {
-            Some("daily") => Ok(When::Daily {
+        let when = match words.next() {
+            Some("daily") => When::Daily {
                 at: clock(words.next().unwrap_or_default())?,
-            }),
+            },
             Some("weekly") => {
-                let days = words.next().unwrap_or_default();
+                let days = days_in(words.next().unwrap_or_default())?;
                 let at = clock(words.next().unwrap_or_default())?;
-                let days: Result<Vec<Weekday>> = days.split(',').map(day).collect();
-                let days = days?;
-                if days.is_empty() {
-                    bail!("weekly needs days, like `weekly mon,thu 09:00`");
-                }
-                Ok(When::Weekly { days, at })
+                When::Weekly { days, at }
             }
             Some("every") => {
                 let span = words.next().unwrap_or_default();
-                let (count, unit) = span.split_at(span.len().saturating_sub(1));
+                // By character, not by byte: `every 1½` was cut in the middle
+                // of the ½ and took the whole clock down with it.
+                let mut letters: Vec<char> = span.chars().collect();
+                let unit = letters.pop().unwrap_or(' ');
+                let count: String = letters.into_iter().collect();
                 let count: i64 = count
                     .parse()
                     .map_err(|_| anyhow::anyhow!("`{span}` is not a length of time"))?;
                 let minutes = match unit {
-                    "m" => count,
-                    "h" => count * 60,
-                    "d" => count * 60 * 24,
+                    'm' => Some(count),
+                    'h' => count.checked_mul(60),
+                    'd' => count.checked_mul(60 * 24),
                     // With the floor named, like the refusal below it: `every
                     // 30m` as the one example was read as the floor once.
                     _ => bail!(
@@ -120,6 +134,12 @@ impl When {
                         most_often()
                     ),
                 };
+                let too_long = || {
+                    anyhow::anyhow!(
+                        "`{span}` is longer than a routine waits; the longest is `every 366d`"
+                    )
+                };
+                let minutes = minutes.ok_or_else(too_long)?;
                 // Said with the floor in it, because this is read by a model
                 // choosing how often, and "too often" alone sent one off to
                 // build a loop instead.
@@ -129,13 +149,24 @@ impl When {
                         most_often()
                     );
                 }
-                Ok(When::Every { minutes })
+                if minutes > MOST_MINUTES {
+                    return Err(too_long());
+                }
+                When::Every { minutes }
             }
             _ => bail!(
                 "try `daily 07:00`, `weekly mon,fri 09:30` or `every 2m`; `{}` is the most often",
                 most_often()
             ),
+        };
+        if let Some(more) = words.next() {
+            bail!(
+                "`{more}` is more than a schedule can say. Write one of `daily 07:00`, `weekly \
+                 mon-fri 09:00` or `every 2m`; something that should happen only in working \
+                 hours can run on the working days, or look at the time itself when it runs."
+            );
         }
+        Ok(when)
     }
 
     /// The first time this should run strictly after `since`.
@@ -144,17 +175,31 @@ impl When {
     /// routine that finished at 07:00:40 must not be due again at 07:00:41
     /// because its own start time still matches.
     pub fn next_after(&self, since: DateTime<Local>) -> Option<DateTime<Local>> {
+        self.next_after_in(since)
+    }
+
+    /// The same, in any time zone, which is what lets the clock changes of
+    /// places other than this Mac's be tested.
+    ///
+    /// Counted in calendar days rather than in spans of twenty-four hours. The
+    /// two differ on the day the clocks change, and the difference lost days:
+    /// a routine that ran at half past midnight on the day the clocks went back
+    /// was looked for "twenty-four hours later", which was still the same date,
+    /// and the one day ahead it looked at was then gone. Nothing was found, and
+    /// a routine with nothing to find is never run again.
+    pub fn next_after_in<Tz: TimeZone>(&self, since: DateTime<Tz>) -> Option<DateTime<Tz>> {
+        let zone = since.timezone();
+        let from = since.naive_local().date();
+        let ahead = |days: u64| from.checked_add_days(Days::new(days));
         match self {
-            When::Daily { at } => {
-                (0..=1).find_map(|days| on(since + Duration::days(days), *at, since))
-            }
-            When::Weekly { days, at } => (0..=7).find_map(|ahead| {
-                let day = since + Duration::days(ahead);
+            When::Daily { at } => (0..=2).find_map(|days| on(&zone, ahead(days)?, *at, &since)),
+            When::Weekly { days, at } => (0..=14).find_map(|n| {
+                let day = ahead(n)?;
                 days.contains(&day.weekday())
-                    .then(|| on(day, *at, since))
+                    .then(|| on(&zone, day, *at, &since))
                     .flatten()
             }),
-            When::Every { minutes } => Some(since + Duration::minutes(*minutes)),
+            When::Every { minutes } => since.checked_add_signed(Duration::minutes(*minutes)),
         }
     }
 
@@ -180,22 +225,24 @@ impl When {
 }
 
 /// That day at that time, if it is after the moment we are counting from.
-fn on(day: DateTime<Local>, at: NaiveTime, after: DateTime<Local>) -> Option<DateTime<Local>> {
-    let when = Local
-        .with_ymd_and_hms(
-            day.year(),
-            day.month(),
-            day.day(),
-            at.hour(),
-            at.minute(),
-            0,
-        )
-        // On the morning the clocks go forward this hour does not exist, and on
-        // the morning they go back it exists twice. `single()` refuses both
-        // rather than guessing, and the day is skipped -- which is the honest
-        // answer for an hour that did not happen.
-        .single()?;
-    (when > after).then_some(when)
+fn on<Tz: TimeZone>(
+    zone: &Tz,
+    day: NaiveDate,
+    at: NaiveTime,
+    after: &DateTime<Tz>,
+) -> Option<DateTime<Tz>> {
+    let when = match zone.from_local_datetime(&day.and_time(at)) {
+        LocalResult::Single(one) => one,
+        // The morning the clocks go back this hour happens twice. The first of
+        // the two, so it runs once, when it was meant to. It used to be refused
+        // as though it had not happened at all.
+        LocalResult::Ambiguous(first, _) => first,
+        // The morning they go forward it does not happen. That day is skipped,
+        // which is the honest answer for an hour that did not exist, and the
+        // days after it are still looked at.
+        LocalResult::None => return None,
+    };
+    (when > *after).then_some(when)
 }
 
 fn clock(said: &str) -> Result<NaiveTime> {
@@ -203,17 +250,54 @@ fn clock(said: &str) -> Result<NaiveTime> {
         .map_err(|_| anyhow::anyhow!("`{said}` is not a time of day; try 07:00"))
 }
 
-fn day(said: &str) -> Result<Weekday> {
-    match &said.trim()[..said.trim().len().min(3)] {
-        "mon" => Ok(Weekday::Mon),
-        "tue" => Ok(Weekday::Tue),
-        "wed" => Ok(Weekday::Wed),
-        "thu" => Ok(Weekday::Thu),
-        "fri" => Ok(Weekday::Fri),
-        "sat" => Ok(Weekday::Sat),
-        "sun" => Ok(Weekday::Sun),
-        other => bail!("`{other}` is not a day"),
+/// The days in a list like `mon,thu` or `mon-fri`.
+fn days_in(said: &str) -> Result<Vec<Weekday>> {
+    let mut days = Vec::new();
+    for one in said.split(',').filter(|one| !one.trim().is_empty()) {
+        match one.split_once('-') {
+            // A run of days, which may go round the end of the week.
+            Some((from, to)) => {
+                let (mut at, to) = (day(from)?, day(to)?);
+                loop {
+                    if !days.contains(&at) {
+                        days.push(at);
+                    }
+                    if at == to {
+                        break;
+                    }
+                    at = at.succ();
+                }
+            }
+            None => {
+                let at = day(one)?;
+                if !days.contains(&at) {
+                    days.push(at);
+                }
+            }
+        }
     }
+    if days.is_empty() {
+        bail!("weekly needs days, like `weekly mon,thu 09:00` or `weekly mon-fri 09:00`");
+    }
+    Ok(days)
+}
+
+/// One day, by its name. The whole word, because the first three letters of
+/// anything were taken as a day before, and cutting a word by bytes at three
+/// panicked on one written with an accent.
+fn day(said: &str) -> Result<Weekday> {
+    Ok(match said.trim() {
+        "mon" | "monday" => Weekday::Mon,
+        "tue" | "tues" | "tuesday" => Weekday::Tue,
+        "wed" | "weds" | "wednesday" => Weekday::Wed,
+        "thu" | "thur" | "thurs" | "thursday" => Weekday::Thu,
+        "fri" | "friday" => Weekday::Fri,
+        "sat" | "saturday" => Weekday::Sat,
+        "sun" | "sunday" => Weekday::Sun,
+        other => {
+            bail!("`{other}` is not a day; days are written mon, tue, wed, thu, fri, sat and sun")
+        }
+    })
 }
 
 /// Whether two routines are the same routine written twice.
@@ -293,6 +377,25 @@ pub fn already_doing_this(who: &str, at: &str) -> String {
 /// a Monday morning reads as an hour ago; if the Mac was shut all weekend it
 /// was three days ago, and those are different pieces of news.
 pub fn arriving_late(due: DateTime<Local>, now: DateTime<Local>) -> String {
+    format!(
+        "(This is late: it was due {} and nothing was running then.)",
+        when_it_was_due(due, now)
+    )
+}
+
+/// The same, for a run held back by the one before it, which was still going.
+///
+/// "Nothing was running then" was said of these too, which is the one thing
+/// that was not true of them.
+pub fn arriving_after_the_last_run(due: DateTime<Local>, now: DateTime<Local>) -> String {
+    format!(
+        "(This is late: it was due {}, and the run before it was still going.)",
+        when_it_was_due(due, now)
+    )
+}
+
+/// When something was due, in the words somebody would use for it.
+fn when_it_was_due(due: DateTime<Local>, now: DateTime<Local>) -> String {
     let clock = due.format("%H:%M");
     // By calendar day rather than by hours: something due at 23:50 and run at
     // 00:10 is yesterday's, though it is twenty minutes old.
@@ -306,7 +409,7 @@ pub fn arriving_late(due: DateTime<Local>, now: DateTime<Local>) -> String {
         2..=6 => format!("at {clock} on {}", due.format("%A")),
         _ => format!("at {clock} on {}", due.format("%-d %B")),
     };
-    format!("(This is late: it was due {when} and nothing was running then.)")
+    when
 }
 
 /// The moment a routine's next run is counted from.
@@ -315,8 +418,15 @@ pub fn arriving_late(due: DateTime<Local>, now: DateTime<Local>) -> String {
 /// whose time passed while the app was closed is overdue, and treating it as
 /// though it had only just been set would quietly move it to tomorrow.
 pub fn counting_from(c: &Conversation, now: DateTime<Local>) -> DateTime<Local> {
-    c.ran_at
-        .or(Some(c.started_at))
+    // The later of the last run and the moment it was set or switched back on.
+    // When the conversation began is only a last resort: counted from there, a
+    // schedule set in a conversation a week old was a week overdue the moment
+    // it was saved, and ran at once saying it was late.
+    let from = match (c.ran_at, c.routine_set_at) {
+        (Some(ran), Some(set)) => Some(ran.max(set)),
+        (ran, set) => ran.or(set),
+    };
+    from.or(Some(c.started_at))
         .and_then(|ms| Local.timestamp_millis_opt(ms).single())
         .unwrap_or(now)
 }
@@ -371,6 +481,124 @@ pub fn due_within(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use chrono::Timelike;
+
+    /// A moment in a named place, for the clock changes.
+    fn in_zone(
+        zone: chrono_tz::Tz,
+        y: i32,
+        m: u32,
+        d: u32,
+        h: u32,
+        min: u32,
+        sec: u32,
+    ) -> DateTime<chrono_tz::Tz> {
+        zone.with_ymd_and_hms(y, m, d, h, min, sec)
+            .earliest()
+            .expect("a real time")
+    }
+
+    #[test]
+    fn a_schedule_set_in_an_old_conversation_counts_from_when_it_was_set() {
+        // Counted from when the conversation began, a schedule saved at three
+        // in the afternoon in a conversation a week old ran at once and said it
+        // was late.
+        let now = at("2026-09-28 15:00:00");
+        let c = Conversation {
+            started_at: at("2026-09-21 10:00:00").timestamp_millis(),
+            routine_set_at: Some(now.timestamp_millis()),
+            runs_at: Some("daily 07:00".into()),
+            runs_what: Some("the briefing".into()),
+            ..Default::default()
+        };
+        let next = When::read("daily 07:00")
+            .unwrap()
+            .next_after(counting_from(&c, now))
+            .unwrap();
+        assert_eq!(next, at("2026-09-29 07:00:00"));
+        assert!(due_within(&[("Scout".to_string(), c)], &HashSet::new(), now, 15).is_none());
+    }
+
+    #[test]
+    fn a_daily_routine_carries_on_through_both_clock_changes() {
+        use chrono_tz::{America::New_York, Europe::Berlin};
+        // New York goes back on 1 November 2026: 01:30 happens twice. It runs
+        // once, at the first, and it is not lost for good.
+        let when = When::read("daily 01:30").unwrap();
+        let next = when
+            .next_after_in(in_zone(New_York, 2026, 10, 31, 1, 30, 20))
+            .expect("a next run");
+        assert_eq!(next.naive_local().to_string(), "2026-11-01 01:30:00");
+        let after = when
+            .next_after_in(next + Duration::seconds(20))
+            .expect("and one after that");
+        assert_eq!(after.naive_local().to_string(), "2026-11-02 01:30:00");
+
+        // Run at half past midnight that morning, the next one is the next day
+        // and not the same date twenty-four hours on.
+        let when = When::read("daily 00:30").unwrap();
+        let next = when
+            .next_after_in(in_zone(New_York, 2026, 11, 1, 0, 30, 20))
+            .expect("a next run");
+        assert_eq!(next.naive_local().to_string(), "2026-11-02 00:30:00");
+
+        // Berlin goes forward on 29 March 2026: 02:30 does not happen. That
+        // day is skipped and the routine carries on the day after.
+        let when = When::read("daily 02:30").unwrap();
+        let next = when
+            .next_after_in(in_zone(Berlin, 2026, 3, 28, 2, 30, 20))
+            .expect("a next run");
+        assert_eq!(next.naive_local().to_string(), "2026-03-30 02:30:00");
+
+        // And late in the evening of the change, the evening is not skipped.
+        let when = When::read("daily 23:30").unwrap();
+        let next = when
+            .next_after_in(in_zone(Berlin, 2026, 3, 28, 23, 30, 20))
+            .expect("a next run");
+        assert_eq!(next.naive_local().to_string(), "2026-03-29 23:30:00");
+
+        // Nor a weekly one on the day of the change.
+        let when = When::read("weekly sun 23:30").unwrap();
+        let next = when
+            .next_after_in(in_zone(Berlin, 2026, 3, 22, 23, 30, 20))
+            .expect("a next run");
+        assert_eq!(next.naive_local().to_string(), "2026-03-29 23:30:00");
+    }
+
+    #[test]
+    fn a_schedule_says_everything_it_means_or_is_refused() {
+        // Leftover words were ignored and the text was stored as written, so
+        // the panel read back what was asked while something else ran.
+        assert!(
+            When::read("every 30m 09:00-17:00").is_err(),
+            "the hours were ignored"
+        );
+        assert!(
+            When::read("daily 07:00 19:00").is_err(),
+            "the second time was ignored"
+        );
+        // And the working week is five days.
+        let working = When::read("weekly mon-fri 09:00").expect("a working week");
+        assert_eq!(working.written(), "weekly mon,tue,wed,thu,fri 09:00");
+        let round = When::read("weekly fri-mon 10:00").expect("round the end of the week");
+        assert_eq!(round.written(), "weekly fri,sat,sun,mon 10:00");
+        assert!(When::read("weekly monday,thursday 07:30").is_ok());
+        assert!(
+            When::read("weekly monkey 07:30").is_err(),
+            "the first three letters of anything were a day"
+        );
+    }
+
+    #[test]
+    fn nothing_written_as_a_schedule_can_take_the_clock_down() {
+        // Each of these panicked, the last on every tick after it was saved.
+        assert!(When::read("every 1½").is_err());
+        assert!(When::read("weekly mié 09:00").is_err());
+        assert!(When::read("every 999999999d").is_err());
+        let longest = When::read("every 366d").expect("a year and a day");
+        assert!(longest.next_after(Local::now()).is_some());
+    }
 
     #[test]
     fn a_late_run_names_the_time_it_was_due_and_not_the_time_it_is_now() {

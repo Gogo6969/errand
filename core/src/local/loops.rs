@@ -647,7 +647,12 @@ async fn errand(
             .enumerate()
             .map(|(i, w)| {
                 ToolCall::new(
-                    w.id.clone().unwrap_or_else(|| format!("call-{round}-{i}")),
+                    // Made up once and never again: `call-{round}-{i}` began
+                    // again every turn, so a server that sends no ids had the
+                    // fifth turn's outcome written over the first turn's step.
+                    w.id.clone().unwrap_or_else(|| {
+                        format!("call-{round}-{i}-{}", uuid::Uuid::new_v4().simple())
+                    }),
                     w.name.clone().unwrap_or_default(),
                     match w.arguments.is_empty() {
                         true => "{}".to_string(),

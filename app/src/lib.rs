@@ -123,6 +123,10 @@ struct Held {
     /// at all and reported a file from half an hour earlier as though it had
     /// just made it. Both came from the same history.
     fresh: Mutex<std::collections::HashSet<String>>,
+    /// Routines that came due while their conversation was busy, so the run
+    /// that follows can say why it is late rather than claim nothing was
+    /// running.
+    held_back: Mutex<std::collections::HashSet<String>>,
     /// What is stopping errands from working, if anything is.
     ///
     /// Only the kind that goes on happening until somebody does something: a
@@ -220,6 +224,14 @@ fn beside_everything_else() -> Option<std::path::PathBuf> {
 /// the same as anybody seeing it: with notifications off for this app it goes
 /// nowhere, and the caller is the one that can say so instead.
 fn tell_them(app: &AppHandle, store: &Store, id: &str, event: &Event) -> bool {
+    // Nothing else is ever told, and this is called for every event, so the
+    // store is not asked anything until it is one of these.
+    if !matches!(
+        event,
+        Event::Done { .. } | Event::Failed { .. } | Event::NeedsYou(_)
+    ) {
+        return false;
+    }
     let talk = store.conversation(id).ok().flatten();
     let (title, body) = match event {
         Event::Done { said, .. } => (called(store, id), gist(said)),
@@ -422,11 +434,16 @@ async fn call_it(
 /// the moment somebody does something to it, and every one of these is
 /// somebody doing something to it.
 fn write_it_down_if_new(app: &AppHandle, held: &Held, id: &str) -> Result<(), String> {
+    // An agent already written down is not new either. Pin, rename and pause
+    // are handed the agent's id, and asked only about a conversation with that
+    // id; once its first conversation had been deleted, any of them brought
+    // it back, empty, and on Claude Code it picked up the deleted session.
     if held
         .store
         .conversation(id)
         .map_err(|e| e.to_string())?
         .is_some()
+        || held.store.agent(id).map_err(|e| e.to_string())?.is_some()
     {
         return Ok(());
     }
@@ -772,15 +789,22 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // The agent that owns this conversation, if it still has not worked
             // out who it is. Asked down whichever conversation just finished,
             // because that is the one with an engine attached to it.
-            let unnamed = store
-                .conversation(&id)
-                .ok()
-                .flatten()
-                .and_then(|c| store.agent(&c.agent).ok().flatten())
-                .filter(|a| a.name == NOT_YET_NAMED)
-                .map(|a| a.id);
+            // Only when a turn is done, which is the only time the answer is
+            // used. Asked on every event, it cost two reads of the store for
+            // every word a local model streamed.
+            let unnamed = matches!(event, Event::Done { .. })
+                .then(|| {
+                    store
+                        .conversation(&id)
+                        .ok()
+                        .flatten()
+                        .and_then(|c| store.agent(&c.agent).ok().flatten())
+                        .filter(|a| a.name == NOT_YET_NAMED)
+                        .map(|a| a.id)
+                })
+                .flatten();
 
-            if let (true, Some(agent)) = (matches!(event, Event::Done { .. }), unnamed) {
+            if let Some(agent) = unnamed {
                 settling
                     .lock()
                     .unwrap()
@@ -2494,7 +2518,22 @@ async fn look_once(
             });
             let enough_today = was.woke_on == Some(today) && was.woke_today >= watch::WAKES_A_DAY;
             if too_soon || enough_today {
-                return Ok(());
+                // Looked, so it is not looked at again until its own time.
+                // Returning without saying so left it due on every tick: a
+                // page watched every fifteen minutes was fetched every thirty
+                // seconds for the rest of the day once it had woken enough.
+                let held: State<Held> = app.state();
+                return held
+                    .store
+                    .looked(
+                        conversation,
+                        None,
+                        None,
+                        was.seeing.as_deref(),
+                        was.unsettled,
+                        was.misses,
+                    )
+                    .map_err(|e| e.to_string());
             }
 
             let said = format!(
@@ -3087,8 +3126,10 @@ fn set_it_running(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
     // happening.
     let read = When::read(when)?;
 
+    // Stored the way it was read, so what Repeat shows is what runs.
     let held: State<Held> = app.state();
-    held.store.runs(&asked.from, Some(when), Some(what))?;
+    held.store
+        .runs(&asked.from, Some(&read.written()), Some(what))?;
 
     let next = read
         .next_after(chrono::Local::now())
@@ -4345,7 +4386,8 @@ async fn one_tick(app: AppHandle) {
 /// Anything whose time has come, started once each.
 async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
     let now = chrono::Local::now();
-    let due: Vec<(String, String, Option<chrono::DateTime<chrono::Local>>)> = {
+    type Late = Option<(chrono::DateTime<chrono::Local>, bool)>;
+    let due: Vec<(String, String, Late)> = {
         let held: State<Held> = app.state();
         held.store
             .routines()
@@ -4370,6 +4412,12 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
                 // the routine, and a routine waiting on a handover had the
                 // next run's text taken as the person's reply to it.
                 let busy = mid_turn(&held, &c.id);
+                if next <= now && busy {
+                    held.held_back.lock().unwrap().insert(c.id.clone());
+                }
+                let held_back =
+                    next <= now && !busy && held.held_back.lock().unwrap().remove(&c.id);
+                let late = late.map(|due| (due, held_back));
                 (next <= now && !busy).then_some((c.id.clone(), what, late))
             })
             .collect()
@@ -4432,7 +4480,7 @@ async fn a_routines_turn(
     app: AppHandle,
     conversation: String,
     what: String,
-    late: Option<chrono::DateTime<chrono::Local>>,
+    late: Option<(chrono::DateTime<chrono::Local>, bool)>,
     now: chrono::DateTime<chrono::Local>,
 ) -> Result<(), String> {
     // Checked again here, because a turn can have started since the tick
@@ -4481,9 +4529,13 @@ async fn a_routines_turn(
     }
     let said = match late {
         None => what,
-        Some(due) => format!(
+        Some((due, false)) => format!(
             "{what}\n\n{}",
             errand_core::routine::arriving_late(due, now)
+        ),
+        Some((due, true)) => format!(
+            "{what}\n\n{}",
+            errand_core::routine::arriving_after_the_last_run(due, now)
         ),
     };
     // A routine says what it was set to say, and nothing else.
@@ -4707,9 +4759,12 @@ async fn runs(
     write_it_down_if_new(&app, &held, &id)?;
     // Read before it is stored, so a schedule nobody can parse is refused here
     // and not at seven in the morning by not happening.
-    if let Some(at) = at.as_deref() {
-        When::read(at).map_err(|e| e.to_string())?;
-    }
+    // And stored the way it was read, so what the panel shows is what runs.
+    let at = at
+        .as_deref()
+        .map(|at| When::read(at).map(|read| read.written()))
+        .transpose()
+        .map_err(|e| e.to_string())?;
     held.store
         .runs(&id, at.as_deref(), what.as_deref())
         .map_err(|e| e.to_string())
@@ -5740,6 +5795,7 @@ pub fn run() {
                 handovers: Mutex::new(HashMap::new()),
                 opening: Mutex::new(HashMap::new()),
                 fresh: Mutex::new(std::collections::HashSet::new()),
+                held_back: Mutex::new(std::collections::HashSet::new()),
                 trouble: Mutex::new(None),
                 sized: Mutex::new(HashMap::new()),
                 mid_run: Mutex::new(HashMap::new()),
