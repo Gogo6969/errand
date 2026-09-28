@@ -119,7 +119,7 @@ pub fn all() -> Vec<Tool> {
         ),
         tool(
             "check_command",
-            "Ask what a command started with start_command has printed since you last asked, and              whether it has finished. Do not call this in a loop waiting for it: say what you have              so far and check again later.",
+            "Ask what a command started with start_command has printed since you last asked, and whether it has finished. Do not call this in a loop waiting for it: say what you have so far and check again later.",
             json!({ "handle": { "type": "string", "description": "The handle start_command gave you" } }),
             &["handle"],
             false,

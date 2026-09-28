@@ -1051,6 +1051,8 @@ mod tests {
                 "save_skill",
                 "run_skill",
                 "skills",
+                "stop_repeating",
+                "pause",
                 // What this Mac can be let at, which is offered whether or not
                 // anything is switched on: a tool nobody can see is a tool
                 // nobody can be told about.

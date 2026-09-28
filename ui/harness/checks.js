@@ -4166,3 +4166,34 @@ export async function aHandoverThatStopsWaiting() {
   check("and one started again from somewhere else reads as running", said() !== "Paused", said());
   return found;
 }
+
+/**
+ * A schedule an agent switched on or off itself, because it was asked to.
+ *
+ * The clock beside a conversation's name was set by the window's own buttons
+ * and by reading the list again, so a schedule an agent set or stopped kept
+ * the old clock until something else redrew it. And a schedule switched off
+ * under Repeat had its clock back after a relaunch, because the list was read
+ * without asking whether it was off.
+ */
+export async function anAgentThatStopsItsOwnSchedule() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  FIXTURE.conversations["agent-outside"].push(
+    { id: "talk-routine-on", agent: "agent-outside", name: "Mornings", opened: true, runs_at: "daily 07:00" },
+    { id: "talk-routine-off", agent: "agent-outside", name: "Evenings", opened: true, runs_at: "daily 19:00", routine_off: true },
+  );
+  await openTalk("talk-outside");
+  const option = (id) => [...document.querySelectorAll("#talks option")].find((o) => o.value === id)?.textContent || "";
+  check("a conversation whose schedule is on has the clock beside its name", option("talk-routine-on") === "Mornings ⏱", option("talk-routine-on"));
+  check("and one whose schedule is switched off does not", option("talk-routine-off") === "Evenings", option("talk-routine-off"));
+
+  tell("repeats", { conversation: "talk-outside", repeats: true });
+  await settle(150);
+  check("a schedule the agent set puts the clock on at once", option("talk-outside") === "First ⏱", option("talk-outside"));
+  tell("repeats", { conversation: "talk-outside", repeats: false });
+  await settle(150);
+  check("and one it switched off takes it away again", option("talk-outside") === "First", option("talk-outside"));
+  return found;
+}

@@ -2458,7 +2458,7 @@ async fn look_once(
                 .map_err(|e| e.to_string())?;
             if misses >= ODD_LOOKS_BEFORE_STOPPING {
                 let reason = format!(
-                    "Stopped looking. {} could not be reached {misses} times running.                      The last thing it said was: {why}",
+                    "Stopped looking. {} could not be reached {misses} times running. The last thing it said was: {why}",
                     watch.written()
                 );
                 held.store
@@ -2495,7 +2495,7 @@ async fn look_once(
                 .map_err(|e| e.to_string())?;
             if unsettled >= ODD_LOOKS_BEFORE_STOPPING {
                 let reason = format!(
-                    "Stopped looking. {} is different every time I look, so I cannot tell a                      real change from the parts that always change. Some pages put a new                      token in every answer. Try watching a feed or an API for the same thing                      if there is one.",
+                    "Stopped looking. {} is different every time I look, so I cannot tell a real change from the parts that always change. Some pages put a new token in every answer. Try watching a feed or an API for the same thing if there is one.",
                     watch.written()
                 );
                 held.store
@@ -3036,6 +3036,8 @@ fn answer_what_engines_cannot(
                     Some(team::Ours::SaveSkill) => save_skill(&app, &asked),
                     Some(team::Ours::RunSkill) => run_skill(&app, &asked).await,
                     Some(team::Ours::Skills) => list_skills(&app, &asked),
+                    Some(team::Ours::StopRepeating) => stop_repeating(&app, &asked),
+                    Some(team::Ours::Pause) => pause_from_inside(&app, &asked),
                     // Not one of the app's own, so it may be one of the things
                     // this Mac can be let at.
                     None => match errand_core::connectors::which(&asked.tool) {
@@ -3130,6 +3132,13 @@ fn set_it_running(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
     let held: State<Held> = app.state();
     held.store
         .runs(&asked.from, Some(&read.written()), Some(what))?;
+    let _ = app.emit(
+        "repeats",
+        Repeats {
+            conversation: asked.from.clone(),
+            repeats: true,
+        },
+    );
 
     let next = read
         .next_after(chrono::Local::now())
@@ -3141,6 +3150,112 @@ fn set_it_running(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
         read.written(),
         routine::WHAT_KEEPS_IT_RUNNING
     ))
+}
+
+/// A schedule set or switched off from inside a conversation, so the clock
+/// beside its name can say so without waiting for the list to be read again.
+#[derive(Clone, Serialize)]
+struct Repeats {
+    conversation: String,
+    repeats: bool,
+}
+
+/// Switch off what repeats, because the agent was asked to stop it.
+///
+/// The way back from `every_day` and `keep_an_eye_on`, which an agent could
+/// set by being asked and never unset. Told to stop, and then to pause, one
+/// said it had both times, and its routine ran again.
+///
+/// Switched off rather than cleared, so whoever asked can start it again from
+/// Repeat or Watch without setting it up from memory. Only this agent's own
+/// conversations, found from the one asking and never from anything the model
+/// names, and never a room's: a room's schedule is everybody's in it.
+fn stop_repeating(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let agent = whose_notebook(app, &asked.from)?;
+    let stopping = team::Stopping::read(&asked.args)?;
+    let held: State<Held> = app.state();
+    let theirs: Vec<Conversation> = held
+        .store
+        .conversations(&agent)?
+        .into_iter()
+        .filter(|c| held.store.members(&c.id).is_ok_and(|m| m.is_empty()))
+        .collect();
+    let done = stopping.among(&theirs, &asked.from);
+    for off in &done {
+        if off.schedule {
+            held.store.routine_off(&off.talk.id, true)?;
+            let _ = app.emit(
+                "repeats",
+                Repeats {
+                    conversation: off.talk.id.clone(),
+                    repeats: false,
+                },
+            );
+        }
+        if off.watch {
+            held.store
+                .pause_watch(&off.talk.id, team::SWITCHED_OFF_WHEN_ASKED)?;
+        }
+    }
+    Ok(team::switched_off(&done, stopping, &theirs, &asked.from))
+}
+
+/// Pause the agent this conversation belongs to, or start it again, because
+/// it was asked to.
+///
+/// The same switch as the one in the window, and the same stop: every other
+/// conversation of it in the middle of something is stopped and says so. Not
+/// this one. This turn is the one saying it has paused, and it ends when that
+/// is written; stopped here, the answer would be cut off before it said what
+/// had happened.
+fn pause_from_inside(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let agent = whose_notebook(app, &asked.from)?;
+    let paused = asked
+        .args
+        .get("paused")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let held: State<Held> = app.state();
+    let already = held
+        .store
+        .agent(&agent)?
+        .is_some_and(|a| a.paused_at.is_some());
+    // Asked for what is already so, nothing changes. Paused again, it keeps
+    // the moment it was first paused; and a conversation somebody opened with
+    // it since is one they chose to have with a paused agent, not one to stop.
+    if paused == already {
+        return Ok(match paused {
+            true => team::paused_itself(true, 0),
+            false => team::started_again(false),
+        });
+    }
+    held.store
+        .pause(&agent, paused, chrono::Local::now().timestamp_millis())?;
+    let _ = app.emit(
+        "paused",
+        Paused {
+            agent: agent.clone(),
+            paused,
+        },
+    );
+    if !paused {
+        return Ok(team::started_again(true));
+    }
+    let mut stopped = 0;
+    for c in held.store.conversations(&agent)? {
+        if c.id != asked.from && mid_turn(&held, &c.id) {
+            stop_and_say(
+                app,
+                &held,
+                &c.id,
+                "paused when asked",
+                "Paused when it was asked to pause. It will not run on its own until it is \
+                 started again.",
+            );
+            stopped += 1;
+        }
+    }
+    Ok(team::paused_itself(already, stopped))
 }
 
 /// Do one of the things this Mac can be let at, if it has been.
@@ -5039,7 +5154,7 @@ async fn watch_it(
             if let Some(home) = home {
                 if at.starts_with(&home) || home.starts_with(at) {
                     return Err(format!(
-                        "{} is where this agent works, so watching it would wake it up with                          its own work and never stop. Watch somewhere else.",
+                        "{} is where this agent works, so watching it would wake it up with its own work and never stop. Watch somewhere else.",
                         at.display()
                     ));
                 }
@@ -5049,7 +5164,7 @@ async fn watch_it(
         let already = held.store.watchers().map_err(|e| e.to_string())?;
         if already.len() >= watch::AT_MOST_WATCHES && !already.iter().any(|c| c.id == id) {
             return Err(format!(
-                "There are already {} watches, which is as many as this keeps track of.                  Stop one first.",
+                "There are already {} watches, which is as many as this keeps track of. Stop one first.",
                 watch::AT_MOST_WATCHES
             ));
         }

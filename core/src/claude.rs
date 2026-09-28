@@ -158,6 +158,10 @@ const GRANTED: &[&str] = &[
     "mcp__errand__save_skill",
     "mcp__errand__run_skill",
     "mcp__errand__skills",
+    // Stopping what repeats and pausing are what somebody asked for, and a
+    // card in front of either would be asking whether it may stop.
+    "mcp__errand__stop_repeating",
+    "mcp__errand__pause",
 ];
 
 /// A thread's conversation with Claude Code.

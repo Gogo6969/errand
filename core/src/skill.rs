@@ -113,6 +113,8 @@ fn is_bookkeeping(tool: &str) -> bool {
         Some(
             Ours::SaveSkill
                 | Ours::Skills
+                | Ours::StopRepeating
+                | Ours::Pause
                 | Ours::Recall
                 | Ours::Remember
                 | Ours::Forget

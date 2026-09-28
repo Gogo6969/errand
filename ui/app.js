@@ -886,7 +886,10 @@ function asTalk(c, keeping) {
     id: c.id,
     agent: c.agent,
     name: c.name,
-    repeats: !!c.runs_at,
+    // Switched off, it is not one the picker should advertise as scheduled.
+    // Read without it, a routine paused under Repeat had its clock back after
+    // the next relaunch.
+    repeats: !!c.runs_at && !c.routine_off,
     messages: keeping?.messages ?? [],
     working: keeping?.working ?? false,
     // Who is in it, when it is a room. Empty for a conversation with one
@@ -1871,6 +1874,22 @@ listen("paused", ({ payload }) => {
   a.paused = payload.paused;
   if (a.id === showingAgent) drawPinned(a);
   drawThreads();
+});
+
+// A schedule set or switched off by the agent itself, because it was asked to.
+listen("repeats", async ({ payload }) => {
+  const t = talks.get(payload.conversation);
+  if (!t) return;
+  t.repeats = payload.repeats;
+  drawTalks();
+  // Repeat, if it is open on this conversation, says what is now true. Only the
+  // sentence and the switch: the boxes may be half typed in.
+  if (el.routine.hidden || talking() !== t) return;
+  const mine = (await invoke("routines")).find((r) => r.conversation === t.id);
+  theRoutineShown = mine || null;
+  el.routineSays.textContent = sayWhen(mine);
+  el.routinePause.textContent = mine?.off ? "Start again" : "Pause";
+  el.routinePause.hidden = !mine;
 });
 
 listen("handing_over", async ({ payload }) => {

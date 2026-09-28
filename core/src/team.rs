@@ -20,6 +20,8 @@
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
+use crate::store::Conversation;
+
 /// What an engine wants the app to do on its behalf.
 ///
 /// Sent up rather than handled where it arrives, because an engine knows about
@@ -366,6 +368,60 @@ pub fn declarations() -> Vec<Value> {
                 "parameters": { "type": "object", "properties": {} }
             }
         }),
+        // The way back from every_day and keep_an_eye_on, which could be set
+        // by asking and not stopped by asking. Told to stop the task and then
+        // to pause, an agent said it had, twice, and its routine ran on.
+        json!({
+            "type": "function",
+            "function": {
+                "name": "stop_repeating",
+                "description":
+                    "Switch off what repeats: this conversation's schedule, its watch, or \
+                     both, or every one this agent has. Use it the moment somebody asks you to \
+                     stop, cancel or pause something that runs on its own, and before you say \
+                     it has stopped: nothing else stops it, and saying so without calling this \
+                     leaves it running. Switched off rather than thrown away, it stays under \
+                     Repeat and Watch, where they can start it again.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "which": {
+                            "type": "string",
+                            "enum": ["schedule", "watch", "both"],
+                            "description": "What to switch off. Both, when they did not say."
+                        },
+                        "everywhere": {
+                            "type": "boolean",
+                            "description":
+                                "Every conversation of this agent rather than this one, for \
+                                 \"stop all your routines\"."
+                        }
+                    }
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "pause",
+                "description":
+                    "Pause yourself, or start yourself again. Paused, nothing of yours runs on \
+                     its own until you are started again: no schedule, no watch and no goal, in \
+                     any of your conversations. You still answer whenever somebody speaks to \
+                     you. Use it when somebody says pause, hold off or stop everything, and \
+                     before you say you have paused: nothing else pauses you. Call it with \
+                     paused false only when they ask you to carry on.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "paused": {
+                            "type": "boolean",
+                            "description": "True to pause, false to start again. True when they did not say."
+                        }
+                    }
+                }
+            }
+        }),
     ]
 }
 
@@ -392,6 +448,8 @@ pub enum Ours {
     SaveSkill,
     RunSkill,
     Skills,
+    StopRepeating,
+    Pause,
 }
 
 impl Ours {
@@ -409,6 +467,8 @@ impl Ours {
             Ours::SaveSkill => "save_skill",
             Ours::RunSkill => "run_skill",
             Ours::Skills => "skills",
+            Ours::StopRepeating => "stop_repeating",
+            Ours::Pause => "pause",
         }
     }
 }
@@ -427,6 +487,8 @@ pub fn ours(tool: &str) -> Option<Ours> {
         "save_skill" => Some(Ours::SaveSkill),
         "run_skill" => Some(Ours::RunSkill),
         "skills" => Some(Ours::Skills),
+        "stop_repeating" => Some(Ours::StopRepeating),
+        "pause" => Some(Ours::Pause),
         _ => None,
     }
 }
@@ -502,6 +564,14 @@ pub fn in_plain_words(tool: Ours, args: &Value) -> String {
             name => format!("Running the skill {name}"),
         },
         Ours::Skills => "Looking at the skills saved here".to_string(),
+        Ours::StopRepeating => match args.get("everywhere").and_then(|v| v.as_bool()) {
+            Some(true) => "Switching off everything it has repeating".to_string(),
+            _ => "Switching off what repeats here".to_string(),
+        },
+        Ours::Pause => match args.get("paused").and_then(|v| v.as_bool()) {
+            Some(false) => "Starting itself again".to_string(),
+            _ => "Pausing itself".to_string(),
+        },
     }
 }
 
@@ -554,6 +624,9 @@ pub fn the_thing_itself(tool: Ours, args: &Value) -> String {
             .unwrap_or("")
             .to_string(),
         Ours::Skills => String::new(),
+        // Nothing to narrow: stopping and pausing are only ever about this
+        // agent's own standing jobs.
+        Ours::StopRepeating | Ours::Pause => String::new(),
     }
 }
 
@@ -645,6 +718,9 @@ pub fn asks_first(tool: Ours) -> bool {
         // somebody just asked for by name, and the steps are shown to the
         // model as a plan to follow, never run blind.
         Ours::SaveSkill | Ours::RunSkill | Ours::Skills => false,
+        // Nor these. Stopping is what somebody asked for, and a card in front
+        // of it at seven in the morning would be a refusal to stop.
+        Ours::StopRepeating | Ours::Pause => false,
     }
 }
 
@@ -673,6 +749,201 @@ pub fn without_the_app(tool: Ours) -> &'static str {
             "There is nowhere to keep skills here. This is an engine with no app behind it, \
              so do the task yourself and say what you would have saved."
         }
+        Ours::StopRepeating | Ours::Pause => {
+            "Nothing here runs on its own. This is an engine with no app behind it, so there \
+             is nothing to stop or pause."
+        }
+    }
+}
+
+/// What `stop_repeating` was asked to switch off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stopping {
+    pub schedule: bool,
+    pub watch: bool,
+    /// Every conversation of this agent, rather than the one asking.
+    pub everywhere: bool,
+}
+
+/// One conversation's share of it: which of its two halves go off.
+#[derive(Debug)]
+pub struct SwitchOff<'a> {
+    pub talk: &'a Conversation,
+    pub schedule: bool,
+    pub watch: bool,
+}
+
+impl Stopping {
+    /// Both, here, when nothing more was said. A model that leaves `which`
+    /// out was asked to stop "it", and whatever it was repeats in this
+    /// conversation.
+    pub fn read(args: &Value) -> anyhow::Result<Self> {
+        let which = args.get("which").and_then(Value::as_str).map(str::trim);
+        let (schedule, watch) = match which {
+            None | Some("") | Some("both") => (true, true),
+            Some("schedule") => (true, false),
+            Some("watch") => (false, true),
+            Some(other) => {
+                anyhow::bail!("which is schedule, watch or both, and \"{other}\" is none of them")
+            }
+        };
+        let everywhere = args
+            .get("everywhere")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Ok(Self {
+            schedule,
+            watch,
+            everywhere,
+        })
+    }
+
+    /// What goes off among this agent's conversations, asked from `here`.
+    ///
+    /// Only what is on. A schedule already off, or a watch that stopped for a
+    /// reason of its own, is left as it is: switched off again it would be
+    /// reported as stopped by this call, and a watch that stopped because a
+    /// page could not be reached would lose the sentence that says so.
+    pub fn among<'a>(&self, theirs: &'a [Conversation], here: &str) -> Vec<SwitchOff<'a>> {
+        theirs
+            .iter()
+            .filter(|c| self.everywhere || c.id == here)
+            .filter_map(|c| {
+                let schedule = self.schedule && repeats(c);
+                let watch = self.watch && still_looking(c);
+                (schedule || watch).then_some(SwitchOff {
+                    talk: c,
+                    schedule,
+                    watch,
+                })
+            })
+            .collect()
+    }
+}
+
+/// A schedule the clock would run.
+fn repeats(c: &Conversation) -> bool {
+    c.runs_at.is_some() && !c.routine_off
+}
+
+/// A watch that has not stopped.
+fn still_looking(c: &Conversation) -> bool {
+    c.watches.is_some() && c.paused.is_none()
+}
+
+/// Why a watch stopped, as Watch shows it, when its own agent switched it off.
+pub const SWITCHED_OFF_WHEN_ASKED: &str =
+    "Switched off by this agent when it was asked to stop. Press Look again to start it.";
+
+/// What the agent is told it switched off, which is what it tells whoever
+/// asked.
+///
+/// Every one of them by name, with what it was set to. "Done" alone was the
+/// answer the model gave when it had done nothing, and a list of what went off
+/// is something the person can check against what they meant.
+pub fn switched_off(
+    done: &[SwitchOff],
+    asked: Stopping,
+    theirs: &[Conversation],
+    here: &str,
+) -> String {
+    if !done.is_empty() {
+        return format!(
+            "Switched off:\n{}\n\nNothing was thrown away. A schedule stays under Repeat, \
+             where Start again runs it again, and a watch stays under Watch, where Look again \
+             does.",
+            listed(done, here)
+        );
+    }
+    let what = match (asked.schedule, asked.watch) {
+        (true, false) => "no schedule running",
+        (false, true) => "no watch running",
+        _ => "nothing repeating",
+    };
+    if asked.everywhere {
+        return format!("Nothing was switched off: this agent has {what} anywhere.");
+    }
+    // Asked in one conversation about something set up in another. Said where
+    // it is, so the model can go and stop that rather than report that nothing
+    // is running while it runs.
+    let elsewhere = Stopping {
+        everywhere: true,
+        ..asked
+    }
+    .among(theirs, here);
+    if elsewhere.is_empty() {
+        return format!("Nothing was switched off: this agent has {what} here or anywhere else.");
+    }
+    format!(
+        "Nothing was switched off: this conversation has {what}. Elsewhere, this agent \
+         has:\n{}\n\nIf that is what they meant, call stop_repeating again with everywhere \
+         true.",
+        listed(&elsewhere, here)
+    )
+}
+
+/// One line for each schedule and watch, and where it is.
+fn listed(these: &[SwitchOff], here: &str) -> String {
+    let mut lines = Vec::new();
+    for one in these {
+        let c = one.talk;
+        let whereabouts = match c.id == here {
+            true => "here".to_string(),
+            false => format!("in \"{}\"", c.name),
+        };
+        if one.schedule {
+            lines.push(format!(
+                "- the schedule {whereabouts}: {}, saying \"{}\"",
+                c.runs_at.as_deref().unwrap_or_default(),
+                c.runs_what.as_deref().unwrap_or_default()
+            ));
+        }
+        if one.watch {
+            lines.push(format!(
+                "- the watch {whereabouts}: {}",
+                c.watches.as_deref().unwrap_or_default()
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// What an agent that paused itself is told, to tell whoever asked.
+pub fn paused_itself(already: bool, stopped: usize) -> String {
+    let mut said = match already {
+        true => "You were already paused, and still are.".to_string(),
+        false => "Paused.".to_string(),
+    };
+    said.push_str(
+        " Nothing of yours runs on its own until you are started again: your schedules, \
+         watches and goals wait, and all of them are kept.",
+    );
+    match stopped {
+        0 => {}
+        1 => said.push_str(
+            " One other conversation of yours was in the middle of something, and it has \
+             been stopped.",
+        ),
+        n => said.push_str(&format!(
+            " {n} other conversations of yours were in the middle of something, and they \
+             have been stopped."
+        )),
+    }
+    said.push_str(
+        " You still answer whenever somebody speaks to you. They can start you again from \
+         the window, or by asking you to.",
+    );
+    said
+}
+
+/// What an agent started again is told.
+pub fn started_again(was_paused: bool) -> String {
+    match was_paused {
+        false => "You were not paused, so nothing changed.".to_string(),
+        true => "Started again. Your schedules, watches and goals run on their own again. A \
+                 schedule counts from now, so the runs it missed while you were paused do not \
+                 all happen at once."
+            .to_string(),
     }
 }
 
@@ -881,7 +1152,9 @@ mod tests {
                 "who_else",
                 "save_skill",
                 "run_skill",
-                "skills"
+                "skills",
+                "stop_repeating",
+                "pause"
             ]
         );
         assert!(declared.iter().all(|d| d["type"] == "function"));
@@ -935,5 +1208,139 @@ mod tests {
         );
         assert_eq!(the_thing_itself(Ours::Skills, &json!({})), "");
         assert!(without_the_app(Ours::RunSkill).contains("no app behind it"));
+    }
+
+    /// A conversation of this agent's, with a schedule, a watch, both or
+    /// neither.
+    fn talk(id: &str, runs: Option<&str>, watches: Option<&str>) -> Conversation {
+        Conversation {
+            id: id.to_string(),
+            agent: "pulse".to_string(),
+            name: format!("{id} talk"),
+            runs_at: runs.map(str::to_string),
+            runs_what: runs.map(|_| "the market pulse".to_string()),
+            watches: watches.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn asked_to_stop_an_agent_switches_off_what_repeats_where_it_was_asked_and_nothing_else() {
+        // What happened on 7 September: told "pause" twice, the agent said it
+        // was pausing, twice, and its routine ran on, because nothing it could
+        // call would stop it.
+        let theirs = [
+            talk("here", Some("daily 07:00"), Some("~/Downloads every 10m")),
+            talk("other", Some("weekly mon 09:00"), None),
+        ];
+        let asked = Stopping::read(&json!({})).unwrap();
+        assert_eq!(
+            asked,
+            Stopping {
+                schedule: true,
+                watch: true,
+                everywhere: false
+            }
+        );
+        let off = asked.among(&theirs, "here");
+        assert_eq!(off.len(), 1, "only the conversation it was asked in");
+        assert_eq!(off[0].talk.id, "here");
+        assert!(off[0].schedule && off[0].watch);
+        let said = switched_off(&off, asked, &theirs, "here");
+        assert!(said.contains("the schedule here: daily 07:00"), "{said}");
+        assert!(
+            said.contains("the watch here: ~/Downloads every 10m"),
+            "{said}"
+        );
+        assert!(said.contains("Nothing was thrown away"), "{said}");
+
+        // Told to stop only the watch, the schedule is left running.
+        let asked = Stopping::read(&json!({ "which": "watch" })).unwrap();
+        let off = asked.among(&theirs, "here");
+        assert!(!off[0].schedule && off[0].watch);
+
+        // Everywhere reaches the other conversation too.
+        let asked = Stopping::read(&json!({ "which": "schedule", "everywhere": true })).unwrap();
+        let off = asked.among(&theirs, "here");
+        assert_eq!(off.len(), 2);
+        let said = switched_off(&off, asked, &theirs, "here");
+        assert!(
+            said.contains("the schedule in \"other talk\": weekly mon 09:00"),
+            "{said}"
+        );
+
+        // A word the tool does not have is refused, rather than read as both.
+        assert!(Stopping::read(&json!({ "which": "everything" })).is_err());
+    }
+
+    #[test]
+    fn asked_to_stop_where_nothing_repeats_it_says_where_something_does() {
+        // Asked in an ordinary conversation to stop the morning briefing that
+        // lives in another one. "Nothing is running" would be the model's next
+        // sentence, said while the briefing runs.
+        let theirs = [
+            talk("here", None, None),
+            talk("briefing", Some("daily 07:00"), None),
+        ];
+        let asked = Stopping::read(&json!({ "which": "both" })).unwrap();
+        let off = asked.among(&theirs, "here");
+        assert!(off.is_empty());
+        let said = switched_off(&off, asked, &theirs, "here");
+        assert!(said.starts_with("Nothing was switched off"), "{said}");
+        assert!(said.contains("in \"briefing talk\": daily 07:00"), "{said}");
+        assert!(said.contains("everywhere true"), "{said}");
+
+        // And with nothing anywhere, it says so without sending it looking.
+        let quiet = [talk("here", None, None)];
+        let said = switched_off(&[], asked, &quiet, "here");
+        assert_eq!(
+            said,
+            "Nothing was switched off: this agent has nothing repeating here or anywhere else."
+        );
+    }
+
+    #[test]
+    fn what_is_already_off_is_not_switched_off_again_or_given_a_new_reason() {
+        // A watch that stopped itself because a page could not be reached says
+        // so under Watch. Stopped again, that sentence would be replaced by
+        // "switched off when asked", and the reason it really stopped lost.
+        let mut off_already = talk(
+            "here",
+            Some("daily 07:00"),
+            Some("https://example.com every 1h"),
+        );
+        off_already.routine_off = true;
+        off_already.paused = Some("Stopped looking. It could not be reached.".to_string());
+        let theirs = [off_already];
+        let asked = Stopping::read(&json!({})).unwrap();
+        assert!(asked.among(&theirs, "here").is_empty());
+    }
+
+    #[test]
+    fn an_agent_that_pauses_itself_is_told_what_that_means_and_how_it_ends() {
+        let said = paused_itself(false, 0);
+        assert!(said.starts_with("Paused."), "{said}");
+        assert!(said.contains("start you again"), "{said}");
+        assert!(!said.contains("stopped"), "nothing else was going: {said}");
+        let said = paused_itself(false, 2);
+        assert!(said.contains("2 other conversations"), "{said}");
+        let said = paused_itself(true, 0);
+        assert!(said.starts_with("You were already paused"), "{said}");
+
+        assert!(started_again(true).starts_with("Started again."));
+        assert!(started_again(false).contains("not paused"));
+
+        // Neither asks first, on either engine: a card in front of stopping
+        // is asking whether it may stop.
+        assert!(!asks_first(Ours::StopRepeating));
+        assert!(!asks_first(Ours::Pause));
+        assert_eq!(
+            in_plain_words(Ours::Pause, &json!({ "paused": false })),
+            "Starting itself again"
+        );
+        assert_eq!(
+            in_plain_words(Ours::StopRepeating, &json!({ "everywhere": true })),
+            "Switching off everything it has repeating"
+        );
     }
 }
