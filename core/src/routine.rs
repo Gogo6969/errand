@@ -26,7 +26,52 @@ use chrono::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::store::Conversation;
+use crate::store::{Conversation, Run};
+
+/// The end of the sentence a run that never started is written down with,
+/// because something else had its conversation. Not a failure: nothing went
+/// wrong with the routine.
+pub const SKIPPED: &str = "so this run was skipped";
+
+/// How many failed runs in a row switch a routine or a watch off.
+///
+/// An every-five-minute routine failed 95 times in a row one night, and each
+/// failure could post a banner. Five is a morning's routine failing all week,
+/// or twenty-five minutes of one every five minutes, which is enough to be
+/// sure it is not a passing hiccup and few enough that nobody wakes to a
+/// hundred of them.
+pub const FAILED_RUNS_BEFORE_STOPPING: usize = 5;
+
+/// Whether a run's outcome is a failure of the routine, rather than a run that
+/// worked, one somebody stopped or paused, or one skipped because something
+/// else had its conversation. Only failures count towards switching it off:
+/// five mornings of pressing Stop is somebody using it.
+pub fn a_failure(outcome: &str) -> bool {
+    !(outcome == "done"
+        || outcome.ends_with(SKIPPED)
+        || outcome.starts_with("stopped ")
+        || outcome.starts_with("paused ")
+        || outcome == "deleted")
+}
+
+/// How many of the newest runs failed, one after another.
+///
+/// Counted back from the newest to the last one that worked. A run that never
+/// came back, because the app was quit or the Mac slept, and one that was
+/// stopped or skipped say nothing about whether the routine works, so they are
+/// passed over rather than counted or taken as a success.
+pub fn failing_in_a_row(runs: &[Run]) -> usize {
+    let mut failing = 0;
+    for outcome in runs.iter().filter_map(|run| run.outcome.as_deref()) {
+        if outcome == "done" {
+            break;
+        }
+        if a_failure(outcome) {
+            failing += 1;
+        }
+    }
+    failing
+}
 
 /// What a standing job needs in order to run, in the words every one of them
 /// uses.
@@ -655,6 +700,53 @@ mod tests {
         let said = arriving_late(due, now);
         assert!(said.contains("07:00"), "{said}");
         assert!(!said.contains("09:12"), "{said}");
+    }
+
+    /// Runs, newest first, from their outcomes.
+    fn runs(outcomes: &[Option<&str>]) -> Vec<Run> {
+        outcomes
+            .iter()
+            .enumerate()
+            .map(|(at, outcome)| Run {
+                id: at as i64,
+                at: at as i64,
+                why: "clock".to_string(),
+                outcome: outcome.map(str::to_string),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn failures_are_counted_back_to_the_last_run_that_worked() {
+        let failed = Some("The model server is not answering.");
+        assert_eq!(
+            failing_in_a_row(&runs(&[failed, failed, Some("done"), failed])),
+            2
+        );
+        assert_eq!(failing_in_a_row(&runs(&[Some("done"), failed, failed])), 0);
+        assert_eq!(failing_in_a_row(&runs(&[])), 0);
+
+        // Stopped, paused, skipped and never finished are passed over: none of
+        // them says the routine is broken, and none says it works either.
+        let skipped = format!("something else was still going in its conversation, {SKIPPED}");
+        let mixed = runs(&[
+            failed,
+            Some("stopped by you"),
+            None,
+            Some(skipped.as_str()),
+            Some("paused by you"),
+            failed,
+            Some("done"),
+        ]);
+        assert_eq!(failing_in_a_row(&mixed), 2);
+
+        // Five mornings of pressing Stop is somebody using it.
+        let stopped = runs(&[Some("stopped by you"); 6]);
+        assert_eq!(failing_in_a_row(&stopped), 0);
+        assert!(!a_failure("deleted"));
+        assert!(a_failure(
+            "It could not open: the Claude Code sign-in has expired."
+        ));
     }
 
     #[test]

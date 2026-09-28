@@ -87,6 +87,16 @@ export const FIXTURE = {
   // How a routine has been going: one good morning, one failed, and one that
   // never came back because the machine slept. The three states the panel has
   // to be able to tell apart.
+  // Twenty-three runs of an every-five-minute routine, which is more than one
+  // page of history.
+  wentBy: {
+    "talk-1": Array.from({ length: 23 }, (_, i) => ({
+      id: 23 - i,
+      at: Date.now() - i * 300000,
+      why: "clock",
+      outcome: i === 22 ? "done" : "the model server is not answering",
+    })),
+  },
   went: [
     { at: Date.now() - 3600000, why: "clock", outcome: null },
     { at: Date.now() - 90000000, why: "clock", outcome: "the model server is not answering" },
@@ -534,8 +544,13 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(null);
           case "export_conversation":
             return Promise.resolve("/Users/you/Desktop/First.md");
-          case "how_it_has_been_going":
-            return Promise.resolve(fixture.went || []);
+          // A page at a time, as the app answers: twenty, and the twenty
+          // before a run's id when asked for older ones.
+          case "how_it_has_been_going": {
+            const all = fixture.wentBy?.[args.id] || fixture.went || [];
+            const from = args.olderThan == null ? 0 : all.findIndex((run) => run.id === args.olderThan) + 1;
+            return Promise.resolve(all.slice(from, from + 20));
+          }
           // Where the words actually are, rather than only which agent has
           // them. Matched against the fixture's own lines so the answer and
           // what the page can show cannot drift apart.

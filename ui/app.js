@@ -217,6 +217,7 @@ const el = {
   routineStop: document.getElementById("routine-stop"),
   routineWent: document.getElementById("routine-went"),
   routineWentList: document.getElementById("routine-went-list"),
+  routineWentMore: document.getElementById("routine-went-more"),
   routineSays: document.getElementById("routine-says"),
   pin: document.getElementById("pin"),
   hide: document.getElementById("hide"),
@@ -3180,35 +3181,70 @@ function sayWhen(routine) {
 async function drawHowItWent(id) {
   el.routineWent.hidden = true;
   el.routineWentList.replaceChildren();
-  let went = [];
-  try {
-    went = await invoke("how_it_has_been_going", { id });
-  } catch {
-    return;
-  }
+  el.routineWentMore.hidden = true;
+  const went = await runsOf(id);
   if (!went.length) return;
-  el.routineWentList.replaceChildren(
-    ...went.map((run) => {
-      const li = document.createElement("li");
-      // A run with nothing against it never came back: the app was quit, or
-      // the machine slept. That is its own outcome and not a failure.
-      li.className = !run.outcome ? "went unfinished" : run.outcome === "done" ? "went" : "went wrong";
-      const when = document.createElement("span");
-      when.className = "went-when";
-      when.textContent = new Date(run.at).toLocaleString();
-      const what = document.createElement("span");
-      what.className = "went-what";
-      what.textContent = !run.outcome
-        ? "did not finish"
-        : run.outcome === "done"
-          ? startedBy(run.why)
-          : run.outcome;
-      li.append(when, what);
-      return li;
-    }),
-  );
+  showTheRuns(id, went);
   el.routineWent.hidden = false;
 }
+
+/** How many runs the app hands back at a time, and so whether there are more. */
+const RUNS_AT_A_TIME = 20;
+
+/** Which conversation the history is of, and the oldest run in it so far. */
+let runsShown = { of: null, oldest: null };
+
+/** A page of runs, newest first, or nothing when the app cannot say. */
+async function runsOf(id, olderThan = null) {
+  try {
+    return await invoke("how_it_has_been_going", { id, olderThan });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Runs added to the bottom of the history, and the way to the ones before.
+ *
+ * The newest twenty were all there was to see, which for a routine every five
+ * minutes is under two hours: the night it failed ninety-five times in a row
+ * was out of reach by breakfast.
+ */
+function showTheRuns(id, went) {
+  el.routineWentList.append(...went.map(aRun));
+  runsShown = { of: id, oldest: went.length ? went[went.length - 1].id : runsShown.oldest };
+  el.routineWentMore.hidden = went.length < RUNS_AT_A_TIME;
+}
+
+function aRun(run) {
+  const li = document.createElement("li");
+  // A run with nothing against it never came back: the app was quit, or the
+  // machine slept. That is its own outcome and not a failure.
+  li.className = !run.outcome ? "went unfinished" : run.outcome === "done" ? "went" : "went wrong";
+  const when = document.createElement("span");
+  when.className = "went-when";
+  when.textContent = new Date(run.at).toLocaleString();
+  const what = document.createElement("span");
+  what.className = "went-what";
+  what.textContent = !run.outcome
+    ? "did not finish"
+    : run.outcome === "done"
+      ? startedBy(run.why)
+      : run.outcome;
+  li.append(when, what);
+  return li;
+}
+
+el.routineWentMore.addEventListener("click", async () => {
+  const { of, oldest } = runsShown;
+  if (!of || oldest == null) return;
+  el.routineWentMore.disabled = true;
+  const older = await runsOf(of, oldest);
+  el.routineWentMore.disabled = false;
+  // Somebody moved to another conversation while these were on their way.
+  if (runsShown.of !== of) return;
+  showTheRuns(of, older);
+});
 
 /** What started a run, in a word somebody would use. */
 function startedBy(why) {

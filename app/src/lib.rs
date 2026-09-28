@@ -1045,6 +1045,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // How this run went, for the routine's own record. Only for runs
             // something other than a person started: a conversation somebody
             // is sitting in front of has its whole history on screen.
+            let mut said_already = false;
             if let Some(outcome) = match &event {
                 Event::Done { .. } => Some("done".to_string()),
                 Event::Failed { why } => Some(why.clone()),
@@ -1054,10 +1055,13 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 let run = held.mid_run.lock().unwrap().remove(&id);
                 if let Some(run) = run {
                     let _ = store.a_run_ended(run, &outcome);
+                    if routine::a_failure(&outcome) {
+                        said_already = when_it_keeps_failing(&app, &store, &id);
+                    }
                 }
             }
 
-            let shown = tell_them(&app, &store, &id, &event);
+            let shown = !said_already && tell_them(&app, &store, &id, &event);
             let _ = app.emit(
                 "happened",
                 Happened {
@@ -2608,6 +2612,89 @@ async fn look_once(
     }
 }
 
+/// Switch off a routine or a watch whose runs keep failing, and say so once.
+///
+/// An every-five-minute routine failed 95 times in a row one night, and each
+/// failure could post a banner. Returns whether the failure just written has
+/// been said already: after the first of a run of them a banner each time is
+/// noise, and the one that switches it off says so in its own words.
+///
+/// Only what started the run that failed, and only if it is still on. Nothing
+/// is thrown away: a routine stays under Repeat and a watch under Watch, to
+/// start again once whatever it needs is working.
+fn when_it_keeps_failing(app: &AppHandle, store: &Store, id: &str) -> bool {
+    let runs = store
+        .how_it_has_been_going(id, None, RUNS_AT_A_TIME)
+        .unwrap_or_default();
+    let failing = routine::failing_in_a_row(&runs);
+    if failing < routine::FAILED_RUNS_BEFORE_STOPPING {
+        return failing > 1;
+    }
+    let Some(talk) = store.conversation(id).ok().flatten() else {
+        return true;
+    };
+    let last = runs
+        .iter()
+        .filter_map(|run| run.outcome.as_deref())
+        .find(|outcome| routine::a_failure(outcome))
+        .map(gist)
+        .unwrap_or_default();
+    let who = called(store, id);
+    let (title, said) = match runs.first().map(|run| run.why.as_str()) {
+        Some("clock") if talk.runs_at.is_some() && !talk.routine_off => {
+            if store.routine_off(id, true).is_err() {
+                return true;
+            }
+            let _ = app.emit(
+                "repeats",
+                Repeats {
+                    conversation: id.to_string(),
+                    repeats: false,
+                },
+            );
+            (
+                format!("{who}'s routine is switched off"),
+                format!(
+                    "Switched off after {failing} failed runs in a row. The last one said: \
+                     {last}\n\nIt is kept under Repeat. Start it again once whatever it needs \
+                     is working."
+                ),
+            )
+        }
+        Some("watch") if talk.watches.is_some() && talk.paused.is_none() => {
+            let why = format!(
+                "Stopped after {failing} failed runs in a row. The last one said: {last} \
+                 Press Look again once whatever it needs is working."
+            );
+            if store.pause_watch(id, &why).is_err() {
+                return true;
+            }
+            (format!("{who}'s watch is stopped"), why)
+        }
+        // Already off, or started by somebody pressing Try it now, who is
+        // looking at it.
+        _ => return true,
+    };
+    if let Ok(line) = store.the_app_says(id, "note", &said) {
+        let _ = app.emit(
+            "noted",
+            Noted {
+                conversation: id.to_string(),
+                seq: line.seq,
+                kind: "note".to_string(),
+                text: line.text,
+                said_by: None,
+            },
+        );
+    }
+    onscreen::show(
+        id,
+        &title,
+        &format!("It failed {failing} times in a row. {last}"),
+    );
+    true
+}
+
 /// A line the app itself put into a conversation, on its way to the window.
 #[derive(Clone, Serialize)]
 struct Noted {
@@ -3366,11 +3453,15 @@ async fn routine_off(held: State<'_, Held>, id: String, off: bool) -> Result<(),
 async fn how_it_has_been_going(
     held: State<'_, Held>,
     id: String,
+    older_than: Option<i64>,
 ) -> Result<Vec<errand_core::store::Run>, String> {
     held.store
-        .how_it_has_been_going(&id, 20)
+        .how_it_has_been_going(&id, older_than, RUNS_AT_A_TIME)
         .map_err(|e| e.to_string())
 }
+
+/// How many runs the history shows at a time, and asks for again for more.
+const RUNS_AT_A_TIME: i64 = 20;
 
 /// Which agent a conversation belongs to.
 ///
@@ -4601,6 +4692,11 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
             let run = held.mid_run.lock().unwrap().remove(&conversation);
             if let Some(run) = run {
                 let _ = held.store.a_run_ended(run, &why);
+                // A run that could not even start counts: an engine that will
+                // not open fails every morning the same way.
+                if routine::a_failure(&why) {
+                    when_it_keeps_failing(app, &held.store, &conversation);
+                }
             }
         }
     }
@@ -4623,13 +4719,16 @@ async fn a_routines_turn(
     {
         let held: State<Held> = app.state();
         if a_handover_waiting_in(&held, &conversation).is_some() {
-            return Err("it was waiting on you for a handover, so this run was skipped".into());
+            return Err(format!(
+                "it was waiting on you for a handover, {}",
+                routine::SKIPPED
+            ));
         }
         if mid_turn(&held, &conversation) {
-            return Err(
-                "something else was still going in its conversation, so this run was skipped"
-                    .into(),
-            );
+            return Err(format!(
+                "something else was still going in its conversation, {}",
+                routine::SKIPPED
+            ));
         }
     }
     let turn = {

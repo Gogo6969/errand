@@ -3226,6 +3226,20 @@ export async function pausingARoutineAndSeeingHowItWent() {
     JSON.stringify(asked.filter((a) => a.name === "routine_off").slice(-1)),
   );
   document.getElementById("repeat").click();
+
+  // More than a page of runs: the ones before the newest twenty can be seen.
+  await openTalk("talk-1");
+  document.getElementById("repeat").click();
+  await new Promise((r) => setTimeout(r, 350));
+  const shown = () => document.querySelectorAll("#routine-went-list li").length;
+  const more = document.getElementById("routine-went-more");
+  check("a long history shows the newest twenty runs", shown() === 20, String(shown()));
+  check("and offers the ones before them", !more.hidden, `hidden=${more.hidden}`);
+  more.click();
+  await new Promise((r) => setTimeout(r, 300));
+  check("which are added below, oldest last", shown() === 23 && /ran/.test([...document.querySelectorAll("#routine-went-list li")].pop()?.textContent || ""), `${shown()} shown`);
+  check("and with nothing older, it stops offering", more.hidden, `hidden=${more.hidden}`);
+  document.getElementById("repeat").click();
   return found;
 }
 

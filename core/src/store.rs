@@ -81,6 +81,8 @@ pub struct Hit {
 /// One time a routine ran, and what came of it.
 #[derive(Debug, Clone, Serialize)]
 pub struct Run {
+    /// Where it is in the history, for asking for the runs before it.
+    pub id: i64,
     pub at: i64,
     /// What started it: the clock, a watch, or somebody pressing Try it now.
     pub why: String,
@@ -2174,19 +2176,31 @@ impl Store {
     /// The question people ask about a standing job is not when it is next but
     /// whether it has been working, and one `ran_at` column cannot answer it.
     /// Three failed mornings leave a conversation looking merely quiet.
-    pub fn how_it_has_been_going(&self, conversation: &str, at_most: i64) -> Result<Vec<Run>> {
+    ///
+    /// `older_than` is a run's id, for the page of runs before it: an
+    /// every-five-minute routine has run twenty times in under two hours, and
+    /// the newest twenty were all there was to see.
+    pub fn how_it_has_been_going(
+        &self,
+        conversation: &str,
+        older_than: Option<i64>,
+        at_most: i64,
+    ) -> Result<Vec<Run>> {
         let conn = self.conn.lock().unwrap();
-        // By id within the same millisecond, so two runs that landed together
-        // still come back in the order they happened.
+        // In the order they were written down, which is the order they
+        // happened even when two landed in the same millisecond, and which a
+        // page of older ones can carry on from exactly.
         let mut q = conn.prepare(
-            "SELECT at, why, outcome FROM runs
-              WHERE conversation = ? ORDER BY at DESC, id DESC LIMIT ?",
+            "SELECT id, at, why, outcome FROM runs
+              WHERE conversation = ?1 AND (?2 IS NULL OR id < ?2)
+              ORDER BY id DESC LIMIT ?3",
         )?;
-        let rows = q.query_map(params![conversation, at_most], |r| {
+        let rows = q.query_map(params![conversation, older_than, at_most], |r| {
             Ok(Run {
-                at: r.get(0)?,
-                why: r.get(1)?,
-                outcome: r.get(2)?,
+                id: r.get(0)?,
+                at: r.get(1)?,
+                why: r.get(2)?,
+                outcome: r.get(3)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -3682,7 +3696,7 @@ mod tests {
         s.make_sure_it_exists("brief", NOT_YET_NAMED, Path::new("/tmp/brief"))
             .unwrap();
         let id = s.conversations("brief").unwrap()[0].id.clone();
-        assert!(s.how_it_has_been_going(&id, 10).unwrap().is_empty());
+        assert!(s.how_it_has_been_going(&id, None, 10).unwrap().is_empty());
 
         let monday = s.a_run_began(&id, "clock").unwrap();
         s.a_run_ended(monday, "done").unwrap();
@@ -3693,7 +3707,7 @@ mod tests {
         // quit, or the machine slept.
         s.a_run_began(&id, "hand").unwrap();
 
-        let went = s.how_it_has_been_going(&id, 10).unwrap();
+        let went = s.how_it_has_been_going(&id, None, 10).unwrap();
         // Three, not one. All three landed in the same millisecond here, which
         // is the case a key made out of the clock quietly turns into one run.
         assert_eq!(went.len(), 3, "{went:?}");
@@ -3706,8 +3720,13 @@ mod tests {
         );
         assert_eq!(went[2].outcome.as_deref(), Some("done"));
 
-        // And it does not grow without bound in front of somebody.
-        assert_eq!(s.how_it_has_been_going(&id, 2).unwrap().len(), 2);
+        // And it does not grow without bound in front of somebody, and what is
+        // before a page can be asked for.
+        let newest = s.how_it_has_been_going(&id, None, 2).unwrap();
+        assert_eq!(newest.len(), 2);
+        let older = s.how_it_has_been_going(&id, Some(newest[1].id), 2).unwrap();
+        assert_eq!(older.len(), 1);
+        assert_eq!(older[0].outcome.as_deref(), Some("done"));
     }
 
     #[test]

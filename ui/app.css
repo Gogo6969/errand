@@ -2001,6 +2001,7 @@ body.in-a-call #what {
 .went-what { color: var(--ink-soft); min-width: 0; overflow-wrap: anywhere; }
 .went.wrong .went-what { color: var(--wrong-soft); }
 .went.unfinished .went-what { color: var(--faint); }
+#routine-went-more { margin-top: 6px; }
 
 /* The line a search was looking for, once you have arrived at it. Marked
    rather than only scrolled to: a conversation scrolled to the middle with
