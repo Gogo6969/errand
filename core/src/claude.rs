@@ -723,8 +723,13 @@ impl Engine for Claude {
     /// this end reconstructed. A remembered yes carries the rule the agent
     /// itself suggested, for the same reason.
     fn answer(&mut self, call: &str, said: Answer) -> Result<()> {
-        let asked = self.waiting.lock().unwrap().remove(call);
-        let asked = asked.unwrap_or_default();
+        let (call, asked) = {
+            let mut waiting = self.waiting.lock().unwrap();
+            let request = the_question(&waiting, call).unwrap_or_else(|| call.to_string());
+            let asked = waiting.remove(&request).unwrap_or_default();
+            (request, asked)
+        };
+        let call = call.as_str();
         let reply = match said {
             Answer::No => serde_json::json!({
                 "behavior": "deny",
@@ -815,6 +820,23 @@ fn a_question(line: &str) -> Option<(String, serde_json::Value)> {
         return None;
     }
     Some((v.get("request_id")?.as_str()?.to_string(), request.clone()))
+}
+
+/// Which waiting question an answer is for, by the question's own id or by the
+/// id of the step it is about.
+///
+/// A question read back from the store has only the step's: the question's id
+/// is Claude Code's name for one request and was never written down. So a
+/// card opened from its notification, before the window had seen it live,
+/// answered with nothing, and pressing Yes failed while the agent waited.
+fn the_question(waiting: &HashMap<String, serde_json::Value>, call: &str) -> Option<String> {
+    if waiting.contains_key(call) {
+        return Some(call.to_string());
+    }
+    waiting
+        .iter()
+        .find(|(_, request)| request.get("tool_use_id").and_then(|id| id.as_str()) == Some(call))
+        .map(|(request, _)| request.clone())
 }
 
 /// Turn one line of Claude Code's output into what the window understands.
@@ -1877,6 +1899,26 @@ mod tests {
                 "`{name}` reaches outside this app and is granted without asking"
             );
         }
+    }
+
+    #[test]
+    fn a_question_is_found_by_its_own_id_or_by_the_step_it_is_about() {
+        // A card read back from the store knows only the step. Answered by
+        // that, it has to reach the same question the live card would have.
+        let mut waiting = HashMap::new();
+        waiting.insert(
+            "f719d6a2".to_string(),
+            serde_json::json!({ "subtype": "can_use_tool", "tool_use_id": "toolu_015" }),
+        );
+        assert_eq!(
+            the_question(&waiting, "f719d6a2").as_deref(),
+            Some("f719d6a2")
+        );
+        assert_eq!(
+            the_question(&waiting, "toolu_015").as_deref(),
+            Some("f719d6a2")
+        );
+        assert_eq!(the_question(&waiting, "toolu_999"), None);
     }
 
     #[test]

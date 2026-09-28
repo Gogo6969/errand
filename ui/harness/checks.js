@@ -916,6 +916,19 @@ export async function questionsStillOpen() {
     live.includes("Fetch BTC spot price") && !live.includes("expired"),
     live.includes("expired") ? "it says the question expired" : live.slice(0, 70),
   );
+  // And answering it reaches the question. Read back from the store it knows
+  // only its step, and the answer went with no id at all, so pressing Yes on a
+  // question opened from its notification failed.
+  const before = asked.length;
+  const yes = [...document.querySelectorAll("#messages .asking .choices button")].find((b) => b.textContent === "Yes");
+  yes?.click();
+  await new Promise((r) => setTimeout(r, 300));
+  const answered = asked.slice(before).find((a) => a.name === "answer");
+  check(
+    "and pressing Yes on it answers with the step it is about",
+    answered?.args?.call === "c2" && answered?.args?.step === "c2",
+    JSON.stringify(answered?.args || "nothing was answered"),
+  );
 
   await openTalk("talk-2");
   const gone = document.getElementById("messages").textContent;

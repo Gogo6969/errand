@@ -1797,7 +1797,10 @@ async function answer(m, said, label) {
   try {
     await invoke("answer", {
       id: t.id,
-      call: m.call,
+      // Read back from the store, a question knows only its step, and that is
+      // enough: both engines find the question by it. Sent as nothing, the
+      // app could not take the answer at all.
+      call: m.call || m.step,
       step: m.step,
       said,
       tool: m.tool || "",
