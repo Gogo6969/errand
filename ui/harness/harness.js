@@ -222,6 +222,17 @@ export const FIXTURE = {
       fix: "Open System Settings, then Notifications, then Errand, and switch Allow notifications on.",
       settings: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.errandai.errand" },
   ],
+  // What ran on its own while nobody was looking: one that went well, one
+  // that failed, and one still going.
+  happened: [
+    { agent: "agent-bitcoin", who: "Bitcoin Desk", conversation: "talk-2", at: Date.now() - 3_600_000,
+      why: "clock", outcome: "done", failed: false, said: "BTC is up 2% overnight." },
+    { agent: "agent-bitcoin", who: "Bitcoin Desk", conversation: "talk-3", at: Date.now() - 7_200_000,
+      why: "clock", outcome: "The model server answered with an error", failed: true, said: "" },
+    { agent: "agent-bitcoin", who: "Bitcoin Desk", conversation: "talk-4", at: Date.now() - 60_000,
+      why: "watch", outcome: null, failed: false, said: "" },
+  ],
+  settings: {},
   whats_running: [
     { conversation: "talk-3", agent: "agent-bitcoin", who: "Bitcoin Desk", talk: "Asked by Day Check",
       what: "Waiting on you: Running a command", waiting: true },
@@ -755,6 +766,18 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             ]);
           case "runs":
             return Promise.resolve([]);
+          case "happened_since":
+            return Promise.resolve(fixture.happened);
+          case "setting":
+            return Promise.resolve(fixture.settings[args?.key] ?? null);
+          // Refused the way the app refuses it, so the window's handling of a
+          // refusal is what gets checked.
+          case "set_setting":
+            if (!(Number(args?.value) >= 1 && Number(args?.value) <= 365)) {
+              return Promise.reject("somewhere between 1 and 365 days");
+            }
+            fixture.settings[args.key] = args.value;
+            return Promise.resolve(null);
           // Everything else is a thing done rather than asked, and the window
           // only cares that it did not fail.
           default:

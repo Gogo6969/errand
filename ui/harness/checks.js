@@ -4663,6 +4663,113 @@ export async function whatItIsForAndWhereItWent() {
   return found;
 }
 
+/**
+ * Every job at once: what happened while you were away, what is open, tiles
+ * grouped by what each is doing, priorities, and jobs marked finished.
+ */
+export async function theOverview() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  const overview = document.getElementById("overview");
+  const away = document.getElementById("overview-away");
+  const tiles = document.getElementById("overview-tiles");
+  const list = document.getElementById("threads");
+
+  document.getElementById("overview-open").click();
+  await settle(300);
+  check("the overview opens over the window", !overview.hidden && getComputedStyle(overview).display !== "none", `hidden=${overview.hidden}`);
+  check(
+    "it says what ran while you were away, and how much of it failed",
+    /2 runs on their own, 1 of them failed/.test(away.textContent) &&
+      away.textContent.includes("BTC is up 2% overnight.") &&
+      /failed\. The model server answered with an error/.test(away.textContent),
+    away.textContent.slice(0, 200),
+  );
+  check("and what is open now, starting with what waits on you", /Waiting on you: [^\n]*Bitcoin Desk/.test(away.textContent), away.textContent.slice(-160));
+
+  const tileOf = (id) => tiles.querySelector(`.job[data-agent="${id}"]`);
+  const desk = tileOf("agent-bitcoin");
+  check("every job has a tile", desk && tiles.querySelectorAll(".job").length >= 2, `${tiles.querySelectorAll(".job").length} tiles`);
+  check(
+    "grouped by what each is doing, what waits on you first",
+    tiles.querySelector(".job-group h2")?.textContent.startsWith("Waiting on you") &&
+      desk?.querySelector(".job-state")?.dataset.state === "waiting",
+    tiles.querySelector(".job-group h2")?.textContent || "no groups",
+  );
+
+  const priority = desk.querySelector("select");
+  priority.value = "1";
+  priority.dispatchEvent(new Event("change"));
+  await settle(150);
+  check(
+    "a priority chosen on a tile is kept",
+    asked.some((a) => a.name === "set_priority" && a.args?.id === "agent-bitcoin" && a.args?.priority === 1) &&
+      tileOf("agent-bitcoin")?.dataset.priority === "1",
+    JSON.stringify(asked.filter((a) => a.name === "set_priority").slice(-1)),
+  );
+
+  const other = [...tiles.querySelectorAll(".job")].find((j) => j.dataset.agent !== "agent-bitcoin");
+  const otherId = other?.dataset.agent;
+  [...other.querySelectorAll("button")].find((b) => b.textContent === "Finished").click();
+  await settle(200);
+  const finishedGroup = [...tiles.querySelectorAll(".job-group")].find((g) => g.querySelector("h2").textContent.startsWith("Finished"));
+  check(
+    "marking a job finished moves it to Finished",
+    asked.some((a) => a.name === "finish" && a.args?.id === otherId && a.args?.finished === true) &&
+      finishedGroup?.querySelector(`.job[data-agent="${otherId}"]`),
+    finishedGroup ? "in Finished" : "no Finished group",
+  );
+  const rows = [...list.querySelectorAll("li[data-agent]")];
+  const row = list.querySelector(`li[data-agent="${otherId}"]`);
+  check(
+    "and in the list it has a Finished badge and goes to the bottom",
+    row?.querySelector(".finished-badge") && rows.filter((r) => !r.classList.contains("is-hidden")).pop() === row,
+    row ? row.textContent.slice(0, 60) : "not in the list",
+  );
+  [...tileOf(otherId).querySelectorAll("button")].find((b) => b.textContent === "Not finished").click();
+  await settle(200);
+  check(
+    "and not finished after all puts it back",
+    asked.some((a) => a.name === "finish" && a.args?.id === otherId && a.args?.finished === false) &&
+      !list.querySelector(`li[data-agent="${otherId}"] .finished-badge`),
+    "back",
+  );
+
+  const group = document.getElementById("overview-group");
+  group.value = "subject";
+  group.dispatchEvent(new Event("change"));
+  await settle(150);
+  const headings = [...tiles.querySelectorAll(".job-group h2")].map((h) => h.textContent.replace(/ \(\d+\)$/, ""));
+  check(
+    "grouped by subject, the headings are the roles jobs chose, with none last",
+    headings.length >= 1 && !headings.some((h) => /Waiting on you|Idle/.test(h)) && (!headings.includes("Other") || headings[headings.length - 1] === "Other"),
+    headings.join(", "),
+  );
+  group.value = "state";
+  group.dispatchEvent(new Event("change"));
+
+  document.getElementById("overview-done").click();
+  await settle(100);
+  check("Back to chat closes it", overview.hidden, `hidden=${overview.hidden}`);
+
+  const days = document.getElementById("finished-days");
+  const says = document.getElementById("finished-days-says");
+  days.value = "3";
+  days.dispatchEvent(new Event("change"));
+  await settle(150);
+  check(
+    "how long a finished job stays in the list is a setting that is kept",
+    asked.some((a) => a.name === "set_setting" && a.args?.key === "finished_kept_days" && a.args?.value === "3") && /3 days/.test(says.textContent),
+    says.textContent,
+  );
+  days.value = "999";
+  days.dispatchEvent(new Event("change"));
+  await settle(150);
+  check("and one that makes no sense is refused, saying why", /between 1 and 365/.test(says.textContent) && days.value === "3", `${says.textContent} / ${days.value}`);
+  return found;
+}
+
 export async function aLongConversation() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });

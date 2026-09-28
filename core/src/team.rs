@@ -1458,6 +1458,8 @@ mod tests {
             engine: "local".into(),
             engine_settings: None,
             paused_at: None,
+            priority: crate::store::NORMALLY,
+            finished_at: None,
         }
     }
 

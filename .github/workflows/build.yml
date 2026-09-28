@@ -50,7 +50,7 @@ jobs:
       # passes without checking. It is run by hand, and what it found is in the
       # commit messages.
       - name: What can be tested without a browser
-        run: node --test ui/speech.test.mjs ui/markdown.test.mjs
+        run: node --test ui/speech.test.mjs ui/markdown.test.mjs ui/jobs.test.mjs
 
   scrub:
     runs-on: ubuntu-latest

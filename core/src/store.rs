@@ -369,6 +369,33 @@ pub struct Agent {
     /// When somebody paused it. Nothing runs on its own while this is set:
     /// not its routines, not its watches, not a goal. Spoken to, it answers.
     pub paused_at: Option<i64>,
+    /// How much its job matters to its person: 1 high, 2 normal, 3 low.
+    #[serde(default = "normally")]
+    pub priority: i64,
+    /// When its person said its job was finished. Nothing while it is not.
+    #[serde(default)]
+    pub finished_at: Option<i64>,
+}
+
+/// A run as seen afterwards: which, when, how it ended, and what it said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunSeen {
+    pub conversation: String,
+    pub agent: String,
+    pub at: i64,
+    /// What started it: `clock`, `watch` or `goal`.
+    pub why: String,
+    /// How it ended, as written down, or nothing while it is still going.
+    pub outcome: Option<String>,
+    /// The last thing it said, if it said anything.
+    pub said: Option<String>,
+}
+
+/// The priority an agent has until somebody gives it another.
+pub const NORMALLY: i64 = 2;
+
+fn normally() -> i64 {
+    NORMALLY
 }
 
 /// One thing an agent has written down about how its own job is done.
@@ -1017,6 +1044,15 @@ const CHANGES: &[&str] = &[
     // model paid for by the token, dollars for Claude. Nothing means no limit.
     "ALTER TABLE agents ADD COLUMN token_limit INTEGER;
      ALTER TABLE agents ADD COLUMN dollar_limit REAL;",
+    // How much an agent's job matters to its person, and when they said it was
+    // finished; and the app's own settings, the first being how long a
+    // finished one stays in the list.
+    "ALTER TABLE agents ADD COLUMN priority INTEGER NOT NULL DEFAULT 2;
+     ALTER TABLE agents ADD COLUMN finished_at INTEGER;
+     CREATE TABLE settings (
+         key   TEXT PRIMARY KEY,
+         value TEXT NOT NULL
+     );",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -2660,13 +2696,89 @@ impl Store {
         Self::only_if_it_is_there(changed, "conversation")
     }
 
+    /// How much an agent's job matters: 1 high, 2 normal, 3 low.
+    pub fn set_priority(&self, agent: &str, priority: i64) -> Result<()> {
+        anyhow::ensure!(
+            (1..=3).contains(&priority),
+            "a priority is 1, 2 or 3, not {priority}"
+        );
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE agents SET priority = ? WHERE id = ?",
+            params![priority, agent],
+        )?;
+        Self::only_if_it_is_there(changed, "agent")
+    }
+
+    /// Say an agent's job is finished, as of this moment, or that it is not
+    /// finished after all.
+    pub fn finish(&self, agent: &str, at: Option<i64>) -> Result<()> {
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE agents SET finished_at = ? WHERE id = ?",
+            params![at, agent],
+        )?;
+        Self::only_if_it_is_there(changed, "agent")
+    }
+
+    /// One of the app's own settings, as it was written, or nothing if it
+    /// never has been.
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare_cached("SELECT value FROM settings WHERE key = ?")?;
+        let mut rows = q.query_map([key], |r| r.get::<_, String>(0))?;
+        rows.next().transpose().map_err(Into::into)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Every run that started since a moment, newest first, with the last
+    /// thing said in it: what happened on its own while nobody was looking.
+    ///
+    /// The last thing said before the same conversation's next run, so an
+    /// older run of an every-five-minutes routine is not given a later run's
+    /// answer.
+    pub fn runs_since(&self, since: i64, at_most: i64) -> Result<Vec<RunSeen>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT r.conversation, c.agent, r.at, r.why, r.outcome,
+                    (SELECT l.text FROM lines l
+                      WHERE l.conversation = r.conversation AND l.kind = 'said'
+                        AND l.at >= r.at
+                        AND l.at < COALESCE((SELECT MIN(r2.at) FROM runs r2
+                                              WHERE r2.conversation = r.conversation
+                                                AND r2.at > r.at), 9000000000000000)
+                      ORDER BY l.seq DESC LIMIT 1)
+               FROM runs r JOIN conversations c ON c.id = r.conversation
+              WHERE r.at >= ?1
+              ORDER BY r.at DESC
+              LIMIT ?2",
+        )?;
+        let rows = q.query_map(params![since, at_most], |r| {
+            Ok(RunSeen {
+                conversation: r.get(0)?,
+                agent: r.get(1)?,
+                at: r.get(2)?,
+                why: r.get(3)?,
+                outcome: r.get(4)?,
+                said: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Every thread, the one spoken to most recently first.
     pub fn agents(&self) -> Result<Vec<Agent>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
             "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
                     cwd, model, started_at, spoke_at, engine, engine_settings,
-                    paused_at
+                    paused_at, priority, finished_at
                FROM agents ORDER BY pinned DESC, spoke_at DESC",
         )?;
         let rows = q.query_map([], |r| {
@@ -2687,6 +2799,8 @@ impl Store {
                 engine: r.get(13)?,
                 engine_settings: r.get(14)?,
                 paused_at: r.get(15)?,
+                priority: r.get(16)?,
+                finished_at: r.get(17)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2699,7 +2813,7 @@ impl Store {
         let mut q = conn.prepare_cached(
             "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
                     cwd, model, started_at, spoke_at, engine, engine_settings,
-                    paused_at
+                    paused_at, priority, finished_at
                FROM agents WHERE id = ?",
         )?;
         let mut rows = q.query_map([id], |r| {
@@ -2720,6 +2834,8 @@ impl Store {
                 engine: r.get(13)?,
                 engine_settings: r.get(14)?,
                 paused_at: r.get(15)?,
+                priority: r.get(16)?,
+                finished_at: r.get(17)?,
             })
         })?;
         rows.next().transpose().map_err(Into::into)
@@ -3251,7 +3367,7 @@ impl Store {
         let mut q = conn.prepare(
             "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
                     cwd, model, started_at, spoke_at, engine, engine_settings,
-                    paused_at
+                    paused_at, priority, finished_at
                FROM agents
               WHERE name LIKE ?1 ESCAPE '\\'
                  OR COALESCE(about, '') LIKE ?1 ESCAPE '\\'
@@ -3283,6 +3399,8 @@ impl Store {
                 engine: r.get(13)?,
                 engine_settings: r.get(14)?,
                 paused_at: r.get(15)?,
+                priority: r.get(16)?,
+                finished_at: r.get(17)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -4034,6 +4152,69 @@ mod tests {
         )
         .unwrap();
         assert_eq!(untouched["context_window"], 32_768, "the other model moved");
+    }
+
+    #[test]
+    fn an_agent_is_normal_priority_until_somebody_says_otherwise() {
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("desk", NOT_YET_NAMED, Path::new("/tmp/desk"))
+            .unwrap();
+        assert_eq!(s.agent("desk").unwrap().unwrap().priority, NORMALLY);
+        s.set_priority("desk", 1).unwrap();
+        assert_eq!(s.agent("desk").unwrap().unwrap().priority, 1);
+        // Three steps and no more, so the overview can always say which.
+        assert!(s.set_priority("desk", 7).is_err());
+        assert!(s.set_priority("nobody", 1).is_err());
+    }
+
+    #[test]
+    fn a_job_said_to_be_finished_can_be_said_not_to_be_after_all() {
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("desk", NOT_YET_NAMED, Path::new("/tmp/desk"))
+            .unwrap();
+        assert_eq!(s.agent("desk").unwrap().unwrap().finished_at, None);
+        s.finish("desk", Some(1_000)).unwrap();
+        assert_eq!(s.agent("desk").unwrap().unwrap().finished_at, Some(1_000));
+        assert_eq!(s.agents().unwrap()[0].finished_at, Some(1_000));
+        s.finish("desk", None).unwrap();
+        assert_eq!(s.agent("desk").unwrap().unwrap().finished_at, None);
+    }
+
+    #[test]
+    fn a_setting_is_nothing_until_it_is_written_and_then_what_was_written_last() {
+        let s = Store::in_memory().unwrap();
+        assert_eq!(s.setting("finished_kept_days").unwrap(), None);
+        s.set_setting("finished_kept_days", "7").unwrap();
+        s.set_setting("finished_kept_days", "14").unwrap();
+        assert_eq!(
+            s.setting("finished_kept_days").unwrap().as_deref(),
+            Some("14")
+        );
+    }
+
+    #[test]
+    fn what_ran_while_nobody_looked_comes_with_what_each_run_said() {
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("desk", NOT_YET_NAMED, Path::new("/tmp/desk"))
+            .unwrap();
+        let first = s.a_run_began("desk", "clock").unwrap();
+        s.the_app_says("desk", "said", "the first run's answer")
+            .unwrap();
+        s.a_run_ended(first, "done").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let second = s.a_run_began("desk", "clock").unwrap();
+        s.the_app_says("desk", "said", "the second run's answer")
+            .unwrap();
+        s.a_run_ended(second, "It stopped part way").unwrap();
+
+        let seen = s.runs_since(0, 10).unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].said.as_deref(), Some("the second run's answer"));
+        assert_eq!(seen[0].outcome.as_deref(), Some("It stopped part way"));
+        // The older run keeps its own answer, not the newer one's.
+        assert_eq!(seen[1].said.as_deref(), Some("the first run's answer"));
+        assert_eq!(seen[1].agent, "desk");
+        assert!(s.runs_since(i64::MAX, 10).unwrap().is_empty());
     }
 
     #[test]

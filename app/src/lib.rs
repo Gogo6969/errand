@@ -6292,6 +6292,108 @@ async fn rename(
     Ok(())
 }
 
+/// How much an agent's job matters: 1 high, 2 normal, 3 low.
+///
+/// Neither of these makes the agent exist if it does not: recreating missing
+/// rows is what brought a deleted agent back to life from a stale window.
+#[tauri::command]
+async fn set_priority(held: State<'_, Held>, id: String, priority: i64) -> Result<(), String> {
+    held.store
+        .set_priority(&id, priority)
+        .map_err(|e| e.to_string())
+}
+
+/// Say an agent's job is finished, or that it is not after all.
+#[tauri::command]
+async fn finish(held: State<'_, Held>, id: String, finished: bool) -> Result<(), String> {
+    let at = finished.then(|| chrono::Local::now().timestamp_millis());
+    held.store.finish(&id, at).map_err(|e| e.to_string())
+}
+
+/// The settings the window may read and write, and nothing else.
+const SETTINGS: &[&str] = &["finished_kept_days"];
+
+/// One of the app's own settings, or nothing if it was never set.
+#[tauri::command]
+async fn setting(held: State<'_, Held>, key: String) -> Result<Option<String>, String> {
+    if !SETTINGS.contains(&key.as_str()) {
+        return Err(format!("there is no setting called {key}"));
+    }
+    held.store.setting(&key).map_err(|e| e.to_string())
+}
+
+/// Change one, having checked it is one and that the value makes sense.
+#[tauri::command]
+async fn set_setting(held: State<'_, Held>, key: String, value: String) -> Result<(), String> {
+    match key.as_str() {
+        "finished_kept_days" => {
+            let days: i64 = value
+                .trim()
+                .parse()
+                .map_err(|_| "say it as a number of days".to_string())?;
+            if !(1..=365).contains(&days) {
+                return Err("somewhere between 1 and 365 days".to_string());
+            }
+            held.store
+                .set_setting(&key, &days.to_string())
+                .map_err(|e| e.to_string())
+        }
+        _ => Err(format!("there is no setting called {key}")),
+    }
+}
+
+/// One run that happened on its own, as the overview says it.
+#[derive(Clone, Serialize)]
+struct RanMeanwhile {
+    agent: String,
+    /// The agent's name.
+    who: String,
+    conversation: String,
+    at: i64,
+    /// What started it: `clock`, `watch` or `goal`.
+    why: String,
+    /// How it ended, or nothing while it is still going.
+    outcome: Option<String>,
+    /// Whether that ending was a failure.
+    failed: bool,
+    /// The gist of the last thing it said.
+    said: String,
+}
+
+/// What ran on its own since a moment, newest first: for the question
+/// somebody coming back asks first, which is what happened while they were
+/// away.
+#[tauri::command]
+async fn happened_since(held: State<'_, Held>, since: i64) -> Result<Vec<RanMeanwhile>, String> {
+    let seen = held
+        .store
+        .runs_since(since, 200)
+        .map_err(|e| e.to_string())?;
+    let names: HashMap<String, String> = held
+        .store
+        .agents()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|a| (a.id, a.name))
+        .collect();
+    Ok(seen
+        .into_iter()
+        .map(|run| RanMeanwhile {
+            who: names
+                .get(&run.agent)
+                .cloned()
+                .unwrap_or_else(|| "an agent no longer here".to_string()),
+            failed: run.outcome.as_deref().is_some_and(routine::a_failure),
+            said: run.said.as_deref().map(gist).unwrap_or_default(),
+            agent: run.agent,
+            conversation: run.conversation,
+            at: run.at,
+            why: run.why,
+            outcome: run.outcome,
+        })
+        .collect())
+}
+
 /// Keep an agent at the top of the list, or stop.
 #[tauri::command]
 async fn pin(
@@ -6801,6 +6903,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             agents,
+            set_priority,
+            finish,
+            setting,
+            set_setting,
+            happened_since,
             matching,
             lines,
             open_thread,

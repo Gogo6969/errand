@@ -18,6 +18,7 @@ window.addEventListener("error", (e) => complain(e.message));
 window.addEventListener("unhandledrejection", (e) => complain(String(e.reason)));
 
 import { tile, forTool, kindOf } from "./icons.js";
+import { STATES, stateOf, stillInTheList, inOrder, bySubject } from "./jobs.js";
 import { render, reachTheAppWith } from "./markdown.js";
 import { toSay } from "./speech.js";
 
@@ -158,6 +159,13 @@ const talks = new Map(); // conversation id → { id, agent, name, messages, wor
 const NOT_YET_NAMED = "New errand";
 let showingAgent = null;
 let showing = null; // the conversation on screen
+/**
+ * How many days a job marked finished stays in the list before it lives only
+ * in the overview. A setting, because a week is a guess. Up here, with the
+ * rest of what the page holds, because the list is drawn before the code
+ * that reads the setting has run.
+ */
+let finishedKeptDays = 7;
 
 const el = {
   threads: document.getElementById("threads"),
@@ -170,6 +178,15 @@ const el = {
   setup: document.getElementById("setup"),
   models: document.getElementById("models"),
   modelsDone: document.getElementById("models-done"),
+  overview: document.getElementById("overview"),
+  overviewOpen: document.getElementById("overview-open"),
+  overviewDone: document.getElementById("overview-done"),
+  overviewGroup: document.getElementById("overview-group"),
+  overviewOrder: document.getElementById("overview-order"),
+  overviewAway: document.getElementById("overview-away"),
+  overviewTiles: document.getElementById("overview-tiles"),
+  finishedDays: document.getElementById("finished-days"),
+  finishedDaysSays: document.getElementById("finished-days-says"),
   reachableList: document.getElementById("reachable-list"),
   atLogin: document.getElementById("at-login"),
   atLoginSays: document.getElementById("at-login-says"),
@@ -634,6 +651,7 @@ async function alsoAsk() {
  * them.
  */
 async function catchUp() {
+  await readTheSettings();
   const known = await invoke("agents");
   for (const a of known) agents.set(a.id, asAgent(a, agents.get(a.id)));
   await whatIsNew();
@@ -1151,6 +1169,12 @@ function asAgent(a, keeping) {
     on: a.engine || "claude",
     onSettings: a.engine_settings || null,
     kind: keeping?.kind,
+    // When it was last spoken to, for ordering the overview by what is recent.
+    spoke: a.spoke_at || 0,
+    // 1 high, 2 normal, 3 low.
+    priority: a.priority || 2,
+    // When its person said its job was finished, or null while it is not.
+    finished: a.finished_at || null,
   };
 }
 
@@ -1425,6 +1449,11 @@ function openTheMenu(a, x, y) {
     }
   });
 
+  item(a.finished ? "Not finished after all" : "Mark as finished", async () => {
+    closeTheMenu();
+    await markFinished(a, !a.finished);
+  });
+
   item(a.hidden ? "Show in the list" : "Hide from the list", async () => {
     a.hidden = !a.hidden;
     closeTheMenu();
@@ -1526,9 +1555,17 @@ function drawThreads() {
   // Hidden ones are out of the way, not gone: a search still finds them, and
   // so does the row at the bottom that says how many there are. With only the
   // search, "where did it go" had no answer anybody could see.
-  const listed = [...agents.values()].filter((a) =>
+  // A job marked finished goes to the bottom, and after the days somebody
+  // chose it leaves the list for the overview. A search still finds it.
+  const now = Date.now();
+  const stillListed = (a) => stillInTheList(a, now, finishedKeptDays, !!narrowedTo);
+  const visible = [...agents.values()].filter((a) =>
     narrowedTo ? narrowedTo.has(a.id) : !a.hidden,
   );
+  const listed = [
+    ...visible.filter((a) => !a.finished),
+    ...visible.filter((a) => a.finished && stillListed(a)),
+  ];
   const hiddenOnes = narrowedTo ? [] : [...agents.values()].filter((a) => a.hidden);
   if (!listed.length && !hiddenOnes.length) {
     const none = document.createElement("li");
@@ -1575,6 +1612,10 @@ function drawThreads() {
         role.className = "role";
         role.textContent = a.title;
         name.append(role);
+      }
+      if (a.finished) {
+        name.append(note("span", "Finished", "finished-badge"));
+        li.classList.add("is-finished");
       }
 
       // What it is for, rather than the last thing said to it. An agent is a
@@ -2680,6 +2721,8 @@ el.form.addEventListener("submit", async (e) => {
   // what to do differently. Anything else starting with / is somebody's own
   // words, a path included, and goes as it is.
   const a = whose();
+  // Something new asked of a job marked finished is that job going again.
+  if (a?.finished) markFinished(a, false);
   if (a && text.startsWith("/")) {
     const called = aSkillCalledFor(text, await readSkills(a.id));
     if (called) {
@@ -5704,6 +5747,335 @@ el.atLogin.addEventListener("change", async () => {
 });
 
 el.setup.addEventListener("click", showModels);
+
+/* ------------------------------------------------------------ overview -- */
+
+async function readTheSettings() {
+  try {
+    const days = Number(await invoke("setting", { key: "finished_kept_days" }));
+    if (days >= 1) finishedKeptDays = days;
+  } catch {
+    // The default stands, which is what an unset one would say anyway.
+  }
+  el.finishedDays.value = String(finishedKeptDays);
+}
+
+el.finishedDays.addEventListener("change", async () => {
+  const days = Math.round(Number(el.finishedDays.value));
+  try {
+    await invoke("set_setting", { key: "finished_kept_days", value: String(days) });
+    finishedKeptDays = days;
+    el.finishedDaysSays.textContent = `Kept. A finished job stays in the list for ${days} day${days === 1 ? "" : "s"}.`;
+    drawThreads();
+  } catch (why) {
+    el.finishedDaysSays.textContent = String(why);
+    el.finishedDays.value = String(finishedKeptDays);
+  }
+});
+
+/**
+ * Say a job is finished, or that it is not after all, here and in the app.
+ *
+ * Finished is somebody's word for it, never the app's guess: a one-off errand
+ * that answered may still be waiting for them to read it, and a routine that
+ * ran is not finished at all.
+ */
+async function markFinished(a, finished) {
+  const was = a.finished;
+  a.finished = finished ? Date.now() : null;
+  drawThreads();
+  if (!el.overview.hidden) drawOverview();
+  try {
+    await invoke("finish", { id: a.id, finished });
+  } catch (why) {
+    a.finished = was;
+    drawThreads();
+    if (!el.overview.hidden) drawOverview();
+    complain(String(why));
+  }
+}
+
+/** What the overview last read from the app: what is running, and what repeats. */
+let overviewKnows = { running: [], standing: [] };
+let overviewTicking = null;
+
+/** When the overview was last looked at, so "while you were away" means something. */
+function lastLookedAt() {
+  try {
+    const at = Number(localStorage.getItem("errand-overview-looked"));
+    return at > 0 ? at : null;
+  } catch {
+    return null;
+  }
+}
+
+function lookedNow() {
+  try {
+    localStorage.setItem("errand-overview-looked", String(Date.now()));
+  } catch {
+    // A private window keeps no such thing, and the last day is shown instead.
+  }
+}
+
+async function showOverview() {
+  // How it was last grouped and ordered, which is somebody's habit rather
+  // than anything the app needs to know.
+  try {
+    el.overviewGroup.value = localStorage.getItem("errand-overview-group") || "state";
+    el.overviewOrder.value = localStorage.getItem("errand-overview-order") || "priority";
+  } catch {
+    // The first option of each stands.
+  }
+  el.overview.hidden = false;
+  await readTheOverview();
+  drawOverview();
+  await drawAway();
+  // Live while it is open: a turn ending or a routine firing behind it would
+  // otherwise leave it describing a state that is over.
+  clearInterval(overviewTicking);
+  overviewTicking = setInterval(async () => {
+    if (el.overview.hidden) {
+      clearInterval(overviewTicking);
+      return;
+    }
+    await readTheOverview();
+    drawOverview();
+  }, 10_000);
+}
+
+function closeOverview() {
+  el.overview.hidden = true;
+  clearInterval(overviewTicking);
+  lookedNow();
+}
+
+async function readTheOverview() {
+  const [running, standing] = await Promise.all([
+    invoke("whats_running").catch(() => []),
+    invoke("standing").catch(() => []),
+  ]);
+  overviewKnows = { running: running || [], standing: standing || [] };
+}
+
+el.overviewOpen.addEventListener("click", showOverview);
+el.overviewDone.addEventListener("click", closeOverview);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !el.overview.hidden) closeOverview();
+});
+for (const [box, key] of [
+  [el.overviewGroup, "errand-overview-group"],
+  [el.overviewOrder, "errand-overview-order"],
+]) {
+  box.addEventListener("change", () => {
+    try {
+      localStorage.setItem(key, box.value);
+    } catch {
+      // Kept for this look only.
+    }
+    drawOverview();
+  });
+}
+
+/** What a job is doing, and the line that says so. */
+function whatItIsDoing(a) {
+  const is = stateOf(a, overviewKnows.running, overviewKnows.standing);
+  const line = {
+    finished: () => `Finished ${howLongAgo(a.finished)}`,
+    waiting: () => is.waiting.what,
+    working: () => is.working.what,
+    paused: () => "Paused: nothing of it runs on its own",
+    stopped: () => is.stopped.stopped || `Its routine (${is.stopped.at}) is switched off`,
+    scheduled: () =>
+      is.next ? `Next: ${whenNext(is.next.due)}, ${is.next.what}` : `Watching ${is.watch.at}`,
+    idle: () => (a.spoke ? `Last spoke ${howLongAgo(a.spoke)}` : "Not asked anything yet"),
+  }[is.state]();
+  return [is.state, line];
+}
+
+/** When a routine is next due, the way somebody says it. */
+function whenNext(at) {
+  const when = new Date(at);
+  const today = new Date();
+  const time = when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (when.toDateString() === today.toDateString()) return `today ${time}`;
+  const tomorrow = new Date(today.getTime() + 86_400_000);
+  if (when.toDateString() === tomorrow.toDateString()) return `tomorrow ${time}`;
+  return `${when.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })} ${time}`;
+}
+
+/** Every job, grouped and ordered the way the controls say. */
+function drawOverview() {
+  const everyone = [...agents.values()].filter((a) => a.name !== NOT_YET_NAMED || a.spoke);
+  const byPriority = el.overviewOrder.value === "priority";
+  const doing = new Map(everyone.map((a) => [a.id, whatItIsDoing(a)]));
+
+  let groups;
+  if (el.overviewGroup.value === "subject") {
+    groups = bySubject(everyone);
+  } else {
+    groups = STATES.map(([state, label]) => [
+      label,
+      everyone.filter((a) => doing.get(a.id)[0] === state),
+    ]);
+  }
+
+  const drawn = groups
+    .filter(([, list]) => list.length)
+    .map(([label, list]) => {
+      const group = document.createElement("section");
+      group.className = "job-group";
+      const head = document.createElement("h2");
+      head.append(label, " ", note("span", `(${list.length})`, "count"));
+      const tiles = document.createElement("div");
+      tiles.className = "jobs";
+      tiles.append(...inOrder(list, byPriority).map((a) => aJob(a, doing.get(a.id))));
+      group.append(head, tiles);
+      return group;
+    });
+  el.overviewTiles.replaceChildren(
+    ...(drawn.length ? drawn : [note("p", "No jobs yet. Start one with + at the top of the list.", "quiet")]),
+  );
+}
+
+/** One job, as a tile. */
+function aJob(a, [state, line]) {
+  const job = document.createElement("article");
+  job.className = "job";
+  job.dataset.agent = a.id;
+  job.dataset.priority = String(a.priority);
+  if (a.finished) job.classList.add("is-finished");
+
+  const head = document.createElement("div");
+  head.className = "job-head";
+  const who = document.createElement("div");
+  who.className = "job-who";
+  who.append(note("span", a.name, "job-name"));
+  if (a.title || a.hidden) {
+    who.append(note("span", [a.title, a.hidden ? "hidden" : ""].filter(Boolean).join(" \u00b7 "), "job-role"));
+  }
+  head.append(tile(kindFor(a), state === "working", a.hue), who);
+  job.append(head);
+  if (a.about) job.append(note("p", a.about, "job-about"));
+
+  const chip = note("span", line, "job-state");
+  chip.dataset.state = state;
+  chip.title = line;
+  job.append(chip);
+
+  const foot = document.createElement("div");
+  foot.className = "job-foot";
+  foot.append(note("span", a.spoke ? howLongAgo(a.spoke) : "", "when"));
+
+  const priority = document.createElement("select");
+  priority.title = "How much this job matters";
+  priority.setAttribute("aria-label", `Priority of ${a.name}`);
+  for (const [value, label] of [["1", "High"], ["2", "Normal"], ["3", "Low"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    priority.append(option);
+  }
+  priority.value = String(a.priority);
+  priority.onchange = async () => {
+    const was = a.priority;
+    a.priority = Number(priority.value);
+    drawOverview();
+    try {
+      await invoke("set_priority", { id: a.id, priority: a.priority });
+    } catch (why) {
+      a.priority = was;
+      drawOverview();
+      complain(String(why));
+    }
+  };
+
+  const finish = document.createElement("button");
+  finish.type = "button";
+  finish.textContent = a.finished ? "Not finished" : "Finished";
+  finish.title = a.finished
+    ? "It is not done after all: back into the list with the rest"
+    : "Mark this job as done: it moves to the bottom of the list, and later only lives here";
+  finish.onclick = () => markFinished(a, !a.finished);
+
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "open";
+  open.textContent = "Open";
+  open.onclick = async () => {
+    closeOverview();
+    await openAgent(a.id);
+  };
+
+  foot.append(priority, finish, open);
+  job.append(foot);
+  return job;
+}
+
+/**
+ * What happened while somebody was away, and what is open now.
+ *
+ * The two questions asked first on coming back, answered before the tiles:
+ * the runs that happened on their own since the overview was last looked at,
+ * and whatever is waiting on them, working, or stopped.
+ */
+async function drawAway() {
+  const since = lastLookedAt() || Date.now() - 86_400_000;
+  let ran = [];
+  try {
+    ran = (await invoke("happened_since", { since })) || [];
+  } catch {
+    ran = [];
+  }
+  const finished = ran.filter((r) => r.outcome);
+  const failed = finished.filter((r) => r.failed);
+
+  const away = document.createElement("section");
+  away.append(note("h2", `Since you last looked, ${howLongAgo(since)}`, ""));
+  away.append(
+    note(
+      "p",
+      finished.length
+        ? `${finished.length} run${finished.length === 1 ? "" : "s"} on ${finished.length === 1 ? "its" : "their"} own${failed.length ? `, ${failed.length} of them failed` : ""}.`
+        : "Nothing ran on its own.",
+      "",
+    ),
+  );
+  const list = document.createElement("ul");
+  for (const r of finished.slice(0, 8)) {
+    const li = document.createElement("li");
+    const who = document.createElement("button");
+    who.type = "button";
+    who.textContent = r.who;
+    who.onclick = async () => {
+      closeOverview();
+      await openAgent(r.agent);
+    };
+    const when = new Date(r.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    li.append(who, ` at ${when}: `);
+    li.append(
+      r.failed
+        ? note("span", `failed. ${r.outcome}`, "failed")
+        : note("span", r.said || "done", "gist"),
+    );
+    list.append(li);
+  }
+  if (finished.length) away.append(list);
+
+  const open = document.createElement("section");
+  open.append(note("h2", "Open now", ""));
+  const byState = (state) =>
+    [...agents.values()].filter((a) => whatItIsDoing(a)[0] === state).map((a) => a.name);
+  const said = [
+    ["Waiting on you", byState("waiting")],
+    ["Working", byState("working")],
+    ["Stopped", byState("stopped")],
+  ].filter(([, names]) => names.length);
+  if (!said.length) open.append(note("p", "Nothing is waiting on you, working, or stopped.", ""));
+  for (const [label, names] of said) {
+    open.append(note("p", `${label}: ${names.join(", ")}`, ""));
+  }
+  el.overviewAway.replaceChildren(away, open);
+}
 el.modelsDone.addEventListener("click", () => {
   el.models.hidden = true;
 });

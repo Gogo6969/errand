@@ -159,6 +159,187 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   cursor: pointer;
 }
 #new:hover { background: var(--card); color: var(--ink); border-color: var(--rule); }
+#overview-open {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+#overview-open:hover { background: var(--card); color: var(--ink); border-color: var(--rule); }
+#overview-open:focus-visible, #new:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ----------------------------------------------------------- overview -- */
+
+/* Over the whole window, like Settings. */
+#overview {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: var(--bg);
+  overflow-y: auto;
+  padding: 26px 28px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+#overview[hidden] { display: none; }
+#overview > header { display: flex; align-items: center; gap: 14px 18px; flex-wrap: wrap; }
+#overview h1 { margin: 0 auto 0 0; font-size: 21px; letter-spacing: -.01em; }
+#overview > header label { display: flex; align-items: center; gap: 6px; color: var(--ink-soft); font-size: 12.5px; }
+#overview select {
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  padding: 4px 6px;
+}
+#overview-done {
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+#overview-done:hover { color: var(--ink); border-color: var(--edge); }
+#overview h2 {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+/* What happened while you were away, and what is open now. */
+.away {
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: var(--side);
+  padding: 14px 18px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px 28px;
+}
+.away section { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.away p { margin: 0; font-size: 13px; color: var(--ink-soft); }
+.away ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 5px; }
+.away li { font-size: 13px; line-height: 1.4; min-width: 0; }
+.away li button {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+}
+.away li button:hover { text-decoration: underline; }
+.away .gist { color: var(--ink-soft); }
+.away .failed { color: var(--wrong); }
+
+/* A group of jobs: a heading, and tiles that wrap to the width there is. */
+.job-group { display: flex; flex-direction: column; gap: 10px; }
+.job-group h2 .count { font-weight: 400; letter-spacing: normal; text-transform: none; }
+.jobs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  gap: 12px;
+}
+.job {
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: var(--side);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.job[data-priority="1"] { border-color: var(--accent); }
+.job.is-finished { opacity: .75; }
+.job-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.job-head .tile { flex: none; }
+.job-who { min-width: 0; display: flex; flex-direction: column; }
+.job-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-role { color: var(--ink-soft); font-size: 12px; }
+.job-about {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.job-state {
+  align-self: flex-start;
+  font-size: 12px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+  color: var(--ink-soft);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.job-state[data-state="waiting"] { color: var(--accent); border-color: var(--accent); }
+.job-state[data-state="working"] { color: var(--ink); border-color: var(--edge); }
+.job-state[data-state="stopped"] { color: var(--wrong); border-color: var(--wrong); }
+.job-state[data-state="finished"] { color: var(--good); border-color: var(--good); }
+.job-foot { display: flex; align-items: center; gap: 8px; margin-top: auto; flex-wrap: wrap; }
+.job-foot .when { color: var(--ink-soft); font-size: 12px; margin-right: auto; }
+.job-foot select { font-size: 12px; }
+.job-foot button {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+.job-foot button:hover { border-color: var(--edge); }
+.job-foot button:focus-visible, .away li button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.job-foot .open { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 500; }
+
+/* A job marked finished, in the list down the side. */
+#threads .finished-badge {
+  margin-left: 6px;
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--good);
+  color: var(--good);
+  vertical-align: 1px;
+}
+#threads li.is-finished { opacity: .78; }
+
+/* How long a finished job stays in the list, in Settings. */
+#models .days { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); }
+#models .days input {
+  width: 64px;
+  font: inherit;
+  padding: 4px 6px;
+  border-radius: 7px;
+  border: 1px solid var(--rule);
+  background: var(--card);
+  color: var(--ink);
+}
 
 #threads { list-style: none; margin: 0; padding: 4px 8px; overflow-y: auto; min-height: 0; }
 
