@@ -4102,6 +4102,7 @@ async fn run_skill(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Strin
         let held: State<Held> = app.state();
         held.watching.lock().unwrap().remove(&talk);
     }
+    put_away_when_done(app, &talk);
     said
 }
 
@@ -4245,6 +4246,7 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
         let held: State<Held> = app.state();
         held.watching.lock().unwrap().remove(&talk);
     }
+    put_away_when_done(app, &talk);
     said
 }
 
@@ -4591,6 +4593,7 @@ async fn answer_from(
         let held: State<Held> = app.state();
         held.watching.lock().unwrap().remove(talk);
     }
+    put_away_when_done(app, talk);
     came
 }
 
@@ -5061,6 +5064,26 @@ fn let_the_wall_know(held: &Held, agent: &str) {
     let folders = held.store.folders_allowed(agent).unwrap_or_default();
     errand_core::wall::also_allow(std::path::Path::new(&a.cwd), folders);
     close_what_is_idle(held, agent);
+}
+
+/// Put a conversation's engine away once the errand it was opened for is over.
+///
+/// An ask from another agent or the terminal, a skill run and a room member's
+/// turn each open an engine for one errand, and nothing closed it: every ask
+/// from the terminal left a process and its tool servers running until Errand
+/// quit. Opened again, it picks up where it was. Only when nothing is going in
+/// it: an errand that stopped to ask permission is waiting on its card, and
+/// closing it would be answering for somebody.
+fn put_away_when_done(app: &AppHandle, talk: &str) {
+    let held: State<Held> = app.state();
+    if mid_turn(&held, talk) {
+        return;
+    }
+    let was = held.live.lock().unwrap().remove(talk);
+    if let Some(mut thread) = was {
+        let _ = thread.stop();
+    }
+    held.doorways.lock().unwrap().remove(talk);
 }
 
 /// Close this agent's engines that are doing nothing, so the next message
