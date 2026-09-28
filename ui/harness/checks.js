@@ -4500,6 +4500,86 @@ export async function copyingAnAgent() {
  * jumped to the bottom each time, so a 4,775-line conversation froze the
  * window for minutes and a line being read further up was taken away.
  */
+/**
+ * Whether the box says so when the agent is waiting on an answer.
+ *
+ * An agent ended on "Have you granted Errand Full Access to Calendars yet? A
+ * yes and I'll set the watch", and the box under it said "What would you like
+ * done?": nothing on screen said an answer was what it was waiting for.
+ */
+export async function anOpenQuestion() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  const line = (seq, kind, text) => ({ seq, at: Date.now() - (10 - seq) * 60000, kind, text, call: null, tool: null, outcome: null });
+  FIXTURE.lines["talk-asks"] = [
+    line(1, "mine", "Tell me fifteen minutes before each meeting"),
+    line(2, "said", "Calendar access is blocked.\n\n**Have you granted Errand Full Access to Calendars yet?** A yes and I'll set the watch."),
+    line(3, "note", "Notifications are off for Errand in macOS."),
+  ];
+  FIXTURE.lines["talk-choice"] = [
+    line(1, "mine", "Set up the digest"),
+    line(2, "said", "Do you want it daily or weekly?"),
+  ];
+  FIXTURE.lines["talk-told"] = [
+    line(1, "mine", "What is 17 times 23?"),
+    line(2, "said", "391."),
+  ];
+  for (const [id, name] of [["talk-asks", "Asks"], ["talk-choice", "Choice"], ["talk-told", "Told"]]) {
+    FIXTURE.conversations["agent-outside"].push({ id, agent: "agent-outside", name, opened: true });
+  }
+  const box = document.getElementById("what");
+  const replies = document.getElementById("replies");
+
+  await openTalk("talk-asks");
+  await settle(150);
+  check(
+    "a question left open is what the box says, a note after it notwithstanding",
+    box.placeholder === "Answer: Have you granted Errand Full Access to Calendars yet?",
+    box.placeholder,
+  );
+  check("and a yes-or-no question has the two answers above it", !replies.hidden, `hidden=${replies.hidden}`);
+  box.value = "Not yet, tomorrow";
+  box.dispatchEvent(new Event("input"));
+  check("which go away while somebody answers in words of their own", replies.hidden, `hidden=${replies.hidden}`);
+  box.value = "";
+  box.dispatchEvent(new Event("input"));
+  check("and come back when the box is empty again", !replies.hidden, `hidden=${replies.hidden}`);
+  const before = asked.filter((a) => a.name === "say").length;
+  replies.querySelector('[data-say="Yes"]').click();
+  await settle(200);
+  const sent = asked.filter((a) => a.name === "say").slice(before);
+  check("Yes says yes", sent.length === 1 && sent[0].args.text === "Yes", JSON.stringify(sent.map((a) => a.args.text)));
+
+  await openTalk("talk-choice");
+  await settle(150);
+  check(
+    "a question offering a choice is said in the box, with no yes or no to press",
+    box.placeholder === "Answer: Do you want it daily or weekly?" && replies.hidden,
+    `${box.placeholder} / hidden=${replies.hidden}`,
+  );
+
+  await openTalk("talk-told");
+  await settle(150);
+  check(
+    "an answer that asks nothing leaves the box as it was",
+    box.placeholder === "What would you like done?" && replies.hidden,
+    `${box.placeholder} / hidden=${replies.hidden}`,
+  );
+  // Hidden meaning out of sight, not only marked so. The skills list was
+  // marked hidden and stayed on screen, because a display of its own
+  // outranked the attribute; checks that read the attribute all passed.
+  for (const id of ["replies", "slash"]) {
+    const it = document.getElementById(id);
+    check(
+      `the ${id} list is out of sight when it is hidden`,
+      !it.hidden || getComputedStyle(it).display === "none",
+      `hidden=${it.hidden}, display=${getComputedStyle(it).display}`,
+    );
+  }
+  return found;
+}
+
 export async function aLongConversation() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });

@@ -479,6 +479,17 @@
       <!-- Its skills, offered as soon as a line starts with /. -->
       <ul id="slash" hidden aria-label="Skills it can run"></ul>
 
+      <!--
+        Its last answer ended on a question a yes or a no answers, and both
+        are a press away. The box says the question as well: "What would you
+        like done?" under a question read as the start of something new, and
+        nothing on screen said an answer was what it was waiting for.
+      -->
+      <div id="replies" class="choices" role="group" aria-label="Answer its question" hidden>
+        <button type="button" class="yes" data-say="Yes">Yes</button>
+        <button type="button" data-say="No">No</button>
+      </div>
+
       <form id="composer">
         <textarea
           id="what"

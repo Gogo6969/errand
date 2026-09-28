@@ -213,6 +213,7 @@ const el = {
   watchSays: document.getElementById("watch-says"),
   attached: document.getElementById("attached"),
   slash: document.getElementById("slash"),
+  replies: document.getElementById("replies"),
   skillsSummary: document.getElementById("skills-summary"),
   skillsList: document.getElementById("skills-list"),
   skillsSays: document.getElementById("skills-says"),
@@ -878,10 +879,78 @@ function drawRoom(t) {
   const aRoom = names.length > 1;
   el.members.hidden = !aRoom;
   el.members.textContent = aRoom ? `Room: ${namedTogether(names)}` : "";
-  el.what.placeholder = aRoom
-    ? "Say it to everyone, or start with @Name to say it to one of them"
-    : "What would you like done?";
+  askedForAnAnswer(t);
 }
+
+/**
+ * The box, and the two buttons above it, for what the conversation is waiting
+ * on: an answer to its last question, or something new to do.
+ *
+ * Agents are told to end a turn they cannot finish on one question a word
+ * answers, and the box under it still said "What would you like done?", which
+ * reads as starting something new. A call keeps its own words.
+ */
+function askedForAnAnswer(t) {
+  const question = theQuestionLeftOpen(t);
+  const aRoom = (t?.members || []).length > 1;
+  if (!document.body.classList.contains("in-a-call")) {
+    el.what.placeholder = question
+      ? `Answer: ${question.length > 90 ? `${question.slice(0, 89)}…` : question}`
+      : aRoom
+        ? "Say it to everyone, or start with @Name to say it to one of them"
+        : "What would you like done?";
+  }
+  // Out of the way once somebody is answering in words of their own.
+  el.replies.hidden = !question || !yesOrNo(question) || !!el.what.value.trim();
+}
+
+/**
+ * The question its last answer left open, if it left one.
+ *
+ * Found in the last paragraph, because that is where agents are told to put
+ * it, and as the last question there: "Have you granted Errand Full Access to
+ * Calendars yet? A yes and I'll set the watch" ends on a sentence that is not
+ * the question. Nothing while it is still working, or once somebody has said
+ * something after it.
+ */
+function theQuestionLeftOpen(t) {
+  if (!t || t.working || t.writing) return null;
+  // Past any note the app added after it, such as notifications being off,
+  // which the window keeps as an ending that did not fail.
+  const last = [...(t.messages || [])].reverse().find((m) => !(m.kind === "ended" && !m.failed));
+  if (!last || last.kind !== "said") return null;
+  const paragraphs = String(last.text || "").trim().split(/\n\s*\n/);
+  const end = (paragraphs[paragraphs.length - 1] || "")
+    .replace(/[*_`#>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const asked = end.match(/[^.!?]*\?/g);
+  return asked ? asked[asked.length - 1].trim() : null;
+}
+
+/**
+ * Whether a yes or a no answers a question.
+ *
+ * Only the kind that starts the way those questions do, and never one that
+ * offers a choice: "Daily or weekly?" answered Yes is no answer at all.
+ */
+function yesOrNo(question) {
+  if (/\bor\b/i.test(question)) return false;
+  return /^(have|has|had|do|does|did|is|are|was|were|am|can|could|shall|should|will|would|may|might|must)\b/i.test(
+    question,
+  );
+}
+
+// Typing an answer of their own puts the two buttons away, and clearing the
+// box brings them back.
+el.what.addEventListener("input", () => askedForAnAnswer(talking()));
+
+el.replies.addEventListener("click", (e) => {
+  const say = e.target.closest("button")?.dataset.say;
+  if (!say) return;
+  el.what.value = say;
+  el.form.requestSubmit();
+});
 
 /** Names the way somebody would say them: "A", "A and B", "A, B and C". */
 function namedTogether(names) {
@@ -1621,6 +1690,7 @@ function drawMessages({ follow = false } = {}) {
   box.replaceChildren(...drawn);
   drawTheTail(t);
   box.scrollTop = following ? box.scrollHeight : keptTop;
+  askedForAnAnswer(t);
 }
 
 /**
@@ -4893,7 +4963,7 @@ function endTheCall() {
   }
   el.call.setAttribute("aria-pressed", "false");
   document.body.classList.remove("in-a-call");
-  el.what.placeholder = "What would you like done?";
+  askedForAnAnswer(talking());
   stopListening();
 }
 
