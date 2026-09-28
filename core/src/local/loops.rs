@@ -1866,7 +1866,13 @@ mod an_aside_leaves_no_trace {
             1,
             "it went on asking the model after Stop"
         );
-        crate::jobs::stop_everything_from("");
+        // Its own command and nobody else's: every engine here runs without an
+        // app, so all of them file their commands under the same empty name.
+        for job in crate::jobs::running() {
+            if job.conversation.is_empty() && job.command == "sleep 30" {
+                crate::jobs::stop(&job.handle);
+            }
+        }
     }
 
     #[tokio::test]

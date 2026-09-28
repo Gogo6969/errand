@@ -1271,8 +1271,10 @@ mod tests {
 
         assert_eq!(LONG_ENOUGH_TO_WAIT.as_secs(), 120);
         // And what it started is still running, because that is the point now.
-        // Left going, it is a `sleep 600` outliving the whole test run.
-        crate::jobs::stop_everything();
+        // Left going, it is a `sleep 600` outliving the whole test run. Only
+        // its own: stopping every command there is killed the one another test
+        // was in the middle of, which then failed for a reason of this one's.
+        crate::jobs::stop_everything_from("a-conversation");
     }
 
     #[tokio::test(flavor = "multi_thread")]
