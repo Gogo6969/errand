@@ -4292,6 +4292,49 @@ export async function whatAnAgentRemembers() {
 }
 
 /**
+ * An agent copied, saved to a file, and started again from one.
+ *
+ * Every new agent started from nothing, and one set up with care had to be set
+ * up with care again for the next.
+ */
+export async function copyingAnAgent() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  const rowOf = (id) => [...document.querySelectorAll("#threads li")].find((li) => li.dataset.agent === id);
+  const menuItems = () => [...document.querySelectorAll('#menu [role="menuitem"]')];
+  const openMenu = (row) => row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 200 }));
+
+  openMenu(rowOf("agent-bitcoin"));
+  await settle(150);
+  const labels = menuItems().map((b) => b.textContent);
+  check("the menu on an agent offers to duplicate it and to save it to a file", labels.includes("Duplicate") && labels.includes("Save to a file"), labels.join(" | "));
+
+  const copying = asked.length;
+  menuItems().find((b) => b.textContent === "Duplicate")?.click();
+  await settle(700);
+  const copied = asked.slice(copying).find((a) => a.name === "duplicate");
+  check("duplicating asks the app for a copy of that agent", copied?.args?.id === "agent-bitcoin", JSON.stringify(copied?.args || "nothing asked"));
+  check("and the copy is opened, under its own name", document.getElementById("thread-name").textContent === "Bitcoin Desk copy", document.getElementById("thread-name").textContent);
+
+  openMenu(rowOf("agent-bitcoin"));
+  await settle(150);
+  menuItems().find((b) => b.textContent === "Save to a file")?.click();
+  await settle(400);
+  const saidWhere = [...document.querySelectorAll("#messages li.ended")].pop()?.textContent || "";
+  check("saving one says where the file went", /Saved Bitcoin Desk to \/Users\/you\/Desktop\/Bitcoin Desk\.errand\.json/.test(saidWhere), saidWhere.slice(0, 120));
+
+  const loading = asked.length;
+  await window.__LOAD_AGENT__("/Users/you/Downloads/Scout.errand.json");
+  await settle(500);
+  const loaded = asked.slice(loading).find((a) => a.name === "load_agent");
+  check("a file dropped on the window starts an agent from it", loaded?.args?.path === "/Users/you/Downloads/Scout.errand.json" && document.getElementById("thread-name").textContent === "Loaded Scout", `${JSON.stringify(loaded?.args || "nothing asked")} / ${document.getElementById("thread-name").textContent}`);
+  document.body.click();
+  await settle(100);
+  return found;
+}
+
+/**
  * A long conversation: drawn from its newest lines, and nobody's place taken.
  *
  * Every line was drawn again on every few words of an answer, and the view

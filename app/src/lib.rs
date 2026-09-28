@@ -5301,6 +5301,82 @@ async fn routines(held: State<'_, Held>) -> Result<Vec<Routine>, String> {
         .collect())
 }
 
+/// A new agent's folder, beside every other agent's.
+fn a_folder_for(app: &AppHandle, id: &str) -> Result<std::path::PathBuf, String> {
+    let home = where_things_live(app)?.join("threads").join(id);
+    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
+    Ok(home.canonicalize().unwrap_or(home))
+}
+
+/// A copy of an agent to start another from: what it is and what it knows,
+/// with a folder and conversations of its own.
+///
+/// Every new agent started from nothing, so one set up with care had to be set
+/// up with care again for the next. What it runs on its own comes across
+/// switched off, so nothing runs twice until somebody chooses to.
+#[tauri::command]
+async fn duplicate(app: AppHandle, held: State<'_, Held>, id: String) -> Result<String, String> {
+    let mut plan = held.store.blueprint(&id).map_err(|e| e.to_string())?;
+    plan.name = format!("{} copy", plan.name);
+    let to = uuid::Uuid::new_v4().to_string();
+    let home = a_folder_for(&app, &to)?;
+    held.store
+        .from_blueprint(&plan, &to, &home)
+        .map_err(|e| e.to_string())?;
+    Ok(to)
+}
+
+/// Save an agent to a file, to start one like it on another Mac.
+///
+/// On the Desktop, and shown there. Never a key: keys stay on the Mac they
+/// were typed into, and the other Mac needs its own.
+#[tauri::command]
+async fn save_agent(held: State<'_, Held>, id: String) -> Result<String, String> {
+    let plan = held.store.blueprint(&id).map_err(|e| e.to_string())?;
+    let called: String = plan
+        .name
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | ':' | '\\') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let onto = std::path::PathBuf::from(std::env::var("HOME").map_err(|e| e.to_string())?)
+        .join("Desktop")
+        .join(format!("{}.errand.json", called.trim()));
+    let written = serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())?;
+    std::fs::write(&onto, written).map_err(|e| e.to_string())?;
+    let _ = std::process::Command::new("open")
+        .args(["-R".as_ref(), onto.as_os_str()])
+        .spawn();
+    Ok(onto.to_string_lossy().to_string())
+}
+
+/// Start an agent from a file somebody saved one to.
+///
+/// What it may do without asking is not carried across: that is decided on
+/// the Mac it runs on, and a file from somewhere else that could say "never
+/// ask, and run anything" would be a way in. It starts the way any new agent
+/// here does, walled into its own folder, and everything else it knew comes
+/// with it.
+#[tauri::command]
+async fn load_agent(app: AppHandle, held: State<'_, Held>, path: String) -> Result<String, String> {
+    let read = std::fs::read_to_string(&path).map_err(|e| format!("could not read {path}: {e}"))?;
+    let mut plan: errand_core::store::Blueprint = serde_json::from_str(&read)
+        .map_err(|e| format!("{path} is not an agent saved from Errand: {e}"))?;
+    plan.asks = errand_core::store::HOW_A_NEW_AGENT_ASKS.to_string();
+    plan.allowed.clear();
+    let to = uuid::Uuid::new_v4().to_string();
+    let home = a_folder_for(&app, &to)?;
+    held.store
+        .from_blueprint(&plan, &to, &home)
+        .map_err(|e| e.to_string())?;
+    Ok(to)
+}
+
 /// One thing that runs on its own, wherever it is.
 #[derive(Clone, Serialize)]
 struct Standing {
@@ -6388,6 +6464,9 @@ pub fn run() {
             forget_skill,
             run_a_skill,
             standing,
+            duplicate,
+            save_agent,
+            load_agent,
             say,
             answer,
             engines,

@@ -230,6 +230,63 @@ pub struct Spending {
     pub errands: i64,
 }
 
+/// What an agent is, to start another from, or to carry to another Mac.
+///
+/// Every new agent started from nothing: whatever one had been told and taught
+/// had to be told and taught again. What it is, what answers it and how much it
+/// asks, what it remembers, what it has been taught, what it may do without
+/// asking, and what it runs on its own. Not its conversations, which are its
+/// own history, and never a key: keys are kept apart from everything else and
+/// stay on the Mac they were typed into.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Blueprint {
+    /// Which version of this file it is, so that a later one can still read it.
+    pub errand_agent: i64,
+    pub name: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub about: Option<String>,
+    #[serde(default)]
+    pub mark: Option<String>,
+    #[serde(default)]
+    pub hue: Option<String>,
+    pub engine: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub engine_settings: Option<serde_json::Value>,
+    pub asks: String,
+    #[serde(default)]
+    pub notes: Vec<Memory>,
+    #[serde(default)]
+    pub skills: Vec<Skill>,
+    /// `(tool, rule)`: what it may do without asking.
+    #[serde(default)]
+    pub allowed: Vec<(String, String)>,
+    /// Its routines and watches, a conversation's worth each.
+    #[serde(default)]
+    pub standing: Vec<StandingJob>,
+}
+
+/// One conversation's schedule and watch, as a blueprint carries it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandingJob {
+    pub name: String,
+    #[serde(default)]
+    pub runs_at: Option<String>,
+    #[serde(default)]
+    pub runs_what: Option<String>,
+    #[serde(default)]
+    pub watches: Option<String>,
+    #[serde(default)]
+    pub watches_what: Option<String>,
+}
+
+/// Why a watch a copy came with is not looking yet.
+pub const COPIED_WATCH: &str =
+    "Copied from another agent, and not looking until you press Look again.";
+
 /// What one agent has used of one hosted model, over some stretch of time.
 #[derive(Debug, Clone, Serialize)]
 pub struct Using {
@@ -1414,6 +1471,166 @@ impl Store {
     }
 
     /// Everything one agent has been taught, newest first.
+    /// What an agent is, to start another from.
+    pub fn blueprint(&self, agent: &str) -> Result<Blueprint> {
+        let found = self
+            .agent(agent)?
+            .ok_or_else(|| anyhow::anyhow!("there is no agent {agent} here"))?;
+        // JSON for a local model and one word for Claude, the alias it runs
+        // as. A key is never part of it, wherever settings came to hold one.
+        let engine_settings = found.engine_settings.as_deref().map(|written| {
+            match serde_json::from_str::<serde_json::Value>(written) {
+                Ok(mut v) if v.is_object() => {
+                    if let Some(object) = v.as_object_mut() {
+                        object.remove("api_key");
+                    }
+                    v
+                }
+                _ => serde_json::Value::String(written.to_string()),
+            }
+        });
+        let (allowed, standing) = {
+            let conn = self.conn.lock().unwrap();
+            let allowed = {
+                let mut q = conn
+                    .prepare("SELECT tool, rule FROM allowed WHERE agent = ? ORDER BY said_at")?;
+                let rows = q
+                    .query_map([agent], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+                rows
+            };
+            let standing = {
+                let mut q = conn.prepare(
+                    "SELECT name, runs_at, runs_what, watches, watches_what FROM conversations
+                      WHERE agent = ? AND (runs_at IS NOT NULL OR watches IS NOT NULL)
+                      ORDER BY started_at",
+                )?;
+                let rows = q
+                    .query_map([agent], |r| {
+                        Ok(StandingJob {
+                            name: r.get(0)?,
+                            runs_at: r.get(1)?,
+                            runs_what: r.get(2)?,
+                            watches: r.get(3)?,
+                            watches_what: r.get(4)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            (allowed, standing)
+        };
+        Ok(Blueprint {
+            errand_agent: 1,
+            name: found.name,
+            title: found.title,
+            about: found.about,
+            mark: found.mark,
+            hue: found.hue,
+            engine: found.engine,
+            model: found.model,
+            engine_settings,
+            asks: found.asks,
+            notes: self.remembers(agent, 10_000)?,
+            skills: self.skills(agent)?,
+            allowed,
+            standing,
+        })
+    }
+
+    /// Start an agent from a blueprint, under a new id and in its own folder.
+    ///
+    /// What it runs on its own comes across switched off, so nothing runs twice
+    /// until somebody chooses to.
+    pub fn from_blueprint(&self, plan: &Blueprint, to: &str, cwd: &Path) -> Result<()> {
+        let now = now();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO agents (id, name, cwd, model, opened, started_at, spoke_at, engine,
+                                 engine_settings, title, about, mark, hue, asks)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                to,
+                plan.name,
+                cwd.to_string_lossy(),
+                plan.model,
+                now,
+                plan.engine,
+                plan.engine_settings.as_ref().map(|v| match v {
+                    serde_json::Value::String(word) => word.clone(),
+                    other => other.to_string(),
+                }),
+                plan.title,
+                plan.about,
+                plan.mark,
+                plan.hue,
+                plan.asks
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO conversations (id, agent, name, opened, started_at, spoke_at)
+             VALUES (?1, ?1, 'First', 0, ?2, ?2)",
+            params![to, now],
+        )?;
+        for one in &plan.notes {
+            tx.execute(
+                "INSERT INTO memories (id, agent, about, note, told, noted_at, told_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    uuid_like(&format!("{to}{}", one.about)),
+                    to,
+                    one.about,
+                    one.note,
+                    one.told.max(1),
+                    now,
+                    now
+                ],
+            )?;
+        }
+        for one in &plan.skills {
+            tx.execute(
+                "INSERT INTO skills (id, agent, name, request, steps, made_at)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                params![
+                    skill_id(to, &one.name),
+                    to,
+                    one.name,
+                    one.request,
+                    serde_json::to_string(&one.steps)?,
+                    one.made_at
+                ],
+            )?;
+        }
+        for (tool, rule) in &plan.allowed {
+            tx.execute(
+                "INSERT INTO allowed (id, agent, tool, rule, said_at) VALUES (?, ?, ?, ?, ?)",
+                params![uuid(), to, tool, rule, now],
+            )?;
+        }
+        for one in &plan.standing {
+            tx.execute(
+                "INSERT INTO conversations (id, agent, name, opened, started_at, spoke_at,
+                                            runs_at, runs_what, routine_off, routine_set_at,
+                                            watches, watches_what, paused)
+                 VALUES (?1, ?2, ?3, 0, ?4, ?4, ?5, ?6, 1, ?4, ?7, ?8, ?9)",
+                params![
+                    uuid(),
+                    to,
+                    one.name,
+                    now,
+                    one.runs_at,
+                    one.runs_what,
+                    one.watches,
+                    one.watches_what,
+                    one.watches.as_ref().map(|_| COPIED_WATCH)
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Take a skill back, by name. Nothing could delete one, so a skill taught
     /// wrongly stayed on offer to every conversation of its agent for good.
     pub fn forget_skill(&self, agent: &str, name: &str) -> Result<bool> {
@@ -3783,6 +4000,83 @@ mod tests {
         // An agent that is not there is said to be not there, not quietly
         // nothing.
         assert!(s.pause("nobody", true, 3_000).is_err());
+    }
+
+    #[test]
+    fn a_copy_of_an_agent_knows_what_it_knew_and_runs_nothing_twice() {
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("scout", NOT_YET_NAMED, Path::new("/tmp/scout"))
+            .unwrap();
+        s.rename("scout", "Trend Scout", "Research", "trends")
+            .unwrap();
+        s.remember("scout", "exchange", "Prices from Coinbase")
+            .unwrap();
+        s.keep_skill("scout", "Morning brief", "what moved overnight", &[])
+            .unwrap();
+        s.allow("scout", "Bash", "curl").unwrap();
+        s.runs("scout", Some("daily 07:00"), Some("the briefing"))
+            .unwrap();
+
+        let mut plan = s.blueprint("scout").unwrap();
+        plan.name = "Trend Scout copy".into();
+        s.from_blueprint(&plan, "scout-2", Path::new("/tmp/scout-2"))
+            .unwrap();
+
+        let copy = s.agent("scout-2").unwrap().expect("the copy is there");
+        assert_eq!(copy.name, "Trend Scout copy");
+        assert_eq!(copy.title.as_deref(), Some("Research"));
+        assert_eq!(
+            s.remembers("scout-2", 10).unwrap()[0].note,
+            "Prices from Coinbase"
+        );
+        assert_eq!(s.skills("scout-2").unwrap()[0].name, "Morning brief");
+        assert_eq!(s.allowances("scout-2").unwrap().len(), 1);
+        // Its routine is there, and off: the original still runs it, and two
+        // briefings every morning is not what anybody copying one wanted.
+        let theirs = s.conversations("scout-2").unwrap();
+        let routine = theirs
+            .iter()
+            .find(|c| c.runs_at.is_some())
+            .expect("the routine came across");
+        assert!(routine.routine_off);
+        assert_eq!(routine.runs_what.as_deref(), Some("the briefing"));
+        // And nothing of the original's changed.
+        assert!(!s.conversations("scout").unwrap()[0].routine_off);
+    }
+
+    #[test]
+    fn a_blueprint_never_carries_a_key() {
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("k", NOT_YET_NAMED, Path::new("/tmp/k"))
+            .unwrap();
+        s.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE agents SET engine = 'local', engine_settings = ? WHERE id = 'k'",
+                [r#"{"model":"deepseek-v4-flash","api_key":"sk-not-a-real-one"}"#],
+            )
+            .unwrap();
+        let plan = s.blueprint("k").unwrap();
+        let written = serde_json::to_string(&plan).unwrap();
+        assert!(!written.contains("sk-not-a-real-one"), "{written}");
+        assert!(written.contains("deepseek-v4-flash"));
+
+        // Claude's is one word, and it comes back as the same word.
+        s.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE agents SET engine = 'claude', engine_settings = 'opus' WHERE id = 'k'",
+                [],
+            )
+            .unwrap();
+        let plan = s.blueprint("k").unwrap();
+        s.from_blueprint(&plan, "k2", Path::new("/tmp/k2")).unwrap();
+        assert_eq!(
+            s.agent("k2").unwrap().unwrap().engine_settings.as_deref(),
+            Some("opus")
+        );
     }
 
     #[test]

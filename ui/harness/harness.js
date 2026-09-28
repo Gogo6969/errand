@@ -659,6 +659,25 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.notes?.[args.agent] || []);
           case "standing":
             return Promise.resolve(fixture.standing || []);
+          // A copy, and one loaded from a file, made the way the app makes
+          // them: a new agent with a first conversation of its own.
+          case "duplicate":
+          case "load_agent": {
+            const from = fixture.agents.find((a) => a.id === args.id) || fixture.agents[0];
+            const id = `${name === "duplicate" ? "agent-copy" : "agent-loaded"}-${fixture.agents.length}`;
+            fixture.agents.push({
+              ...from,
+              id,
+              name: name === "duplicate" ? `${from.name} copy` : "Loaded Scout",
+              pinned: false,
+              hidden: false,
+              paused_at: null,
+            });
+            fixture.conversations[id] = [{ id, agent: id, name: "First", opened: false }];
+            return Promise.resolve(id);
+          }
+          case "save_agent":
+            return Promise.resolve("/Users/you/Desktop/Bitcoin Desk.errand.json");
           case "skills_of":
             return Promise.resolve(fixture.skills?.[args.agent] || []);
           // A run is a conversation of its own, made here the way the app

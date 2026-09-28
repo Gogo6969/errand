@@ -1218,6 +1218,28 @@ function openTheMenu(a, x, y) {
     await alsoAsk();
   });
 
+  item("Duplicate", async () => {
+    closeTheMenu();
+    let copy;
+    try {
+      copy = await invoke("duplicate", { id: a.id });
+    } catch (why) {
+      complain(String(why));
+      return;
+    }
+    if (await meetAgent(copy)) await openAgent(copy);
+  });
+
+  item("Save to a file", async () => {
+    closeTheMenu();
+    try {
+      const onto = await invoke("save_agent", { id: a.id });
+      tellHere(`Saved ${a.name} to ${onto}. Drop it on Errand on another Mac to start one like it there.`);
+    } catch (why) {
+      complain(String(why));
+    }
+  });
+
   item("Copy its id", async (b) => {
     try {
       await navigator.clipboard.writeText(a.id);
@@ -2799,6 +2821,20 @@ async function look() {
  * an endpoint that can see, and guessing at either would produce something that
  * silently sends nothing.
  */
+/** Start an agent from a file one was saved to, and go to it. */
+async function loadAnAgent(path) {
+  let id;
+  try {
+    id = await invoke("load_agent", { path });
+  } catch (why) {
+    complain(String(why));
+    return;
+  }
+  if (await meetAgent(id)) await openAgent(id);
+}
+// For the window harness, which cannot drop a file.
+window.__LOAD_AGENT__ = loadAnAgent;
+
 function catchFiles() {
   const webview = window.__TAURI__?.webview?.getCurrentWebview?.();
   if (!webview) return; // Not inside the window, which is only true in a browser.
@@ -2810,12 +2846,16 @@ function catchFiles() {
     document.body.classList.remove("catching");
     if (payload.type !== "drop" || !payload.paths?.length) return;
 
+    // An agent saved to a file starts one like it here.
+    const anAgent = /\.errand\.json$/i;
+    for (const path of payload.paths.filter((p) => anAgent.test(p))) loadAnAgent(path);
+
     // A picture is attached; anything else is still a path in the box, which
     // is what dropping a file did before pictures were understood and is
     // still the right thing for a spreadsheet or a folder.
     const looksLikeAPicture = /\.(png|jpe?g|gif|webp)$/i;
     const pictures = payload.paths.filter((p) => looksLikeAPicture.test(p));
-    const rest = payload.paths.filter((p) => !looksLikeAPicture.test(p));
+    const rest = payload.paths.filter((p) => !looksLikeAPicture.test(p) && !anAgent.test(p));
 
     for (const path of pictures) {
       attached.push({ name: path.split("/").pop(), url: path });
