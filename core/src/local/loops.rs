@@ -125,6 +125,20 @@ const SPECULATION: std::ops::RangeInclusive<usize> = 3..=12;
 /// A conversation with a model running on this machine.
 pub struct Local {
     turns: UnboundedSender<Turn>,
+    /// Stops whatever the conversation is doing, in the middle of it.
+    ///
+    /// A `Turn::Stop` on its own was read only between turns or while a card
+    /// was waiting, so Stop, Pause, a change of engine and a routine's restart
+    /// all left a turn running on: it went on streaming and calling tools, up
+    /// to twenty-four rounds of them, with nothing on screen saying so.
+    stopping: CancellationToken,
+}
+
+impl Drop for Local {
+    /// Put away is stopped. Nothing keeps an engine the app no longer holds.
+    fn drop(&mut self) {
+        self.stopping.cancel();
+    }
 }
 
 /// Something to do to the conversation.
@@ -171,6 +185,7 @@ impl Local {
             model: settings.model.clone(),
         });
 
+        let stopping = CancellationToken::new();
         tokio::runtime::Handle::current().spawn(conversation(
             LlmClient::new(settings),
             Opening {
@@ -182,8 +197,9 @@ impl Local {
             host,
             asked,
             tx,
+            stopping.clone(),
         ));
-        Ok((Self { turns }, rx))
+        Ok((Self { turns, stopping }, rx))
     }
 }
 
@@ -213,6 +229,7 @@ impl Engine for Local {
     }
 
     fn stop(&mut self) -> Result<()> {
+        self.stopping.cancel();
         let _ = self.turns.send(Turn::Stop);
         Ok(())
     }
@@ -242,6 +259,7 @@ async fn conversation(
     host: Option<(String, tokio::sync::mpsc::UnboundedSender<team::Wants>)>,
     mut asked: UnboundedReceiver<Turn>,
     out: std::sync::mpsc::Sender<Event>,
+    stopping: CancellationToken,
 ) {
     let Opening {
         home,
@@ -334,6 +352,7 @@ async fn conversation(
             &mut forgotten,
             &mut asked,
             &out,
+            &stopping,
         )
         .await;
         // Taken back out, however it went. A failed aside that stayed would be
@@ -381,7 +400,12 @@ async fn errand(
     forgotten: &mut usize,
     asked: &mut UnboundedReceiver<Turn>,
     out: &std::sync::mpsc::Sender<Event>,
+    stopping: &CancellationToken,
 ) -> Result<Done> {
+    // What the person typed while a card was waiting on them, this turn. Their
+    // words, so an address in them counts as one they named; kept apart
+    // because they go into the conversation beside a step's result.
+    let mut typed_while_asked: Vec<String> = Vec::new();
     // Ours always, and theirs only once somebody has asked for them.
     //
     // Sending every tool every time was correct and unaffordable: twenty-six
@@ -509,8 +533,12 @@ async fn errand(
             });
         }
 
-        let cancel = CancellationToken::new();
-        let mut stream = ask_it(client, &asking, &defs, &cancel, out).await?;
+        let cancel = stopping.child_token();
+        let mut stream = match ask_it(client, &asking, &defs, &cancel, out).await {
+            Ok(stream) => stream,
+            Err(_) if stopping.is_cancelled() => return Ok(Done::Abandoned),
+            Err(why) => return Err(why),
+        };
 
         let mut wrote = String::new();
         // What a thinking model showed of its working. Kept rather than
@@ -543,6 +571,10 @@ async fn errand(
                 }
             }
         }
+        // Stopped, which is not the stream breaking and not an answer.
+        if stopping.is_cancelled() {
+            return Ok(Done::Abandoned);
+        }
 
         if std::env::var("ERRAND_TRACE").is_ok() {
             eprintln!(
@@ -568,6 +600,13 @@ async fn errand(
                 text: said.clone(),
                 settled: true,
             });
+            // What it managed to say is what it said, and the next turn has to
+            // be able to see it.
+            history.push(ChatMessage::Assistant {
+                content: wrote.trim().to_string(),
+                tool_calls: Vec::new(),
+                reasoning: None,
+            });
             return Ok(Done::Finished(said));
         }
 
@@ -578,6 +617,18 @@ async fn errand(
                 let _ = out.send(Event::Said {
                     text: said.clone(),
                     settled: true,
+                });
+                // Into the conversation, so the next thing asked is asked of
+                // somebody who remembers answering. It was only ever put there
+                // for a turn that called a tool, so "make line two shorter"
+                // arrived with no poem in front of the model, for as long as
+                // the conversation stayed open; a reopened one read its answers
+                // back from the store and was fine, which is why it hid.
+                // Without the reasoning, the same as a conversation read back.
+                history.push(ChatMessage::Assistant {
+                    content: said.clone(),
+                    tool_calls: Vec::new(),
+                    reasoning: None,
                 });
             }
             return Ok(Done::Finished(said));
@@ -659,34 +710,17 @@ async fn errand(
                     ChatMessage::User { content, .. } => Some(content.clone()),
                     _ => None,
                 })
+                .chain(typed_while_asked.iter().cloned())
                 .collect();
-            let must_ask = match asks {
-                // Ahead of `auto`, and the only thing that is. Reading a page
-                // in somebody's own browser sends a request out from this Mac
-                // signed in as them, so it is the one thing here that acts
-                // rather than looks, and an address that came from somewhere
-                // other than them is worth stopping for whatever the posture.
-                // `connectors::asks_first` says why the address decides it
-                // rather than the tool.
-                _ if job
-                    .is_some_and(|job| crate::connectors::asks_first(job, &args, &they_said)) =>
-                {
-                    true
-                }
-                // `auto` next, or it would not mean never: handing work to
-                // another agent had its own default and quietly outranked the
-                // posture somebody had chosen for this agent.
-                "auto" => false,
-                // Nothing that changes anything, because nothing is meant to
-                // be changed yet. Claude Code has a posture for this; a local
-                // model has only what it is told, so the wall is put here
-                // rather than trusted to the instructions, which a small model
-                // will talk itself past.
-                "plan" => tools::asks_first(&name) || name == "run_command",
-                _ if mine.is_some() => mine.is_some_and(team::asks_first),
-                "edits" => tools::asks_first(&name) && name != "write_file",
-                _ => tools::asks_first(&name),
-            };
+            // Anything they typed while a card for this step was up, said
+            // beside the step's result.
+            let mut they_also_said = String::new();
+            let must_ask = must_ask(
+                asks,
+                &name,
+                mine,
+                job.is_some_and(|job| crate::connectors::asks_first(job, &args, &they_said)),
+            );
             if must_ask && !allowed.contains(&name) {
                 let _ = out.send(Event::NeedsYou(NeedsYou {
                     asking: say_plainly(outside, &name, &args),
@@ -718,14 +752,22 @@ async fn errand(
                     Some(both) => both,
                 };
                 // Whatever they typed while deciding is part of the
-                // conversation and goes in before the tool result, so the model
-                // reads it as context for the step rather than as a new errand.
-                for text in meanwhile {
-                    history.push(ChatMessage::User {
-                        content: text,
-                        name: None,
-                        image_data_urls: vec![],
-                    });
+                // conversation, and it travels with this step's result so the
+                // model reads it as context for the step rather than as a new
+                // errand. It used to go in as a message of its own between the
+                // call and its result, and no provider takes a conversation in
+                // that shape: every request after it was refused, for the rest
+                // of the session.
+                if !meanwhile.is_empty() {
+                    they_also_said = format!(
+                        "\n\nWhile you waited for their answer, they wrote: {}",
+                        meanwhile
+                            .iter()
+                            .map(|text| format!("\"{text}\""))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                    typed_while_asked.extend(meanwhile);
                 }
                 match said {
                     Answer::No => {
@@ -735,7 +777,7 @@ async fn errand(
                             outcome: "Not allowed".to_string(),
                         });
                         history.push(ChatMessage::Tool {
-                            content: refused.to_string(),
+                            content: format!("{refused}{they_also_said}"),
                             tool_call_id: call.id.clone(),
                         });
                         continue;
@@ -747,60 +789,71 @@ async fn errand(
                 }
             }
 
-            let outcome = match match name.as_str() {
-                "find_tools" => Ok(look_up(outside, loaded, &args)),
-                // Only the thing holding every agent can reach another one, so
-                // this goes up rather than being answered here.
-                _ if mine.is_some() || this_mac => match host {
-                    None => Ok(match mine {
-                        Some(ours) => team::without_the_app(ours).to_string(),
-                        // A connector reaches this Mac's own apps through the
-                        // app itself, so without one there is nothing to reach
-                        // them with.
-                        None => "That reads something on this Mac, which needs Errand \
+            let doing_it = async {
+                match name.as_str() {
+                    "find_tools" => Ok(look_up(outside, loaded, &args)),
+                    // Only the thing holding every agent can reach another one, so
+                    // this goes up rather than being answered here.
+                    _ if mine.is_some() || this_mac => match host {
+                        None => Ok(match mine {
+                            Some(ours) => team::without_the_app(ours).to_string(),
+                            // A connector reaches this Mac's own apps through the
+                            // app itself, so without one there is nothing to reach
+                            // them with.
+                            None => "That reads something on this Mac, which needs Errand \
                                  itself to be running."
-                            .to_string(),
-                    }),
-                    Some((from, to)) => {
-                        let (tell_me, answer) = tokio::sync::oneshot::channel();
-                        let sent = to.send(team::Wants {
-                            // A model does not want a commentary on somebody
-                            // else's work: none of it is the answer and all of
-                            // it would be in its context.
-                            along_the_way: None,
-                            tool: name.clone(),
-                            args: args.clone(),
-                            from: from.clone(),
-                            // A model asking is never the owner, whatever it
-                            // says in the request.
-                            as_owner: false,
-                            answer: tell_me,
-                        });
-                        match sent {
-                            Err(_) => Ok("Nobody answered.".to_string()),
-                            Ok(()) => answer
-                                .await
-                                .unwrap_or_else(|_| Ok("Nobody answered.".to_string())),
+                                .to_string(),
+                        }),
+                        Some((from, to)) => {
+                            let (tell_me, answer) = tokio::sync::oneshot::channel();
+                            let sent = to.send(team::Wants {
+                                // A model does not want a commentary on somebody
+                                // else's work: none of it is the answer and all of
+                                // it would be in its context.
+                                along_the_way: None,
+                                tool: name.clone(),
+                                args: args.clone(),
+                                from: from.clone(),
+                                // A model asking is never the owner, whatever it
+                                // says in the request.
+                                as_owner: false,
+                                answer: tell_me,
+                            });
+                            match sent {
+                                Err(_) => Ok("Nobody answered.".to_string()),
+                                Ok(()) => answer
+                                    .await
+                                    .unwrap_or_else(|_| Ok("Nobody answered.".to_string())),
+                            }
                         }
+                    },
+                    _ if outside.knows(&name).is_some() => {
+                        // A model can call something it has only seen the name of,
+                        // and refusing on a technicality would be pedantry: it
+                        // knows what it wants. Keep the schema for next time.
+                        loaded.insert(name.clone());
+                        outside.call(&name, &args).await
                     }
-                },
-                _ if outside.knows(&name).is_some() => {
-                    // A model can call something it has only seen the name of,
-                    // and refusing on a technicality would be pedantry: it
-                    // knows what it wants. Keep the schema for next time.
-                    loaded.insert(name.clone());
-                    outside.call(&name, &args).await
+                    _ => {
+                        tools::run(
+                            &name,
+                            &args,
+                            home,
+                            host.map_or("", |(from, _)| from.as_str()),
+                        )
+                        .await
+                    }
                 }
-                _ => {
-                    tools::run(
-                        &name,
-                        &args,
-                        home,
-                        host.map_or("", |(from, _)| from.as_str()),
-                    )
-                    .await
-                }
-            } {
+            };
+            // Stopped means stopped, in the middle of a step as much as
+            // between them: a command left running after Stop is a command
+            // nobody asked to finish.
+            let done = tokio::select! {
+                biased;
+                _ = stopping.cancelled() => return Ok(Done::Abandoned),
+                done = doing_it => done,
+            };
+            let outcome = match done {
                 Ok(said) => said,
                 // Told to the model as a result, not raised as an error: a
                 // failed step is something to try differently, and an error is
@@ -812,7 +865,7 @@ async fn errand(
                 outcome: first_line(&outcome),
             });
             history.push(ChatMessage::Tool {
-                content: outcome,
+                content: format!("{outcome}{they_also_said}"),
                 tool_call_id: call.id,
             });
         }
@@ -827,6 +880,41 @@ async fn errand(
         settled: true,
     });
     Ok(Done::Finished(stuck))
+}
+
+/// Whether a tool needs a card before it runs, on this agent's posture.
+fn must_ask(
+    asks: &str,
+    name: &str,
+    mine: Option<team::Ours>,
+    an_address_nobody_named: bool,
+) -> bool {
+    match asks {
+        // Ahead of `auto`, and the only thing that is. Reading a page in
+        // somebody's own browser sends a request out from this Mac signed in
+        // as them, so it is the one thing here that acts rather than looks,
+        // and an address that came from somewhere other than them is worth
+        // stopping for whatever the posture. `connectors::asks_first` says why
+        // the address decides it rather than the tool.
+        _ if an_address_nobody_named => true,
+        // `auto` next, or it would not mean never: handing work to another
+        // agent had its own default and quietly outranked the posture somebody
+        // had chosen for this agent.
+        "auto" => false,
+        // Nothing that changes anything, because nothing is meant to be
+        // changed yet. Claude Code has a posture for this; a local model has
+        // only what it is told, so the wall is put here rather than trusted to
+        // the instructions, which a small model will talk itself past.
+        "plan" => tools::asks_first(name) || name == "run_command",
+        _ if mine.is_some() => mine.is_some_and(team::asks_first),
+        // Editing files is what this posture allows, and changing one is
+        // editing it. Only writing a new one used to be let through, so a
+        // routine on this posture that updated a file stopped at a card at
+        // seven in the morning with nobody there to press it, while Claude
+        // Code on the same posture edited without asking.
+        "edits" => tools::asks_first(name) && !matches!(name, "write_file" | "change_file"),
+        _ => tools::asks_first(name),
+    }
 }
 
 /// Wait for somebody to answer this particular question.
@@ -1475,6 +1563,269 @@ mod an_aside_leaves_no_trace {
             "the first name on the wire is not its own:\n{first}"
         );
         assert!(!first.contains("You are Errand"), "{first}");
+    }
+
+    #[test]
+    fn an_agent_allowed_to_edit_files_is_not_asked_before_changing_one() {
+        assert!(!must_ask("edits", "write_file", None, false));
+        assert!(!must_ask("edits", "change_file", None, false));
+        // Running a command is still asked about on that posture.
+        assert!(must_ask("edits", "run_command", None, false));
+        // Never asks means never, and a page nobody named is asked about on
+        // every posture.
+        assert!(!must_ask("auto", "run_command", None, false));
+        assert!(must_ask("auto", "read_web_page", None, true));
+    }
+
+    /// The roles of the messages in one request, in order.
+    fn roles_in(request: &str) -> Vec<String> {
+        let body: serde_json::Value = serde_json::from_str(request).expect("a JSON request");
+        body["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|m| m["role"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_model_sees_its_own_last_answer_when_it_is_asked_the_next_thing() {
+        // "Write a haiku", then "make line two shorter": the second request
+        // went out with no haiku in it, because an answer that called no tool
+        // was never put back into the conversation while it stayed open.
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_remembers(asked.clone()).await;
+        let home = std::env::temp_dir().join("errand-own-answer-test");
+        std::fs::create_dir_all(&home).unwrap();
+        let settings = LlmSettings {
+            provider: "openai-compat".into(),
+            base_url: where_it_is,
+            model: "pretend".into(),
+            ..Default::default()
+        };
+        let (mut engine, events) = Local::open(
+            settings,
+            home,
+            "auto",
+            &crate::memory::Knowing::default(),
+            Vec::new(),
+            None,
+        )
+        .expect("a conversation to talk to");
+
+        engine.say("write a haiku about rain", &[]).unwrap();
+        until_it_finishes(&events).await;
+        engine.say("make line two shorter", &[]).unwrap();
+        until_it_finishes(&events).await;
+
+        let seen = asked.lock().unwrap().clone();
+        assert_eq!(
+            roles_in(&seen[1]),
+            ["system", "user", "assistant", "user"],
+            "{}",
+            seen[1]
+        );
+        let body: serde_json::Value = serde_json::from_str(&seen[1]).unwrap();
+        assert_eq!(
+            body["messages"][2]["content"], "ok",
+            "its own answer is not the one it gave"
+        );
+    }
+
+    /// A server that asks for one command on the first request, and answers
+    /// every request after that with "ok".
+    async fn a_server_that_wants_one_command(
+        asked: Arc<Mutex<Vec<String>>>,
+        command: &'static str,
+    ) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let where_it_is = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let asked = asked.clone();
+                tokio::spawn(async move {
+                    let mut got = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let Ok(n) = stream.read(&mut buf).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        got.extend_from_slice(&buf[..n]);
+                        let text = String::from_utf8_lossy(&got).to_string();
+                        let Some(at) = text.find("\r\n\r\n") else {
+                            continue;
+                        };
+                        let want: usize = text
+                            .to_ascii_lowercase()
+                            .split("content-length:")
+                            .nth(1)
+                            .and_then(|rest| rest.split("\r\n").next())
+                            .and_then(|n| n.trim().parse().ok())
+                            .unwrap_or(0);
+                        if text.len() - (at + 4) >= want {
+                            asked.lock().unwrap().push(text[at + 4..].to_string());
+                            break;
+                        }
+                    }
+                    let first = asked.lock().unwrap().len() == 1;
+                    let arguments = serde_json::json!({ "command": command }).to_string();
+                    let call = serde_json::json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [{
+                        "index": 0, "id": "call-1", "type": "function",
+                        "function": { "name": "run_command", "arguments": arguments }
+                    }]}}]});
+                    let body = match first {
+                        true => format!(
+                            "data: {call}\n\n\
+                             data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
+                             data: [DONE]\n\n"
+                        ),
+                        false => "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n\
+                                  data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                                  data: [DONE]\n\n"
+                            .to_string(),
+                    };
+                    let _ = stream
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                                 Content-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        where_it_is
+    }
+
+    #[tokio::test]
+    async fn words_typed_while_a_card_is_up_go_after_the_steps_result() {
+        // They used to go in as a message of their own between the call and
+        // its result, which no provider takes: DeepSeek refused every request
+        // after it, for the rest of the conversation.
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_wants_one_command(asked.clone(), "echo listed").await;
+        let home = std::env::temp_dir().join("errand-typed-at-a-card-test");
+        std::fs::create_dir_all(&home).unwrap();
+        let settings = LlmSettings {
+            provider: "openai-compat".into(),
+            base_url: where_it_is,
+            model: "pretend".into(),
+            ..Default::default()
+        };
+        let (mut engine, events) = Local::open(
+            settings,
+            home,
+            "ask",
+            &crate::memory::Knowing::default(),
+            Vec::new(),
+            None,
+        )
+        .expect("a conversation to talk to");
+
+        engine.say("list the folders", &[]).unwrap();
+        let waited = std::time::Instant::now();
+        let call = loop {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(20),
+                "no card came"
+            );
+            match events.try_recv() {
+                Ok(Event::NeedsYou(card)) => break card.call,
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        };
+        engine.say("only the first folder", &[]).unwrap();
+        engine.answer(&call, Answer::Yes).unwrap();
+        until_it_finishes(&events).await;
+
+        let seen = asked.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "one request for the step and one after it");
+        assert_eq!(
+            roles_in(&seen[1]),
+            ["system", "user", "assistant", "tool"],
+            "{}",
+            seen[1]
+        );
+        let body: serde_json::Value = serde_json::from_str(&seen[1]).unwrap();
+        let result = body["messages"][3]["content"].as_str().unwrap_or_default();
+        assert!(
+            result.contains("only the first folder"),
+            "what they typed was lost: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_a_conversation_stops_it_in_the_middle_of_a_step() {
+        // Stop was a message queued behind the turn, read only between turns,
+        // so a turn that was running a command ran on after Stop, Pause or a
+        // change of engine: up to twenty-four more rounds of tools.
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_wants_one_command(asked.clone(), "sleep 30").await;
+        let home = std::env::temp_dir().join("errand-stopped-mid-step-test");
+        std::fs::create_dir_all(&home).unwrap();
+        let settings = LlmSettings {
+            provider: "openai-compat".into(),
+            base_url: where_it_is,
+            model: "pretend".into(),
+            ..Default::default()
+        };
+        let (mut engine, events) = Local::open(
+            settings,
+            home,
+            "auto",
+            &crate::memory::Knowing::default(),
+            Vec::new(),
+            None,
+        )
+        .expect("a conversation to talk to");
+
+        engine.say("wait for a while", &[]).unwrap();
+        let waited = std::time::Instant::now();
+        loop {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(20),
+                "the step never started"
+            );
+            match events.try_recv() {
+                Ok(Event::Doing(_)) => break,
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        engine.stop().unwrap();
+
+        let stopped = std::time::Instant::now();
+        loop {
+            match events.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                Ok(Event::Did { .. }) => panic!("the step it was stopped in finished anyway"),
+                _ => {
+                    assert!(
+                        stopped.elapsed() < std::time::Duration::from_secs(5),
+                        "the conversation was still going five seconds after Stop"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        }
+        assert_eq!(
+            asked.lock().unwrap().len(),
+            1,
+            "it went on asking the model after Stop"
+        );
+        crate::jobs::stop_everything_from("");
     }
 
     #[tokio::test]

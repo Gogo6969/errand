@@ -25,12 +25,38 @@ pub fn count_tokens(s: &str) -> usize {
 }
 
 pub fn estimate_messages(messages: &[ChatMessage]) -> usize {
-    messages
-        .iter()
-        .map(|m| count_tokens(m.content()) + PER_MESSAGE_OVERHEAD)
-        .sum::<usize>()
-        + 2
+    messages.iter().map(cost_of).sum::<usize>() + 2
 }
+
+/// What one message costs, counting everything that is sent with it.
+///
+/// A call's arguments and a model's reasoning go to the server as well as its
+/// words, and they were counted as nothing: a `write_file` carrying twenty
+/// thousand tokens of contents was costed at four, and every request after it
+/// was refused for being too long.
+fn cost_of(m: &ChatMessage) -> usize {
+    let carried = match m {
+        ChatMessage::Assistant {
+            tool_calls,
+            reasoning,
+            ..
+        } => {
+            tool_calls
+                .iter()
+                .map(|call| {
+                    count_tokens(&call.function.name) + count_tokens(&call.function.arguments)
+                })
+                .sum::<usize>()
+                + reasoning.as_deref().map_or(0, count_tokens)
+        }
+        _ => 0,
+    };
+    count_tokens(m.content()) + PER_MESSAGE_OVERHEAD + carried
+}
+
+/// How much of a result is always kept, however little room there is: enough
+/// for the model to see what the step returned and that it ran.
+const ENOUGH_TO_GO_ON: usize = 2_000;
 
 pub fn trim_to_fit(messages: &mut Vec<ChatMessage>, budget: usize) {
     let budget = budget.max(512);
@@ -43,10 +69,7 @@ pub fn trim_to_fit(messages: &mut Vec<ChatMessage>, budget: usize) {
     // message just subtracts its precomputed cost. Token cost of a message
     // is invariant under removal of *other* messages, so the result is
     // identical (same messages dropped, same order).
-    let mut costs: Vec<usize> = messages
-        .iter()
-        .map(|m| count_tokens(m.content()) + PER_MESSAGE_OVERHEAD)
-        .collect();
+    let mut costs: Vec<usize> = messages.iter().map(cost_of).collect();
     let mut total: usize = costs.iter().sum::<usize>() + 2;
 
     if total <= budget {
@@ -84,31 +107,85 @@ pub fn trim_to_fit(messages: &mut Vec<ChatMessage>, budget: usize) {
         }
     }
 
-    // Only then the turn itself, oldest first, keeping the request and the
-    // thing just said. A turn that does not fit on its own is a turn whose
-    // tool results are enormous, and something has to go.
-    let mut anchor = messages
+    // Only then the turn itself. Its tool results are the biggest things in it,
+    // and a result cut short is still a result: the model can still see the
+    // step ran and what it began with. So results are cut down first, the
+    // biggest first, keeping their start. A whole step goes only when that is
+    // not enough, the oldest first and never the latest, and it takes its
+    // results with it.
+    //
+    // Messages used to go one at a time here, oldest first, keeping only the
+    // request and the very last message. That took away the call a result
+    // answered while keeping the result, the pass below then took the result
+    // as well as an orphan, and the model, holding its request and no record
+    // of any step, took the first step again. On a small window that was
+    // every round, twenty-four times over.
+    let after = messages
         .iter()
-        .rposition(|m| matches!(m, ChatMessage::User { .. }));
+        .rposition(|m| matches!(m, ChatMessage::User { .. }))
+        .map_or(0, |at| at + 1);
 
-    let mut i = 0;
-    while total > budget && messages.len() > 2 {
-        let last_idx = messages.len().saturating_sub(1);
-        let is_system = matches!(messages.get(i), Some(ChatMessage::System { .. }));
-        if i == last_idx || is_system || Some(i) == anchor {
-            i += 1;
-            if i >= messages.len() {
-                break;
-            }
-            continue;
+    // Each result is cut once at most: the note saying it was cut makes it a
+    // little longer than what was kept, and a loop that looked only at length
+    // picked the same result again for ever.
+    let mut cut: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    while total > budget {
+        let biggest = (after..messages.len())
+            .filter(|&at| !cut.contains(&at))
+            .filter(|&at| {
+                matches!(&messages[at], ChatMessage::Tool { content, .. }
+                    if content.chars().count() > ENOUGH_TO_GO_ON)
+            })
+            .max_by_key(|&at| costs[at]);
+        let Some(at) = biggest else {
+            break;
+        };
+        cut.insert(at);
+        if let ChatMessage::Tool { content, .. } = &mut messages[at] {
+            let chars = content.chars().count();
+            // Roughly four characters to a token, and a little more than the
+            // excess, so one cut is usually enough.
+            let over = (total - budget) * 4 + 200;
+            let keep = chars.saturating_sub(over).max(ENOUGH_TO_GO_ON);
+            let kept: String = content.chars().take(keep).collect();
+            *content = format!(
+                "{kept}\n…(cut to fit: {} more characters were here)",
+                chars - keep
+            );
         }
-        messages.remove(i);
-        total -= costs.remove(i);
-        // Everything after the hole moved down one, the anchor included.
-        if let Some(at) = anchor {
-            if at > i {
-                anchor = Some(at - 1);
+        let now = cost_of(&messages[at]);
+        total = total - costs[at] + now;
+        costs[at] = now;
+    }
+
+    while total > budget {
+        let steps: Vec<usize> = (after..messages.len())
+            .filter(|&at| {
+                matches!(&messages[at], ChatMessage::Assistant { tool_calls, .. } if !tool_calls.is_empty())
+            })
+            .collect();
+        // The latest step stays, whatever it costs: it is the one the next
+        // round follows from.
+        if steps.len() < 2 {
+            break;
+        }
+        let oldest = steps[0];
+        let calls: std::collections::HashSet<String> = match &messages[oldest] {
+            ChatMessage::Assistant { tool_calls, .. } => {
+                tool_calls.iter().map(|call| call.id.clone()).collect()
             }
+            _ => break,
+        };
+        let mut going: Vec<usize> = (after..messages.len())
+            .filter(|&at| {
+                matches!(&messages[at], ChatMessage::Tool { tool_call_id, .. } if calls.contains(tool_call_id))
+            })
+            .collect();
+        going.push(oldest);
+        going.sort_unstable();
+        for at in going.into_iter().rev() {
+            messages.remove(at);
+            total -= costs.remove(at);
         }
     }
 
@@ -294,6 +371,121 @@ mod tests {
             !kept.iter().any(|c| c.contains("hours ago")),
             "the old conversation should have gone first"
         );
+    }
+
+    fn calling_with(call: &str, arguments: &str) -> ChatMessage {
+        ChatMessage::Assistant {
+            content: String::new(),
+            tool_calls: vec![crate::local::ToolCall {
+                id: call.to_string(),
+                kind: "function".into(),
+                function: crate::local::ToolCallFunction {
+                    name: "write_file".into(),
+                    arguments: arguments.to_string(),
+                },
+            }],
+            reasoning: None,
+        }
+    }
+
+    fn offered_and_answered(talk: &[ChatMessage]) {
+        let mut offered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for message in talk {
+            match message {
+                ChatMessage::Assistant { tool_calls, .. } => {
+                    offered.extend(tool_calls.iter().map(|c| c.id.as_str()));
+                }
+                ChatMessage::Tool { tool_call_id, .. } => assert!(
+                    offered.contains(tool_call_id.as_str()),
+                    "a result for {tool_call_id} survived without its call"
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn a_result_too_big_to_fit_is_cut_down_and_keeps_the_call_it_answers() {
+        // What made an agent repeat a step twenty-four times: the only step of
+        // the turn was bigger than the window, the call went, its result went
+        // after it as an orphan, and the model saw a request and no step.
+        let mut talk = vec![
+            ChatMessage::System {
+                content: "instructions".into(),
+            },
+            user("Read the log and say what failed"),
+            calling("call-read"),
+            answering(
+                "call-read",
+                &"a line of the log that goes on ".repeat(3_000),
+            ),
+        ];
+        trim_to_fit(&mut talk, 6_000);
+
+        assert!(estimate_messages(&talk) <= 6_000, "it still does not fit");
+        assert!(
+            talk.iter()
+                .any(|m| matches!(m, ChatMessage::Assistant { .. })),
+            "the call went"
+        );
+        let result = talk
+            .iter()
+            .find_map(|m| match m {
+                ChatMessage::Tool { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .expect("the result is still there");
+        assert!(
+            result.starts_with("a line of the log"),
+            "its start was not kept"
+        );
+        assert!(result.contains("cut to fit"), "it does not say it was cut");
+        offered_and_answered(&talk);
+    }
+
+    #[test]
+    fn what_a_call_carries_is_counted_as_well_as_what_it_says() {
+        // A file written in one call carries its whole contents as arguments,
+        // and they were costed as nothing.
+        let contents = "a sentence of the report being written ".repeat(2_000);
+        let talk = vec![
+            user("write the report"),
+            calling_with(
+                "call-write",
+                &format!("{{\"path\":\"r.md\",\"contents\":\"{contents}\"}}"),
+            ),
+        ];
+        assert!(
+            estimate_messages(&talk) > 10_000,
+            "the arguments were not counted"
+        );
+    }
+
+    #[test]
+    fn older_steps_of_the_turn_go_before_the_latest_one_does() {
+        let mut talk = vec![
+            ChatMessage::System {
+                content: "instructions".into(),
+            },
+            user("Tidy the folder"),
+            calling("call-list"),
+            answering("call-list", &"a file name in the listing ".repeat(90)),
+            calling("call-move"),
+            answering("call-move", &"moved one more file ".repeat(90)),
+            calling("call-check"),
+            answering("call-check", "the folder is tidy"),
+        ];
+        trim_to_fit(&mut talk, 700);
+        let kept: Vec<&str> = talk.iter().map(|m| m.content()).collect();
+        assert!(
+            kept.iter().any(|c| c.contains("the folder is tidy")),
+            "the latest step went: {kept:?}"
+        );
+        assert!(
+            kept.iter().any(|c| c.contains("Tidy the folder")),
+            "the request went"
+        );
+        offered_and_answered(&talk);
     }
 
     #[test]

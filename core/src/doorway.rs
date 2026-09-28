@@ -286,13 +286,30 @@ fn carry(socket: &Path, passing: &Passed) -> Result<Came, String> {
 pub struct Doorway {
     at: PathBuf,
     listening: tokio::task::JoinHandle<()>,
+    /// Which file this one bound, by device and inode.
+    bound: Option<(u64, u64)>,
 }
 
 impl Drop for Doorway {
     fn drop(&mut self) {
         self.listening.abort();
-        let _ = std::fs::remove_file(&self.at);
+        // Only its own. A conversation reopened binds a new socket at the same
+        // path, and the old doorway was dropped after that, when the new one
+        // took its place in the map: it took the new socket's file with it,
+        // and from the second routine run on every one of the app's tools
+        // answered "Errand is not running" until the app was restarted.
+        if self.bound.is_some() && self.bound == which_file(&self.at) {
+            let _ = std::fs::remove_file(&self.at);
+        }
     }
+}
+
+/// The device and inode of whatever is at a path, without following a link.
+fn which_file(at: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(at)
+        .ok()
+        .map(|found| (found.dev(), found.ino()))
 }
 
 impl Doorway {
@@ -342,6 +359,7 @@ pub fn listen(
     let bound = tokio::net::UnixListener::bind(&at)
         .with_context(|| format!("listening at {}", at.display()))?;
     permit(&at, 0o600);
+    let this_one = which_file(&at);
 
     let listening = tokio::spawn(async move {
         loop {
@@ -360,7 +378,11 @@ pub fn listen(
         }
     });
 
-    Ok(Doorway { at, listening })
+    Ok(Doorway {
+        at,
+        listening,
+        bound: this_one,
+    })
 }
 
 /// Read the one call on this connection, put it in the queue, write the answer.
@@ -682,6 +704,49 @@ fn permit(what: &Path, mode: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_doorway_put_away_leaves_the_one_that_replaced_it_standing() {
+        // A reopened conversation binds a new socket at the same path, and the
+        // old doorway is dropped after that. It used to take the new socket's
+        // file with it, and every tool of the app answered "Errand is not
+        // running" from the second routine run on.
+        let at = std::env::temp_dir().join(format!("errand-door-{}.sock", std::process::id()));
+        let (wants, mut asked) = tokio::sync::mpsc::unbounded_channel();
+        let old = listen(at.clone(), "old".into(), wants.clone()).expect("the first door");
+        let new = listen(at.clone(), "new".into(), wants).expect("the second door");
+        drop(old);
+        assert!(at.exists(), "putting the old door away removed the new one");
+
+        let knocking = tokio::spawn({
+            let at = at.clone();
+            async move {
+                use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+                let mut stream = tokio::net::UnixStream::connect(&at)
+                    .await
+                    .expect("the door opens");
+                stream
+                    .write_all(b"{\"tool\":\"who_else\",\"args\":{}}\n")
+                    .await
+                    .unwrap();
+                let mut line = String::new();
+                tokio::io::BufReader::new(stream)
+                    .read_line(&mut line)
+                    .await
+                    .ok();
+            }
+        });
+        let came = tokio::time::timeout(std::time::Duration::from_secs(5), asked.recv())
+            .await
+            .expect("the call arrived")
+            .expect("a call");
+        assert_eq!(came.from, "new", "the call reached the wrong conversation");
+        let _ = came.answer.send(Ok("nobody".into()));
+        let _ = knocking.await;
+
+        drop(new);
+        assert!(!at.exists(), "the last door should take its file with it");
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_caller_that_wants_to_watch_is_told_what_is_happening_before_the_answer() {

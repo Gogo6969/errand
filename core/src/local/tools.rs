@@ -340,6 +340,69 @@ fn inside(home: &Path, said: &str) -> Result<std::path::PathBuf> {
     Ok(real)
 }
 
+/// The most of one page that is read.
+const AT_MOST: usize = 4 * 1024 * 1024;
+
+/// A page, read with limits on how long it may take and how much of it there is.
+///
+/// A plain request had neither. A server that took the connection and never
+/// answered held the errand for ever, and an address that turned out to be a
+/// disk image was read whole into the one process that runs every agent and the
+/// clock. Files that are not pages are refused rather than read as text.
+async fn fetched(url: &str) -> Result<String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
+    let mut response = client
+        .get(url)
+        .header("user-agent", "Errand")
+        .send()
+        .await
+        .with_context(|| format!("fetching {url}"))?;
+    let kind = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let not_a_page = [
+        "image/",
+        "video/",
+        "audio/",
+        "font/",
+        "application/octet-stream",
+        "application/zip",
+        "application/pdf",
+    ];
+    if not_a_page.iter().any(|shape| kind.starts_with(shape)) {
+        anyhow::bail!(
+            "{url} is {kind}, not a page, so it was not read. To keep the file, download it into \
+             the working directory with a command."
+        );
+    }
+    let mut body: Vec<u8> = Vec::new();
+    let mut cut = false;
+    while let Some(chunk) = response.chunk().await? {
+        let room = AT_MOST - body.len();
+        if chunk.len() >= room {
+            body.extend_from_slice(&chunk[..room]);
+            cut = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let mut text = String::from_utf8_lossy(&body).into_owned();
+    if cut {
+        text.push_str(&format!(
+            "\n\n(Only the first {} MB of this page was read.)",
+            AT_MOST / 1024 / 1024
+        ));
+    }
+    Ok(text)
+}
+
 /// Write a file at exactly this path, never through a link at the end of it.
 ///
 /// `inside` has already resolved the path, so the last part is a real file or
@@ -609,14 +672,7 @@ pub async fn run(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0)
                 .min(usize::MAX as u64) as usize;
-            let body = reqwest::Client::new()
-                .get(&url)
-                .header("user-agent", "Errand")
-                .send()
-                .await
-                .with_context(|| format!("fetching {url}"))?
-                .text()
-                .await?;
+            let body = fetched(&url).await?;
             Ok(a_part_of(&body, from, "fetch_url"))
         }
 
@@ -1033,6 +1089,45 @@ mod tests {
         );
         assert!(inside(&home, "notes.txt").is_ok());
         assert!(inside(&home, "a/b/notes.txt").is_ok());
+    }
+
+    /// Serve one answer, whatever is asked, and say where.
+    async fn serving(kind: &'static str, body: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut ignored = [0u8; 4096];
+                let _ = stream.read(&mut ignored).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(&body).await;
+            }
+        });
+        at
+    }
+
+    #[tokio::test]
+    async fn a_page_too_big_to_be_worth_reading_is_read_only_as_far_as_the_limit() {
+        let at = serving("text/plain", vec![b'x'; 6 * 1024 * 1024]).await;
+        let body = fetched(&at).await.expect("it is read");
+        assert!(
+            body.len() < 5 * 1024 * 1024,
+            "the whole of it was read: {} bytes",
+            body.len()
+        );
+        assert!(body.ends_with("(Only the first 4 MB of this page was read.)"));
+    }
+
+    #[tokio::test]
+    async fn a_picture_is_not_read_as_though_it_were_a_page() {
+        let at = serving("image/png", vec![0u8; 1024]).await;
+        let said = fetched(&at).await.expect_err("it is refused");
+        assert!(said.to_string().contains("not a page"), "{said}");
     }
 
     #[tokio::test]

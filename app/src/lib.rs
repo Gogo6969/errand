@@ -644,6 +644,9 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // Bound before the process that will use it exists. The doorway
             // only connects when a tool is actually called, so the order is
             // not load-bearing, but there is no reason to have a race here.
+            // The last one put away first, rather than replaced after the new
+            // one is bound: dropping it removes the file at this same path.
+            drop(held.doorways.lock().unwrap().remove(&id));
             let door = doorway::listen(
                 where_things_live(&app)?
                     .join("mcp")

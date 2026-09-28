@@ -413,6 +413,23 @@ pub fn stop_everything() {
     }
 }
 
+/// Stop every command one conversation started, and say how many were going.
+///
+/// For Stop and Pause. A step abandoned in the middle does not take its
+/// command with it, because the command belongs to this table rather than to
+/// the step, so a long build or a loop the person had just stopped the agent
+/// over went on running with nothing on screen to show for it.
+pub fn stop_everything_from(conversation: &str) -> usize {
+    let theirs: Vec<String> = table()
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, job)| job.conversation == conversation)
+        .map(|(handle, _)| handle.clone())
+        .collect();
+    theirs.iter().filter(|handle| stop(handle)).count()
+}
+
 /// What to tell a model when it starts one, in the words it should read back.
 pub fn in_plain_words(started: &Started) -> String {
     format!(
@@ -480,6 +497,32 @@ mod tests {
         assert_eq!(again.said, "", "the same output came back twice");
 
         assert!(stop(&started.handle), "it should have been stopped");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stopping_a_conversation_stops_its_commands_and_nobody_elses() {
+        let mine =
+            start(shell("sleep 30"), "sleep 30", "waiting", "stopped-one", 0).expect("it starts");
+        let theirs =
+            start(shell("sleep 30"), "sleep 30", "waiting", "another-one", 0).expect("it starts");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        assert_eq!(
+            stop_everything_from("stopped-one"),
+            1,
+            "its command was not stopped"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            look(&mine.handle).and_then(|p| p.over).is_some(),
+            "its command is still going"
+        );
+        assert_eq!(
+            look(&theirs.handle).and_then(|p| p.over),
+            None,
+            "another conversation's command was stopped"
+        );
+        stop(&theirs.handle);
     }
 
     #[tokio::test(flavor = "multi_thread")]
