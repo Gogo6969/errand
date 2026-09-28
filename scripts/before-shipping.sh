@@ -239,6 +239,11 @@ sqlite3 "$STORE" "
   DELETE FROM allowed WHERE agent='$AGENT';
   DELETE FROM conversations WHERE agent='$AGENT';
   DELETE FROM agents WHERE id='$AGENT';" 2>/dev/null
+# What its errands used of a hosted model, which would otherwise sit in the
+# cost panel under "an agent that is gone". A call of its own, because a build
+# older than the table would stop the tidying above at the first line it did
+# not know.
+sqlite3 "$STORE" "DELETE FROM used WHERE agent='$AGENT';" 2>/dev/null
 rm -rf "$HOME_DIR" 2>/dev/null
 
 say "$PASSED worked, $FAILED failed"

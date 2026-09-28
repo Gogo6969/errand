@@ -146,6 +146,12 @@ fn show(event: &Event) {
                 if ask.can_remember { "a = always, " } else { "" }
             );
         }
+        // Said small, under the answer, because in a terminal it is the only
+        // place anybody would see it.
+        Event::Used(used) => println!(
+            "\n  ({} tokens in, {} out, on {})",
+            used.tokens_in, used.tokens_out, used.model
+        ),
         Event::Done { .. } => print!("\n› "),
         Event::Failed { why } => println!("\nit could not: {why}"),
     }

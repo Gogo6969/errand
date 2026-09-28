@@ -1168,11 +1168,25 @@ export async function whatItCost() {
     said.includes("an agent that is gone"),
     said.slice(0, 160),
   );
+  // A hosted model is paid for by the token, and what it used is shown as
+  // tokens: the panel said only Claude was paid for while nearly every agent
+  // ran on one.
+  check(
+    "what a hosted model used is there, in tokens and by model",
+    said.includes("1.3M tokens on hosted models") && said.includes("deepseek-v4-flash at api.deepseek.com · 1.2M in, 45k out · 31 errands"),
+    said.slice(said.indexOf("tokens") - 60, said.indexOf("tokens") + 160),
+  );
+  check(
+    "and it says why tokens rather than dollars",
+    said.includes("Errand does not guess"),
+    said.slice(-160),
+  );
+  check("and no longer claims only Claude is paid for", !/Only Claude is paid for/.test(said), said.slice(0, 80));
 
   // Nothing paid for is not the same as nothing loaded: somebody running only
   // local models should be told why this is empty rather than left to wonder.
   const was = FIXTURE.what_it_cost;
-  FIXTURE.what_it_cost = { today: [], this_month: [], nothing_yet: true };
+  FIXTURE.what_it_cost = { today: [], this_month: [], used_today: [], used_this_month: [], nothing_yet: true };
   document.getElementById("costing").hidden = false;
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
   typing.value = "what it has cost";
@@ -1186,7 +1200,8 @@ export async function whatItCost() {
   await new Promise((r) => setTimeout(r, 300));
   check(
     "nothing paid for says why, rather than looking like nothing loaded",
-    document.getElementById("costing").textContent.includes("costs no money"),
+    document.getElementById("costing").textContent.includes("costs nothing") &&
+      document.getElementById("costing").textContent.includes("paid for by the token"),
     document.getElementById("costing").textContent.slice(0, 110),
   );
   FIXTURE.what_it_cost = was;

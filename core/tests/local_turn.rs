@@ -49,6 +49,9 @@ async fn one_turn_with_every_event_it_produces() {
                 it.answer(&ask.call, errand_core::Answer::Yes).unwrap();
             }
             Ok(Event::Started { model, .. }) => println!("STARTED  {model}"),
+            Ok(Event::Used(used)) => {
+                println!("USED     {} in, {} out", used.tokens_in, used.tokens_out)
+            }
             Ok(Event::Done { said, .. }) => {
                 println!("DONE     {said:?}");
                 return;

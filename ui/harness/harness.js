@@ -354,6 +354,19 @@ export const FIXTURE = {
       { agent: "agent-bitcoin", who: "Bitcoin Desk", dollars: 4.2, turns: 30, errands: 12 },
       { agent: "agent-gone", who: "an agent that is gone", dollars: 0.5, turns: 2, errands: 2 },
     ],
+    // A hosted model, counted in tokens rather than priced.
+    used_today: [],
+    used_this_month: [
+      {
+        agent: "agent-unnamed",
+        who: "Trend Scout",
+        model: "deepseek-v4-flash",
+        by: "api.deepseek.com",
+        tokens_in: 1234567,
+        tokens_out: 45210,
+        errands: 31,
+      },
+    ],
     nothing_yet: false,
   },
   outside: [

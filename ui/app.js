@@ -5563,12 +5563,16 @@ async function whatItCost() {
     return;
   }
 
+  // It used to say "only Claude is paid for" while twelve of thirteen agents
+  // ran on models billed by the token.
   if (spent.nothing_yet) {
     el.costing.replaceChildren(
       note(
         "p",
-        "Nothing has cost anything yet. Only Claude is paid for: a model running " +
-          "on this machine costs no money, so it never appears here.",
+        "Nothing has been paid for yet. Claude says what each errand cost, in dollars. " +
+          "DeepSeek, Kimi and other hosted models are paid for by the token, and what each " +
+          "errand used is counted here. A model on this Mac or your own network costs nothing " +
+          "and never appears here.",
       ),
     );
     return;
@@ -5576,14 +5580,50 @@ async function whatItCost() {
 
   const money = (d) => `$${d.toFixed(2)}`;
   const total = (rows) => rows.reduce((sum, one) => sum + one.dollars, 0);
+  const agents = (rows) => new Set(rows.map((one) => one.agent)).size;
+  const counted = (n) => (n === 1 ? "agent" : "agents");
 
-  const section = (title, rows) => {
-    const head = document.createElement("p");
-    head.className = "server-what";
-    head.textContent = rows.length
-      ? `${title}: ${money(total(rows))} across ${rows.length} ${rows.length === 1 ? "agent" : "agents"}.`
-      : `${title}: nothing.`;
-    const list = rows.map((one) => {
+  // Claude in dollars, because it says; hosted models in tokens, because what
+  // a token costs depends on a plan this app cannot see, and a guessed price
+  // beside an agent is worse than an honest count.
+  const section = (title, rows, used) => {
+    if (!rows.length && !used.length) return [note("p", `${title}: nothing.`, "server-what")];
+    const parts = [];
+    if (rows.length) {
+      parts.push(
+        note("p", `${title}: ${money(total(rows))} on Claude across ${agents(rows)} ${counted(agents(rows))}.`, "server-what"),
+        ...paid(rows),
+      );
+    }
+    if (used.length) {
+      const all = used.reduce((sum, one) => sum + one.tokens_in + one.tokens_out, 0);
+      parts.push(
+        note(
+          "p",
+          `${title}: ${tokensSaid(all)} tokens on hosted models across ${agents(used)} ${counted(agents(used))}.`,
+          "server-what",
+        ),
+        ...used.map((one) => {
+          const row = document.createElement("div");
+          row.className = "one";
+          const who = document.createElement("span");
+          who.className = "who";
+          who.textContent = one.who;
+          const much = document.createElement("span");
+          much.className = "where";
+          much.textContent = `${one.model} at ${one.by} · ${tokensSaid(one.tokens_in)} in, ${tokensSaid(
+            one.tokens_out,
+          )} out · ${one.errands} ${one.errands === 1 ? "errand" : "errands"}`;
+          row.append(who, much);
+          return row;
+        }),
+      );
+    }
+    return parts;
+  };
+
+  const paid = (rows) =>
+    rows.map((one) => {
       const row = document.createElement("div");
       row.className = "one";
       const who = document.createElement("span");
@@ -5600,11 +5640,27 @@ async function whatItCost() {
       row.append(who, much);
       return row;
     });
-    return [head, ...list];
-  };
 
-  el.costing.replaceChildren(
-    ...section("Today", spent.today),
-    ...section("This month", spent.this_month),
-  );
+  const parts = [
+    ...section("Today", spent.today, spent.used_today || []),
+    ...section("This month", spent.this_month, spent.used_this_month || []),
+  ];
+  if ((spent.used_this_month || []).length) {
+    parts.push(
+      note(
+        "p",
+        "Hosted models are counted in tokens rather than dollars: what a token costs depends on " +
+          "your plan with each provider, and Errand does not guess.",
+      ),
+    );
+  }
+  el.costing.replaceChildren(...parts);
+}
+
+/** A number of tokens the way somebody would say it: 950, 12.4k, 1.3M. */
+function tokensSaid(n) {
+  if (n < 1000) return String(n);
+  if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
+  if (n < 1000000) return `${Math.round(n / 1000)}k`;
+  return `${(n / 1000000).toFixed(1)}M`;
 }

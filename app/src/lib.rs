@@ -743,6 +743,19 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                     }
                 }
             };
+            // What a turn used of a model paid for by the token, filed and
+            // nothing more: it is about the bill, not the conversation. Before
+            // the check below, because a turn that was stopped was still paid
+            // for up to where it got.
+            if let Event::Used(used) = &event {
+                if let Ok(Some(talk)) = store.conversation(&id) {
+                    let now = chrono::Local::now().timestamp_millis();
+                    if let Err(why) = store.used(&talk.agent, &id, used, now) {
+                        eprintln!("could not write down what {id} used: {why}");
+                    }
+                }
+                continue;
+            }
             // From an engine that has been put away, whether stopped, paused,
             // or replaced by a routine's own: nothing it says now is part of
             // the conversation. Read, it put "Writing" back after Stop, and a
@@ -2102,6 +2115,10 @@ async fn stop_offering(held: State<'_, Held>, id: String) -> Result<(), String> 
 struct WhatItCost {
     today: Vec<errand_core::store::Spending>,
     this_month: Vec<errand_core::store::Spending>,
+    /// What hosted models were used, in tokens, because what they cost
+    /// depends on a plan this app cannot see.
+    used_today: Vec<errand_core::store::Using>,
+    used_this_month: Vec<errand_core::store::Using>,
     /// Nothing has ever been paid for. Said apart from an empty list, because
     /// somebody running only local models is not somebody whose spending failed
     /// to load.
@@ -2131,11 +2148,16 @@ async fn what_it_cost(held: State<'_, Held>) -> Result<WhatItCost, String> {
         .store
         .spending_since(month)
         .map_err(|e| e.to_string())?;
+    let used_today = held.store.used_since(midnight).map_err(|e| e.to_string())?;
+    let used_this_month = held.store.used_since(month).map_err(|e| e.to_string())?;
     let ever = held.store.spending_since(0).map_err(|e| e.to_string())?;
+    let ever_used = held.store.used_since(0).map_err(|e| e.to_string())?;
     Ok(WhatItCost {
         today,
         this_month,
-        nothing_yet: ever.is_empty(),
+        used_today,
+        used_this_month,
+        nothing_yet: ever.is_empty() && ever_used.is_empty(),
     })
 }
 

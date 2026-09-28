@@ -25,7 +25,7 @@ use super::talk::LlmClient;
 use super::tokens;
 use super::tools;
 use super::{ChatMessage, LlmSettings, ToolCall, ToolDef};
-use crate::engine::{Answer, Engine, Event, NeedsYou, Step};
+use crate::engine::{Answer, Engine, Event, NeedsYou, Step, Used};
 use crate::mcp;
 use crate::team;
 
@@ -340,6 +340,7 @@ async fn conversation(
             image_data_urls: pictures,
         });
 
+        let mut counted = Counted::default();
         let ran = errand(
             &client,
             &home,
@@ -353,8 +354,22 @@ async fn conversation(
             &mut asked,
             &out,
             &stopping,
+            &mut counted,
         )
         .await;
+        // Whatever came of it: a turn that failed or was stopped was still
+        // paid for, round by round, up to where it got.
+        if counted.tokens_in + counted.tokens_out > 0 {
+            let _ = out.send(Event::Used(Used {
+                model: client.settings.model.clone(),
+                by: reqwest::Url::parse(&client.settings.base_url)
+                    .ok()
+                    .and_then(|url| url.host_str().map(str::to_string))
+                    .unwrap_or_default(),
+                tokens_in: counted.tokens_in,
+                tokens_out: counted.tokens_out,
+            }));
+        }
         // Taken back out, however it went. A failed aside that stayed would be
         // the same problem with none of the benefit.
         if an_aside {
@@ -383,6 +398,13 @@ enum Done {
     Abandoned,
 }
 
+/// What a turn's rounds have used so far.
+#[derive(Debug, Default)]
+struct Counted {
+    tokens_in: i64,
+    tokens_out: i64,
+}
+
 /// One errand: round the loop until the model stops asking for tools.
 #[allow(clippy::too_many_arguments)]
 async fn errand(
@@ -401,6 +423,8 @@ async fn errand(
     asked: &mut UnboundedReceiver<Turn>,
     out: &std::sync::mpsc::Sender<Event>,
     stopping: &CancellationToken,
+    // What the rounds of this turn used, where the server said.
+    counted: &mut Counted,
 ) -> Result<Done> {
     // What the person typed while a card was waiting on them, this turn. Their
     // words, so an address in them counts as one they named; kept apart
@@ -564,6 +588,13 @@ async fn errand(
                 // their own errand needs to watch it.
                 super::stream::ChatDelta::Reasoning(t) => thought.push_str(&t),
                 super::stream::ChatDelta::ToolCall(call) => wants.push(call),
+                super::stream::ChatDelta::Used {
+                    tokens_in,
+                    tokens_out,
+                } => {
+                    counted.tokens_in += tokens_in;
+                    counted.tokens_out += tokens_out;
+                }
                 super::stream::ChatDelta::Done { .. } => break,
                 super::stream::ChatDelta::Error(why) => {
                     broke = Some(why);

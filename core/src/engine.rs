@@ -143,6 +143,10 @@ pub enum Event {
     Did { call: String, outcome: String },
     /// Stopped, and it is a person's turn. The work is halted until answered.
     NeedsYou(NeedsYou),
+    /// What the turn just over used of a model paid for by the token. Sent
+    /// once, however the turn ended, because a turn that failed or was
+    /// stopped was still paid for. Written down, never shown as a line.
+    Used(Used),
     /// The turn is over and this is what came of it.
     Done {
         said: String,
@@ -169,6 +173,24 @@ pub struct Cost {
     pub dollars: f64,
     /// How many times the model went round before it answered.
     pub turns: i64,
+}
+
+/// What a turn used of a model that is paid for by the token.
+///
+/// Counted, not priced. A hosted model is billed at a rate this app does not
+/// know and should not guess: plans differ and prices change, and a made-up
+/// dollar figure beside an agent is worse than an honest count of what it
+/// used. Twelve of thirteen agents ran on paid models while the only record of
+/// spending said nothing had been spent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Used {
+    /// The model, as it was asked for.
+    pub model: String,
+    /// Who answered it: the server's host, so the same model at two providers
+    /// is two lines.
+    pub by: String,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
 }
 
 impl Event {

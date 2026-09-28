@@ -230,6 +230,21 @@ pub struct Spending {
     pub errands: i64,
 }
 
+/// What one agent has used of one hosted model, over some stretch of time.
+#[derive(Debug, Clone, Serialize)]
+pub struct Using {
+    pub agent: String,
+    /// What it is called, or something honest if it has been forgotten.
+    pub who: String,
+    pub model: String,
+    /// Who answered: the server's host.
+    pub by: String,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    /// How many turns it was, across all of it.
+    pub errands: i64,
+}
+
 /// One standing job, and whoever is doing it.
 ///
 /// Named after what it is for rather than after the first thing it was asked,
@@ -904,6 +919,20 @@ const CHANGES: &[&str] = &[
     // typed, so a follow-up typed mid-errand made a file written a minute
     // earlier look like it came from before the errand.
     "ALTER TABLE conversations ADD COLUMN turn_began_at INTEGER;",
+    // What each errand used of a model paid for by the token. Twelve of
+    // thirteen agents ran on hosted models while the only record of spending
+    // was Claude's, and it said nothing had been spent.
+    "CREATE TABLE used (
+         id           INTEGER PRIMARY KEY,
+         agent        TEXT NOT NULL,
+         conversation TEXT NOT NULL,
+         at           INTEGER NOT NULL,
+         model        TEXT NOT NULL,
+         served_by    TEXT NOT NULL,
+         tokens_in    INTEGER NOT NULL,
+         tokens_out   INTEGER NOT NULL
+     );
+     CREATE INDEX used_when ON used(at);",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -1742,6 +1771,62 @@ impl Store {
         Ok(())
     }
 
+    /// Write down what a turn used of a model paid for by the token.
+    pub fn used(
+        &self,
+        agent: &str,
+        conversation: &str,
+        used: &crate::engine::Used,
+        at: i64,
+    ) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO used (agent, conversation, at, model, served_by, tokens_in, tokens_out)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                agent,
+                conversation,
+                at,
+                used.model,
+                used.by,
+                used.tokens_in,
+                used.tokens_out
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// What has been used of hosted models since a moment, by agent and
+    /// model, most first.
+    pub fn used_since(&self, at: i64) -> Result<Vec<Using>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT u.agent,
+                    coalesce(a.name, 'an agent that is gone'),
+                    u.model,
+                    u.served_by,
+                    sum(u.tokens_in),
+                    sum(u.tokens_out),
+                    count(*)
+               FROM used u
+               LEFT JOIN agents a ON a.id = u.agent
+              WHERE u.at >= ?
+              GROUP BY u.agent, u.model, u.served_by
+              ORDER BY sum(u.tokens_in + u.tokens_out) DESC",
+        )?;
+        let rows = q.query_map([at], |r| {
+            Ok(Using {
+                agent: r.get(0)?,
+                who: r.get(1)?,
+                model: r.get(2)?,
+                by: r.get(3)?,
+                tokens_in: r.get(4)?,
+                tokens_out: r.get(5)?,
+                errands: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// What has been spent since a moment, by agent, biggest first.
     pub fn spending_since(&self, at: i64) -> Result<Vec<Spending>> {
         let conn = self.conn.lock().unwrap();
@@ -2377,6 +2462,9 @@ impl Store {
     /// something about the thread rather than something said in it.
     pub fn happened(&self, conversation: &str, event: &Event) -> Result<Option<Line>> {
         match event {
+            // Kept in a table of its own by whoever reads it, never as a line:
+            // it is about the bill, not about the conversation.
+            Event::Used(_) => Ok(None),
             // `opened` is the conversation's, not the agent's, and that is the
             // one flag in here that must be right: it decides whether the next
             // process is started with `--session-id` or `--resume`, and the
@@ -3685,6 +3773,37 @@ mod tests {
         // An agent that is not there is said to be not there, not quietly
         // nothing.
         assert!(s.pause("nobody", true, 3_000).is_err());
+    }
+
+    #[test]
+    fn what_a_hosted_model_used_is_added_up_by_agent_and_model() {
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("scout", NOT_YET_NAMED, Path::new("/tmp/scout"))
+            .unwrap();
+        let talk = s.conversations("scout").unwrap()[0].id.clone();
+        let deepseek = |tokens_in, tokens_out| crate::engine::Used {
+            model: "deepseek-v4-flash".into(),
+            by: "api.deepseek.com".into(),
+            tokens_in,
+            tokens_out,
+        };
+        s.used("scout", &talk, &deepseek(1000, 50), 10).unwrap();
+        s.used("scout", &talk, &deepseek(2000, 70), 20).unwrap();
+        let kimi = crate::engine::Used {
+            model: "kimi-k3".into(),
+            by: "api.moonshot.ai".into(),
+            tokens_in: 10,
+            tokens_out: 5,
+        };
+        s.used("scout", &talk, &kimi, 30).unwrap();
+
+        let all = s.used_since(0).unwrap();
+        assert_eq!(all.len(), 2, "one line per model: {all:?}");
+        assert_eq!(all[0].model, "deepseek-v4-flash");
+        assert_eq!((all[0].tokens_in, all[0].tokens_out), (3000, 120));
+        assert_eq!(all[0].errands, 2);
+        // Since a moment, which is how "today" is asked.
+        assert_eq!(s.used_since(25).unwrap().len(), 1);
     }
 
     #[test]

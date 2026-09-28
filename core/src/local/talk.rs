@@ -16,6 +16,10 @@ pub use super::stream::{ChatDelta, StreamHandle};
 pub struct LlmClient {
     pub settings: LlmSettings,
     pub http: reqwest::Client,
+    /// Whether this server refused to say what a request used. Asked once,
+    /// and not again after a no: a request refused for it is an answer lost.
+    /// Shared by copies, which talk to the same server.
+    refuses_to_count: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,6 +47,10 @@ struct ChatRequest<'a> {
     /// ignore unknown fields depending on vendor mood.
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_prompt: Option<bool>,
+    /// Asked of a server somebody else runs, which bills by the token, so
+    /// that what each errand used can be counted. See `LlmClient::counts`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,7 +84,23 @@ impl LlmClient {
             .connect_timeout(std::time::Duration::from_secs(4))
             .build()
             .expect("reqwest client");
-        Self { settings, http }
+        Self {
+            settings,
+            http,
+            refuses_to_count: Default::default(),
+        }
+    }
+
+    /// Whether to ask this server what each request used.
+    ///
+    /// Only one somebody else runs, which is one that bills by the token. A
+    /// machine on this network costs nothing, and an older server there
+    /// could refuse a field it does not know.
+    fn counts(&self) -> bool {
+        !super::find::on_this_network(&self.settings.base_url)
+            && !self
+                .refuses_to_count
+                .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub async fn list_models(&self) -> Result<Vec<String>> {
@@ -149,7 +173,7 @@ impl LlmClient {
             Some("auto")
         };
         let cache_prompt = (self.settings.provider == "llamacpp").then_some(true);
-        let req = ChatRequest {
+        let mut req = ChatRequest {
             model: &self.settings.model,
             messages: &payload_messages,
             temperature: self.settings.temperature,
@@ -158,18 +182,40 @@ impl LlmClient {
             tool_choice,
             max_tokens,
             cache_prompt,
+            stream_options: None,
         };
-        let mut builder = self.http.post(&url).json(&req);
-        // Only attach an Authorization header when there's actually a key.
-        // A blank/whitespace key means "local server" (llama.cpp, LM Studio,
-        // Ollama, vLLM) -- those need no auth, and sending `Bearer ` (empty)
-        // makes some of them answer 401. Cloud endpoints always set a key.
-        if let Some(key) = self.settings.api_key.as_deref() {
-            if !key.trim().is_empty() {
-                builder = builder.bearer_auth(key);
+        if self.counts() {
+            req.stream_options = Some(serde_json::json!({ "include_usage": true }));
+            match stream::open_counting(
+                self.authorised(self.http.post(&url).json(&req)),
+                cancel.clone(),
+            )
+            .await
+            {
+                // A server that will not say is asked the same thing without
+                // the question, rather than the errand failing over it.
+                Err(why) if refused_to_count(&why.to_string()) => {
+                    self.refuses_to_count
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    req.stream_options = None;
+                }
+                went => return went,
             }
         }
-        stream::open(builder, cancel).await
+        stream::open(self.authorised(self.http.post(&url).json(&req)), cancel).await
+    }
+
+    /// A request with the key on it, where there is one.
+    ///
+    /// Only when there's actually a key. A blank/whitespace key means "local
+    /// server" (llama.cpp, LM Studio, Ollama, vLLM) -- those need no auth, and
+    /// sending `Bearer ` (empty) makes some of them answer 401. Cloud
+    /// endpoints always set a key.
+    fn authorised(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.settings.api_key.as_deref() {
+            Some(key) if !key.trim().is_empty() => builder.bearer_auth(key),
+            _ => builder,
+        }
     }
 
     /// Non-streaming chat completion. Used internally for short calls like tool re-prompting.
@@ -198,6 +244,7 @@ impl LlmClient {
             tool_choice,
             max_tokens,
             cache_prompt,
+            stream_options: None,
         };
         // Non-streaming call → keep a finite ceiling (the client itself no
         // longer sets one, since streaming requests must be uncapped).
@@ -439,6 +486,11 @@ fn serialize_message(m: &ChatMessage) -> serde_json::Value {
 /// Matched on the phrase rather than the status code: providers differ
 /// on whether this is a 400 or a 422, but all of them name the
 /// parameter they are refusing.
+/// Whether a server refused a request because it was asked what it used.
+pub fn refused_to_count(err: &str) -> bool {
+    err.contains("LLM error 4") && err.contains("stream_options")
+}
+
 pub fn is_tool_choice_rejection(err: &str) -> bool {
     let lc = err.to_ascii_lowercase();
     (lc.contains("tool_choice") || lc.contains("tool choice"))
@@ -566,8 +618,11 @@ mod what_goes_on_the_wire {
             tool_choice: None,
             max_tokens: None,
             cache_prompt: None,
+            stream_options: None,
         };
         let said = serde_json::to_value(&asking).expect("serialises");
+        // Nor is anybody asked what a request used unless it is being counted.
+        assert!(said.get("stream_options").is_none(), "{said}");
         assert!(said.get("temperature").is_none(), "{said}");
 
         // And one somebody did choose is still sent.
@@ -632,7 +687,7 @@ mod tests {
 
 #[cfg(test)]
 mod tool_choice_tests {
-    use super::is_tool_choice_rejection;
+    use super::{is_tool_choice_rejection, refused_to_count};
 
     /// Verbatim from the field, 2026-08-12: a `/online` turn on
     /// deepseek-v4-flash asking for today's QQQ holdings.
@@ -654,6 +709,21 @@ mod tool_choice_tests {
 
     /// Must NOT swallow unrelated failures -- those still have to reach
     /// the user instead of being retried into a different error.
+    #[test]
+    fn a_server_that_will_not_say_what_it_used_is_recognised() {
+        assert!(refused_to_count(
+            "LLM error 400 Bad Request: {\"error\":\"Unrecognized request argument supplied: stream_options\"}"
+        ));
+        assert!(refused_to_count(
+            "LLM error 422 Unprocessable Entity: extra_forbidden, loc: body.stream_options"
+        ));
+        // Anything else is a failure of its own, not a reason to ask again.
+        assert!(!refused_to_count("LLM error 401 Unauthorized"));
+        assert!(!refused_to_count(
+            "LLM error 500: stream_options broke the server"
+        ));
+    }
+
     #[test]
     fn unrelated_errors_are_left_alone() {
         assert!(!is_tool_choice_rejection(

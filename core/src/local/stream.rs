@@ -361,6 +361,11 @@ pub enum ChatDelta {
     /// QwQ, o1-like). Streamed separately from final answer tokens.
     Reasoning(String),
     ToolCall(ToolCallAccum),
+    /// What the request used, where the server said.
+    Used {
+        tokens_in: i64,
+        tokens_out: i64,
+    },
     Done {
         reason: String,
     },
@@ -405,6 +410,26 @@ pub async fn open_as(
     cancel: CancellationToken,
     wire: Wire,
 ) -> Result<StreamHandle> {
+    open_with(request, cancel, wire, false).await
+}
+
+/// The same, for a request that asked to be told what it used.
+///
+/// A server that bills by the token says so in a chunk of its own after the
+/// answer's last, and a stream read only as far as the answer never sees it.
+pub async fn open_counting(
+    request: reqwest::RequestBuilder,
+    cancel: CancellationToken,
+) -> Result<StreamHandle> {
+    open_with(request, cancel, Wire::Openai, true).await
+}
+
+async fn open_with(
+    request: reqwest::RequestBuilder,
+    cancel: CancellationToken,
+    wire: Wire,
+    counting: bool,
+) -> Result<StreamHandle> {
     // Honor cancellation while the initial HTTP send is in flight.
     // Without this select, a stalled LLM (TCP connect succeeded but
     // headers never arrive) leaves `request.send().await` blocked
@@ -439,7 +464,7 @@ pub async fn open_as(
 
     tokio::spawn(async move {
         let went = match wire {
-            Wire::Openai => pump(resp, tx.clone(), cancel_for_task).await,
+            Wire::Openai => pump(resp, tx.clone(), cancel_for_task, counting).await,
             Wire::Anthropic => pump_anthropic(resp, tx.clone(), cancel_for_task).await,
         };
         if let Err(e) = went {
@@ -519,6 +544,7 @@ async fn pump(
     resp: reqwest::Response,
     tx: mpsc::UnboundedSender<ChatDelta>,
     cancel: CancellationToken,
+    counting: bool,
 ) -> Result<()> {
     use eventsource_stream::Eventsource;
     let mut events = resp.bytes_stream().eventsource();
@@ -534,17 +560,33 @@ async fn pump(
     // turn doesn't hang forever. Generous enough to cover prompt prefill on a
     // large model + long context before the first token arrives.
     const INACTIVITY: std::time::Duration = std::time::Duration::from_secs(300);
+    // How long to wait after the answer's last chunk for the one that says
+    // what it used. The server sends it straight after, or not at all; the
+    // answer is complete either way and is not held up any longer than this.
+    const AFTER_THE_END: std::time::Duration = std::time::Duration::from_secs(3);
+    // The answer has finished, with this reason, and what it used has not
+    // arrived yet.
+    let mut finished: Option<String> = None;
+    let mut counted = false;
 
     loop {
+        let patience = match finished {
+            Some(_) => AFTER_THE_END,
+            None => INACTIVITY,
+        };
         tokio::select! {
             _ = cancel.cancelled() => {
                 let _ = tx.send(ChatDelta::Done { reason: "cancelled".into() });
                 return Ok(());
             }
-            next = tokio::time::timeout(INACTIVITY, events.next()) => {
+            next = tokio::time::timeout(patience, events.next()) => {
                 let next = match next {
                     Ok(n) => n,
                     Err(_elapsed) => {
+                        if let Some(reason) = finished {
+                            let _ = tx.send(ChatDelta::Done { reason });
+                            return Ok(());
+                        }
                         let _ = tx.send(ChatDelta::Error(
                             "the model server went silent for 5 minutes, so the connection is treated as stalled"
                                 .into(),
@@ -553,7 +595,8 @@ async fn pump(
                     }
                 };
                 let Some(item) = next else {
-                    let _ = tx.send(ChatDelta::Done { reason: "stream-end".into() });
+                    let reason = finished.unwrap_or_else(|| "stream-end".into());
+                    let _ = tx.send(ChatDelta::Done { reason });
                     return Ok(());
                 };
                 let event = item.map_err(|e| anyhow!("sse: {e}"))?;
@@ -562,7 +605,10 @@ async fn pump(
                     for tc in openai_tool_buf.drain(..) {
                         let _ = tx.send(ChatDelta::ToolCall(tc));
                     }
-                    let _ = tx.send(ChatDelta::Done { reason: "done".into() });
+                    // The reason the answer gave, not "done": whether it was
+                    // cut off by its length is read from it.
+                    let reason = finished.unwrap_or_else(|| "done".into());
+                    let _ = tx.send(ChatDelta::Done { reason });
                     return Ok(());
                 }
                 let parsed: StreamChunk = match serde_json::from_str(&event.data) {
@@ -572,6 +618,21 @@ async fn pump(
                         continue;
                     }
                 };
+                // Before the choices, because some servers put it in the same
+                // chunk as the answer's last, and that chunk ends the answer.
+                if let Some(used) = parsed.usage.filter(|_| counting) {
+                    if used.prompt_tokens + used.completion_tokens > 0 {
+                        counted = true;
+                        let _ = tx.send(ChatDelta::Used {
+                            tokens_in: used.prompt_tokens,
+                            tokens_out: used.completion_tokens,
+                        });
+                    }
+                    if let Some(reason) = finished {
+                        let _ = tx.send(ChatDelta::Done { reason });
+                        return Ok(());
+                    }
+                }
                 for choice in parsed.choices {
                     if let Some(content) = choice.delta.content {
                         if !content.is_empty() {
@@ -605,6 +666,12 @@ async fn pump(
                         finalize(&mut harmony, &tx, &mut saw_final_or_default_token, &mut saw_thought_only, &mut harmony_tool_index);
                         for tc in openai_tool_buf.drain(..) {
                             let _ = tx.send(ChatDelta::ToolCall(tc));
+                        }
+                        // Asked what it used and not told yet: the chunk
+                        // that says is the next one.
+                        if counting && !counted {
+                            finished = Some(reason);
+                            break;
                         }
                         let _ = tx.send(ChatDelta::Done { reason });
                         return Ok(());
@@ -666,7 +733,20 @@ fn finalize(
 
 #[derive(Debug, Deserialize)]
 struct StreamChunk {
+    /// Empty in the chunk that says what the request used.
+    #[serde(default)]
     choices: Vec<StreamChoice>,
+    #[serde(default)]
+    usage: Option<StreamUsage>,
+}
+
+/// What a request used, as OpenAI-style servers count it.
+#[derive(Debug, Deserialize)]
+struct StreamUsage {
+    #[serde(default)]
+    prompt_tokens: i64,
+    #[serde(default)]
+    completion_tokens: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -764,5 +844,117 @@ mod reasoning_field_tests {
         let choice: StreamChoice = serde_json::from_str(json).unwrap();
         assert_eq!(choice.delta.content.as_deref(), Some("Hi"));
         assert_eq!(choice.finish_reason.as_deref(), Some("stop"));
+    }
+}
+
+#[cfg(test)]
+mod counting_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A server that answers one request with this body, as a stream, and
+    /// keeps the connection open for a while after it, the way a server that
+    /// never sends `[DONE]` would.
+    async fn a_server_saying(body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let _ = stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{body}")
+                        .as_bytes(),
+                )
+                .await;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        at
+    }
+
+    async fn everything_from(at: &str) -> Vec<ChatDelta> {
+        let request = reqwest::Client::new().post(at).body("{}");
+        let mut handle = open_counting(request, CancellationToken::new())
+            .await
+            .expect("a stream");
+        let mut all = Vec::new();
+        while let Some(delta) = handle.rx.recv().await {
+            let done = matches!(delta, ChatDelta::Done { .. } | ChatDelta::Error(_));
+            all.push(delta);
+            if done {
+                break;
+            }
+        }
+        all
+    }
+
+    fn used(all: &[ChatDelta]) -> Option<(i64, i64)> {
+        all.iter().find_map(|d| match d {
+            ChatDelta::Used {
+                tokens_in,
+                tokens_out,
+            } => Some((*tokens_in, *tokens_out)),
+            _ => None,
+        })
+    }
+
+    fn reason(all: &[ChatDelta]) -> Option<String> {
+        all.iter().find_map(|d| match d {
+            ChatDelta::Done { reason } => Some(reason.clone()),
+            _ => None,
+        })
+    }
+
+    #[tokio::test]
+    async fn what_a_hosted_model_used_is_read_from_the_chunk_after_the_answer() {
+        // DeepSeek's shape: the usage in a chunk of its own, with no choices,
+        // after the one that finishes the answer. Read only as far as the
+        // answer, it was never seen and nothing was ever counted.
+        let at = a_server_saying(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n\
+             data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n\
+             data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":34}}\n\n\
+             data: [DONE]\n\n",
+        )
+        .await;
+        let all = everything_from(&at).await;
+        assert_eq!(used(&all), Some((1200, 34)), "{all:?}");
+        // And the answer's own reason survives the wait, since whether it was
+        // cut off by its length is read from it.
+        assert_eq!(reason(&all).as_deref(), Some("length"));
+    }
+
+    #[tokio::test]
+    async fn usage_in_the_last_chunk_of_the_answer_is_read_as_well() {
+        let at = a_server_saying(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\
+             \"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\n",
+        )
+        .await;
+        let all = everything_from(&at).await;
+        assert_eq!(used(&all), Some((10, 2)));
+        assert_eq!(reason(&all).as_deref(), Some("stop"));
+    }
+
+    #[tokio::test]
+    async fn a_server_that_never_says_what_it_used_does_not_hold_the_answer_up() {
+        // No usage and no [DONE], with the connection left open: the answer
+        // is finished after a short wait, not after five minutes of silence.
+        let at = a_server_saying(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n\
+             data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        )
+        .await;
+        let began = std::time::Instant::now();
+        let all = everything_from(&at).await;
+        assert!(began.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(used(&all), None);
+        assert_eq!(reason(&all).as_deref(), Some("stop"));
+        assert!(all
+            .iter()
+            .any(|d| matches!(d, ChatDelta::Token(t) if t == "ok")));
     }
 }
