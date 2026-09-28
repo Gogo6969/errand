@@ -716,6 +716,19 @@ async fn errand(
             });
         }
 
+        // Why a call's arguments could not be read, for each call. Asked for as
+        // JSON and not always given it: writing a shell command with quotes
+        // inside quotes, a small model left one unclosed.
+        let unreadable: Vec<Option<String>> = wants
+            .iter()
+            .map(|w| match w.arguments.trim().is_empty() {
+                true => None,
+                false => serde_json::from_str::<serde_json::Value>(&w.arguments)
+                    .err()
+                    .map(|why| why.to_string()),
+            })
+            .collect();
+
         let calls: Vec<ToolCall> = wants
             .iter()
             .enumerate()
@@ -728,9 +741,19 @@ async fn errand(
                         format!("call-{round}-{i}-{}", uuid::Uuid::new_v4().simple())
                     }),
                     w.name.clone().unwrap_or_default(),
-                    match w.arguments.is_empty() {
-                        true => "{}".to_string(),
-                        false => w.arguments.clone(),
+                    match (w.arguments.trim().is_empty(), &unreadable[i]) {
+                        (true, _) => "{}".to_string(),
+                        // Kept as JSON that holds what it was. Sent back the
+                        // way it came, it made the conversation impossible to
+                        // send again: a strict server reads every call's
+                        // arguments before it answers anything, and refused
+                        // this request and every one after it. A routine's
+                        // engine stays open between runs, so one bad call
+                        // failed a routine ninety-eight times in one night.
+                        (false, Some(_)) => {
+                            serde_json::json!({ "unreadable": w.arguments }).to_string()
+                        }
+                        (false, None) => w.arguments.clone(),
                     },
                 )
             })
@@ -748,8 +771,31 @@ async fn errand(
             },
         });
 
-        for call in calls {
+        for (which, call) in calls.into_iter().enumerate() {
             let name = call.function.name.clone();
+            // Not run with nothing in place of what it could not read, which
+            // is what happened: a command with no command, and a model told
+            // it had failed for a reason that was not the reason.
+            if let Some(why) = &unreadable[which] {
+                let _ = out.send(Event::Doing(Step {
+                    what: format!("Tried {name}, with instructions that could not be read"),
+                    tool: name.clone(),
+                    call: call.id.clone(),
+                }));
+                let _ = out.send(Event::Did {
+                    call: call.id.clone(),
+                    outcome: "Not run: its arguments were not JSON".to_string(),
+                });
+                history.push(ChatMessage::Tool {
+                    content: format!(
+                        "Nothing was run: the arguments of that call were not valid JSON \
+                         ({why}). Call {name} again with its arguments as one JSON object. \
+                         A quote mark inside a string needs a backslash in front of it."
+                    ),
+                    tool_call_id: call.id.clone(),
+                });
+                continue;
+            }
             let args: serde_json::Value =
                 serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::json!({}));
 
@@ -1762,6 +1808,185 @@ mod an_aside_leaves_no_trace {
             ["system", "user", "assistant", "user"],
             "{second}"
         );
+    }
+
+    /// A server as strict as the one that broke: it reads every call's
+    /// arguments in what it is sent, and refuses the whole request with a 500
+    /// if any of them is not JSON. Its own first answer is a call whose
+    /// arguments are not, the way a small model wrote one.
+    async fn a_strict_server_given_broken_arguments(asked: Arc<Mutex<Vec<String>>>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let where_it_is = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let asked = asked.clone();
+                tokio::spawn(async move {
+                    let mut got = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    let mut body = String::new();
+                    loop {
+                        let Ok(n) = stream.read(&mut buf).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        got.extend_from_slice(&buf[..n]);
+                        let text = String::from_utf8_lossy(&got).to_string();
+                        let Some(at) = text.find("\r\n\r\n") else {
+                            continue;
+                        };
+                        let want: usize = text
+                            .to_ascii_lowercase()
+                            .split("content-length:")
+                            .nth(1)
+                            .and_then(|rest| rest.split("\r\n").next())
+                            .and_then(|n| n.trim().parse().ok())
+                            .unwrap_or(0);
+                        if text.len() - (at + 4) >= want {
+                            body = text[at + 4..].to_string();
+                            asked.lock().unwrap().push(body.clone());
+                            break;
+                        }
+                    }
+                    let sent: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let unreadable = sent["messages"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|m| m["tool_calls"].as_array().cloned().unwrap_or_default())
+                        .any(|call| {
+                            serde_json::from_str::<serde_json::Value>(
+                                call["function"]["arguments"].as_str().unwrap_or("{}"),
+                            )
+                            .is_err()
+                        });
+                    let first = asked.lock().unwrap().len() == 1;
+                    let broken = r#"{"command": "sqlite3 \"Envelope Index\" \"SELECT 1"#;
+                    let call = serde_json::json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [{
+                        "index": 0, "id": "call-1", "type": "function",
+                        "function": { "name": "run_command", "arguments": broken }
+                    }]}}]});
+                    let (status, body) = match (unreadable, first) {
+                        (true, _) => (
+                            "500 Internal Server Error",
+                            "{\"error\":{\"code\":500,\"message\":\"Failed to parse tool call arguments as JSON\"}}"
+                                .to_string(),
+                        ),
+                        (false, true) => (
+                            "200 OK",
+                            format!(
+                                "data: {call}\n\n\
+                                 data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
+                                 data: [DONE]\n\n"
+                            ),
+                        ),
+                        (false, false) => (
+                            "200 OK",
+                            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n\
+                             data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                             data: [DONE]\n\n"
+                                .to_string(),
+                        ),
+                    };
+                    let kind = match status.starts_with("200") {
+                        true => "text/event-stream",
+                        false => "application/json",
+                    };
+                    let _ = stream
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\n\
+                                 Content-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        where_it_is
+    }
+
+    #[tokio::test]
+    async fn a_call_whose_arguments_are_not_json_is_not_run_and_the_conversation_goes_on() {
+        // A command with quotes inside quotes, and one left unclosed. The call
+        // went back into the conversation the way it came, a strict server
+        // refused every request after it, and a routine whose engine stayed
+        // open failed ninety-eight times in one night.
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_strict_server_given_broken_arguments(asked.clone()).await;
+        let home = std::env::temp_dir().join("errand-broken-arguments-test");
+        std::fs::create_dir_all(&home).unwrap();
+        let settings = LlmSettings {
+            provider: "openai-compat".into(),
+            base_url: where_it_is,
+            model: "pretend".into(),
+            ..Default::default()
+        };
+        let (mut engine, events) = Local::open(
+            settings,
+            home,
+            "auto",
+            &crate::memory::Knowing::default(),
+            Vec::new(),
+            None,
+        )
+        .expect("a conversation to talk to");
+
+        engine
+            .say("how many messages are in my inbox", &[])
+            .unwrap();
+        let waited = std::time::Instant::now();
+        let ended = loop {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(30),
+                "the turn never finished"
+            );
+            match events.try_recv() {
+                Ok(done @ Event::Done { .. }) => break done,
+                Ok(Event::Failed { why }) => panic!("the conversation broke: {why}"),
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        };
+        assert!(matches!(ended, Event::Done { .. }));
+
+        let seen = asked.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "one request for the call and one after it");
+        let second: serde_json::Value = serde_json::from_str(&seen[1]).unwrap();
+        let messages = second["messages"].as_array().unwrap();
+        let kept = messages
+            .iter()
+            .flat_map(|m| m["tool_calls"].as_array().cloned().unwrap_or_default())
+            .map(|call| {
+                call["function"]["arguments"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(kept.len(), 1, "{second}");
+        let arguments: serde_json::Value =
+            serde_json::from_str(&kept[0]).expect("the call went back as JSON");
+        assert!(
+            arguments["unreadable"]
+                .as_str()
+                .is_some_and(|raw| raw.contains("Envelope Index")),
+            "what it wrote was not kept: {arguments}"
+        );
+        let result = messages
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or_default();
+        assert!(result.starts_with("Nothing was run"), "{result}");
+        assert!(result.contains("not valid JSON"), "{result}");
     }
 
     /// A server that asks for one command on the first request, and answers
