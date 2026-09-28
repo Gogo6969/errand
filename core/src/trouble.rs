@@ -95,9 +95,10 @@ pub fn what_it_means(why: &str, engine: &str) -> Option<Trouble> {
     // Something that will very likely work in a minute. Named so it does not
     // read as somebody's fault, and deliberately not marked as needing action.
     if crate::local::talk::is_server_down_error(why) {
+        let at = which_server(why).map_or_else(String::new, |at| format!(" at {at}"));
         return Some(Trouble {
             said: format!(
-                "The model server {}.",
+                "The model server{at} {}.",
                 crate::local::talk::what_the_server_did(why)
             ),
             fix: "It was tried twice. If it is a machine of yours, check it is running; \
@@ -109,6 +110,22 @@ pub fn what_it_means(why: &str, engine: &str) -> Option<Trouble> {
     None
 }
 
+/// Which server it was, when the error names the address it was sending to.
+///
+/// Somebody running models on two Macs and two hosted services was told "the
+/// model server cannot be reached" and left to guess which, and the sentence
+/// that replaced the error in the conversation was the only one kept.
+fn which_server(why: &str) -> Option<String> {
+    let from = why.find("url (")? + "url (".len();
+    let to = why[from..].find(')')? + from;
+    let url = reqwest::Url::parse(&why[from..to]).ok()?;
+    let host = url.host_str()?;
+    Some(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    })
+}
+
 /// The whole thing, as one piece of text for a line in a conversation.
 pub fn as_a_line(trouble: &Trouble) -> String {
     format!("{} {}", trouble.said, trouble.fix)
@@ -117,6 +134,24 @@ pub fn as_a_line(trouble: &Trouble) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_that_cannot_be_reached_is_named() {
+        let raw = "error sending request for url (http://192.168.1.143:8095/v1/chat/completions)";
+        let said = what_it_means(raw, "local").expect("this one is recognised");
+        assert_eq!(
+            said.said,
+            "The model server at 192.168.1.143:8095 cannot be reached."
+        );
+        // And one that names no address still reads as a sentence.
+        let said = what_it_means("connection refused", "local").expect("recognised");
+        assert_eq!(said.said, "The model server cannot be reached.");
+        let hosted = "error sending request for url (https://api.deepseek.com/v1/chat/completions)";
+        assert_eq!(
+            what_it_means(hosted, "local").unwrap().said,
+            "The model server at api.deepseek.com cannot be reached."
+        );
+    }
 
     #[test]
     fn another_engines_refused_key_is_not_reported_as_claude_being_signed_out() {

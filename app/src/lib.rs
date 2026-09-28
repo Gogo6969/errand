@@ -891,6 +891,45 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 _ => {}
             }
 
+            // As it came, for the one check that needs the engine's own words.
+            let as_it_came = event.clone();
+            // What the failure actually means, in the app's own words, before it
+            // is written down or put on screen. The provider's sentence is
+            // accurate and says nothing somebody can act on: "401 OAuth access
+            // token has been revoked" is a login that has expired and a
+            // terminal command away from working, and nothing in those words
+            // says so.
+            let event = match &event {
+                Event::Failed { why } => match errand_core::trouble::what_it_means(why, &on_engine)
+                {
+                    Some(trouble) => {
+                        // Remembered, so the next errand is warned before it is
+                        // typed rather than after. The one that prompted this
+                        // cost somebody a paragraph and a screenshot.
+                        let held: State<Held> = app.state();
+                        *held.trouble.lock().unwrap() = match trouble.until_somebody_acts {
+                            true => Some(trouble.clone()),
+                            false => None,
+                        };
+                        let _ = app.emit("trouble", trouble.clone());
+                        Event::Failed {
+                            why: errand_core::trouble::as_a_line(&trouble),
+                        }
+                    }
+                    None => event.clone(),
+                },
+                // Anything that got through means whatever was wrong is not
+                // wrong any more, so the warning goes away on its own.
+                Event::Done { .. } | Event::Said { .. } => {
+                    let held: State<Held> = app.state();
+                    if held.trouble.lock().unwrap().take().is_some() {
+                        let _ = app.emit("trouble_over", ());
+                    }
+                    event.clone()
+                }
+                _ => event.clone(),
+            };
+
             // What the turn cost, written down as it ends. Only where the
             // engine said: a model on this machine costs no dollars, and a row
             // of zeroes would make every total a lie about what it totals.
@@ -949,7 +988,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // alone, the next turn asks to pick up the same missing session and
             // fails in the same words, for ever. Forgetting that it was ever
             // opened is what lets the next one start.
-            if let Event::Failed { why } = &event {
+            if let Event::Failed { why } = &as_it_came {
                 if errand_core::claude::the_session_is_gone(why) {
                     if let Err(e) = store.start_it_again(&id) {
                         eprintln!("could not let {id} start again: {e}");
@@ -1004,43 +1043,6 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             if let Some(waiting) = watching.lock().unwrap().get(&id) {
                 let _ = waiting.send(event.clone());
             }
-
-            // What the failure actually means, in the app's own words, before it
-            // is written down or put on screen. The provider's sentence is
-            // accurate and says nothing somebody can act on: "401 OAuth access
-            // token has been revoked" is a login that has expired and a
-            // terminal command away from working, and nothing in those words
-            // says so.
-            let event = match &event {
-                Event::Failed { why } => match errand_core::trouble::what_it_means(why, &on_engine)
-                {
-                    Some(trouble) => {
-                        // Remembered, so the next errand is warned before it is
-                        // typed rather than after. The one that prompted this
-                        // cost somebody a paragraph and a screenshot.
-                        let held: State<Held> = app.state();
-                        *held.trouble.lock().unwrap() = match trouble.until_somebody_acts {
-                            true => Some(trouble.clone()),
-                            false => None,
-                        };
-                        let _ = app.emit("trouble", trouble.clone());
-                        Event::Failed {
-                            why: errand_core::trouble::as_a_line(&trouble),
-                        }
-                    }
-                    None => event.clone(),
-                },
-                // Anything that got through means whatever was wrong is not
-                // wrong any more, so the warning goes away on its own.
-                Event::Done { .. } | Event::Said { .. } => {
-                    let held: State<Held> = app.state();
-                    if held.trouble.lock().unwrap().take().is_some() {
-                        let _ = app.emit("trouble_over", ());
-                    }
-                    event.clone()
-                }
-                _ => event.clone(),
-            };
 
             // How this run went, for the routine's own record. Only for runs
             // something other than a person started: a conversation somebody
