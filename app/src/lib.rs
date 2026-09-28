@@ -4113,7 +4113,7 @@ async fn what_came_back(
                     // that waits at a terminal for something that will never
                     // arrive there.
                     Event::NeedsYou(ask) => telling.send(Meanwhile::Step(format!(
-                        "Waiting on you: {} \u{2014} answer it in the Errand window",
+                        "Waiting on you in the Errand window: {}",
                         ask.asking
                     ))),
                     Event::Failed { why } => {
@@ -4512,12 +4512,14 @@ async fn run_what_is_due(app: &AppHandle) -> Result<(), String> {
                 let when = When::read(c.runs_at.as_deref()?).ok()?;
                 let next = when.next_after(routine::counting_from(&c, now))?;
                 // Late by more than a schedule's own patience is worth saying
-                // out loud. Ten minutes is arbitrary and only decides whether
-                // the run announces itself as late.
-                // Late by more than a schedule's own patience carries the time
-                // it was actually due, which is the only part of this worth
-                // reading.
-                let late = (now.signed_duration_since(next).num_minutes() > 10).then_some(next);
+                // out loud, with the time it was actually due. Ten minutes is
+                // arbitrary and only decides whether the run announces itself
+                // as late. Missed more than once, it is one run for all of
+                // them, and the one it stands for is the last: measured from
+                // the first, a report two Fridays behind reported on the
+                // Friday before last.
+                let last = when.last_due_by(next, &now);
+                let late = (now.signed_duration_since(last).num_minutes() > 10).then_some(last);
                 let what = c.runs_what.clone()?;
                 // Not if the last run is still going. A routine that takes
                 // longer than its own interval is ordinary, and starting it on

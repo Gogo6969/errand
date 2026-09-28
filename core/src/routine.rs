@@ -203,6 +203,44 @@ impl When {
         }
     }
 
+    /// The last time it was due by `now`, walking on from `first`, the first
+    /// time it was due and did not run.
+    ///
+    /// A routine that missed several times while the app was closed runs once,
+    /// for all of them, and says when it was due. It named the first of the
+    /// missed times: a weekly report due every Friday, opened on a Monday with
+    /// two Fridays missed, was told it was due the Friday before last and
+    /// reported on that week.
+    pub fn last_due_by<Tz: TimeZone>(
+        &self,
+        first: DateTime<Tz>,
+        now: &DateTime<Tz>,
+    ) -> DateTime<Tz> {
+        if let When::Every { minutes } = self {
+            // Counted rather than walked: a routine every minute, missed for a
+            // month, is forty thousand steps.
+            let behind = now
+                .clone()
+                .signed_duration_since(first.clone())
+                .num_minutes();
+            let whole = (behind.max(0) / minutes) * minutes;
+            return first
+                .clone()
+                .checked_add_signed(Duration::minutes(whole))
+                .unwrap_or(first);
+        }
+        let mut last = first;
+        // A daily routine missed for a year is 365 steps. Past that the date it
+        // names is the least of what is wrong.
+        for _ in 0..400 {
+            match self.next_after_in(last.clone()) {
+                Some(next) if next <= *now => last = next,
+                _ => break,
+            }
+        }
+        last
+    }
+
     /// Said back the way it was written, so what is stored round-trips.
     pub fn written(&self) -> String {
         match self {
@@ -617,6 +655,43 @@ mod tests {
         let said = arriving_late(due, now);
         assert!(said.contains("07:00"), "{said}");
         assert!(!said.contains("09:12"), "{said}");
+    }
+
+    #[test]
+    fn a_routine_missed_more_than_once_is_due_at_the_last_time_it_missed() {
+        // Tally Keeper, on 28 September: weekly on Fridays at 15:00, last run
+        // on the 11th, opened on Monday the 28th. Told it was due on the 18th,
+        // it reported on the 18th, with the 25th the week that mattered.
+        let weekly = When::read("weekly fri 15:00").unwrap();
+        let first = weekly
+            .next_after(at("2026-09-11 15:00:20"))
+            .expect("a next run");
+        assert_eq!(first, at("2026-09-18 15:00:00"));
+        assert_eq!(
+            weekly.last_due_by(first, &at("2026-09-28 09:13:00")),
+            at("2026-09-25 15:00:00")
+        );
+
+        // Two mornings missed, opened five minutes after the third: this is
+        // the third morning's run, and on time for it.
+        let daily = When::read("daily 09:00").unwrap();
+        let first = daily.next_after(at("2026-09-25 09:00:10")).unwrap();
+        assert_eq!(
+            daily.last_due_by(first, &at("2026-09-28 09:05:00")),
+            at("2026-09-28 09:00:00")
+        );
+
+        // Missed once, it is the one it missed.
+        let first = daily.next_after(at("2026-09-27 09:00:10")).unwrap();
+        assert_eq!(daily.last_due_by(first, &at("2026-09-28 11:00:00")), first);
+
+        // Every five minutes, from a run at nine, looked at at 09:23.
+        let often = When::read("every 5m").unwrap();
+        let first = often.next_after(at("2026-09-28 09:00:00")).unwrap();
+        assert_eq!(
+            often.last_due_by(first, &at("2026-09-28 09:23:00")),
+            at("2026-09-28 09:20:00")
+        );
     }
 
     #[test]
