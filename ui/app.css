@@ -678,6 +678,9 @@ main > aside, main > #title, main > #composer { flex: none; }
   gap: 10px;
 }
 
+/* The way back to lines not drawn, at the top of the ones that are. */
+#messages .earlier { align-self: center; }
+
 /* What it said, and what you said. Two voices, so two shapes. */
 .said, .mine {
   max-width: 74ch;

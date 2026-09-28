@@ -549,34 +549,15 @@ function markTheLine(seq) {
   if (!t) return;
   const at = t.messages.findIndex((m) => m.seq === seq);
   if (at < 0) return;
-  const drawn = el.messages.children[theRowFor(at)];
+  if (at < drawnFrom(t)) {
+    while (at < drawnFrom(t)) t.earlier = (t.earlier || 0) + 1;
+    drawMessages();
+  }
+  const drawn = el.messages.querySelector(`:scope > [data-seq="${seq}"]`);
   if (!drawn) return;
   for (const was of el.messages.querySelectorAll(".found")) was.classList.remove("found");
   drawn.classList.add("found");
   drawn.scrollIntoView({ block: "center" });
-}
-
-/**
- * Which row on screen belongs to the nth message.
- *
- * They are not the same number: the day separators are rows of their own, and
- * counting past them lands on the line above or below the one somebody
- * searched for, which is worse than not scrolling at all.
- */
-function theRowFor(nth) {
-  let row = 0;
-  const t = talking();
-  let day = null;
-  for (let i = 0; i <= nth && i < t.messages.length; i++) {
-    const m = t.messages[i];
-    if (m.at) {
-      const its = whichDay(m.at);
-      if (day !== null && its !== day) row += 1;
-      day = its;
-    }
-    if (i < nth) row += 1;
-  }
-  return row;
 }
 
 function waitingOn(agent) {
@@ -823,7 +804,8 @@ async function show(id) {
   drawTalks();
   drawRoom(t);
   drawThreads();
-  drawMessages();
+  t.earlier = 0;
+  drawMessages({ follow: true });
   pickItBackUp(id);
   // Which conversation somebody is actually reading, so a notification can be
   // held back for this one and shown for the thirty-nine that are not. The app
@@ -1479,14 +1461,53 @@ function theDayChanged(day) {
   return li;
 }
 
-function drawMessages() {
+/**
+ * How many lines are drawn at a time, from the newest back.
+ *
+ * Every line was drawn on every redraw, answers put through markdown again
+ * each time, and a conversation 4,775 lines long froze the window for minutes
+ * per answer. The newest are what anybody is reading; the rest are a press
+ * away, and a search that lands further back draws back to it.
+ */
+const LINES_AT_A_TIME = 200;
+
+/** Where the drawn lines start in this conversation. */
+function drawnFrom(t) {
+  return Math.max(0, t.messages.length - LINES_AT_A_TIME * (1 + (t.earlier || 0)));
+}
+
+/** Whether somebody is reading at the bottom, rather than further up. */
+function atTheBottom() {
+  const box = el.messages;
+  return box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+}
+
+/**
+ * Draw the conversation on screen.
+ *
+ * `follow` is for the moments the bottom is where somebody is going: the
+ * conversation just opened, or they have just said something. Otherwise the
+ * view follows only somebody already at the bottom. It used to jump there on
+ * every redraw, so a line being read further up was taken away by the next
+ * step of an errand running below it.
+ */
+function drawMessages({ follow = false } = {}) {
   const t = talking();
   if (!t) return;
+  const box = el.messages;
+  const following = follow || atTheBottom();
+  const keptTop = box.scrollTop;
+  const from = drawnFrom(t);
   const drawn = [];
+  if (from > 0) drawn.push(earlierLines(t, from));
   let day = null;
-  for (const m of t.messages) {
+  for (let i = from; i < t.messages.length; i++) {
+    const m = t.messages[i];
     const node = draw(m);
     if (!node) continue;
+    // Found by what it is rather than by counting rows, which a day's
+    // separator or a line not drawn throws out by one.
+    if (typeof m.seq === "number") node.dataset.seq = String(m.seq);
     // A line with no time is one that arrived this second and has not been
     // written down yet, which is today by definition and needs no announcing.
     if (m.at) {
@@ -1496,10 +1517,24 @@ function drawMessages() {
     }
     drawn.push(node);
   }
-  el.messages.replaceChildren(...drawn);
-  // What is being written this second, under everything already said. Dots
-  // while there are no words yet, because dots say "working" and an empty box
-  // says nothing.
+  box.replaceChildren(...drawn);
+  drawTheTail(t);
+  box.scrollTop = following ? box.scrollHeight : keptTop;
+}
+
+/**
+ * What is being written this second, under everything already said. Dots while
+ * there are no words yet, because dots say "working" and an empty box says
+ * nothing.
+ *
+ * On its own, because words arrive many times a second and only this changes
+ * with each of them. Redrawing the whole conversation for every one was most
+ * of what froze a long one.
+ */
+function drawTheTail(t) {
+  for (const old of el.messages.querySelectorAll(":scope > .writing, :scope > .thinking, :scope > .answering")) {
+    old.remove();
+  }
   if (t.writing) {
     const writing = document.createElement("li");
     writing.className = "said writing";
@@ -1511,7 +1546,24 @@ function drawMessages() {
     // alone do not say whose turn it is.
     if (t.answering) el.messages.append(note("li", `${t.answering} is answering`, "answering"));
   }
-  el.messages.scrollTop = el.messages.scrollHeight;
+}
+
+/** The way to the lines before the ones drawn, keeping the same ones in view. */
+function earlierLines(t, from) {
+  const li = document.createElement("li");
+  li.className = "earlier";
+  const more = document.createElement("button");
+  more.type = "button";
+  more.textContent = `Show earlier lines (${from} more)`;
+  more.onclick = () => {
+    const box = el.messages;
+    const fromTheBottom = box.scrollHeight - box.scrollTop;
+    t.earlier = (t.earlier || 0) + 1;
+    drawMessages();
+    box.scrollTop = box.scrollHeight - fromTheBottom;
+  };
+  li.append(more);
+  return li;
 }
 
 function draw(m) {
@@ -2088,17 +2140,32 @@ listen("happened", async ({ payload }) => {
     case "said":
       // Words mean a turn is going, whoever started it. A window reopened in
       // the middle of one never saw it begin.
-      t.working = true;
-      if (payload.settled) {
-        t.writing = "";
-        t.messages.push({ kind: "said", text: payload.text, seq: payload.seq });
-        // In a call it is also read out, as each line settles rather than all
-        // at once at the end: the first paragraph is spoken while the second
-        // is still being written.
-        if (inACall && payload.conversation === showing) sayOutLoud(payload.text);
-      } else {
+      if (!payload.settled) {
+        const was = t.working;
+        t.working = true;
         t.writing = (t.writing || "") + payload.text;
+        // Only what they change: the words at the bottom, and the side the
+        // first time they say it is working. The whole conversation and the
+        // whole side were drawn again for every few words.
+        if (payload.conversation === showing) {
+          const following = atTheBottom();
+          drawTheTail(t);
+          if (following) el.messages.scrollTop = el.messages.scrollHeight;
+        }
+        if (!was) {
+          const a = agents.get(t.agent);
+          if (a && payload.conversation === showing) drawMark(a);
+          drawThreads();
+        }
+        return;
       }
+      t.working = true;
+      t.writing = "";
+      t.messages.push({ kind: "said", text: payload.text, seq: payload.seq });
+      // In a call it is also read out, as each line settles rather than all at
+      // once at the end: the first paragraph is spoken while the second is
+      // still being written.
+      if (inACall && payload.conversation === showing) sayOutLoud(payload.text);
       break;
 
     case "doing":
@@ -2544,7 +2611,7 @@ async function sayIt(text, going = []) {
   // back: the gap between the two is exactly when a person wonders whether the
   // thing they typed went anywhere.
   t.working = true;
-  drawMessages();
+  drawMessages({ follow: true });
   drawThreads();
 
   try {

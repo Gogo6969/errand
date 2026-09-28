@@ -4292,6 +4292,84 @@ export async function whatAnAgentRemembers() {
 }
 
 /**
+ * A long conversation: drawn from its newest lines, and nobody's place taken.
+ *
+ * Every line was drawn again on every few words of an answer, and the view
+ * jumped to the bottom each time, so a 4,775-line conversation froze the
+ * window for minutes and a line being read further up was taken away.
+ */
+export async function aLongConversation() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  FIXTURE.lines["talk-long"] = Array.from({ length: 450 }, (_, i) => ({
+    seq: i + 1,
+    at: Date.now() - (450 - i) * 60000,
+    kind: i % 2 ? "said" : "mine",
+    text: i === 6 ? "Where is the lighthouse keeper's ledger?" : `Line ${i + 1} of a long day`,
+    call: null,
+    tool: null,
+    outcome: null,
+  }));
+  FIXTURE.conversations["agent-outside"].push({ id: "talk-long", agent: "agent-outside", name: "A long day", opened: true });
+  await openTalk("talk-long");
+  const box = document.getElementById("messages");
+  const drawnLines = () => box.querySelectorAll(":scope > [data-seq]").length;
+  check("a long conversation draws its newest lines, not all of them", drawnLines() === 200, `${drawnLines()} drawn of 450`);
+  const earlier = box.querySelector(".earlier button");
+  check("and offers the ones before them", /250 more/.test(earlier?.textContent || ""), earlier?.textContent || "no button");
+  check("and opens at the bottom", box.scrollHeight - box.scrollTop - box.clientHeight < 80, `${box.scrollTop} of ${box.scrollHeight}`);
+
+  // Words being written leave everything else as it is.
+  const firstDrawn = box.querySelector(":scope > [data-seq]");
+  ["One ", "moment ", "please"].forEach((piece, n) =>
+    tell("happened", { conversation: "talk-long", seq: 9950 + n, kind: "said", text: piece, settled: false }),
+  );
+  await settle(150);
+  check(
+    "words arriving redraw only the words",
+    firstDrawn.isConnected && /One moment please/.test(box.querySelector(".writing")?.textContent || ""),
+    `${firstDrawn.isConnected}: ${box.querySelector(".writing")?.textContent || "nothing being written"}`,
+  );
+
+  // Somebody reading further up keeps their place when a step arrives below.
+  box.scrollTop = 0;
+  tell("happened", { conversation: "talk-long", seq: 9960, kind: "doing", what: "Reading the page", tool: "Bash", call: "long-1" });
+  await settle(150);
+  check("a line being read further up stays in view when a step arrives below", box.scrollTop < 50, `scrollTop ${box.scrollTop}`);
+  tell("happened", { conversation: "talk-long", seq: 9961, kind: "done" });
+  await settle(150);
+
+  // The ones before, drawn above, with the same lines still in view.
+  box.scrollTop = 0;
+  const topSeq = box.querySelector(":scope > [data-seq]").dataset.seq;
+  box.querySelector(".earlier button").click();
+  await settle(200);
+  const still = box.querySelector(`:scope > [data-seq="${topSeq}"]`);
+  const at = still ? Math.round(still.getBoundingClientRect().top - box.getBoundingClientRect().top) : null;
+  check(
+    "showing earlier lines draws them above and keeps the same line in view",
+    drawnLines() > 200 && at !== null && at >= -5 && at <= box.clientHeight,
+    `${drawnLines()} drawn; line ${topSeq} at ${at}px`,
+  );
+
+  // A search that lands further back than is drawn draws back to it.
+  await openTalk("talk-1");
+  const find = document.getElementById("find");
+  find.value = "lighthouse keeper";
+  find.dispatchEvent(new Event("input"));
+  await settle(400);
+  [...document.querySelectorAll("#threads li")].find((li) => li.dataset.agent === "agent-outside")?.click();
+  await settle(800);
+  const marked = box.querySelector("li.found");
+  check("a search that lands further back than is drawn draws back to it", marked?.dataset.seq === "7", marked ? `line ${marked.dataset.seq}` : "nothing marked");
+  find.value = "";
+  find.dispatchEvent(new Event("input"));
+  await settle(300);
+  return found;
+}
+
+/**
  * Everything that runs on its own, in one list.
  *
  * Routines and watches were found by opening each agent in turn and looking
