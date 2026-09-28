@@ -53,9 +53,14 @@ pub enum Access {
 
 /// What is said when the answer is no.
 ///
-/// Where the switch is, and whose it is. Errand never changes it.
-pub const REFUSED: &str = "macOS has been told Errand may not read calendars. That is theirs to \
-    change, under System Settings, Privacy & Security, Calendars.";
+/// Where the switch is. Errand never changes it, and the sentence is read both
+/// by agents and by the person whose switch it is, so it says where rather
+/// than whose. It names Full Access because the no that turned up first on a
+/// real Mac was not a plain no: Errand was listed there already, set to Add
+/// Events Only, and "turn Errand on" sent somebody to a switch that was on.
+pub const REFUSED: &str = "macOS has not let Errand read calendars. That is changed under \
+    System Settings, Privacy & Security, Calendars, by giving Errand Full Access: Add Events \
+    Only lets it add to them and not read them.";
 
 /// What is said while the question is on screen and nobody has answered it.
 pub const ASKING: &str = "macOS is asking whether Errand may read calendars, in a dialog of its \
@@ -82,7 +87,8 @@ mod mac {
             EKAuthorizationStatus::FullAccess => Access::Allowed,
             EKAuthorizationStatus::NotDetermined => Access::NotAskedYet,
             // Write-only is a yes to adding events and a no to reading them,
-            // which for something that only ever reads is a no.
+            // which for something that only ever reads is a no. It is also
+            // somebody's own answer, so it is said rather than asked again.
             _ => Access::Refused,
         }
     }
