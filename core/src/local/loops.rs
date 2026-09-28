@@ -147,6 +147,8 @@ enum Turn {
     Say(String, Vec<String>),
     /// A question of the app's own, taken back out when it is answered.
     Aside(String),
+    /// Who the agent is now, in place of who it was when this opened.
+    Called(String),
     Answer {
         call: String,
         said: Answer,
@@ -219,6 +221,13 @@ impl Engine for Local {
             .map_err(|_| anyhow::anyhow!("this conversation has ended"))
     }
 
+    fn now_called(&mut self, identity: &str) -> Result<bool> {
+        self.turns
+            .send(Turn::Called(identity.to_string()))
+            .map_err(|_| anyhow::anyhow!("this conversation has ended"))?;
+        Ok(true)
+    }
+
     fn answer(&mut self, call: &str, said: Answer) -> Result<()> {
         self.turns
             .send(Turn::Answer {
@@ -264,7 +273,7 @@ async fn conversation(
     let Opening {
         home,
         asks,
-        knows,
+        mut knows,
         so_far,
     } = opening;
     // Started once for the conversation rather than once per turn. Several of
@@ -298,6 +307,9 @@ async fn conversation(
     // How much of this conversation the model can no longer see. Kept so that
     // it is mentioned when it changes rather than on every turn after.
     let mut forgotten: usize = 0;
+    // A new name that arrived while a card was waiting on somebody, taken in
+    // as soon as that turn is over.
+    let mut renamed: Option<String> = None;
 
     while let Some(turn) = asked.recv().await {
         let (said, pictures, an_aside) = match turn {
@@ -306,6 +318,16 @@ async fn conversation(
             // An answer with no question behind it. It happens when a thread is
             // reopened while a card is still on screen from last time.
             Turn::Answer { .. } => continue,
+            // Only the opening changes, and only who it is: its notes, and
+            // anything carried on from another conversation, stay as they were.
+            Turn::Called(identity) => {
+                knows.identity = identity;
+                with_opening(
+                    &mut history,
+                    opening_instructions(&home, &outside, &knows, &asks),
+                );
+                continue;
+            }
             Turn::Stop => break,
         };
         // Where the conversation stood before this. An aside is put back to
@@ -355,8 +377,16 @@ async fn conversation(
             &out,
             &stopping,
             &mut counted,
+            &mut renamed,
         )
         .await;
+        if let Some(identity) = renamed.take() {
+            knows.identity = identity;
+            with_opening(
+                &mut history,
+                opening_instructions(&home, &outside, &knows, &asks),
+            );
+        }
         // Whatever came of it: a turn that failed or was stopped was still
         // paid for, round by round, up to where it got.
         if counted.tokens_in + counted.tokens_out > 0 {
@@ -388,6 +418,17 @@ async fn conversation(
                 });
             }
         }
+    }
+}
+
+/// The conversation's opening, replaced, with everything after it left alone.
+fn with_opening(history: &mut Vec<ChatMessage>, opening: String) {
+    match history
+        .iter_mut()
+        .find(|one| matches!(one, ChatMessage::System { .. }))
+    {
+        Some(ChatMessage::System { content }) => *content = opening,
+        _ => history.insert(0, ChatMessage::System { content: opening }),
     }
 }
 
@@ -425,6 +466,8 @@ async fn errand(
     stopping: &CancellationToken,
     // What the rounds of this turn used, where the server said.
     counted: &mut Counted,
+    // A new name that arrived while a card was up, for the caller to take in.
+    renamed: &mut Option<String>,
 ) -> Result<Done> {
     // What the person typed while a card was waiting on them, this turn. Their
     // words, so an address in them counts as one they named; kept apart
@@ -783,7 +826,7 @@ async fn errand(
                     allows: crate::allowing::the_whole_tool(&name).in_words,
                 }));
 
-                let (said, meanwhile) = match wait_for_an_answer(asked, &call.id).await {
+                let (said, meanwhile) = match wait_for_an_answer(asked, &call.id, renamed).await {
                     None => return Ok(Done::Abandoned),
                     Some(both) => both,
                 };
@@ -965,6 +1008,7 @@ fn must_ask(
 async fn wait_for_an_answer(
     asked: &mut UnboundedReceiver<Turn>,
     call: &str,
+    renamed: &mut Option<String>,
 ) -> Option<(Answer, Vec<String>)> {
     let mut meanwhile: Vec<String> = Vec::new();
     loop {
@@ -981,6 +1025,9 @@ async fn wait_for_an_answer(
             // An answer to some other question, which by now has no question
             // behind it. Nothing to do with it but let it go.
             Some(Turn::Answer { .. }) => {}
+            // Kept for after the card, because the conversation's opening is
+            // not something this can reach.
+            Some(Turn::Called(identity)) => *renamed = Some(identity),
         }
     }
 }
@@ -1665,6 +1712,55 @@ mod an_aside_leaves_no_trace {
         assert_eq!(
             body["messages"][2]["content"], "ok",
             "its own answer is not the one it gave"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_settled_on_mid_conversation_reaches_that_conversation() {
+        // A new agent is asked who it is after its first errand, with that
+        // conversation still open, and the opening was read once: it worked as
+        // Errand for the rest of the conversation it had just named itself in.
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_remembers(asked.clone()).await;
+        let home = std::env::temp_dir().join("errand-now-called-test");
+        std::fs::create_dir_all(&home).unwrap();
+        let settings = LlmSettings {
+            provider: "openai-compat".into(),
+            base_url: where_it_is,
+            model: "pretend".into(),
+            ..Default::default()
+        };
+        let knows = crate::memory::Knowing {
+            identity: String::new(),
+            notes: "What you have already been told about this job:\n- where it goes: Telegram"
+                .into(),
+        };
+        let (mut engine, events) = Local::open(settings, home, "auto", &knows, Vec::new(), None)
+            .expect("a conversation to talk to");
+
+        engine
+            .say("find the cheapest flight to Lisbon", &[])
+            .unwrap();
+        until_it_finishes(&events).await;
+        let identity = crate::memory::who_you_are("Atlas", Some("Travel"), Some("Finds flights."));
+        assert!(
+            engine.now_called(&identity).unwrap(),
+            "a local conversation takes a new name without being closed"
+        );
+        engine.say("and the way back", &[]).unwrap();
+        until_it_finishes(&events).await;
+
+        let seen = asked.lock().unwrap().clone();
+        assert!(seen[0].contains("You are Errand."), "{}", seen[0]);
+        let second = &seen[1];
+        assert!(second.contains("You are Atlas (Travel)."), "{second}");
+        assert!(!second.contains("You are Errand."), "{second}");
+        // Everything else as it was: its notes, and the conversation so far.
+        assert!(second.contains("where it goes: Telegram"), "{second}");
+        assert_eq!(
+            roles_in(second),
+            ["system", "user", "assistant", "user"],
+            "{second}"
         );
     }
 

@@ -133,3 +133,73 @@ async fn reopening_something_that_was_never_there_says_so_rather_than_hanging() 
     }
     panic!("reopening a thread that never existed neither worked nor complained");
 }
+
+/// Where Claude Code keeps a session's transcript, found rather than worked
+/// out: the folder is named after the working directory, spelled its own way.
+fn transcript_of(session: &str) -> Option<PathBuf> {
+    let projects = PathBuf::from(std::env::var("HOME").ok()?).join(".claude/projects");
+    std::fs::read_dir(projects)
+        .ok()?
+        .flatten()
+        .map(|folder| folder.path().join(format!("{session}.jsonl")))
+        .find(|file| file.exists())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "talks to the real Claude Code; run with --ignored"]
+async fn an_aside_is_answered_from_the_conversation_and_leaves_nothing_in_it() {
+    // A new agent is asked who it is after its first errand. Asked down the
+    // pipe, the question and its line of fields stayed in Claude Code's own
+    // session, in front of everything said after it.
+    let id = format!("{}-2222-4222-8222-{:012x}", "4c1d7e2a", std::process::id());
+    let home: PathBuf = std::env::temp_dir().join(format!("errand-aside-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+
+    let (mut talk, events) = Claude::open(
+        &id,
+        &home,
+        PickUp::New,
+        "ask",
+        None,
+        None,
+        &errand_core::memory::Knowing::default(),
+    )
+    .expect("starting a thread");
+    talk.say("Remember the word QUINCE. Reply with just OK.", &[])
+        .unwrap();
+    until_done(&events);
+    let transcript = transcript_of(&id).expect("Claude Code wrote the session down");
+    let before = std::fs::read_to_string(&transcript).unwrap();
+
+    talk.aside("What word did I ask you to remember? Reply with just that word.")
+        .unwrap();
+    let answered = until_done(&events);
+    talk.stop().unwrap();
+
+    assert!(
+        answered.to_uppercase().contains("QUINCE"),
+        "the aside was not answered from the conversation; it said {answered:?}"
+    );
+    let after = std::fs::read_to_string(&transcript).unwrap();
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "the aside was written into the conversation's own session"
+    );
+    assert!(!after.contains("What word did I ask you"), "{after}");
+    // And no second session was left behind for it.
+    let folder = transcript.parent().unwrap().to_path_buf();
+    let sessions = std::fs::read_dir(&folder)
+        .unwrap()
+        .flatten()
+        .filter(|one| one.path().extension().is_some_and(|e| e == "jsonl"))
+        .count();
+    assert_eq!(sessions, 1, "the copy the aside was asked in was kept");
+
+    std::fs::remove_dir_all(&home).ok();
+    // Only the folder this test made, which is named after its own directory.
+    if folder.to_string_lossy().contains("errand-aside-") {
+        std::fs::remove_dir_all(&folder).ok();
+    }
+}

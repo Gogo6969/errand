@@ -278,10 +278,23 @@ pub trait Engine {
     /// format of the first, set no routine, and the person was shown a line of
     /// fields where a confirmation should have been.
     ///
-    /// Falls back to saying it, for an engine that keeps a session of its own
-    /// and cannot be asked to forget part of it.
+    /// Falls back to saying it, for an engine that has no way of asking
+    /// something outside the conversation.
     fn aside(&mut self, text: &str) -> anyhow::Result<()> {
         self.say(text, &[])
+    }
+    /// Take in who it is now, keeping everything else about the conversation.
+    ///
+    /// For an agent that settled on a name, or was renamed, while one of its
+    /// conversations was open. That conversation was opened knowing the old
+    /// name, and went on working as it for as long as it stayed open: a new
+    /// agent called itself Errand for the rest of its first conversation.
+    ///
+    /// Says whether it could. An engine whose instructions are fixed when it
+    /// starts cannot, and is closed once it is idle instead, so that the next
+    /// thing said opens it knowing.
+    fn now_called(&mut self, _identity: &str) -> anyhow::Result<bool> {
+        Ok(false)
     }
     /// Stop it, whatever it is doing.
     fn stop(&mut self) -> anyhow::Result<()>;

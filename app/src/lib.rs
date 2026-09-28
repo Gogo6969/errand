@@ -794,6 +794,8 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                                 eprintln!("could not write down who {agent} is: {e}");
                             } else {
                                 let _ = app.emit("settled", (&agent, &on));
+                                let held: State<Held> = app.state();
+                                tell_them_who_it_is(&held, &agent);
                             }
                         }
                     }
@@ -5266,6 +5268,43 @@ fn put_away_when_done(app: &AppHandle, talk: &str) {
     held.doorways.lock().unwrap().remove(talk);
 }
 
+/// Let an agent's open conversations know who it is now.
+///
+/// A conversation reads who its agent is once, when it opens. A new agent
+/// settles on a name after its first errand, with that conversation still
+/// open, so it went on working as Errand for the rest of it; a rename by hand
+/// did the same. An engine that can take the new name in place does, and the
+/// conversation carries on as it was. One that cannot is closed if it is
+/// idle, so the next thing said opens it knowing, and otherwise learns it the
+/// next time it opens.
+fn tell_them_who_it_is(held: &Held, agent: &str) {
+    let Ok(Some(who)) = held.store.agent(agent) else {
+        return;
+    };
+    let identity =
+        errand_core::memory::who_you_are(&who.name, who.title.as_deref(), who.about.as_deref());
+    let open: Vec<String> = held.live.lock().unwrap().keys().cloned().collect();
+    for id in open {
+        let theirs = matches!(held.store.conversation(&id), Ok(Some(c)) if c.agent == agent);
+        if !theirs {
+            continue;
+        }
+        let took_it = held
+            .live
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .map(|engine| engine.now_called(&identity));
+        if matches!(took_it, Some(Ok(true))) || mid_turn(held, &id) {
+            continue;
+        }
+        let was = held.live.lock().unwrap().remove(&id);
+        if let Some(mut thread) = was {
+            let _ = thread.stop();
+        }
+    }
+}
+
 /// Close this agent's engines that are doing nothing, so the next message
 /// opens them again with whatever changed: a new wall, a new name.
 ///
@@ -6215,7 +6254,9 @@ async fn rename(
     write_it_down_if_new(&app, &held, &id)?;
     held.store
         .rename(&id, &name, &title, &about)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    tell_them_who_it_is(&held, &id);
+    Ok(())
 }
 
 /// Keep an agent at the top of the list, or stop.

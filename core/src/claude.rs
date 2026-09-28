@@ -203,7 +203,89 @@ enum Turn {
     /// They are the same to the pipe and the order between them matters, which
     /// is the reason they are not two channels.
     Say(String),
+    /// A question of the app's own, asked where the conversation never sees it.
+    Aside(String),
     Stop,
+}
+
+/// How to ask a conversation something without it becoming part of it.
+///
+/// Claude Code keeps its own session, so an aside asked down the pipe stayed
+/// in it: a new agent was asked who it was after its first errand, and the
+/// question and its one line of fields sat in the transcript in front of
+/// everything said after. The local engine takes its asides back out; this
+/// asks in a copy of the session instead, one that is never written down.
+/// Tried on the real CLI first: a fork with `--no-session-persistence` knew
+/// what the session knew, and the session file did not change by a byte.
+struct OffTheRecord {
+    claude: std::path::PathBuf,
+    cwd: std::path::PathBuf,
+    session: String,
+    model: Option<String>,
+    walled: bool,
+    doorway: Option<std::path::PathBuf>,
+}
+
+/// The longest an aside is waited for. It is one line, and nothing else in
+/// the conversation can happen until it is back.
+const AN_ASIDE_TAKES_AT_MOST: std::time::Duration = std::time::Duration::from_secs(120);
+
+impl OffTheRecord {
+    async fn ask(&self, question: &str) -> Result<String> {
+        let claude = self.claude.to_string_lossy();
+        // Behind the same wall as the conversation it copies.
+        let mut command = match self.walled {
+            true => crate::wall::around(
+                &claude,
+                &self.cwd,
+                crate::wall::Inside::ClaudeCode {
+                    doorway: self.doorway.as_deref(),
+                },
+            ),
+            false => crate::wall::kept_out(&claude, self.doorway.as_deref()),
+        };
+        if let Some(path) = the_persons_path() {
+            command.env("PATH", path);
+        }
+        command
+            .args([
+                "--print",
+                "--resume",
+                &self.session,
+                "--fork-session",
+                "--no-session-persistence",
+                // No tools and no servers: it is asked for one line about
+                // what already happened, and starting somebody's MCP servers
+                // for that would cost seconds and could do things.
+                "--tools",
+                "",
+                "--strict-mcp-config",
+                "--output-format",
+                "text",
+            ])
+            .args(match &self.model {
+                Some(named) => vec!["--model", named.as_str()],
+                None => vec![],
+            })
+            .arg(question)
+            .current_dir(&self.cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let answered = tokio::time::timeout(AN_ASIDE_TAKES_AT_MOST, command.output())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "it did not answer within {} seconds",
+                    AN_ASIDE_TAKES_AT_MOST.as_secs()
+                )
+            })??;
+        if !answered.status.success() {
+            anyhow::bail!("{}", in_words(&String::from_utf8_lossy(&answered.stderr)));
+        }
+        Ok(String::from_utf8_lossy(&answered.stdout).trim().to_string())
+    }
 }
 
 /// How the next process picks a conversation up.
@@ -654,6 +736,15 @@ impl Claude {
             }
         });
 
+        let told = tx.clone();
+        let off_the_record = OffTheRecord {
+            claude: where_claude_is(),
+            cwd: cwd.to_path_buf(),
+            session: session.to_string(),
+            model: model.map(str::to_string),
+            walled,
+            doorway: doorway.map(std::path::Path::to_path_buf),
+        };
         let (turns, mut asked) = tokio::sync::mpsc::unbounded_channel();
         handle.spawn(async move {
             while let Some(turn) = asked.recv().await {
@@ -661,6 +752,27 @@ impl Claude {
                     Turn::Say(line) => {
                         if stdin.write_all(line.as_bytes()).await.is_err() {
                             break; // It has gone; the event stream will say so.
+                        }
+                    }
+                    // Here rather than on a task of its own, so that anything
+                    // said meanwhile waits behind it, as it does on the local
+                    // engine. Answered alongside, a reply to the person would
+                    // arrive while the app was still reading the aside's.
+                    Turn::Aside(question) => {
+                        let events = match off_the_record.ask(&question).await {
+                            Ok(said) => vec![
+                                Event::Said {
+                                    text: said.clone(),
+                                    settled: true,
+                                },
+                                Event::Done { said, cost: None },
+                            ],
+                            Err(why) => vec![Event::Failed {
+                                why: format!("{why:#}"),
+                            }],
+                        };
+                        for event in events {
+                            let _ = told.send(event);
                         }
                     }
                     Turn::Stop => break,
@@ -713,6 +825,12 @@ impl Engine for Claude {
         );
         self.turns
             .send(Turn::Say(line))
+            .map_err(|_| anyhow::anyhow!("this conversation has ended"))
+    }
+
+    fn aside(&mut self, text: &str) -> Result<()> {
+        self.turns
+            .send(Turn::Aside(text.to_string()))
             .map_err(|_| anyhow::anyhow!("this conversation has ended"))
     }
 
