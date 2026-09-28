@@ -4250,6 +4250,31 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
     said
 }
 
+/// The first words of an errand that stopped part way, as `wait_for_the_answer`
+/// says them.
+const STOPPED_PART_WAY: [&str; 3] = [
+    "It stopped to ask permission",
+    "It stopped before it finished",
+    "It did not finish within",
+];
+
+/// The exit code for what an errand asked from a terminal came to.
+///
+/// A turn that failed says so in its first words, and a script reading the
+/// exit code has to be told as well: this returned 0 for "It could not: ..."
+/// and a pipeline carried on as though the errand had been done. And 0 for an
+/// errand that stopped at a permission card, was stopped, or ran out of time,
+/// which is a pipeline carrying on from half a job.
+fn how_it_ended(said: &str) -> i32 {
+    if said.starts_with("It could not:") {
+        return 1;
+    }
+    if STOPPED_PART_WAY.iter().any(|start| said.starts_with(start)) {
+        return 4;
+    }
+    0
+}
+
 /// Collect what the other agent said, until its turn ends.
 ///
 /// Waiting on a task rather than on a thread, and that is not a tidiness
@@ -4262,8 +4287,15 @@ async fn wait_for_the_answer(
     done: tokio::sync::mpsc::UnboundedReceiver<Event>,
     along_the_way: Option<tokio::sync::mpsc::UnboundedSender<errand_core::team::Meanwhile>>,
 ) -> anyhow::Result<String> {
-    Ok(match what_came_back(done, along_the_way).await {
+    Ok(in_words(what_came_back(done, along_the_way).await))
+}
+
+/// What an errand came to, as the one who asked for it is told.
+fn in_words(came: Came) -> String {
+    match came {
         Came::Said(said) => said,
+        // Each begins with one of `STOPPED_PART_WAY`, which is how the terminal
+        // knows to exit 4 for it.
         Came::Asked { to, so_far } => format!(
             "It stopped to ask permission to {to} and there was nobody to answer, so it did \
              not finish. What it got to: {so_far}"
@@ -4275,7 +4307,7 @@ async fn wait_for_the_answer(
         Came::TooLong(so_far) => {
             format!("It did not finish within ten minutes. What it got to: {so_far}")
         }
-    })
+    }
 }
 
 /// How a conversation somebody was waiting on came out.
@@ -6082,7 +6114,12 @@ Set ERRAND_QUIET to leave that out.
 
 --json asks for the answer as JSON, and --shape asks for it as JSON matching
 an example you give. Either way the answer is checked before it is printed:
-prose where a script expected an object exits 3 rather than being piped on.";
+prose where a script expected an object exits 3 rather than being piped on.
+
+It exits 0 when the agent answered, 1 when it could not be reached or could
+not do the errand, 3 when an answer asked for as JSON was not, and 4 when it
+stopped part way: it needed a permission nobody was there to give, it was
+stopped, or it ran out of time.";
 
 /// Ask a running Errand something from a terminal.
 ///
@@ -6180,14 +6217,7 @@ fn from_a_terminal(args: Vec<String>) -> i32 {
     match outcome {
         Ok(said) if wanted.is_none() => {
             println!("{said}");
-            // A turn that failed says so in its first words, and a script
-            // reading the exit code has to be told as well: this returned 0
-            // for "It could not: ..." and a pipeline carried on as though the
-            // errand had been done.
-            if said.starts_with("It could not:") {
-                return 1;
-            }
-            0
+            how_it_ended(&said)
         }
         // Asked for in a shape, so checked before it is printed. A script that
         // is handed prose where it expected an object finds out three steps
@@ -6729,6 +6759,30 @@ mod tests {
             "the clock's own run was not busy"
         );
         assert!(!a_turn_is_going(&running, &doing, false, "another"));
+    }
+
+    #[test]
+    fn an_errand_asked_from_a_terminal_exits_with_what_it_came_to() {
+        // Through the words each ending is really said in, so the two cannot
+        // drift apart: a script cannot tell half a job from a whole one by
+        // anything but the code.
+        let so_far = || "two of the three files".to_string();
+        assert_eq!(how_it_ended(&in_words(Came::Said("391".into()))), 0);
+        assert_eq!(
+            how_it_ended(&in_words(Came::Failed("the server is down".into()))),
+            1
+        );
+        for part_way in [
+            Came::Asked {
+                to: "run ls".into(),
+                so_far: so_far(),
+            },
+            Came::Stopped(so_far()),
+            Came::TooLong(so_far()),
+        ] {
+            let said = in_words(part_way);
+            assert_eq!(how_it_ended(&said), 4, "{said}");
+        }
     }
 
     #[test]
