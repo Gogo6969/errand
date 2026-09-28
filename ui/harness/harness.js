@@ -348,6 +348,14 @@ export const FIXTURE = {
       on: false,
     },
   ],
+  // Everything that runs on its own: one routine due, one switched off, one
+  // whose agent is paused, and a watch that stopped.
+  standing: [
+    { conversation: "talk-2", agent: "agent-bitcoin", who: "Bitcoin Desk", name: "First", kind: "routine", at: "daily 07:00", what: "What moved overnight", due: Date.now() + 3600000, off: false, stopped: null, paused: false },
+    { conversation: "talk-3", agent: "agent-bitcoin", who: "Bitcoin Desk", name: "Asked by Day Check", kind: "routine", at: "weekly fri 15:00", what: "The weekly tally", due: null, off: true, stopped: null, paused: false },
+    { conversation: "talk-1", agent: "agent-unnamed", who: "Pulse Keeper", name: "First", kind: "routine", at: "every 5m", what: "Write one small pulse file", due: null, off: false, stopped: null, paused: true },
+    { conversation: "talk-4", agent: "agent-bitcoin", who: "Bitcoin Desk", name: "Answered a few", kind: "watch", at: "https://example.com every 1h", what: "Tell me what changed", due: null, off: false, stopped: "Stopped looking. It could not be reached 5 times running.", paused: false },
+  ],
   // What one agent has been taught.
   skills: {
     "agent-bitcoin": [
@@ -649,6 +657,8 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           // that holds a key.
           case "notes":
             return Promise.resolve(fixture.notes?.[args.agent] || []);
+          case "standing":
+            return Promise.resolve(fixture.standing || []);
           case "skills_of":
             return Promise.resolve(fixture.skills?.[args.agent] || []);
           // A run is a conversation of its own, made here the way the app

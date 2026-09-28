@@ -5246,6 +5246,101 @@ async fn routines(held: State<'_, Held>) -> Result<Vec<Routine>, String> {
         .collect())
 }
 
+/// One thing that runs on its own, wherever it is.
+#[derive(Clone, Serialize)]
+struct Standing {
+    conversation: String,
+    agent: String,
+    /// The agent's name.
+    who: String,
+    /// The conversation's.
+    name: String,
+    /// `routine` or `watch`.
+    kind: &'static str,
+    /// When, for a routine; what is looked at, for a watch.
+    at: String,
+    /// What it does each time.
+    what: String,
+    /// When a routine that will run is next due.
+    due: Option<i64>,
+    /// A routine switched off under Repeat.
+    off: bool,
+    /// Why a watch stopped looking, if it has.
+    stopped: Option<String>,
+    /// Its agent is paused, so none of it runs whatever it says here.
+    paused: bool,
+}
+
+/// Everything that runs on its own, every agent's, in one list.
+///
+/// Routines and watches were found by opening each agent in turn and looking
+/// for a clock beside a conversation's name, so nobody could say what their
+/// Mac would do overnight without going through all of them.
+#[tauri::command]
+async fn standing(held: State<'_, Held>) -> Result<Vec<Standing>, String> {
+    let now = chrono::Local::now();
+    let paused = held.store.paused_agents().map_err(|e| e.to_string())?;
+    let who: HashMap<String, String> = held
+        .store
+        .agents()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|a| (a.id, a.name))
+        .collect();
+    let name_of = |agent: &str| {
+        who.get(agent)
+            .cloned()
+            .unwrap_or_else(|| "an agent that is gone".to_string())
+    };
+    let mut all = Vec::new();
+    for c in held.store.every_routine().map_err(|e| e.to_string())? {
+        let Some(at) = c.runs_at.clone() else {
+            continue;
+        };
+        let stopped_for_now = c.routine_off || paused.contains(&c.agent);
+        let due = When::read(&at)
+            .ok()
+            .and_then(|when| when.next_after(routine::counting_from(&c, now)))
+            .map(|d| d.timestamp_millis())
+            .filter(|_| !stopped_for_now);
+        all.push(Standing {
+            who: name_of(&c.agent),
+            paused: paused.contains(&c.agent),
+            kind: "routine",
+            at,
+            what: c.runs_what.unwrap_or_default(),
+            due,
+            off: c.routine_off,
+            stopped: None,
+            conversation: c.id,
+            agent: c.agent,
+            name: c.name,
+        });
+    }
+    for c in held.store.watchers().map_err(|e| e.to_string())? {
+        all.push(Standing {
+            who: name_of(&c.agent),
+            paused: paused.contains(&c.agent),
+            kind: "watch",
+            at: c.watches.unwrap_or_default(),
+            what: c.watches_what.unwrap_or_default(),
+            due: None,
+            off: false,
+            stopped: c.paused,
+            conversation: c.id,
+            agent: c.agent,
+            name: c.name,
+        });
+    }
+    all.sort_by(|a, b| {
+        a.who
+            .to_lowercase()
+            .cmp(&b.who.to_lowercase())
+            .then(a.kind.cmp(b.kind))
+    });
+    Ok(all)
+}
+
 /// Open a link somewhere that is not this window.
 ///
 /// A link followed inside the webview replaces the app with a web page and
@@ -6239,6 +6334,7 @@ pub fn run() {
             skills_of,
             forget_skill,
             run_a_skill,
+            standing,
             say,
             answer,
             engines,

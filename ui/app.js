@@ -147,6 +147,7 @@ const el = {
   checkup: document.getElementById("checkup"),
   working: document.getElementById("working"),
   costing: document.getElementById("costing"),
+  standing: document.getElementById("standing"),
   tour: document.getElementById("tour"),
   changed: document.getElementById("changed"),
   speak: document.getElementById("speak"),
@@ -3845,6 +3846,7 @@ function whatCouldBeDone() {
   add("What Errand is", `the whole thing, in ${WHAT_THIS_IS.length} lines`, () => showTheTour(), true);
   add("What changed in this one", "since the version before it", () => whatChanged(), true);
   add("What it has cost", "today and this month", () => whatItCost(), true);
+  add("Everything that runs on its own", "every agent's routines and watches", () => whatRunsOnItsOwn(), true);
   add("Check this setup", "what is wrong, and what to do", () => checkup());
   add(
     whose()?.paused ? "Start this agent again" : "Pause this agent",
@@ -5906,6 +5908,108 @@ async function whatItCost() {
     );
   }
   el.costing.replaceChildren(...parts);
+}
+
+/**
+ * Everything that runs on its own, every agent's, in one list.
+ *
+ * Routines and watches were found by opening each agent in turn and looking
+ * for a clock beside a conversation's name, so nobody could say what their Mac
+ * would do overnight without going through all of them.
+ */
+async function whatRunsOnItsOwn({ again = false } = {}) {
+  if (!again && !el.standing.hidden) {
+    el.standing.hidden = true;
+    return;
+  }
+  el.standing.hidden = false;
+  let all;
+  try {
+    all = await invoke("standing");
+  } catch (why) {
+    el.standing.replaceChildren(note("p", String(why)));
+    return;
+  }
+  if (!all.length) {
+    el.standing.replaceChildren(
+      note(
+        "p",
+        "Nothing runs on its own yet. Ask any agent to do something every morning, or to keep an " +
+          "eye on a folder or a page, and it appears here.",
+      ),
+    );
+    return;
+  }
+  const routines = all.filter((one) => one.kind === "routine").length;
+  const watches = all.length - routines;
+  const agentsIn = new Set(all.map((one) => one.agent)).size;
+  const counted = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  el.standing.replaceChildren(
+    note(
+      "p",
+      `${counted(routines, "routine", "routines")} and ${counted(watches, "watch", "watches")}, across ${counted(
+        agentsIn,
+        "agent",
+        "agents",
+      )}.`,
+      "server-what",
+    ),
+    ...all.map(aStandingJob),
+  );
+}
+
+function aStandingJob(one) {
+  const row = document.createElement("div");
+  row.className = "one";
+  const when = one.kind === "routine" ? one.at : `watching ${one.at}`;
+  // What stops it comes first, because it is the only thing about it somebody
+  // has to do something about.
+  const state = one.paused
+    ? "its agent is paused"
+    : one.off
+      ? "switched off"
+      : one.stopped
+        ? `stopped: ${one.stopped}`
+        : one.due
+          ? `next ${new Date(one.due).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}`
+          : "";
+  const open = document.createElement("button");
+  open.type = "button";
+  open.textContent = "Open";
+  open.onclick = async () => {
+    el.standing.hidden = true;
+    if (!talks.has(one.conversation)) await openAgent(one.agent);
+    if (talks.has(one.conversation)) await show(one.conversation);
+  };
+  row.append(
+    note("span", one.who, "who"),
+    note("span", `${one.name} · ${when}`, "when"),
+    ...(state ? [note("span", state, one.due && !one.paused && !one.off && !one.stopped ? "when" : "state")] : []),
+    open,
+  );
+  // A routine is switched off and on here, the same switch as under Repeat.
+  if (one.kind === "routine") {
+    const flip = document.createElement("button");
+    flip.type = "button";
+    flip.textContent = one.off ? "Start again" : "Pause";
+    flip.onclick = async () => {
+      try {
+        await invoke("routine_off", { id: one.conversation, off: !one.off });
+      } catch (why) {
+        complain(String(why));
+        return;
+      }
+      const t = talks.get(one.conversation);
+      if (t) {
+        t.repeats = one.off;
+        drawTalks();
+      }
+      whatRunsOnItsOwn({ again: true });
+    };
+    row.append(flip);
+  }
+  row.append(note("span", one.what, "what"));
+  return row;
 }
 
 /** A number of tokens the way somebody would say it: 950, 12.4k, 1.3M. */

@@ -1814,8 +1814,8 @@ body.catching #what { border-color: var(--accent); }
 /* What it has cost, in the same shape as what is running. The two are opened
    the same way and read the same way, and there is no reason for them to look
    like different kinds of thing. */
-#costing[hidden] { display: none; }
-#costing {
+#costing[hidden], #standing[hidden] { display: none; }
+#costing, #standing {
   border-bottom: 1px solid var(--rule);
   background: var(--side);
   padding: 12px 18px;
@@ -1842,6 +1842,13 @@ body.catching #what { border-color: var(--accent); }
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
+
+/* One row for each thing that runs on its own. */
+#standing .one { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 13px; padding: 6px 0; border-top: 1px solid var(--rule); }
+#standing .who { font-weight: 600; }
+#standing .when { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+#standing .state { color: var(--wrong-soft); }
+#standing .what { flex: 1 1 100%; color: var(--ink-soft); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* A command left running is not a turn: there is nothing to open, and there is
    something to stop. Both of those are said by how the row behaves. */

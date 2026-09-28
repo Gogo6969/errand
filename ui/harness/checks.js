@@ -4296,6 +4296,45 @@ export async function whatAnAgentRemembers() {
 }
 
 /**
+ * Everything that runs on its own, in one list.
+ *
+ * Routines and watches were found by opening each agent in turn and looking
+ * for a clock beside a conversation's name.
+ */
+export async function everythingThatRunsOnItsOwn() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  const panel = document.getElementById("standing");
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  const typing = document.getElementById("palette-what");
+  typing.value = "runs on its own";
+  typing.dispatchEvent(new Event("input"));
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await settle(300);
+  const said = panel.textContent;
+  check("the palette opens one list of everything that runs on its own", !panel.hidden && /3 routines and 1 watch, across 2 agents/.test(said), said.slice(0, 90));
+  const rows = [...panel.querySelectorAll(".one")];
+  const row = (text) => rows.find((r) => r.textContent.includes(text))?.textContent || "";
+  check("a routine that will run says when", /daily 07:00/.test(row("What moved overnight")) && /next /.test(row("What moved overnight")), row("What moved overnight"));
+  check("one switched off says so, and does not promise a next run", /switched off/.test(row("weekly tally")) && !/next /.test(row("weekly tally")), row("weekly tally"));
+  check("one whose agent is paused says that first", /its agent is paused/.test(row("pulse file")), row("pulse file"));
+  check("and a watch that stopped says why", /stopped: Stopped looking/.test(row("what changed")), row("what changed"));
+
+  const pausing = asked.length;
+  [...rows.find((r) => r.textContent.includes("What moved overnight")).querySelectorAll("button")].find((b) => b.textContent === "Pause")?.click();
+  await settle(300);
+  const off = asked.slice(pausing).find((a) => a.name === "routine_off");
+  check("a routine can be paused from the list, with the same switch as under Repeat", off?.args?.id === "talk-2" && off?.args?.off === true, JSON.stringify(off?.args || "nothing asked"));
+
+  const again = [...panel.querySelectorAll(".one")].find((r) => r.textContent.includes("What moved overnight"));
+  [...again.querySelectorAll("button")].find((b) => b.textContent === "Open")?.click();
+  await settle(700);
+  check("and Open goes to its conversation", panel.hidden && document.getElementById("talks").value === "talk-2", `hidden=${panel.hidden}, showing ${document.getElementById("talks").value}`);
+  return found;
+}
+
+/**
  * Skills in the window: seen, run and forgotten, and offered behind /.
  *
  * They ran only when asked for in words, and nothing could delete one.
