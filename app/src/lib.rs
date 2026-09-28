@@ -1054,8 +1054,16 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                     Event::NeedsYou(ask) => Some(format!("Waiting on you: {}", ask.asking)),
                     _ => None,
                 };
+                // Not over a handover this conversation is parked on. The step
+                // that asked for it comes from the engine on a thread of its
+                // own, and landing after the handover it put "Over to you"
+                // where "Waiting on you" was: the badge counted nobody and the
+                // side never said the agent was waiting. Seen in the system
+                // log, as a badge set to 0 the second a handover began.
                 if let Some(now) = now {
-                    held.doing.lock().unwrap().insert(id.clone(), now);
+                    if a_handover_waiting_in(&held, &id).is_none() {
+                        held.doing.lock().unwrap().insert(id.clone(), now);
+                    }
                 }
             }
 
