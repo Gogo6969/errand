@@ -348,6 +348,17 @@ export const FIXTURE = {
       on: false,
     },
   ],
+  // What one agent has been taught.
+  skills: {
+    "agent-bitcoin": [
+      {
+        name: "Morning brief",
+        request: "Tell me what moved overnight",
+        steps: [{ tool: "run_command", input: {}, outcome: "ok" }],
+        made_at: 1,
+      },
+    ],
+  },
   // What two agents have written down.
   notes: {
     "agent-bitcoin": [
@@ -638,6 +649,20 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           // that holds a key.
           case "notes":
             return Promise.resolve(fixture.notes?.[args.agent] || []);
+          case "skills_of":
+            return Promise.resolve(fixture.skills?.[args.agent] || []);
+          // A run is a conversation of its own, made here the way the app
+          // makes one, so the window can go to it.
+          case "run_a_skill": {
+            const id = `talk-skill-${(fixture.conversations[args.agent] || []).length}`;
+            (fixture.conversations[args.agent] ||= []).push({
+              id,
+              agent: args.agent,
+              name: `Skill: ${args.name}`,
+              opened: true,
+            });
+            return Promise.resolve(id);
+          }
           case "note_down":
             return /sk-[A-Za-z0-9]{20,}/.test(args.note || "")
               ? Promise.reject("that looks like a password or a key, and notes are read into every conversation. Leave it out.")

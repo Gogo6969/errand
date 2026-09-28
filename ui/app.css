@@ -2014,6 +2014,33 @@ body.in-a-call #what {
 #note-new { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: end; }
 #notes-says:empty { display: none; }
 
+/* What it has been taught, under what it remembers. */
+#skills { margin-top: 10px; font-size: 13px; }
+#skills summary { color: var(--ink-soft); cursor: pointer; }
+#skills-list { list-style: none; margin: 8px 0; padding: 0; display: grid; gap: 6px; }
+#skills-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; padding-top: 6px; border-top: 1px solid var(--rule); }
+#skills-list .skill-name { font-weight: 600; }
+#skills-list .skill-what { flex: 1 1 14em; min-width: 0; overflow-wrap: anywhere; color: var(--ink-soft); }
+#skills-says:empty { display: none; }
+
+/* Skills offered as a line starting with / is typed. */
+#slash {
+  list-style: none;
+  margin: 0 18px;
+  padding: 6px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--card);
+  display: grid;
+  gap: 2px;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+#slash li { display: flex; gap: 10px; align-items: baseline; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+#slash li:hover, #slash li[aria-selected="true"] { background: var(--rule); }
+#slash .skill-name { font-weight: 600; white-space: nowrap; }
+#slash .skill-what { color: var(--ink-soft); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* The line a search was looking for, once you have arrived at it. Marked
    rather than only scrolled to: a conversation scrolled to the middle with
    nothing picked out is one somebody now has to read to find out why they are

@@ -4296,6 +4296,74 @@ export async function whatAnAgentRemembers() {
 }
 
 /**
+ * Skills in the window: seen, run and forgotten, and offered behind /.
+ *
+ * They ran only when asked for in words, and nothing could delete one.
+ */
+export async function skillsInTheWindow() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  await openTalk("talk-2");
+  document.getElementById("thread-name").click();
+  await settle(300);
+  const rows = () => [...document.querySelectorAll("#skills-list li")];
+  check("its skills are listed under who it is", rows().length === 1 && /Morning brief/.test(rows()[0].textContent) && /1 step/.test(rows()[0].textContent), rows().map((li) => li.textContent).join(" | "));
+
+  const forgetting = asked.length;
+  [...rows()[0].querySelectorAll("button")].find((b) => b.textContent === "Forget")?.click();
+  await settle(250);
+  const gone = asked.slice(forgetting).find((a) => a.name === "forget_skill");
+  check("forgetting one asks the app to take it back", gone?.args?.name === "Morning brief", JSON.stringify(gone?.args || "nothing asked"));
+
+  const running = asked.length;
+  [...rows()[0].querySelectorAll("button")].find((b) => b.textContent === "Run")?.click();
+  await settle(600);
+  const ran = asked.slice(running).find((a) => a.name === "run_a_skill");
+  check("running one asks the app to run it", ran?.args?.agent === "agent-bitcoin" && ran?.args?.name === "Morning brief", JSON.stringify(ran?.args || "nothing asked"));
+  const picker = document.getElementById("talks");
+  check("and goes to the conversation it runs in", picker.selectedOptions[0]?.textContent.startsWith("Skill: Morning brief"), picker.selectedOptions[0]?.textContent || "nothing chosen");
+
+  // Behind /, as it is typed.
+  await openTalk("talk-2");
+  const box = document.getElementById("what");
+  box.value = "/mor";
+  box.dispatchEvent(new Event("input"));
+  await settle(250);
+  const slash = document.getElementById("slash");
+  check("typing / offers its skills", !slash.hidden && /Morning brief/.test(slash.textContent), `hidden=${slash.hidden}: ${slash.textContent}`);
+  slash.querySelector("li")?.click();
+  await settle(100);
+  check("and choosing one puts its name in the box", box.value === "/Morning brief ", JSON.stringify(box.value));
+
+  box.value = "/Morning brief only bitcoin";
+  const sending = asked.length;
+  document.getElementById("composer").requestSubmit();
+  await settle(600);
+  const slashed = asked.slice(sending).find((a) => a.name === "run_a_skill");
+  check(
+    "a line naming a skill runs it, with the rest as what to do differently",
+    slashed?.args?.name === "Morning brief" && slashed?.args?.differently === "only bitcoin" && !asked.slice(sending).some((a) => a.name === "say"),
+    JSON.stringify(asked.slice(sending).map((a) => [a.name, a.args])),
+  );
+
+  // Anything else starting with / is somebody's own words.
+  await openTalk("talk-overnight");
+  box.value = "/etc/hosts looks wrong";
+  const plain = asked.length;
+  document.getElementById("composer").requestSubmit();
+  await settle(400);
+  check(
+    "and a line that only starts with / is sent as it is",
+    asked.slice(plain).some((a) => a.name === "say" && a.args?.text === "/etc/hosts looks wrong") && !asked.slice(plain).some((a) => a.name === "run_a_skill"),
+    JSON.stringify(asked.slice(plain).map((a) => a.name)),
+  );
+  tell("happened", { conversation: "talk-overnight", seq: 9861, kind: "done" });
+  await settle(150);
+  return found;
+}
+
+/**
  * A turn the window did not start.
  *
  * The clock, a watch, a goal, another agent and the terminal all start turns,

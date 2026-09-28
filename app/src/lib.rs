@@ -3536,6 +3536,55 @@ async fn unnote(held: State<'_, Held>, agent: String, about: String) -> Result<(
     Ok(())
 }
 
+/// What an agent has been taught, newest first.
+///
+/// Skills ran only when asked for in words, and there was nowhere to see
+/// which ones there were.
+#[tauri::command]
+async fn skills_of(
+    held: State<'_, Held>,
+    agent: String,
+) -> Result<Vec<errand_core::store::Skill>, String> {
+    held.store.skills(&agent).map_err(|e| e.to_string())
+}
+
+/// Take a skill back.
+#[tauri::command]
+async fn forget_skill(held: State<'_, Held>, agent: String, name: String) -> Result<(), String> {
+    held.store
+        .forget_skill(&agent, &name)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Run a skill from the window, in a conversation of its own.
+///
+/// The same arrangement as an agent running one: a conversation named after
+/// the skill with the plan said into it, so the run is a record somebody can
+/// open afterwards under the skill's name. Answers with the conversation, for
+/// the window to go to, without waiting for the run to finish.
+#[tauri::command]
+async fn run_a_skill(
+    app: AppHandle,
+    held: State<'_, Held>,
+    agent: String,
+    name: String,
+    differently: Option<String>,
+) -> Result<String, String> {
+    let found = held
+        .store
+        .skill(&agent, &name)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("{agent} has no skill called {name}"))?;
+    let talk = uuid::Uuid::new_v4().to_string();
+    held.store
+        .begin_conversation_for(&talk, &agent, &skill::called(&found.name), None)
+        .map_err(|e| e.to_string())?;
+    let plan = skill::the_plan(&found, differently.as_deref().unwrap_or(""));
+    say(app.clone(), app.state(), talk.clone(), plan, None).await?;
+    Ok(talk)
+}
+
 /// How many runs the history shows at a time, and asks for again for more.
 const RUNS_AT_A_TIME: i64 = 20;
 
@@ -6187,6 +6236,9 @@ pub fn run() {
             notes,
             note_down,
             unnote,
+            skills_of,
+            forget_skill,
+            run_a_skill,
             say,
             answer,
             engines,

@@ -170,6 +170,10 @@ const el = {
   watchAgain: document.getElementById("watch-again"),
   watchSays: document.getElementById("watch-says"),
   attached: document.getElementById("attached"),
+  slash: document.getElementById("slash"),
+  skillsSummary: document.getElementById("skills-summary"),
+  skillsList: document.getElementById("skills-list"),
+  skillsSays: document.getElementById("skills-says"),
   trouble: document.getElementById("trouble"),
   palette: document.getElementById("palette"),
   paletteWhat: document.getElementById("palette-what"),
@@ -2331,12 +2335,27 @@ function drawAttached() {
 const ROOM_STILL_ANSWERING =
   "The room is still answering. It takes one thing round at a time; say it again when the round is over.";
 
-el.form.addEventListener("submit", (e) => {
+el.form.addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = el.what.value.trim();
   // A picture on its own is a question: "what is this". So something has to be
   // said, but it does not have to be typed.
   if (!text && !attached.length) return;
+  el.slash.hidden = true;
+  // A line naming one of its skills runs it, with anything after the name as
+  // what to do differently. Anything else starting with / is somebody's own
+  // words, a path included, and goes as it is.
+  const a = whose();
+  if (a && text.startsWith("/")) {
+    const called = aSkillCalledFor(text, await readSkills(a.id));
+    if (called) {
+      halfTyped.delete(showing);
+      el.what.value = "";
+      el.what.style.height = "auto";
+      await runTheSkill(a, called.one.name, called.differently);
+      return;
+    }
+  }
   // A room takes one thing round at a time. Refused here, with the words left
   // in the box, rather than sent: the app refuses it too, but by then the box
   // is empty and the line is on screen as though it went.
@@ -2859,7 +2878,135 @@ el.name.addEventListener("click", () => {
   el.whois.hidden = false;
   el.whoisName.focus();
   drawNotes();
+  drawSkills();
 });
+
+/** Each agent's skills, as last read from the app. */
+const skillsOf = new Map();
+
+async function readSkills(agent) {
+  try {
+    const all = await invoke("skills_of", { agent });
+    skillsOf.set(agent, all);
+    return all;
+  } catch {
+    return skillsOf.get(agent) || [];
+  }
+}
+
+/**
+ * What this agent has been taught, each with a way to run it again or take it
+ * back. They ran only when asked for in words, and nothing could delete one.
+ */
+async function drawSkills() {
+  const a = whose();
+  if (!a) return;
+  el.skillsSays.textContent = "";
+  const all = await readSkills(a.id);
+  el.skillsSummary.textContent = all.length ? `What it has been taught (${all.length})` : "What it has been taught";
+  el.skillsList.replaceChildren(
+    ...(all.length
+      ? all.map((one) => aSkill(a, one))
+      : [
+          note(
+            "li",
+            "Nothing yet. Once it has done something you want again, ask it to keep that as a skill, " +
+              "and it can be run from here or by typing / in the box.",
+          ),
+        ]),
+  );
+}
+
+function aSkill(a, one) {
+  const li = document.createElement("li");
+  const steps = one.steps?.length || 0;
+  const run = document.createElement("button");
+  run.type = "button";
+  run.textContent = "Run";
+  run.onclick = () => runTheSkill(a, one.name, "");
+  const forget = document.createElement("button");
+  forget.type = "button";
+  forget.textContent = "Forget";
+  forget.onclick = async () => {
+    try {
+      await invoke("forget_skill", { agent: a.id, name: one.name });
+    } catch (why) {
+      el.skillsSays.textContent = String(why);
+      return;
+    }
+    drawSkills();
+  };
+  li.append(
+    note("span", one.name, "skill-name"),
+    note("span", `${one.request} · ${steps} ${steps === 1 ? "step" : "steps"}`, "skill-what"),
+    run,
+    forget,
+  );
+  return li;
+}
+
+/**
+ * Run a skill in a conversation of its own, and go to it.
+ *
+ * The same arrangement as an agent running one, so the run is a record that
+ * can be opened afterwards under the skill's name, and it is watched as it
+ * goes rather than announced when it is over.
+ */
+async function runTheSkill(a, name, differently) {
+  let talk;
+  try {
+    talk = await invoke("run_a_skill", { agent: a.id, name, differently: differently || null });
+  } catch (why) {
+    complain(String(why));
+    return;
+  }
+  el.whois.hidden = true;
+  if (await meet(talk)) await show(talk);
+}
+
+/** The skill a line starting with / names, and what else it says. */
+function aSkillCalledFor(text, all) {
+  if (!text.startsWith("/")) return null;
+  const said = text.slice(1);
+  const lower = said.toLowerCase();
+  const one = all.find((s) => lower === s.name.toLowerCase() || lower.startsWith(`${s.name.toLowerCase()} `));
+  return one ? { one, differently: said.slice(one.name.length).trim() } : null;
+}
+
+/**
+ * Its skills, offered as soon as a line starts with /, the way Grok Bot puts
+ * them behind it. Only the ones whose names start with what has been typed.
+ */
+async function offerSkills() {
+  const typed = el.what.value;
+  const a = whose();
+  if (!a || !typed.startsWith("/") || typed.includes("\n")) {
+    el.slash.hidden = true;
+    return;
+  }
+  const all = skillsOf.get(a.id) ?? (await readSkills(a.id));
+  const word = typed.slice(1).toLowerCase();
+  const fits = all.filter((one) => one.name.toLowerCase().startsWith(word));
+  if (!fits.length) {
+    el.slash.hidden = true;
+    return;
+  }
+  el.slash.replaceChildren(
+    ...fits.map((one) => {
+      const li = document.createElement("li");
+      li.append(note("span", `/${one.name}`, "skill-name"), note("span", one.request, "skill-what"));
+      li.onclick = () => {
+        el.what.value = `/${one.name} `;
+        el.slash.hidden = true;
+        el.what.focus();
+      };
+      return li;
+    }),
+  );
+  el.slash.hidden = false;
+}
+
+el.what.addEventListener("input", offerSkills);
 
 /**
  * What this agent has written down, and a way to correct or take back each.

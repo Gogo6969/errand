@@ -216,6 +216,15 @@
           </form>
           <p id="notes-says"></p>
         </details>
+        <!--
+          What it has been taught, to run again or take back. Skills ran only
+          when asked for in words, and nothing could delete one.
+        -->
+        <details id="skills">
+          <summary id="skills-summary">What it has been taught</summary>
+          <ul id="skills-list"></ul>
+          <p id="skills-says"></p>
+        </details>
       </aside>
 
       <!--
@@ -448,6 +457,9 @@
       <div id="trouble" hidden></div>
 
       <div id="attached" hidden></div>
+
+      <!-- Its skills, offered as soon as a line starts with /. -->
+      <ul id="slash" hidden aria-label="Skills it can run"></ul>
 
       <form id="composer">
         <textarea

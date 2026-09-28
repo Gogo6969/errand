@@ -1414,6 +1414,16 @@ impl Store {
     }
 
     /// Everything one agent has been taught, newest first.
+    /// Take a skill back, by name. Nothing could delete one, so a skill taught
+    /// wrongly stayed on offer to every conversation of its agent for good.
+    pub fn forget_skill(&self, agent: &str, name: &str) -> Result<bool> {
+        let gone = self.conn.lock().unwrap().execute(
+            "DELETE FROM skills WHERE agent = ? AND id = ?",
+            params![agent, skill_id(agent, name)],
+        )?;
+        Ok(gone > 0)
+    }
+
     pub fn skills(&self, agent: &str) -> Result<Vec<Skill>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
@@ -3773,6 +3783,20 @@ mod tests {
         // An agent that is not there is said to be not there, not quietly
         // nothing.
         assert!(s.pause("nobody", true, 3_000).is_err());
+    }
+
+    #[test]
+    fn a_skill_can_be_taken_back() {
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("tidy", NOT_YET_NAMED, Path::new("/tmp/tidy"))
+            .unwrap();
+        s.keep_skill("tidy", "Tidy Downloads", "tidy my downloads", &[])
+            .unwrap();
+        assert_eq!(s.skills("tidy").unwrap().len(), 1);
+        // By the name however it is written, the way it is looked up.
+        assert!(s.forget_skill("tidy", "tidy downloads").unwrap());
+        assert!(s.skills("tidy").unwrap().is_empty());
+        assert!(!s.forget_skill("tidy", "tidy downloads").unwrap());
     }
 
     #[test]
