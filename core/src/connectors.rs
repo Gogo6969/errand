@@ -522,6 +522,40 @@ return out"#
         .to_string()
 }
 
+/// Whether an app is open, asked without opening it.
+///
+/// A question of its own, and it has to be. Put in front of a script that goes
+/// on to talk to the app, the same test comes too late: before a line of it
+/// runs, reading the script starts the app to learn its words, so the app is
+/// always open by the time anything asks. Tried on TextEdit, closed, and it
+/// opened; asked alone, it stayed closed.
+pub fn is_open(app: &str) -> Result<bool> {
+    let said = ask_the_mac(
+        app,
+        &format!("application {} is running", quoted(app)),
+        Duration::from_secs(10),
+    )?;
+    Ok(said.trim() == "true")
+}
+
+/// How much is unread in each inbox, without opening Mail to find out.
+///
+/// For a watch, which asks every few minutes whether or not anybody is at the
+/// Mac. Opening Mail to answer would put it back on screen every time somebody
+/// quit it, and a Mail that is not open has fetched nothing new to count.
+/// Nothing when it is not open.
+pub fn unread_in_inboxes() -> Result<Option<Vec<Holding>>> {
+    if !is_open("Mail")? {
+        return Ok(None);
+    }
+    let said = ask_the_mac(
+        "Mail",
+        &the_script_for_where_the_unread_is(),
+        Duration::from_secs(20),
+    )?;
+    Ok(Some(worth_looking_in(&where_it_is(&said), false)))
+}
+
 /// Read back what Mail said about where the unread is.
 ///
 /// Split from both ends rather than through the middle: an account name has no
@@ -1142,9 +1176,67 @@ pub fn how_the_diary_went(found: i64, missed: &[String], over: i64) -> String {
     said
 }
 
+/// How long an agent waits for somebody to answer macOS's question about
+/// calendars before it is answered the old way instead.
+const ANSWERED_IN: Duration = Duration::from_secs(20);
+
+/// What an answer read the old way says under it, so that "nothing on
+/// Thursday" is never read as more than it is.
+const THE_OLD_WAY: &str = "This was read through the Calendar app, which shows a repeating event \
+    only on the day it first happened, so repeats of one are missing here.";
+
 /// Everything in the diary over a stretch of days.
+///
+/// Through EventKit, which sees each repeat of a repeating event at its own
+/// time, once macOS has been told Errand may read calendars. Until then, and
+/// if it has been told no, through the Calendar app as before, with a
+/// sentence under the answer saying what that way cannot see.
 fn what_is_on(when: &str) -> Result<String> {
     let over = days(when);
+    let why_not = match crate::diary::access() {
+        crate::diary::Access::Allowed => return from_the_diary(over),
+        crate::diary::Access::NotAskedYet => match crate::diary::ask(ANSWERED_IN) {
+            Some(true) => return from_the_diary(over),
+            Some(false) => crate::diary::REFUSED,
+            None => crate::diary::ASKING,
+        },
+        crate::diary::Access::Refused => crate::diary::REFUSED,
+    };
+    let said = through_the_calendar_app(over)?;
+    Ok(format!("{said}\n\n{THE_OLD_WAY} {why_not}"))
+}
+
+/// Everything on from the start of today, over this many days, from EventKit.
+fn from_the_diary(over: i64) -> Result<String> {
+    use chrono::TimeZone;
+    let today = chrono::Local::now().date_naive();
+    let midnight = |day: chrono::NaiveDate| {
+        chrono::Local
+            .from_local_datetime(&day.and_time(chrono::NaiveTime::MIN))
+            .earliest()
+            .map(|t| t.timestamp())
+    };
+    // Counted in days on the calendar rather than in hours, so that the day
+    // the clocks change is still one day.
+    let (Some(from), Some(to)) = (
+        midnight(today),
+        midnight(today + chrono::Days::new(over.max(1) as u64)),
+    ) else {
+        bail!("could not work out when today starts here");
+    };
+    let events = crate::diary::between(from, to)?;
+    let under = how_the_diary_went(events.len() as i64, &[], over);
+    Ok(match events.is_empty() {
+        true => under,
+        false => format!(
+            "{}\n\n{under}",
+            crate::diary::listed(&events, &chrono::Local)
+        ),
+    })
+}
+
+/// Everything in the diary over a stretch of days, asked of the Calendar app.
+fn through_the_calendar_app(over: i64) -> Result<String> {
     let calendars: Vec<String> = ask_the_mac(
         "Calendar",
         &every_calendar_script(),

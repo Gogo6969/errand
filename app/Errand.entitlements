@@ -13,6 +13,12 @@
   <key>com.apple.security.device.audio-input</key>
   <true/>
 
+  <!-- Reading calendars, once somebody has said yes to macOS's question. Under
+       the hardened runtime the question is never even asked without this, and
+       the answer is a silent no that looks like an empty diary. -->
+  <key>com.apple.security.personal-information.calendars</key>
+  <true/>
+
   <!-- Errand's whole job: starting Claude Code and local model servers as
        child processes. -->
   <key>com.apple.security.cs.allow-jit</key>

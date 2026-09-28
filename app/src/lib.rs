@@ -2496,7 +2496,59 @@ async fn look_once(
             .ok_or("it went away while being looked at")?
     };
 
-    let seen = match watch::look_again(&watch.look, was.saw.as_deref()).await {
+    // Mail and the calendar are theirs to switch off, and a watch on either
+    // stops with them rather than reading what the switch now says it may not.
+    if let Some(wanted) = watch.needs() {
+        let on = {
+            let held: State<Held> = app.state();
+            held.store
+                .connected()
+                .map_err(|e| e.to_string())?
+                .iter()
+                .any(|one| one == wanted)
+        };
+        if !on {
+            let named = errand_core::connectors::KNOWN
+                .iter()
+                .find(|c| c.id == wanted)
+                .map_or(wanted, |c| c.name);
+            let reason = format!(
+                "Stopped looking. {named} is not connected, so there is nothing to look at. It \
+                 can be turned on under Settings, and this started again under Watch."
+            );
+            return stop_watching(app, conversation, &reason);
+        }
+    }
+    if matches!(watch.look, watch::Look::Diary(_)) {
+        match errand_core::diary::access() {
+            errand_core::diary::Access::Allowed => {}
+            // Asked, and this look is skipped rather than counted as failing:
+            // the dialog may wait an hour for somebody to come back, and a
+            // watch that stopped itself meanwhile would be one more thing to
+            // start again.
+            errand_core::diary::Access::NotAskedYet => {
+                errand_core::diary::ask_in_the_background();
+                let held: State<Held> = app.state();
+                return held
+                    .store
+                    .looked(
+                        conversation,
+                        None,
+                        None,
+                        was.seeing.as_deref(),
+                        was.unsettled,
+                        was.misses,
+                    )
+                    .map_err(|e| e.to_string());
+            }
+            errand_core::diary::Access::Refused => {
+                let reason = format!("Stopped looking. {}", errand_core::diary::REFUSED);
+                return stop_watching(app, conversation, &reason);
+            }
+        }
+    }
+
+    let seen = match watch::look_again(watch, was.saw.as_deref()).await {
         Ok(seen) => seen,
         Err(why) => {
             // Counted rather than retried for ever. A watch on an address that
@@ -2531,8 +2583,9 @@ async fn look_once(
     };
 
     match watch::compare(was.saw.as_deref(), was.seeing.as_deref(), &seen.mark) {
-        // Nothing was known. This is now what is known, and nobody is woken.
-        watch::Next::FirstSight => {
+        // Nothing was known, or there is less than there was: mail was read,
+        // a meeting began. This is now what is known, and nobody is woken.
+        watch::Next::FirstSight | watch::Next::Fewer => {
             let held: State<Held> = app.state();
             held.store
                 .looked(conversation, Some(&seen.mark), Some(&seen.note), None, 0, 0)
@@ -2649,6 +2702,18 @@ async fn look_once(
             Ok(())
         }
     }
+}
+
+/// Stop a watch, and say why in its own conversation.
+fn stop_watching(app: &AppHandle, conversation: &str, reason: &str) -> Result<(), String> {
+    let held: State<Held> = app.state();
+    held.store
+        .pause_watch(conversation, reason)
+        .map_err(|e| e.to_string())?;
+    held.store
+        .noted(conversation, reason)
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Switch off a routine or a watch whose runs keep failing, and say so once.
@@ -3971,6 +4036,7 @@ fn keep_an_eye_on(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
     let read = watch::Watch::read(&together)?;
 
     let held: State<Held> = app.state();
+    may_watch(&held, &asked.from, &read).map_err(anyhow::Error::msg)?;
     held.store.watch(&asked.from, Some(&together), Some(what))?;
     Ok(format!(
         "Set. {}\n\nIt is under Watch, where it can be changed or stopped.",
@@ -5819,38 +5885,78 @@ async fn watch_it(
     write_it_down_if_new(&app, &held, &id)?;
     if let Some(said) = watches.as_deref() {
         let watch = watch::Watch::read(said).map_err(|e| format!("{e:#}"))?;
-
-        // A watch on a folder the agent writes into is a loop that feeds
-        // itself, and it is the easiest mistake here to make. Refused in both
-        // directions rather than warned about.
-        if let watch::Look::Here(at) = &watch.look {
-            let home = held
-                .store
-                .conversation(&id)
-                .map_err(|e| e.to_string())?
-                .and_then(|c| held.store.agent(&c.agent).ok().flatten())
-                .map(|a| std::path::PathBuf::from(a.cwd));
-            if let Some(home) = home {
-                if at.starts_with(&home) || home.starts_with(at) {
-                    return Err(format!(
-                        "{} is where this agent works, so watching it would wake it up with its own work and never stop. Watch somewhere else.",
-                        at.display()
-                    ));
-                }
-            }
-        }
-
-        let already = held.store.watchers().map_err(|e| e.to_string())?;
-        if already.len() >= watch::AT_MOST_WATCHES && !already.iter().any(|c| c.id == id) {
-            return Err(format!(
-                "There are already {} watches, which is as many as this keeps track of. Stop one first.",
-                watch::AT_MOST_WATCHES
-            ));
-        }
+        may_watch(&held, &id, &watch)?;
     }
     held.store
         .watch(&id, watches.as_deref(), what.as_deref())
         .map_err(|e| e.to_string())
+}
+
+/// Whether this conversation may watch this, whoever is setting it up.
+///
+/// One set of rules for the window and for an agent. The tool an agent sets a
+/// watch with used to skip them, so an agent could watch the folder it writes
+/// into, a loop that feeds itself, which the window had always refused.
+fn may_watch(held: &Held, id: &str, watch: &watch::Watch) -> Result<(), String> {
+    // A watch on a folder the agent writes into is a loop that feeds itself,
+    // and it is the easiest mistake here to make. Refused in both directions
+    // rather than warned about.
+    if let watch::Look::Here(at) = &watch.look {
+        let home = held
+            .store
+            .conversation(id)
+            .map_err(|e| e.to_string())?
+            .and_then(|c| held.store.agent(&c.agent).ok().flatten())
+            .map(|a| std::path::PathBuf::from(a.cwd));
+        if let Some(home) = home {
+            if at.starts_with(&home) || home.starts_with(at) {
+                return Err(format!(
+                    "{} is where this agent works, so watching it would wake it up with its own work and never stop. Watch somewhere else.",
+                    at.display()
+                ));
+            }
+        }
+    }
+
+    // Mail and the calendar are only ever read when somebody has switched
+    // them on, and a watch is no way round that.
+    if let Some(wanted) = watch.needs() {
+        let on = held
+            .store
+            .connected()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|one| one == wanted);
+        if !on {
+            let named = errand_core::connectors::KNOWN
+                .iter()
+                .find(|c| c.id == wanted)
+                .map_or(wanted, |c| c.name);
+            return Err(format!(
+                "{named} is not connected, so this would have nothing to look at. It can be turned on under Settings first."
+            ));
+        }
+    }
+    if matches!(watch.look, watch::Look::Diary(_)) {
+        match errand_core::diary::access() {
+            errand_core::diary::Access::Refused => {
+                return Err(errand_core::diary::REFUSED.to_string());
+            }
+            // Asked now, while somebody is setting this up and so most likely
+            // at the Mac, rather than at the first look, when they may not be.
+            errand_core::diary::Access::NotAskedYet => errand_core::diary::ask_in_the_background(),
+            errand_core::diary::Access::Allowed => {}
+        }
+    }
+
+    let already = held.store.watchers().map_err(|e| e.to_string())?;
+    if already.len() >= watch::AT_MOST_WATCHES && !already.iter().any(|c| c.id == id) {
+        return Err(format!(
+            "There are already {} watches, which is as many as this keeps track of. Stop one first.",
+            watch::AT_MOST_WATCHES
+        ));
+    }
+    Ok(())
 }
 
 /// What this conversation watches, if anything.

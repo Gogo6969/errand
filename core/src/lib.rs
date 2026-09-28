@@ -21,6 +21,7 @@ pub mod changes;
 pub mod claims;
 pub mod claude;
 pub mod connectors;
+pub mod diary;
 pub mod doctor;
 pub mod doorway;
 pub mod elsewhere;

@@ -8,7 +8,7 @@
 //!
 //!     cargo test -p errand-core --test watch_live -- --ignored --nocapture
 
-use errand_core::watch::{compare, look, Look, Next, Watch};
+use errand_core::watch::{compare, look, Next, Watch};
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "reaches the network; run with --ignored"]
@@ -20,7 +20,7 @@ async fn a_page_fetched_twice_without_changing_looks_the_same_both_times() {
         "https://news.ycombinator.com",
         "https://example.com",
     ] {
-        let at = Look::Away(url.to_string());
+        let at = Watch::read(url).expect("a page to watch");
         let Ok(once) = look(&at).await else {
             println!("{url}: could not be reached, skipped");
             continue;
@@ -45,16 +45,16 @@ async fn a_folder_says_it_changed_when_a_file_arrives_and_not_before() {
     std::fs::create_dir_all(&here).unwrap();
     let watch = Watch::read(&format!("{} every 10m", here.display())).expect("a watch");
 
-    let first = look(&watch.look).await.expect("looking");
+    let first = look(&watch).await.expect("looking");
     assert_eq!(compare(None, None, &first.mark), Next::FirstSight);
 
     // Nothing has happened, so nothing has changed.
-    let again = look(&watch.look).await.expect("looking");
+    let again = look(&watch).await.expect("looking");
     assert_eq!(compare(Some(&first.mark), None, &again.mark), Next::Same);
 
     // A part-downloaded file is not a file that arrived.
     std::fs::write(here.join("invoice.pdf.crdownload"), "half").unwrap();
-    let during = look(&watch.look).await.expect("looking");
+    let during = look(&watch).await.expect("looking");
     assert_eq!(
         compare(Some(&first.mark), None, &during.mark),
         Next::Same,
@@ -64,13 +64,13 @@ async fn a_folder_says_it_changed_when_a_file_arrives_and_not_before() {
     // And now it really arrives.
     std::fs::remove_file(here.join("invoice.pdf.crdownload")).unwrap();
     std::fs::write(here.join("invoice.pdf"), "whole").unwrap();
-    let arrived = look(&watch.look).await.expect("looking");
+    let arrived = look(&watch).await.expect("looking");
     assert_eq!(
         compare(Some(&first.mark), None, &arrived.mark),
         Next::Settling,
         "the first sight of a difference is not yet a change"
     );
-    let steady = look(&watch.look).await.expect("looking");
+    let steady = look(&watch).await.expect("looking");
     assert_eq!(
         compare(Some(&first.mark), Some(&arrived.mark), &steady.mark),
         Next::Changed,

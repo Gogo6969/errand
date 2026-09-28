@@ -5054,22 +5054,57 @@ function sayWhatItWouldDo() {
   const what = el.watchWhat.value.trim();
   if (!at && !what) {
     el.watchPlain.textContent =
-      "Name a folder, a file or a web address, choose how often to look, and say what " +
-      "this agent should do when it changes.";
+      "Name a folder, a file or a web address, or type mail or calendar, choose how often " +
+      "to look, and say what this agent should do then.";
     return;
   }
   if (!at) {
-    el.watchPlain.textContent = "Name a folder, a file or a web address to watch.";
+    el.watchPlain.textContent = "Name a folder, a file or a web address to watch, or type mail or calendar.";
     return;
   }
-  const page = /^https?:\/\//i.test(at);
-  const looking = page ? `read ${at}` : `look at ${at}`;
-  const changed = page ? "If the page has changed" : "If anything there has changed";
   const then = what
     ? `it will ask this agent to ${what.replace(/^(please\s+)?/i, "")}.`
     : "it will wake this agent. Say what it should do, above.";
+  const kind = whatKindOfWatch(at);
+  if (kind === "mail") {
+    el.watchPlain.textContent =
+      `It will count your unread mail ${howOftenInWords()}, while Errand is running, window or no ` +
+      `window, and only while Mail is open. If there is more of it, ${then}`;
+    return;
+  }
+  if (kind === "calendar") {
+    el.watchPlain.textContent =
+      `It will look at your calendars ${howOftenInWords()}, while Errand is running, window or no ` +
+      `window. At least ${howLongBefore(at)} before each event, ${then}`;
+    return;
+  }
+  const page = kind === "page";
+  const looking = page ? `read ${at}` : `look at ${at}`;
+  const changed = page ? "If the page has changed" : "If anything there has changed";
   el.watchPlain.textContent =
     `It will ${looking} ${howOftenInWords()}, while Errand is running, window or no window. ${changed}, ${then}`;
+}
+
+/**
+ * Which kind of thing is being named, as far as saying it back goes.
+ *
+ * Only for the sentence. What is saved is read by the app, which refuses
+ * anything it cannot read and says why.
+ */
+function whatKindOfWatch(at) {
+  const words = at.toLowerCase().split(/\s+/).filter(Boolean);
+  const named = words[0] === "my" ? words.slice(1) : words;
+  if (["mail", "new mail", "email", "inbox", "inboxes"].includes(named.join(" "))) return "mail";
+  if (["calendar", "calendars", "diary"].includes(named[0])) return "calendar";
+  return /^https?:\/\//i.test(at) ? "page" : "path";
+}
+
+/** How long before each event a calendar watch wakes somebody, in words. */
+function howLongBefore(at) {
+  const said = at.match(/(\d+)\s*([mhd])\b/i);
+  if (!said) return "15 minutes";
+  const unit = { m: "minute", h: "hour", d: "day" }[said[2].toLowerCase()];
+  return `${said[1]} ${unit}${said[1] === "1" ? "" : "s"}`;
 }
 
 async function drawWatch({ leaveTheFields = false } = {}) {

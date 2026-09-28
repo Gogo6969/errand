@@ -216,10 +216,12 @@ pub fn declarations() -> Vec<Value> {
             "function": {
                 "name": "keep_an_eye_on",
                 "description": format!(
-                    "Wake this conversation when a folder, a file or a web page changes, and \
-                     say what to do then. Use it for `tell me when this changes` rather than \
-                     checking over and over yourself. It appears under Watch, where they can \
-                     see it and stop it. It only looks {}.",
+                    "Wake this conversation when a folder, a file or a web page changes, when \
+                     new mail arrives, or before each event in their calendar, and say what to \
+                     do then. Use it for `tell me when this changes`, `when mail comes in` or \
+                     `before each meeting` rather than checking over and over yourself. Mail \
+                     and the calendar need their connector switched on. It appears under \
+                     Watch, where they can see it and stop it. It only looks {}.",
                     crate::routine::WHILE_RUNNING
                 ),
                 "parameters": {
@@ -227,13 +229,18 @@ pub fn declarations() -> Vec<Value> {
                     "properties": {
                         "watch": {
                             "type": "string",
-                            "description": "A folder, a file, or a web address beginning http"
+                            "description":
+                                "A folder, a file, a web address beginning http, `mail` for new \
+                                 mail in their inboxes, or `calendar 15m before` to be woken that \
+                                 long before each event"
                         },
                         "how_often": {
                             "type": "string",
                             "description":
-                                "`10m`, `1h`, `24h`. A folder may be looked at every 5 minutes \
-                                 at the most often, a web page every 15."
+                                "How often to look: `10m`, `1h`, `24h`. A folder, mail or the \
+                                 calendar may be looked at every 5 minutes at the most often, a \
+                                 web page every 15. For the calendar, `5m`: how early to wake is \
+                                 said in `watch`."
                         },
                         "what": {
                             "type": "string",

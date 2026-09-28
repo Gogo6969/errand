@@ -2692,6 +2692,36 @@ export async function settingAWatchExplainsItself() {
     plain.textContent,
   );
 
+  // Mail and the calendar are named in words, because nobody knows the
+  // address of their own inbox, and each is described as what it is.
+  at.value = "mail";
+  at.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 100));
+  check(
+    "mail is described as counting unread mail, and only while Mail is open",
+    /count your unread mail every hour/.test(plain.textContent) &&
+      /only while Mail is open/.test(plain.textContent) &&
+      /If there is more of it, it will ask this agent to tell me what is new/.test(plain.textContent),
+    plain.textContent,
+  );
+  at.value = "calendar 30m before";
+  at.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 100));
+  check(
+    "a calendar watch is described as waking before each event",
+    /look at your calendars every hour/.test(plain.textContent) &&
+      /At least 30 minutes before each event, it will ask this agent/.test(plain.textContent),
+    plain.textContent,
+  );
+  at.value = "my calendar";
+  at.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 100));
+  check(
+    "and a quarter of an hour when nobody said how long",
+    /At least 15 minutes before each event/.test(plain.textContent),
+    plain.textContent,
+  );
+
   // Saving sends the two controls as the one line the app stores.
   at.value = "~/Downloads";
   at.dispatchEvent(new Event("input"));

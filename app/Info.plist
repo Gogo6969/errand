@@ -4,9 +4,9 @@
 
   A usage string is not a nicety: without one the system refuses the request
   outright rather than showing anybody a prompt, so the feature fails in a way
-  that looks like a bug in the app. Both strings are here because dictation
-  needs both -- the microphone to hear, and speech recognition to turn what it
-  heard into words.
+  that looks like a bug in the app. Dictation needs two -- the microphone to
+  hear, and speech recognition to turn what it heard into words -- and reading
+  calendars needs its own.
 -->
 <plist version="1.0">
 <dict>
@@ -14,5 +14,15 @@
   <string>Errand uses the microphone when you dictate an errand instead of typing it.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>Errand turns what you dictate into the words of an errand.</string>
+  <!--
+    Calendars, read through EventKit, which sees every repeat of a repeating
+    event; the Calendar app's scripting sees only the first. Full access is
+    the newer name for reading them, and the older key is what macOS 12 and
+    13 read instead.
+  -->
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>Errand reads your calendars when an agent is asked what is on, or is set to wake before an event. It never adds, moves or cancels anything.</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>Errand reads your calendars when an agent is asked what is on, or is set to wake before an event. It never adds, moves or cancels anything.</string>
 </dict>
 </plist>
