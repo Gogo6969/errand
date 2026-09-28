@@ -532,6 +532,8 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           case "routine_off":
             routineOff = !!args.off;
             return Promise.resolve(null);
+          case "export_conversation":
+            return Promise.resolve("/Users/you/Desktop/First.md");
           case "how_it_has_been_going":
             return Promise.resolve(fixture.went || []);
           // Where the words actually are, rather than only which agent has

@@ -4207,6 +4207,66 @@ export async function aHandoverThatStopsWaiting() {
 }
 
 /**
+ * A turn the window did not start.
+ *
+ * The clock, a watch, a goal, another agent and the terminal all start turns,
+ * and none of them showed: no request, nothing saying Working, nothing to
+ * stop, until the answer arrived or the conversation was opened again.
+ */
+export async function aTurnSomethingElseStarted() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  await openTalk("talk-outside");
+  const open = document.querySelector('#threads li[aria-current="true"]')?.dataset.agent || "";
+  const row = () =>
+    [...document.querySelectorAll("#threads li")].find((li) => li.dataset.agent === open)?.querySelector(".last")?.textContent || "";
+  const mine = (text) => [...document.querySelectorAll("#messages li.mine")].filter((li) => li.textContent.includes(text)).length;
+
+  tell("noted", { conversation: "talk-outside", seq: 9901, kind: "mine", text: "What moved overnight?" });
+  await settle(200);
+  check("a routine's request appears in the open conversation as it is made", mine("What moved overnight?") === 1, `${mine("What moved overnight?")} on screen`);
+  check("and the agent reads as Working down the side", row() === "Working…", row());
+  const palette = () => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+  };
+  palette();
+  await settle(200);
+  const stop = [...document.querySelectorAll("#palette-list li")].find((li) => li.textContent.startsWith("Stop what it is doing"));
+  check("and it can be stopped from here", stop && stop.getAttribute("aria-disabled") !== "true", stop?.outerHTML.slice(0, 90) || "no Stop in the palette");
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await settle(100);
+  tell("happened", { conversation: "talk-outside", seq: 9902, kind: "done" });
+  await settle(150);
+  check("until it ends", row() !== "Working…", row());
+
+  // The window's own request comes back the same way, and is not shown twice.
+  document.getElementById("what").value = "Anything else?";
+  document.getElementById("composer").requestSubmit();
+  await settle(250);
+  tell("noted", { conversation: "talk-outside", seq: 9903, kind: "mine", text: "Anything else?" });
+  await settle(200);
+  check("a request the window sent itself is shown once", mine("Anything else?") === 1, `${mine("Anything else?")} on screen`);
+  tell("happened", { conversation: "talk-outside", seq: 9904, kind: "done" });
+  await settle(150);
+
+  // Something the window did, said in the conversation while a turn runs, is
+  // not the end of the turn, and a success is not said in red.
+  tell("happened", { conversation: "talk-outside", seq: 9905, kind: "doing", what: "Reading the page", tool: "Bash", call: "x1" });
+  await settle(150);
+  palette();
+  await settle(200);
+  [...document.querySelectorAll("#palette-list li")].find((li) => li.textContent.startsWith("Export this conversation"))?.click();
+  await settle(300);
+  const saved = [...document.querySelectorAll("#messages li.ended")].pop();
+  check("saving a copy says where, and not as a failure", /Saved to/.test(saved?.textContent || "") && !saved.classList.contains("failed"), `${saved?.className}: ${saved?.textContent}`);
+  check("and the turn still going is still going", row() === "Working…", row());
+  tell("happened", { conversation: "talk-outside", seq: 9906, kind: "done" });
+  await settle(150);
+  return found;
+}
+
+/**
  * A schedule an agent switched on or off itself, because it was asked to.
  *
  * The clock beside a conversation's name was set by the window's own buttons

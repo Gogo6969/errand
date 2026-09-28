@@ -46,13 +46,25 @@ function itHasStopped(talk) {
 }
 
 function complain(why) {
+  tellHere(why, true);
+}
+
+/**
+ * A line from the window, rather than the agent, in the conversation on screen.
+ *
+ * Not the end of a turn. What it says about is something the window tried, a
+ * rename, a link, the microphone, and the agent may be half way through an
+ * answer that is still coming: ending the turn here drew the conversation as
+ * stopped while it carried on. And not always a failure. "Saved to" was said
+ * in red.
+ */
+function tellHere(text, failed = false) {
   const t = talking();
   if (!t) {
-    document.getElementById("thread-name").textContent = why;
+    document.getElementById("thread-name").textContent = text;
     return;
   }
-  itHasStopped(t);
-  t.messages.push({ kind: "ended", failed: true, text: why });
+  t.messages.push({ kind: "ended", failed, text });
   drawMessages();
 }
 
@@ -1886,9 +1898,27 @@ listen("settled", async ({ payload }) => {
  * nothing more is going to happen. Waiting for somebody to click away and back
  * before it appears would hide it at exactly the moment it is about.
  */
-listen("noted", ({ payload }) => {
-  const t = talks.get(payload.conversation);
+listen("noted", async ({ payload }) => {
+  // A request can be the first line of a conversation this window has not
+  // met: an agent asked from the terminal gets one of its own.
+  const t =
+    talks.get(payload.conversation) ||
+    (payload.kind === "mine" ? await meet(payload.conversation) : null);
   if (!t) return;
+  if (payload.kind === "mine") {
+    // This window's own, back with where it landed. It is on screen already.
+    const own = t.messages.find(
+      (m) => m.kind === "mine" && (m.seq === payload.seq || (m.seq == null && m.text === payload.text)),
+    );
+    if (own) {
+      own.seq ??= payload.seq;
+      return;
+    }
+    // Anybody else's starts a turn the window did not start: the clock, a
+    // watch, a goal, another agent or the terminal. Shown as working, so it
+    // can be seen and stopped like any other.
+    t.working = true;
+  }
   // Through the same reader a reload goes through, so a line that arrives live
   // and the same line read back tomorrow are the same thing. Pushed straight in
   // as its own kind, it drew as nothing at all live and drew fine after a
@@ -2003,6 +2033,9 @@ listen("happened", async ({ payload }) => {
     // of dots and then a wall of text -- the exact thing this app says reads as
     // a hang rather than as thinking.
     case "said":
+      // Words mean a turn is going, whoever started it. A window reopened in
+      // the middle of one never saw it begin.
+      t.working = true;
       if (payload.settled) {
         t.writing = "";
         t.messages.push({ kind: "said", text: payload.text, seq: payload.seq });
@@ -2016,6 +2049,7 @@ listen("happened", async ({ payload }) => {
       break;
 
     case "doing":
+      t.working = true;
       t.messages.push({
         kind: "doing",
         text: payload.what,
@@ -3510,7 +3544,7 @@ function whatCouldBeDone() {
 
   add("Export this conversation", "to the Desktop", async () => {
     const onto = await invoke("export_conversation", { id: showing });
-    complain(`Saved to ${onto}`);
+    tellHere(`Saved to ${onto}`);
   }, !!showing);
   add("New conversation with this agent", a?.name || "", () => alsoAsk(), !!a);
   add("New agent", "", () => start());

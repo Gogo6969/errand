@@ -1162,6 +1162,21 @@ async fn say(
             return Err(why);
         }
     };
+    // Told to the window, whoever said it. The clock, a watch, a goal, another
+    // agent and the terminal all start turns here, and the window showed none
+    // of them: no request, no Working, nothing to stop, until the answer
+    // arrived or the conversation was opened again. The window's own requests
+    // come back this way too, and it knows them.
+    let _ = app.emit(
+        "noted",
+        Noted {
+            conversation: id.clone(),
+            seq: written.seq,
+            kind: "mine".to_string(),
+            text: text.clone(),
+            said_by: None,
+        },
+    );
 
     // A room has no engine of its own. What was said goes round the members,
     // on a task of this turn's own, so the window gets its line back now and
