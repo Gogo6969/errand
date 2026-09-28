@@ -395,19 +395,67 @@ function howLongAgo(at) {
  */
 const halfTyped = new Map();
 
+/**
+ * The pictures waiting to go, per conversation, for the same reason.
+ *
+ * They were kept for the window rather than for a conversation, so a
+ * screenshot pasted for one agent went to whichever agent was spoken to next,
+ * and on to its provider.
+ */
+const picturesWaiting = new Map();
+
+/**
+ * Which conversation the box is holding the words of, if any.
+ *
+ * Between leaving one conversation and the next one being drawn there can be
+ * a round trip to the store, and a second switch in that gap put the first
+ * conversation's draft down as the second's.
+ */
+let theBoxHolds = null;
+
+/**
+ * Where Up and Down have walked to through what was asked before. Here with
+ * the rest of what the box is holding, because it is a place in one
+ * conversation's list and meant nothing in the next one's.
+ */
+let walkedBack = null;
+
 function putItDown(id) {
   if (!id || !el.what) return;
   const said = el.what.value;
-  if (said.trim()) halfTyped.set(id, said);
-  else halfTyped.delete(id);
+  if (theBoxHolds === id) {
+    if (said.trim()) halfTyped.set(id, said);
+    else halfTyped.delete(id);
+    if (attached.length) picturesWaiting.set(id, attached);
+    else picturesWaiting.delete(id);
+  } else {
+    // Typed while it was still being opened, before its own draft was put
+    // back. Kept, but never in place of the draft that was waiting for it.
+    if (said.trim() && !halfTyped.has(id)) halfTyped.set(id, said);
+    if (attached.length && !picturesWaiting.has(id)) picturesWaiting.set(id, attached);
+  }
+  theBoxHolds = null;
+  el.what.value = "";
+  attached = [];
+  drawAttached();
+  walkedBack = null;
+  // Dictation writes into the box, and the box is about to be somebody
+  // else's.
+  stopListening();
 }
 
 function pickItBackUp(id) {
   if (!el.what) return;
-  el.what.value = halfTyped.get(id) || "";
+  // Anything in the box now was typed or pasted while this was being opened,
+  // since leaving the last conversation emptied it. The draft that was
+  // waiting comes first; what arrived in between is not thrown away.
+  el.what.value = halfTyped.get(id) || el.what.value;
   el.what.style.height = "auto";
   el.what.style.height =
     Math.min(el.what.scrollHeight, window.innerHeight * 0.4) + "px";
+  attached = [...(picturesWaiting.get(id) || []), ...attached];
+  drawAttached();
+  theBoxHolds = id;
 }
 
 /**
@@ -680,6 +728,11 @@ async function show(id) {
     t.members = members || [];
     t.messages = lines.map((line) => fromStore(line, live));
     t.loaded = true;
+    // Somebody moved on while this was being read. What was read is kept for
+    // when they come back; everything below is about the conversation on
+    // screen, and that is now another one. Carried on, it put this one's
+    // draft into the other's box and marked this one read, unseen.
+    if (showing !== id) return;
   }
 
   // Drawn from what is already known, before anything slow is started. This
@@ -1456,8 +1509,12 @@ function draw(m) {
       // And there is no answer to hang the ordinary "Ask again" on, because
       // never getting one is the whole of what happened.
       if (m.cutOff) {
+        // The request above this ending, not the newest in the conversation.
+        // The newest could be anything asked since, "delete the drafts
+        // folder" included, and that is what this button used to send.
         const t = talking();
-        const asked = t && [...t.messages].reverse().find((x) => x.kind === "mine");
+        const at = t ? t.messages.indexOf(m) : -1;
+        const asked = at > 0 && t.messages.slice(0, at).reverse().find((x) => x.kind === "mine");
         if (asked) {
           const again = document.createElement("button");
           again.type = "button";
@@ -2253,8 +2310,23 @@ el.form.addEventListener("submit", (e) => {
   halfTyped.delete(showing);
   el.what.value = "";
   el.what.style.height = "auto";
-  sayIt(text || "What is this?");
+  sayIt(text || "What is this?", takeThePictures());
 });
+
+/**
+ * The pictures waiting in the box, taken so they go once.
+ *
+ * Only sending from the box takes them. "Ask again", "Run it again" and
+ * trying a routine say words of their own, and took whatever screenshot was
+ * waiting for the next thing somebody meant to type.
+ */
+function takeThePictures() {
+  const going = attached.map((one) => one.url);
+  attached = [];
+  picturesWaiting.delete(showing);
+  drawAttached();
+  return going;
+}
 
 /**
  * Anything pasted that is a picture rather than words.
@@ -2356,12 +2428,9 @@ function showThePictures(node, m) {
 }
 
 /** Say something to the thread that is open, from wherever it was typed. */
-async function sayIt(text) {
+async function sayIt(text, going = []) {
   const t = talking();
   if (!t) return;
-  const going = attached.map((one) => one.url);
-  attached = [];
-  drawAttached();
   // Shown from the moment it is sent, out of what is already in hand, rather
   // than waiting for a round trip to disk and back to see what was attached.
   const mine = { kind: "mine", text, showing: going };
@@ -2393,8 +2462,7 @@ async function sayIt(text) {
 // way a terminal does, because the second thing you ask is usually the first
 // thing again with one word changed. Only from an empty box, or while already
 // walking, so it never steals the arrow keys from somebody editing a sentence.
-let walkedBack = null;
-
+// Where the walk has got to is kept with the box, beside `halfTyped`.
 el.what.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();

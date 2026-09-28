@@ -3502,7 +3502,7 @@ export async function aTurnTheAppWasClosedDuring() {
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
 
   await openTalk("talk-cut-off");
-  const ended = document.querySelector("#messages li.ended");
+  const ended = [...document.querySelectorAll("#messages li.ended")].find((li) => li.querySelector("button.again"));
   check("it says what happened rather than showing nothing", ended, String(!!ended));
   check(
     "and says the words that were already written are still there",
@@ -3520,7 +3520,7 @@ export async function aTurnTheAppWasClosedDuring() {
   await new Promise((r) => setTimeout(r, 400));
   const sent = asked.filter((a) => a.name === "say").slice(-1)[0];
   check(
-    "pressing it asks the question again, not the apology",
+    "pressing it asks the question it cut off, not the apology and not the newest request",
     asked.filter((a) => a.name === "say").length > before &&
       sent?.args?.text === "Show me the most important news of today",
     JSON.stringify(sent?.args?.text),
@@ -3733,6 +3733,32 @@ export async function seeingItBeforeYouSendIt() {
     String(strip.querySelector(".attached-one img")?.src || "").slice(0, 22),
   );
   strip.querySelector(".attached-one .take-off")?.click();
+  await new Promise((r) => setTimeout(r, 150));
+
+  // A picture belongs to the conversation it was pasted into. It went to
+  // whichever agent was spoken to next.
+  window.__ATTACH__({ name: "for-talk-1.png", url: pasted });
+  await new Promise((r) => setTimeout(r, 150));
+  // A conversation no check after this one opens, with nothing waiting in
+  // it, since sending leaves a line there.
+  await openTalk("talk-overnight");
+  check("a picture waiting in one conversation is not waiting in the next", strip.hidden, `hidden=${strip.hidden}, ${strip.querySelectorAll(".attached-one").length} shown`);
+  const says = asked.length;
+  document.getElementById("what").value = "Anything new?";
+  document.getElementById("composer").requestSubmit();
+  await new Promise((r) => setTimeout(r, 300));
+  const went = asked.slice(says).find((a) => a.name === "say");
+  check("and sending there sends no picture", went && !went.args?.attached, JSON.stringify(went?.args || "nothing sent"));
+  tell("happened", { conversation: "talk-overnight", seq: 9851, kind: "done" });
+  await new Promise((r) => setTimeout(r, 150));
+  await openTalk("talk-1");
+  check(
+    "coming back, it is waiting where it was pasted",
+    !strip.hidden && strip.querySelector(".attached-one img")?.alt === "for-talk-1.png",
+    strip.querySelector(".attached-one img")?.alt || "nothing waiting",
+  );
+  strip.querySelector(".attached-one .take-off")?.click();
+  await new Promise((r) => setTimeout(r, 150));
 
   // And the warning, which has to be there before anything is typed.
   const trouble = document.getElementById("trouble");

@@ -151,6 +151,10 @@ export const FIXTURE = {
       { seq: 1, at: Date.now() - 60000, kind: "mine", text: "Show me the most important news of today", call: null, tool: null, outcome: null },
       { seq: 2, at: Date.now() - 30000, kind: "ended", call: "cut-off", tool: null, outcome: null,
         text: "Errand was closed while this was running, so it stopped part way. Nothing already written down was lost." },
+      // Asked since, so the newest request is not the one that was cut off.
+      // Run it again sent this one.
+      { seq: 3, at: Date.now() - 20000, kind: "mine", text: "Delete the drafts folder", call: null, tool: null, outcome: null },
+      { seq: 4, at: Date.now() - 10000, kind: "said", text: "Done: the drafts folder is gone.", call: null, tool: null, outcome: null },
     ],
     // A conversation an agent carried on while nobody was looking: yesterday's
     // briefing and today's, one under the other. Dated rather than numbered,
