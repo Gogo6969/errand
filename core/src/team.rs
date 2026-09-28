@@ -954,6 +954,95 @@ pub fn started_again(was_paused: bool) -> String {
     }
 }
 
+/// What each agent is called where it has to be told apart from the others:
+/// its name, with a number after it when another agent has the same one.
+///
+/// Two agents came to be called "Inbox Watch (Mail)", name and role the same,
+/// and anything asking for one by name got whichever had last been spoken to,
+/// with nothing to say it might have been the other. Numbered in the order
+/// they were made, so a number never moves to a different agent when one of
+/// them is used.
+pub fn told_apart(agents: &[crate::store::Agent]) -> Vec<String> {
+    agents
+        .iter()
+        .map(|one| {
+            let mut same: Vec<&crate::store::Agent> = agents
+                .iter()
+                .filter(|other| other.name.eq_ignore_ascii_case(&one.name))
+                .collect();
+            if same.len() < 2 {
+                return one.name.clone();
+            }
+            same.sort_by(|a, b| (a.started_at, &a.id).cmp(&(b.started_at, &b.id)));
+            let place = same
+                .iter()
+                .position(|other| other.id == one.id)
+                .unwrap_or(0);
+            format!("{} #{}", one.name, place + 1)
+        })
+        .collect()
+}
+
+/// The agent somebody means, by name or by the numbered name `who_else` gives
+/// when two share one, or a sentence saying why it cannot be told.
+pub fn the_one_called<'a>(
+    agents: &'a [crate::store::Agent],
+    named: &str,
+) -> Result<&'a crate::store::Agent, String> {
+    let named = named.trim();
+    let labels = told_apart(agents);
+    let as_labelled = labels
+        .iter()
+        .position(|label| label.eq_ignore_ascii_case(named));
+    if let Some(at) = as_labelled {
+        if labels[at] != agents[at].name {
+            return Ok(&agents[at]);
+        }
+    }
+    let same: Vec<usize> = (0..agents.len())
+        .filter(|&at| agents[at].name.eq_ignore_ascii_case(named))
+        .collect();
+    match same.as_slice() {
+        [] => Err(format!("there is nobody here called {named}")),
+        [only] => Ok(&agents[*only]),
+        many => Err(format!(
+            "there are {} agents called {named}, so it is not clear which one is meant. Ask \
+             again with one of these names: {}",
+            many.len(),
+            many.iter()
+                .map(|&at| {
+                    format!(
+                        "{} ({}): {}",
+                        labels[at],
+                        agents[at].title.as_deref().unwrap_or("no role"),
+                        agents[at]
+                            .about
+                            .as_deref()
+                            .unwrap_or("has not said what it handles")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        )),
+    }
+}
+
+/// A name no other agent here has: the one chosen, or it with the first free
+/// number after it.
+///
+/// For an agent settling on a name for itself. One a person gives by hand is
+/// theirs to give, and asking by it says when it is shared.
+pub fn a_name_of_its_own(chosen: &str, taken: &[String]) -> String {
+    let free = |name: &str| !taken.iter().any(|t| t.eq_ignore_ascii_case(name));
+    if free(chosen) {
+        return chosen.to_string();
+    }
+    (2..)
+        .map(|n| format!("{chosen} {n}"))
+        .find(|name| free(name))
+        .unwrap_or_else(|| chosen.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1349,5 +1438,88 @@ mod tests {
             in_plain_words(Ours::StopRepeating, &json!({ "everywhere": true })),
             "Switching off everything it has repeating"
         );
+    }
+
+    fn an_agent(id: &str, name: &str, about: &str, started_at: i64) -> crate::store::Agent {
+        crate::store::Agent {
+            id: id.into(),
+            name: name.into(),
+            title: Some("Mail".into()),
+            about: Some(about.into()),
+            mark: None,
+            hue: None,
+            asks: "auto".into(),
+            pinned: false,
+            hidden: false,
+            cwd: "/tmp".into(),
+            model: None,
+            started_at,
+            spoke_at: started_at,
+            engine: "local".into(),
+            engine_settings: None,
+            paused_at: None,
+        }
+    }
+
+    #[test]
+    fn two_agents_with_one_name_are_told_apart_in_the_order_they_were_made() {
+        // Listed most recently spoken to first, which is how the store lists
+        // them: the numbers follow when each was made, not the list.
+        let all = vec![
+            an_agent("b", "Inbox Watch", "I check your mailboxes", 200),
+            an_agent("c", "Ledger", "Keeps the books", 150),
+            an_agent("a", "Inbox Watch", "Reads the unread post", 100),
+        ];
+        assert_eq!(
+            told_apart(&all),
+            ["Inbox Watch #2", "Ledger", "Inbox Watch #1"]
+        );
+    }
+
+    #[test]
+    fn asking_for_a_name_two_agents_share_says_so_rather_than_picking_one() {
+        let all = vec![
+            an_agent("b", "Inbox Watch", "I check your mailboxes", 200),
+            an_agent("a", "Inbox Watch", "Reads the unread post", 100),
+        ];
+        let why = the_one_called(&all, "inbox watch").unwrap_err();
+        assert!(
+            why.contains("there are 2 agents called inbox watch"),
+            "{why}"
+        );
+        assert!(
+            why.contains("Inbox Watch #1 (Mail): Reads the unread post"),
+            "{why}"
+        );
+        assert!(
+            why.contains("Inbox Watch #2 (Mail): I check your mailboxes"),
+            "{why}"
+        );
+        // And the numbered names it offers reach the one they name.
+        assert_eq!(the_one_called(&all, "Inbox Watch #1").unwrap().id, "a");
+        assert_eq!(the_one_called(&all, "inbox watch #2").unwrap().id, "b");
+    }
+
+    #[test]
+    fn a_name_only_one_agent_has_reaches_it_and_one_nobody_has_says_so() {
+        let all = vec![
+            an_agent("c", "Ledger", "Keeps the books", 150),
+            an_agent("a", "Inbox Watch", "Reads the unread post", 100),
+        ];
+        assert_eq!(the_one_called(&all, " ledger ").unwrap().id, "c");
+        // A number where there is nothing to tell apart is not a name here.
+        assert!(the_one_called(&all, "Ledger #1").is_err());
+        assert_eq!(
+            the_one_called(&all, "Scout").unwrap_err(),
+            "there is nobody here called Scout"
+        );
+    }
+
+    #[test]
+    fn an_agent_settling_on_a_name_already_taken_gets_the_next_free_number() {
+        let taken = vec!["Inbox Watch".to_string(), "inbox watch 2".to_string()];
+        assert_eq!(a_name_of_its_own("Ledger", &taken), "Ledger");
+        assert_eq!(a_name_of_its_own("Inbox Watch", &taken), "Inbox Watch 3");
+        assert_eq!(a_name_of_its_own("INBOX WATCH", &taken), "INBOX WATCH 3");
     }
 }

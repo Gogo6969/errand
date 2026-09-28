@@ -789,7 +789,19 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                         let Some((agent, said)) = settling.lock().unwrap().remove(&id) else {
                             continue;
                         };
-                        if let Some(on) = read_what_it_settled_on(&said) {
+                        if let Some(mut on) = read_what_it_settled_on(&said) {
+                            // Not a name another agent already has: nobody asking
+                            // for one of two agents with one name can say which.
+                            let taken: Vec<String> = store
+                                .agents()
+                                .map(|all| {
+                                    all.into_iter()
+                                        .filter(|a| a.id != agent)
+                                        .map(|a| a.name)
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            on.name = team::a_name_of_its_own(&on.name, &taken);
                             if let Err(e) = store.settled_on(&agent, &on) {
                                 eprintln!("could not write down who {agent} is: {e}");
                             } else {
@@ -4202,15 +4214,18 @@ async fn run_skill(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Strin
 fn who_else(app: &AppHandle, from: &str) -> anyhow::Result<String> {
     let held: State<Held> = app.state();
     let mine = held.store.conversation(from)?.map(|c| c.agent);
-    let others: Vec<String> = held
-        .store
-        .agents()?
+    let everybody = held.store.agents()?;
+    // Told apart by number where two share a name, and the numbers are what
+    // `ask` takes, so the name an agent is shown here is one that reaches it.
+    let labels = team::told_apart(&everybody);
+    let others: Vec<String> = everybody
         .into_iter()
-        .filter(|a| Some(&a.id) != mine.as_ref() && a.name != NOT_YET_NAMED)
-        .map(|a| {
+        .zip(labels)
+        .filter(|(a, _)| Some(&a.id) != mine.as_ref() && a.name != NOT_YET_NAMED)
+        .map(|(a, label)| {
             format!(
                 "  {} ({}) -- {}",
-                a.name,
+                label,
                 a.title.unwrap_or_else(|| "no role".into()),
                 a.about
                     .unwrap_or_else(|| "has not said what it handles".into())
@@ -4248,12 +4263,10 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
     let (them, mine) = {
         let held: State<Held> = app.state();
         let mine = held.store.conversation(&asked.from)?.map(|c| c.agent);
-        let them = held
-            .store
-            .agents()?
-            .into_iter()
-            .find(|a| a.name.eq_ignore_ascii_case(named.trim()))
-            .ok_or_else(|| anyhow::anyhow!("there is nobody here called {named}"))?;
+        let everybody = held.store.agents()?;
+        let them = team::the_one_called(&everybody, named)
+            .map_err(anyhow::Error::msg)?
+            .clone();
         (them, mine)
     };
     anyhow::ensure!(
