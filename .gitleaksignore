@@ -1,0 +1,10 @@
+# Findings the secret scan in CI may pass over, one fingerprint a line.
+#
+# Both are invented values in a test of the note that refuses to write a key
+# down, added in ae72ff0: a Stripe-shaped key split in two, which the scanner
+# still reads as one because a comma after "secret is" is where it expects a
+# value, and a JWT-shaped bearer token. Neither was ever a real key. The test
+# has built its keys at run time since e658e35, so nothing new should ever
+# need adding here; the old commit stays in the history the scan reads.
+ae72ff04cf58792c4a4252bb2189de7439ef4b9b:core/src/memory.rs:generic-api-key:440
+ae72ff04cf58792c4a4252bb2189de7439ef4b9b:core/src/memory.rs:jwt:442
