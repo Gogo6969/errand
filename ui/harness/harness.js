@@ -356,6 +356,11 @@ export const FIXTURE = {
     { conversation: "talk-1", agent: "agent-unnamed", who: "Pulse Keeper", name: "First", kind: "routine", at: "every 5m", what: "Write one small pulse file", due: null, off: false, stopped: null, paused: true },
     { conversation: "talk-4", agent: "agent-bitcoin", who: "Bitcoin Desk", name: "Answered a few", kind: "watch", at: "https://example.com every 1h", what: "Tell me what changed", due: null, off: false, stopped: "Stopped looking. It could not be reached 5 times running.", paused: false },
   ],
+  // What one agent may use in a month, and what it has used.
+  limits: {
+    "agent-bitcoin": { tokens: null, dollars: 20, used_tokens: 0, spent_dollars: 4.7 },
+    "agent-hosted": { tokens: null, dollars: null, used_tokens: 1234567, spent_dollars: 0 },
+  },
   // What one agent has been taught.
   skills: {
     "agent-bitcoin": [
@@ -659,6 +664,10 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.notes?.[args.agent] || []);
           case "standing":
             return Promise.resolve(fixture.standing || []);
+          case "limits":
+            return Promise.resolve(
+              fixture.limits?.[args.agent] || { tokens: null, dollars: null, used_tokens: 0, spent_dollars: 0 },
+            );
           // A copy, and one loaded from a file, made the way the app makes
           // them: a new agent with a first conversation of its own.
           case "duplicate":

@@ -4292,6 +4292,68 @@ export async function whatAnAgentRemembers() {
 }
 
 /**
+ * A monthly limit, in dollars for Claude and in tokens for a hosted model.
+ *
+ * Nothing stopped an agent spending: twelve of thirteen ran on paid models and
+ * nothing was even counted.
+ */
+export async function aMonthlyLimit() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  const openWho = async (id) => {
+    [...document.querySelectorAll("#threads li")].find((li) => li.dataset.agent === id)?.click();
+    await settle(500);
+    document.getElementById("thread-name").click();
+    await settle(300);
+  };
+
+  await openWho("agent-bitcoin");
+  const summary = () => document.getElementById("limit-summary").textContent;
+  const used = () => document.getElementById("limit-used").textContent;
+  check("a Claude agent's limit is in dollars, beside what it spent this month", summary() === "Monthly limit: $20" && used() === "Spent $4.70 this month." && document.getElementById("limit-unit").textContent === "Dollars a month", `${summary()} / ${used()}`);
+  document.getElementById("limit-value").value = "30";
+  const setting = asked.length;
+  document.getElementById("limit-form").requestSubmit();
+  await settle(250);
+  const set = asked.slice(setting).find((a) => a.name === "set_limits");
+  check("and changing it sets dollars, not tokens", set?.args?.dollars === 30 && set?.args?.tokens === null, JSON.stringify(set?.args || "nothing asked"));
+  document.getElementById("thread-name").click();
+  await settle(100);
+
+  // A hosted one, counted in tokens.
+  FIXTURE.agents.push({
+    ...FIXTURE.agents[0],
+    id: "agent-hosted",
+    name: "Hosted Scout",
+    engine: "local",
+    pinned: false,
+    hidden: false,
+    paused_at: null,
+    spoke_at: Date.now(),
+  });
+  FIXTURE.conversations["agent-hosted"] = [{ id: "talk-hosted", agent: "agent-hosted", name: "First", opened: true }];
+  tell("happened", { conversation: "talk-hosted", seq: 9991, kind: "said", text: "Hello", settled: true });
+  tell("happened", { conversation: "talk-hosted", seq: 9992, kind: "done" });
+  await settle(400);
+  await openWho("agent-hosted");
+  check("a hosted model's limit is in tokens, beside what it used this month", used() === "Used 1.2M tokens this month." && document.getElementById("limit-unit").textContent === "Tokens a month", `${summary()} / ${used()}`);
+  document.getElementById("limit-value").value = "5M";
+  const tokensAsked = asked.length;
+  document.getElementById("limit-form").requestSubmit();
+  await settle(250);
+  const tokens = asked.slice(tokensAsked).find((a) => a.name === "set_limits");
+  check("and 5M is read as five million tokens", tokens?.args?.tokens === 5000000 && tokens?.args?.dollars === null, JSON.stringify(tokens?.args || "nothing asked"));
+  document.getElementById("limit-value").value = "plenty";
+  document.getElementById("limit-form").requestSubmit();
+  await settle(150);
+  check("and something that is not an amount is refused, saying how to write one", /like 5M or 500k/.test(document.getElementById("limit-says").textContent), document.getElementById("limit-says").textContent);
+  document.getElementById("thread-name").click();
+  await settle(100);
+  return found;
+}
+
+/**
  * An agent copied, saved to a file, and started again from one.
  *
  * Every new agent started from nothing, and one set up with care had to be set

@@ -287,6 +287,23 @@ pub struct StandingJob {
 pub const COPIED_WATCH: &str =
     "Copied from another agent, and not looking until you press Look again.";
 
+/// How much an agent may use in a month. Nothing means no limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Limits {
+    pub tokens: Option<i64>,
+    pub dollars: Option<f64>,
+}
+
+/// A number of tokens the way somebody would say it: 950, 12.4k, 1.3M.
+pub fn tokens_in_words(n: i64) -> String {
+    match n {
+        n if n < 1_000 => n.to_string(),
+        n if n < 10_000 => format!("{:.1}k", n as f64 / 1_000.0),
+        n if n < 1_000_000 => format!("{}k", (n as f64 / 1_000.0).round() as i64),
+        n => format!("{:.1}M", n as f64 / 1_000_000.0),
+    }
+}
+
 /// What one agent has used of one hosted model, over some stretch of time.
 #[derive(Debug, Clone, Serialize)]
 pub struct Using {
@@ -990,6 +1007,10 @@ const CHANGES: &[&str] = &[
          tokens_out   INTEGER NOT NULL
      );
      CREATE INDEX used_when ON used(at);",
+    // How much an agent may use in a month before it is paused: tokens for a
+    // model paid for by the token, dollars for Claude. Nothing means no limit.
+    "ALTER TABLE agents ADD COLUMN token_limit INTEGER;
+     ALTER TABLE agents ADD COLUMN dollar_limit REAL;",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -1996,6 +2017,70 @@ impl Store {
             params![uuid(), agent, conversation, at, dollars, turns],
         )?;
         Ok(())
+    }
+
+    /// How much an agent may use in a month.
+    pub fn limits(&self, agent: &str) -> Result<Limits> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT token_limit, dollar_limit FROM agents WHERE id = ?",
+                [agent],
+                |r| {
+                    Ok(Limits {
+                        tokens: r.get(0)?,
+                        dollars: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    /// Set how much an agent may use in a month, or take the limit away.
+    pub fn set_limits(&self, agent: &str, limits: Limits) -> Result<()> {
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE agents SET token_limit = ?, dollar_limit = ? WHERE id = ?",
+            params![limits.tokens, limits.dollars, agent],
+        )?;
+        Self::only_if_it_is_there(changed, "agent")
+    }
+
+    /// What an agent has used since a moment: tokens of hosted models, and
+    /// dollars of Claude.
+    pub fn spent_by(&self, agent: &str, since: i64) -> Result<(i64, f64)> {
+        let conn = self.conn.lock().unwrap();
+        let tokens: i64 = conn.query_row(
+            "SELECT coalesce(sum(tokens_in + tokens_out), 0) FROM used WHERE agent = ? AND at >= ?",
+            params![agent, since],
+            |r| r.get(0),
+        )?;
+        let dollars: f64 = conn.query_row(
+            "SELECT coalesce(sum(dollars), 0) FROM spending WHERE agent = ? AND at >= ?",
+            params![agent, since],
+            |r| r.get(0),
+        )?;
+        Ok((tokens, dollars))
+    }
+
+    /// Whether an agent has used what it may this month, said as a sentence
+    /// when it has.
+    pub fn over_its_limit(&self, agent: &str, since: i64) -> Result<Option<String>> {
+        let limits = self.limits(agent)?;
+        let (tokens, dollars) = self.spent_by(agent, since)?;
+        if let Some(limit) = limits.tokens.filter(|limit| tokens >= *limit) {
+            return Ok(Some(format!(
+                "It has used {} tokens this month, and its limit is {}.",
+                tokens_in_words(tokens),
+                tokens_in_words(limit)
+            )));
+        }
+        if let Some(limit) = limits.dollars.filter(|limit| dollars >= *limit) {
+            return Ok(Some(format!(
+                "It has spent ${dollars:.2} this month, and its limit is ${limit:.2}."
+            )));
+        }
+        Ok(None)
     }
 
     /// Write down what a turn used of a model paid for by the token.
@@ -4000,6 +4085,64 @@ mod tests {
         // An agent that is not there is said to be not there, not quietly
         // nothing.
         assert!(s.pause("nobody", true, 3_000).is_err());
+    }
+
+    #[test]
+    fn an_agent_over_its_monthly_limit_is_said_to_be_and_one_under_it_is_not() {
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("scout", NOT_YET_NAMED, Path::new("/tmp/scout"))
+            .unwrap();
+        let talk = s.conversations("scout").unwrap()[0].id.clone();
+        let used = |tokens_in| crate::engine::Used {
+            model: "deepseek-v4-flash".into(),
+            by: "api.deepseek.com".into(),
+            tokens_in,
+            tokens_out: 0,
+        };
+        // No limit, no sentence, whatever it used.
+        s.used("scout", &talk, &used(900_000), 10).unwrap();
+        assert_eq!(s.over_its_limit("scout", 0).unwrap(), None);
+
+        s.set_limits(
+            "scout",
+            Limits {
+                tokens: Some(1_000_000),
+                dollars: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(s.limits("scout").unwrap().tokens, Some(1_000_000));
+        assert_eq!(s.over_its_limit("scout", 0).unwrap(), None);
+        s.used("scout", &talk, &used(200_000), 20).unwrap();
+        assert_eq!(
+            s.over_its_limit("scout", 0).unwrap().as_deref(),
+            Some("It has used 1.1M tokens this month, and its limit is 1.0M.")
+        );
+        // Counted from the start of the month it is asked about.
+        assert_eq!(s.over_its_limit("scout", 15).unwrap(), None);
+
+        // Dollars, for Claude.
+        s.set_limits(
+            "scout",
+            Limits {
+                tokens: None,
+                dollars: Some(5.0),
+            },
+        )
+        .unwrap();
+        s.spent("scout", &talk, 6.5, 3, 30).unwrap();
+        assert_eq!(
+            s.over_its_limit("scout", 0).unwrap().as_deref(),
+            Some("It has spent $6.50 this month, and its limit is $5.00.")
+        );
+    }
+
+    #[test]
+    fn tokens_are_said_the_way_somebody_would_say_them() {
+        assert_eq!(tokens_in_words(950), "950");
+        assert_eq!(tokens_in_words(12_400), "12k");
+        assert_eq!(tokens_in_words(7_573), "7.6k");
+        assert_eq!(tokens_in_words(1_279_777), "1.3M");
     }
 
     #[test]

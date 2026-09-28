@@ -2038,6 +2038,13 @@ body.in-a-call #what {
 #skills-list .skill-what { flex: 1 1 14em; min-width: 0; overflow-wrap: anywhere; color: var(--ink-soft); }
 #skills-says:empty { display: none; }
 
+/* How much it may use in a month. */
+#limit { margin-top: 10px; font-size: 13px; }
+#limit summary { color: var(--ink-soft); cursor: pointer; }
+#limit-used { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+#limit-form { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: end; }
+#limit-says:empty { display: none; }
+
 /* Skills offered as a line starting with / is typed. */
 #slash {
   list-style: none;

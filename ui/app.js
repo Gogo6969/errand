@@ -216,6 +216,12 @@ const el = {
   skillsSummary: document.getElementById("skills-summary"),
   skillsList: document.getElementById("skills-list"),
   skillsSays: document.getElementById("skills-says"),
+  limitSummary: document.getElementById("limit-summary"),
+  limitUsed: document.getElementById("limit-used"),
+  limitForm: document.getElementById("limit-form"),
+  limitUnit: document.getElementById("limit-unit"),
+  limitValue: document.getElementById("limit-value"),
+  limitSays: document.getElementById("limit-says"),
   trouble: document.getElementById("trouble"),
   palette: document.getElementById("palette"),
   paletteWhat: document.getElementById("palette-what"),
@@ -3028,6 +3034,70 @@ el.name.addEventListener("click", () => {
   el.whoisName.focus();
   drawNotes();
   drawSkills();
+  drawLimit();
+});
+
+/**
+ * How much this agent may use in a month, beside what it has used this one.
+ *
+ * Dollars for Claude, which says what each errand cost, and tokens for a model
+ * paid for by the token, which is what is counted for those. Past it, the
+ * agent is paused: nothing of it runs on its own until it is started again.
+ */
+async function drawLimit() {
+  const a = whose();
+  if (!a) return;
+  el.limitSays.textContent = "";
+  let seen;
+  try {
+    seen = await invoke("limits", { agent: a.id });
+  } catch (why) {
+    el.limitSays.textContent = String(why);
+    return;
+  }
+  const inDollars = a.on === "claude";
+  const set = inDollars ? seen.dollars : seen.tokens;
+  const said = set == null ? "none" : inDollars ? `$${set}` : tokensSaid(set);
+  el.limitSummary.textContent = `Monthly limit: ${said}`;
+  el.limitUnit.textContent = inDollars ? "Dollars a month" : "Tokens a month";
+  el.limitValue.value = set == null ? "" : inDollars ? String(set) : tokensSaid(set);
+  el.limitUsed.textContent = inDollars
+    ? `Spent $${seen.spent_dollars.toFixed(2)} this month.`
+    : `Used ${tokensSaid(seen.used_tokens)} tokens this month.`;
+}
+
+/** "5M", "500k", "2,000,000" or "$20" as a number; nothing for no limit. */
+function anAmount(text) {
+  const said = String(text).trim().replace(/[$,\s]/g, "").toLowerCase();
+  if (!said) return null;
+  const read = said.match(/^(\d+(?:\.\d+)?)([km]?)$/);
+  if (!read) return NaN;
+  return parseFloat(read[1]) * (read[2] === "m" ? 1e6 : read[2] === "k" ? 1e3 : 1);
+}
+
+el.limitForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const a = whose();
+  if (!a) return;
+  const inDollars = a.on === "claude";
+  const amount = anAmount(el.limitValue.value);
+  if (Number.isNaN(amount)) {
+    el.limitSays.textContent = inDollars ? "Say it in dollars, like 20." : "Say it in tokens, like 5M or 500k.";
+    return;
+  }
+  try {
+    await invoke("set_limits", {
+      agent: a.id,
+      tokens: inDollars || amount === null ? null : Math.round(amount),
+      dollars: inDollars ? amount : null,
+    });
+  } catch (why) {
+    el.limitSays.textContent = String(why);
+    return;
+  }
+  await drawLimit();
+  el.limitSays.textContent =
+    amount === null ? "No limit." : "Kept. Past it, it is paused, and its conversation says why.";
 });
 
 /** Each agent's skills, as last read from the app. */

@@ -225,6 +225,21 @@
           <ul id="skills-list"></ul>
           <p id="skills-says"></p>
         </details>
+        <!--
+          How much it may use in a month before it is paused: dollars for
+          Claude, tokens for a model paid for by the token.
+        -->
+        <details id="limit">
+          <summary id="limit-summary">Monthly limit</summary>
+          <p id="limit-used"></p>
+          <form id="limit-form">
+            <label><span id="limit-unit">Tokens a month</span>
+              <input id="limit-value" type="text" inputmode="decimal" placeholder="No limit" autocomplete="off" />
+            </label>
+            <button type="submit">Keep</button>
+          </form>
+          <p id="limit-says"></p>
+        </details>
       </aside>
 
       <!--

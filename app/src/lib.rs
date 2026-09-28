@@ -758,6 +758,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                         eprintln!("could not write down what {id} used: {why}");
                     }
                 }
+                when_it_is_over_its_limit(&app, &store, &id);
                 continue;
             }
             // From an engine that has been put away, whether stopped, paused,
@@ -964,6 +965,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                     ) {
                         eprintln!("could not write down what {id} cost: {why}");
                     }
+                    when_it_is_over_its_limit(&app, &store, &id);
                 }
             }
 
@@ -2131,6 +2133,16 @@ struct WhatItCost {
     nothing_yet: bool,
 }
 
+/// Midnight at the start of this month, here, which a monthly limit counts
+/// from.
+fn the_start_of_this_month() -> i64 {
+    let now = chrono::Local::now();
+    chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .and_then(|t| t.and_local_timezone(*now.offset()).earliest())
+        .map_or(0, |t| t.timestamp_millis())
+}
+
 #[tauri::command]
 async fn what_it_cost(held: State<'_, Held>) -> Result<WhatItCost, String> {
     let now = chrono::Local::now();
@@ -2141,10 +2153,7 @@ async fn what_it_cost(held: State<'_, Held>) -> Result<WhatItCost, String> {
         .and_hms_opt(0, 0, 0)
         .and_then(|t| t.and_local_timezone(*now.offset()).earliest())
         .map_or(0, |t| t.timestamp_millis());
-    let month = chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
-        .and_then(|d| d.and_hms_opt(0, 0, 0))
-        .and_then(|t| t.and_local_timezone(*now.offset()).earliest())
-        .map_or(0, |t| t.timestamp_millis());
+    let month = the_start_of_this_month();
 
     let today = held
         .store
@@ -5301,6 +5310,97 @@ async fn routines(held: State<'_, Held>) -> Result<Vec<Routine>, String> {
         .collect())
 }
 
+/// Pause an agent that has used what it may this month, and say so once.
+///
+/// Pause rather than refuse: nothing of it runs on its own from here, which is
+/// where the money went unwatched, and it still answers when somebody speaks
+/// to it, which is somebody choosing to spend. The turn that crossed the line
+/// finishes, because stopping it would throw away what it was paid for.
+fn when_it_is_over_its_limit(app: &AppHandle, store: &Store, id: &str) {
+    let Ok(Some(talk)) = store.conversation(id) else {
+        return;
+    };
+    let Ok(Some(agent)) = store.agent(&talk.agent) else {
+        return;
+    };
+    if agent.paused_at.is_some() {
+        return;
+    }
+    let Ok(Some(why)) = store.over_its_limit(&agent.id, the_start_of_this_month()) else {
+        return;
+    };
+    if store
+        .pause(&agent.id, true, chrono::Local::now().timestamp_millis())
+        .is_err()
+    {
+        return;
+    }
+    let _ = app.emit(
+        "paused",
+        Paused {
+            agent: agent.id.clone(),
+            paused: true,
+        },
+    );
+    let said = format!(
+        "Paused: {why} Nothing of it runs on its own until it is started again, and it \
+         still answers when spoken to. The limit is under its name, beside what it has used."
+    );
+    if let Ok(line) = store.the_app_says(id, "note", &said) {
+        let _ = app.emit(
+            "noted",
+            Noted {
+                conversation: id.to_string(),
+                seq: line.seq,
+                kind: "note".to_string(),
+                text: line.text,
+                said_by: None,
+            },
+        );
+    }
+    onscreen::show(id, &format!("{} is paused", agent.name), &why);
+}
+
+/// How much an agent may use in a month, and what it has used this one.
+#[derive(Serialize)]
+struct LimitSeen {
+    tokens: Option<i64>,
+    dollars: Option<f64>,
+    used_tokens: i64,
+    spent_dollars: f64,
+}
+
+#[tauri::command]
+async fn limits(held: State<'_, Held>, agent: String) -> Result<LimitSeen, String> {
+    let set = held.store.limits(&agent).map_err(|e| e.to_string())?;
+    let (used_tokens, spent_dollars) = held
+        .store
+        .spent_by(&agent, the_start_of_this_month())
+        .map_err(|e| e.to_string())?;
+    Ok(LimitSeen {
+        tokens: set.tokens,
+        dollars: set.dollars,
+        used_tokens,
+        spent_dollars,
+    })
+}
+
+/// Set how much an agent may use in a month, or take the limit away.
+#[tauri::command]
+async fn set_limits(
+    held: State<'_, Held>,
+    agent: String,
+    tokens: Option<i64>,
+    dollars: Option<f64>,
+) -> Result<(), String> {
+    if tokens.is_some_and(|n| n <= 0) || dollars.is_some_and(|d| d <= 0.0) {
+        return Err("A limit has to be more than nothing. Leave it empty for no limit.".into());
+    }
+    held.store
+        .set_limits(&agent, errand_core::store::Limits { tokens, dollars })
+        .map_err(|e| e.to_string())
+}
+
 /// A new agent's folder, beside every other agent's.
 fn a_folder_for(app: &AppHandle, id: &str) -> Result<std::path::PathBuf, String> {
     let home = where_things_live(app)?.join("threads").join(id);
@@ -6467,6 +6567,8 @@ pub fn run() {
             duplicate,
             save_agent,
             load_agent,
+            limits,
+            set_limits,
             say,
             answer,
             engines,
