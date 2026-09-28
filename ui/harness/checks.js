@@ -4643,6 +4643,15 @@ export async function whatItIsForAndWhereItWent() {
   );
 
   const list = document.getElementById("threads");
+  // The side keeps to its column, with room for the overview's button.
+  const side = document.getElementById("side").getBoundingClientRect();
+  const plus = document.getElementById("new").getBoundingClientRect();
+  check(
+    "the side keeps to its column, its buttons inside it",
+    side.width <= 233 && plus.right <= side.right,
+    `side ${Math.round(side.width)}px, + ends at ${Math.round(plus.right)} of ${Math.round(side.right)}`,
+  );
+
   // By which agent the row is, not by what it says: another agent in the list
   // is called "Bitcoin Desk copy".
   const rowOf = () => list.querySelector(`li[data-agent="${owner}"]`);

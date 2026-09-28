@@ -139,6 +139,11 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   display: grid;
   grid-template-rows: auto 1fr auto;
   min-height: 0;
+  /* Held to its column. A grid item is otherwise as wide as its widest
+     content, and a search box counts at its natural width: with a second
+     button beside it the side grew past 232 pixels and its + sat on top of
+     the conversation's own mark. */
+  min-width: 0;
 }
 
 #side header {
@@ -1306,6 +1311,7 @@ main > aside, main > #title, main > #composer { flex: none; }
 #find {
   flex: 1;
   min-width: 0;
+  width: 0;
   appearance: none;
   padding: 5px 9px;
   border-radius: 8px;
