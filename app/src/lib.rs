@@ -127,6 +127,10 @@ struct Held {
     /// that follows can say why it is late rather than claim nothing was
     /// running.
     held_back: Mutex<std::collections::HashSet<String>>,
+    /// The Mac kept awake while an errand is going, as the `caffeinate` doing
+    /// it. A Mac that idled to sleep in the middle of an errand ran nothing
+    /// until somebody next touched it, and a routine's answer arrived then.
+    awake: Mutex<Option<std::process::Child>>,
     /// What is stopping errands from working, if anything is.
     ///
     /// Only the kind that goes on happening until somebody does something: a
@@ -1202,6 +1206,7 @@ async fn say(
     // each answer arrives as the member that gave it finishes.
     if a_room {
         let _ = held.store.a_turn_began(&id);
+        stay_awake(&held);
         tauri::async_runtime::spawn(a_rooms_turn(app.clone(), id.clone(), text, as_given));
         return Ok(Some(written.seq));
     }
@@ -1243,6 +1248,7 @@ async fn say(
     // had been going: quitting Errand mid-turn left a question with no answer
     // and nothing saying why, which reads as an app still thinking about it.
     let _ = held.store.a_turn_began(&id);
+    stay_awake(&held);
 
     let mut live = held.live.lock().unwrap();
     let thread = live
@@ -4672,6 +4678,45 @@ async fn one_tick(app: AppHandle) {
     if let Err(why) = look_around(&app).await {
         eprintln!("the looking: {why}");
     }
+    let held: State<Held> = app.state();
+    may_sleep_now(&held);
+}
+
+/// Keep the Mac from idling to sleep while an errand is going.
+///
+/// The system's own `caffeinate` rather than a power assertion of this app's:
+/// it holds off only the sleep that comes from nobody touching the machine,
+/// not the display's, and told to wait on this process it lets go the moment
+/// Errand goes, however Errand goes.
+fn stay_awake(held: &Held) {
+    let mut awake = held.awake.lock().unwrap();
+    if let Some(child) = awake.as_mut() {
+        if matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+    }
+    *awake = std::process::Command::new("/usr/bin/caffeinate")
+        .args(["-i", "-w", &std::process::id().to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok();
+}
+
+/// Let the Mac sleep again, once nothing is going: no turn, no step and
+/// nobody's handover being waited on.
+fn may_sleep_now(held: &Held) {
+    let going = !held.running.lock().unwrap().is_empty()
+        || !held.doing.lock().unwrap().is_empty()
+        || !held.handovers.lock().unwrap().is_empty();
+    if going {
+        return;
+    }
+    if let Some(mut child) = held.awake.lock().unwrap().take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 /// Anything whose time has come, started once each.
@@ -6097,6 +6142,7 @@ pub fn run() {
                 opening: Mutex::new(HashMap::new()),
                 fresh: Mutex::new(std::collections::HashSet::new()),
                 held_back: Mutex::new(std::collections::HashSet::new()),
+                awake: Mutex::new(None),
                 trouble: Mutex::new(None),
                 sized: Mutex::new(HashMap::new()),
                 mid_run: Mutex::new(HashMap::new()),
