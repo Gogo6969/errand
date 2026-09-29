@@ -171,3 +171,21 @@ test("an empty answer renders nothing rather than an empty bubble full of nothin
   assert.equal(drawn("").children.length, 0);
   assert.equal(drawn("   \n\n  ").children.length, 0);
 });
+
+test("points spaced out with blank lines are one list, numbered as they were written", () => {
+  const out = drawn("1. **I cannot end it.** Something.\n\n2. **This box has to stay awake.** More.");
+  assert.equal(out.all("ol").length, 1, "each point became a list of its own");
+  assert.equal(out.all("li").length, 2);
+  // And bullets the same way, without swallowing a numbered list after them.
+  const mixed = drawn("- one\n\n- two\n\n1. three");
+  assert.equal(mixed.all("ul")[0].all("li").length, 2);
+  assert.equal(mixed.all("ol").length, 1);
+});
+
+test("a numbered list picked up again after a paragraph goes on from its own number", () => {
+  const out = drawn("1. First.\n\nA word in between.\n\n2. Second.");
+  const lists = out.all("ol");
+  assert.equal(lists.length, 2);
+  assert.equal(lists[0].start, undefined, "a list that starts at 1 says nothing");
+  assert.equal(lists[1].start, 2);
+});

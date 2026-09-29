@@ -106,6 +106,13 @@ export function render(text) {
     if (bulletOf(line) !== null) {
       const ordered = /^\s*\d+[.)]\s/.test(line);
       const list = document.createElement(ordered ? "ol" : "ul");
+      // From the number the model wrote. A list picked up again after a
+      // paragraph, at 2, was drawn as a second list starting at 1.
+      if (ordered) {
+        const from = Number(line.match(/^\s*(\d+)/)[1]);
+        if (from !== 1) list.start = from;
+      }
+      const sameKind = (next) => bulletOf(next) !== null && /^\s*\d+[.)]\s/.test(next) === ordered;
       while (at < lines.length && bulletOf(lines[at]) !== null) {
         const item = document.createElement("li");
         const first = bulletOf(lines[at]);
@@ -119,6 +126,12 @@ export function render(text) {
         }
         item.append(inline([first, ...more].join(" ")));
         list.append(item);
+        // A blank line between two items is still one list, when what follows
+        // it is another item of the same kind: a model that spaces its points
+        // out had each one drawn as a list of its own, all numbered 1.
+        let next = at;
+        while (next < lines.length && !lines[next].trim()) next++;
+        if (next > at && next < lines.length && sameKind(lines[next])) at = next;
       }
       out.append(list);
       continue;
