@@ -5200,6 +5200,30 @@ export async function onlyModelsThatAnswer() {
   document.getElementById("models-done").click();
   await settle(150);
 
+  // The model this agent is on, when it stops answering: said on the closed
+  // picker, where a note at the end of a long name is never seen.
+  FIXTURE.answering = Object.fromEntries(locals.map((at) => [at, true]));
+  window.dispatchEvent(new Event("focus"));
+  await settle(400);
+  const original = picker.value;
+  picker.value = gone.mark;
+  picker.dispatchEvent(new Event("change"));
+  await settle(300);
+  FIXTURE.answering[JSON.parse(gone.settings).base_url] = false;
+  window.dispatchEvent(new Event("focus"));
+  await settle(400);
+  check(
+    "the model an agent is on, when it stops answering, is marked on the closed picker",
+    picker.classList.contains("quiet") &&
+      picker.selectedOptions[0]?.textContent.endsWith("· not answering") &&
+      /not answering/.test(picker.title),
+    `${picker.className} / ${picker.selectedOptions[0]?.textContent} / ${picker.title}`,
+  );
+  picker.value = original;
+  picker.dispatchEvent(new Event("change"));
+  await settle(300);
+  check("and not once it is on one that answers", !picker.classList.contains("quiet") && picker.value === original, `${picker.className} / ${picker.value}`);
+
   // Everything back as the other checks expect it.
   FIXTURE.answering = Object.fromEntries(locals.map((at) => [at, true]));
   window.dispatchEvent(new Event("focus"));
@@ -5213,5 +5237,47 @@ export async function onlyModelsThatAnswer() {
   FIXTURE.offered.splice(FIXTURE.offered.indexOf(gone), 1);
   tell("models_changed", {});
   await settle(100);
+  return found;
+}
+
+/**
+ * A step that printed nothing is finished, and a turn that is over leaves
+ * nothing spinning.
+ *
+ * A search that found nothing came back with an empty answer, which read the
+ * same as no answer yet: two steps spun for ever under an errand that had
+ * been stopped.
+ */
+export async function aStepThatPrintedNothing() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  FIXTURE.lines["talk-quiet"] = [
+    { seq: 1, at: Date.now() - 60000, kind: "mine", text: "Look for the config files", call: null, tool: null, outcome: null },
+    { seq: 2, at: Date.now() - 59000, kind: "doing", text: "Search for config files", call: "q-1", tool: "run_command", outcome: "" },
+    { seq: 3, at: Date.now() - 58000, kind: "said", text: "There are none.", call: null, tool: null, outcome: null },
+  ];
+  FIXTURE.conversations["agent-outside"].push({ id: "talk-quiet", agent: "agent-outside", name: "Quiet", opened: true });
+  await openTalk("talk-quiet");
+  await settle(250);
+  const box = document.getElementById("messages");
+  const stepNamed = (words) => [...box.querySelectorAll(".doing")].find((d) => d.textContent.includes(words));
+  const quiet = stepNamed("Search for config files");
+  check(
+    "a step that finished without printing anything is finished, and says so",
+    quiet && !quiet.classList.contains("running") && /no output/.test(quiet.textContent),
+    quiet ? `${quiet.className}: ${quiet.textContent}` : "no step",
+  );
+
+  tell("happened", { conversation: "talk-quiet", seq: 10, kind: "doing", what: "List the folder", tool: "run_command", call: "q-2" });
+  tell("happened", { conversation: "talk-quiet", seq: 11, kind: "did", call: "q-2", outcome: "" });
+  tell("happened", { conversation: "talk-quiet", seq: 12, kind: "doing", what: "Look once more", tool: "run_command", call: "q-3" });
+  await settle(200);
+  check("one still going spins", stepNamed("Look once more")?.classList.contains("running"), stepNamed("Look once more")?.className || "no step");
+  check("and one that answered with nothing does not", stepNamed("List the folder") && !stepNamed("List the folder").classList.contains("running"), stepNamed("List the folder")?.className || "no step");
+  tell("happened", { conversation: "talk-quiet", seq: 13, kind: "done" });
+  await settle(200);
+  const spinning = [...box.querySelectorAll(".doing.running")].map((d) => d.textContent);
+  check("and once the turn is over, nothing in it is still spinning", spinning.length === 0, spinning.join(" | ") || "none");
   return found;
 }

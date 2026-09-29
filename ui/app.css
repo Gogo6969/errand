@@ -1293,6 +1293,8 @@ main > aside, main > #title, main > #composer { flex: none; }
   background-repeat: no-repeat;
 }
 #engine:hover { background-color: var(--card); border-color: var(--rule); color: var(--ink); }
+/* The model this agent is on, when its server is not answering. */
+#engine.quiet, #engine.quiet:hover { color: var(--wrong); border-color: var(--wrong-soft); }
 #engine:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* ---------------------------------------------------------- prose ----- */

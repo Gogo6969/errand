@@ -101,8 +101,12 @@ pub fn what_it_means(why: &str, engine: &str) -> Option<Trouble> {
                 "The model server{at} {}.",
                 crate::local::talk::what_the_server_did(why)
             ),
-            fix: "It was tried twice. If it is a machine of yours, check it is running; \
-                  otherwise this usually clears on its own."
+            // Not "this usually clears on its own", which is what it said of a
+            // server on somebody's own network that had been switched off: it
+            // was not going to, and the words sent them to wait for it.
+            fix: "It was tried twice. If it is a machine of yours, check its model server \
+                  is running. The model menu at the top offers only the models that are \
+                  answering, so choosing one there is the quickest way on."
                 .to_string(),
             until_somebody_acts: false,
         });

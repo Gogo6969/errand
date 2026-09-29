@@ -1195,6 +1195,16 @@ pub fn read(line: &str) -> Vec<Event> {
                 .unwrap_or_default()
         }
 
+        // Claude Code's own words rather than the model's. A request that fails
+        // comes back as an assistant message Claude Code wrote itself and marks
+        // as its own: "Failed to authenticate. API Error: 401 ...". Kept as
+        // something the agent said, it was handed to the next model in the
+        // conversation as the agent's own reply, and one handed that and
+        // "continue" said it would pick up the previous AI's work and invented
+        // what that was. The turn's failure says the same thing, where failures
+        // go.
+        "assistant" if written_by_claude_code(&v) => vec![],
+
         "assistant" => v
             .pointer("/message/content")
             .and_then(|c| c.as_array())
@@ -1288,6 +1298,15 @@ pub fn read(line: &str) -> Vec<Event> {
 
         _ => vec![],
     }
+}
+
+/// Whether an assistant message was written by Claude Code itself rather than
+/// by the model: an API error, or its stand-in when there is no reply.
+fn written_by_claude_code(v: &serde_json::Value) -> bool {
+    v.get("isApiErrorMessage")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false)
+        || v.pointer("/message/model").and_then(|m| m.as_str()) == Some("<synthetic>")
 }
 
 /// What the agent complained about, said the way a person would say it.
@@ -1535,6 +1554,15 @@ mod tests {
     const RESULT: &str = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"hello-from-a-tool"}]}}"#;
     const DONE: &str = r#"{"type":"result","is_error":false,"result":"Output: hello","total_cost_usd":0.18,"num_turns":2}"#;
     const HOOK: &str = r#"{"type":"system","subtype":"hook_started","session_id":"7ee4de55-1111"}"#;
+
+    #[test]
+    fn an_error_claude_code_wrote_itself_is_not_the_agent_speaking() {
+        // As it arrived, from a login that had been revoked.
+        let refused = r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Failed to authenticate. API Error: 401 OAuth access token has been revoked."}]},"parent_tool_use_id":null,"isApiErrorMessage":true,"error":"authentication_failed"}"#;
+        assert!(read(refused).is_empty());
+        // The model's own words still are.
+        assert!(!read(TEXT).is_empty());
+    }
 
     #[test]
     fn the_start_of_a_thread_says_what_is_answering_it() {

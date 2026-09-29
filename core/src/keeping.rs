@@ -149,6 +149,11 @@ pub fn as_turns(lines: &[Line]) -> Vec<ChatMessage> {
                 // reopen is how a conversation stops fitting.
                 image_data_urls: Vec::new(),
             }),
+            // Claude Code saying a request failed, kept as said before that was
+            // recognised as its own words: see `claude::written_by_claude_code`.
+            // Handed to a model as its own reply, it is the one line in a
+            // conversation it can only misread.
+            "said" if an_engine_error(&line.text) => None,
             "said" => Some(ChatMessage::Assistant {
                 content: line.text.trim().to_string(),
                 tool_calls: Vec::new(),
@@ -158,6 +163,13 @@ pub fn as_turns(lines: &[Line]) -> Vec<ChatMessage> {
         })
         .filter(|one| !said_nothing(one))
         .collect()
+}
+
+/// Whether something kept as said is Claude Code reporting a failed request.
+fn an_engine_error(said: &str) -> bool {
+    let said = said.trim_start();
+    said.starts_with("API Error")
+        || (said.starts_with("Failed to authenticate.") && said.contains("API Error"))
 }
 
 /// Whether a turn is empty, and so worth nothing but tokens.
@@ -224,6 +236,24 @@ mod tests {
             pictures: Vec::new(),
             said_by: None,
         }
+    }
+
+    #[test]
+    fn a_failed_request_kept_as_said_is_not_handed_back_as_the_agents_reply() {
+        let lines = [
+            line(1, "mine", "Could you reach the Mac Studio over SSH?", None),
+            line(
+                3,
+                "said",
+                "Failed to authenticate. API Error: 401 OAuth access token has been revoked.",
+                None,
+            ),
+            line(5, "mine", "continue", None),
+            line(7, "said", "The Mac Studio answers on 192.168.1.143.", None),
+        ];
+        let turns = as_turns(&lines);
+        assert_eq!(turns.len(), 3, "{turns:?}");
+        assert!(!format!("{turns:?}").contains("API Error"));
     }
 
     fn agent() -> Agent {

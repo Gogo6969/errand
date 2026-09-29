@@ -356,11 +356,22 @@ async fn conversation(
             }
         }
 
-        history.push(ChatMessage::User {
-            content: said,
-            name: None,
-            image_data_urls: pictures,
-        });
+        // Already there, when this is what reopened the conversation: the line
+        // is written down before the engine opens, so what was read back ends
+        // with it. It went to the model twice, two "continue"s in a row.
+        let read_back = !an_aside
+            && pictures.is_empty()
+            && matches!(
+                history.last(),
+                Some(ChatMessage::User { content, .. }) if content.trim() == said.trim()
+            );
+        if !read_back {
+            history.push(ChatMessage::User {
+                content: said,
+                name: None,
+                image_data_urls: pictures,
+            });
+        }
 
         let mut counted = Counted::default();
         let ran = errand(
@@ -1758,6 +1769,56 @@ mod an_aside_leaves_no_trace {
         assert_eq!(
             body["messages"][2]["content"], "ok",
             "its own answer is not the one it gave"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_line_that_reopened_a_conversation_is_said_to_the_model_once() {
+        // Written down before the engine opens, so what is read back already
+        // ends with it: "continue" went out twice in a row.
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_remembers(asked.clone()).await;
+        let home = std::env::temp_dir().join("errand-said-once-test");
+        std::fs::create_dir_all(&home).unwrap();
+        let settings = LlmSettings {
+            provider: "openai-compat".into(),
+            base_url: where_it_is,
+            model: "pretend".into(),
+            ..Default::default()
+        };
+        let user = |said: &str| ChatMessage::User {
+            content: said.to_string(),
+            name: None,
+            image_data_urls: Vec::new(),
+        };
+        let so_far = vec![
+            user("Could you reach the Mac Studio over SSH?"),
+            ChatMessage::Assistant {
+                content: "It answers on 192.168.1.143.".into(),
+                tool_calls: Vec::new(),
+                reasoning: None,
+            },
+            user("continue"),
+        ];
+        let (mut engine, events) = Local::open(
+            settings,
+            home,
+            "auto",
+            &crate::memory::Knowing::default(),
+            so_far,
+            None,
+        )
+        .expect("a conversation to talk to");
+
+        engine.say("continue", &[]).unwrap();
+        until_it_finishes(&events).await;
+
+        let seen = asked.lock().unwrap().clone();
+        assert_eq!(
+            roles_in(&seen[0]),
+            ["system", "user", "assistant", "user"],
+            "{}",
+            seen[0]
         );
     }
 

@@ -109,6 +109,11 @@ function itHasStopped(talk) {
   if (!talk) return;
   talk.working = false;
   talk.writing = "";
+  // A step that has not answered by the time its turn is over never will, and
+  // a spinner beside it says something is still going on when nothing is.
+  for (const m of talk.messages || []) {
+    if (m.kind === "doing" && m.outcome == null) m.outcome = "stopped";
+  }
 }
 
 function complain(why) {
@@ -487,6 +492,13 @@ async function drawEngines(a) {
       return option;
     }),
   );
+  // And on the closed picker, which shows only the start of a long name: a note
+  // at the end of it is exactly the part nobody sees.
+  const quietNow = answeredLast.get(mine) === false;
+  el.engine.classList.toggle("quiet", quietNow);
+  el.engine.title = quietNow
+    ? "The server for this model is not answering. Choose another model, or start it."
+    : "What answers this agent";
 
   // An agent on something that is not in the list still has to say what it is
   // on, or the picker quietly claims it is something else.
@@ -1438,7 +1450,11 @@ function fromStoreLine(line, live = false) {
         text: line.text,
         tool: line.tool,
         call: line.call,
-        outcome: line.outcome || "",
+        // Nothing on disk is a step that never answered, which only a turn
+        // still going can be in the middle of. An empty answer is a step that
+        // finished and printed nothing: a search that found nothing, which is
+        // an answer. The two used to read the same, and both spun for ever.
+        outcome: line.outcome ?? (live ? null : "stopped"),
       };
     default:
       return {
@@ -1989,16 +2005,17 @@ function draw(m) {
       // A step with no answer yet is a step still happening, and it is the only
       // thing on the screen that knows that. So it says so, rather than sitting
       // there looking exactly like the four finished steps above it.
-      node.className = m.outcome ? "doing" : "doing running";
-      node.append(tile(forTool(m.tool), !m.outcome));
+      const going = m.outcome == null;
+      node.className = going ? "doing running" : "doing";
+      node.append(tile(forTool(m.tool), going));
       const what = document.createElement("span");
       what.className = "what";
       what.textContent = m.text;
       node.append(what);
-      if (m.outcome) {
+      if (!going) {
         const out = document.createElement("span");
         out.className = "outcome";
-        out.textContent = m.outcome;
+        out.textContent = m.outcome || "no output";
         node.append(out);
       }
       return node;
@@ -3085,6 +3102,9 @@ el.engine.addEventListener("change", async () => {
 
   t.on = choice.engine;
   t.onSettings = choice.settings;
+  // Drawn again for what it is on now, or a picker marked as not answering
+  // stays marked after somebody has moved it to one that does.
+  drawEngines(t);
 
   const talk = talking();
   // Whatever was answering has been killed, and a killed engine says nothing
@@ -3103,7 +3123,13 @@ el.engine.addEventListener("change", async () => {
     talk?.messages.push({
       kind: "ended",
       failed: false,
-      text: `Now on ${choice.name}. It has not seen anything said before this line.`,
+      // Which is true of Claude, and was said of a local model too, which is
+      // handed everything said here when it starts: somebody told it had seen
+      // nothing typed "continue", and had no reason to think that would work.
+      text:
+        choice.engine === "local"
+          ? `Now on ${choice.name}. It is handed what was said here so far.`
+          : `Now on ${choice.name}. It has not seen anything said before this line.`,
     });
   } catch (why) {
     talk?.messages.push({ kind: "ended", failed: true, text: String(why) });
