@@ -28,6 +28,8 @@ pub mod stream;
 pub mod talk;
 pub mod tokens;
 pub mod tools;
+/// Putting what went wrong to a model again, with tools that only pretend.
+pub mod trial;
 
 mod loops;
 

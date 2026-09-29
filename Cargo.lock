@@ -909,6 +909,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "errand-core",
+ "serde_json",
  "tokio",
 ]
 

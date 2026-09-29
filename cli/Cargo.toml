@@ -8,7 +8,13 @@ license.workspace = true
 name = "errand"
 path = "src/main.rs"
 
+# What went wrong on errands, put to a model again with tools that pretend.
+[[bin]]
+name = "errand-trial"
+path = "src/trial.rs"
+
 [dependencies]
 errand-core = { path = "../core" }
 anyhow.workspace = true
 tokio.workspace = true
+serde_json.workspace = true
