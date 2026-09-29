@@ -7718,6 +7718,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_task_reaches_the_window_with_its_fields_where_the_window_reads_them() {
+        // The window reads a task's own fields and the two the app adds side
+        // by side. Nested under a key, every task would arrive untitled,
+        // normal and never finished, and nothing would say why.
+        let store = errand_core::store::Store::in_memory().unwrap();
+        store
+            .begin("desk", "Bitcoin Desk", std::path::Path::new("/tmp/desk"))
+            .unwrap();
+        store.begin_conversation("talk", "desk", "First").unwrap();
+        store.set_task_priority("talk", 1).unwrap();
+        store.finish_task("talk", Some(1234)).unwrap();
+        let talk = store.conversation("talk").unwrap().unwrap();
+        let sent = serde_json::to_value(Task {
+            talk,
+            first: Some("Check the drive".into()),
+            said: true,
+        })
+        .unwrap();
+        assert_eq!(sent["id"], "talk");
+        assert_eq!(sent["agent"], "desk");
+        assert_eq!(sent["priority"], 1);
+        assert_eq!(sent["finished_at"], 1234);
+        assert_eq!(sent["first"], "Check the drive");
+        assert_eq!(sent["said"], true);
+        assert!(sent.get("talk").is_none(), "nested: {sent}");
+    }
+
+    #[test]
     fn only_a_server_nearby_is_knocked_on() {
         for here in [
             "localhost",
