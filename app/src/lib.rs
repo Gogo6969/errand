@@ -1704,6 +1704,69 @@ async fn engines(held: State<'_, Held>) -> Result<Vec<Choice>, String> {
         .collect())
 }
 
+/// Whether each of these model servers is there, as far as a knock on its door
+/// can tell: something listening at its address and port.
+///
+/// For the picker, which offers only what can answer. Asked when the window
+/// comes back and every few minutes, never while somebody is choosing: the
+/// picker was once a live search on every open, and that was slow and
+/// different every time. A knock takes a second and a half at the most, and
+/// they all go at once.
+///
+/// Nothing for an address out on the internet, which is not knocked on: a
+/// hosted service is up far more reliably than a knock from here can tell, and
+/// knocking would send something out every few minutes for nothing.
+#[tauri::command]
+async fn answering(addresses: Vec<String>) -> Vec<Option<bool>> {
+    let knocks: Vec<_> = addresses
+        .into_iter()
+        .map(|address| tauri::async_runtime::spawn(knock(address)))
+        .collect();
+    let mut answers = Vec::with_capacity(knocks.len());
+    for knock in knocks {
+        answers.push(knock.await.unwrap_or(None));
+    }
+    answers
+}
+
+/// One knock, on a server nearby. Nothing for one that is not.
+async fn knock(address: String) -> Option<bool> {
+    let url = tauri::Url::parse(&address).ok()?;
+    let host = url
+        .host_str()?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    if !nearby(&host) {
+        return None;
+    }
+    let port = url.port_or_known_default()?;
+    let door = tokio::net::TcpStream::connect((host.as_str(), port));
+    Some(matches!(
+        tokio::time::timeout(std::time::Duration::from_millis(1500), door).await,
+        Ok(Ok(_))
+    ))
+}
+
+/// Whether a server is on this Mac or this network, rather than out on the
+/// internet.
+fn nearby(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost")
+        || host.ends_with(".local")
+        || !host.contains(['.', ':'])
+    {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            let first = ip.segments()[0];
+            ip.is_loopback() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80
+        }
+        Err(_) => false,
+    }
+}
+
 /// Somewhere models are served from, with what it is offering right now.
 #[derive(Serialize)]
 struct Somewhere {
@@ -6943,6 +7006,7 @@ pub fn run() {
             say,
             answer,
             engines,
+            answering,
             use_engine,
             runs,
             routines,
@@ -7283,6 +7347,43 @@ fn everything_that_waits_for_the_app(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_server_nearby_is_knocked_on() {
+        for here in [
+            "localhost",
+            "127.0.0.1",
+            "192.168.1.25",
+            "10.0.0.7",
+            "172.20.1.2",
+            "mac-studio.local",
+            "studio",
+            "::1",
+            "fd12:3456::1",
+        ] {
+            assert!(nearby(here), "{here}");
+        }
+        for away in [
+            "api.deepseek.com",
+            "8.8.8.8",
+            "api.moonshot.ai",
+            "2001:4860::8888",
+        ] {
+            assert!(!nearby(away), "{away}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_knock_tells_a_server_that_is_there_from_one_that_is_not() {
+        let open = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let there = format!("http://{}/v1", open.local_addr().unwrap());
+        // A port that was just in use and is not any more: nothing listens.
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gone = format!("http://{}/v1", closed.local_addr().unwrap());
+        drop(closed);
+        let said = answering(vec![there, gone, "https://api.deepseek.com/v1".to_string()]).await;
+        assert_eq!(said, vec![Some(true), Some(false), None]);
+    }
 
     #[test]
     fn a_person_s_turn_and_a_parked_handover_both_keep_the_clock_away() {

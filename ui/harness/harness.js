@@ -496,6 +496,12 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
                 talk: null,
               })),
             });
+          // Whatever the check set, and nothing when it set nothing: an answer
+          // of null is the app's own "was not asked".
+          case "answering":
+            return Promise.resolve(
+              fixture.answering ? args.addresses.map((at) => fixture.answering[at] ?? null) : null,
+            );
           case "engines":
             return Promise.resolve(
               fixture.offered.map((o) => ({ engine: o.engine, name: o.label, settings: o.settings })),

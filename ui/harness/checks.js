@@ -663,10 +663,11 @@ export async function whichModels() {
     ),
     [...document.getElementById("engine").options].map((o) => o.textContent).join(" / "),
   );
+  const models = () => [...document.getElementById("engine").options].filter((o) => !o.value.startsWith("__"));
   check(
     "it shows what was chosen, and that is all",
-    document.getElementById("engine").options.length === FIXTURE.offered.length,
-    `${document.getElementById("engine").options.length} of ${FIXTURE.offered.length}`,
+    models().length === FIXTURE.offered.length,
+    `${models().length} of ${FIXTURE.offered.length}`,
   );
 
   document.getElementById("setup").click();
@@ -4808,7 +4809,7 @@ export async function theOverview() {
   group.value = "subject";
   group.dispatchEvent(new Event("change"));
   await settle(150);
-  const headings = [...tiles.querySelectorAll(".job-group h2")].map((h) => h.textContent.replace(/ \(\d+\)$/, ""));
+  const headings = [...tiles.querySelectorAll(".job-group h2 .label")].map((h) => h.textContent);
   check(
     "grouped by subject, the headings are the roles jobs chose, with none last",
     headings.length >= 1 && !headings.some((h) => /Waiting on you|Completed|Repeating/.test(h)) && (!headings.includes("Other") || headings[headings.length - 1] === "Other"),
@@ -4816,6 +4817,23 @@ export async function theOverview() {
   );
   group.value = "state";
   group.dispatchEvent(new Event("change"));
+  await settle(150);
+  const panels = [...tiles.querySelectorAll(".job-group")];
+  const [first, second] = panels;
+  const between = first && second ? Math.round(second.getBoundingClientRect().top - first.getBoundingClientRect().bottom) : null;
+  const ownHead = first?.querySelector("h2")?.getBoundingClientRect();
+  const ownTiles = first?.querySelector(".jobs")?.getBoundingClientRect();
+  const toOwn = ownHead && ownTiles ? Math.round(ownTiles.top - ownHead.bottom) : null;
+  check(
+    "each group is a panel, further from the next group than its heading is from its own tiles",
+    panels.length >= 2 && getComputedStyle(first).borderTopStyle === "solid" && between > toOwn,
+    `${between}px between groups, ${toOwn}px from a heading to its tiles`,
+  );
+  check(
+    "and says what it is in colour as well as in words",
+    first?.dataset.state && getComputedStyle(first.querySelector("h2"), "::before").backgroundColor !== "rgba(0, 0, 0, 0)",
+    `${first?.dataset.state}: ${first ? getComputedStyle(first.querySelector("h2"), "::before").backgroundColor : "none"}`,
+  );
 
   document.getElementById("overview-done").click();
   await settle(100);
@@ -5104,5 +5122,96 @@ export async function anAgentThatStopsItsOwnSchedule() {
   tell("repeats", { conversation: "talk-outside", repeats: false });
   await settle(150);
   check("and one it switched off takes it away again", option("talk-outside") === "First", option("talk-outside"));
+  return found;
+}
+
+/**
+ * The picker offers only models that answer, and the way to add one.
+ *
+ * A model on a server that was switched off was offered like any other, chosen,
+ * and found dead two tries later in a red line that said it usually clears on
+ * its own.
+ */
+export async function onlyModelsThatAnswer() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  const picker = document.getElementById("engine");
+  const said = () => [...picker.options].map((o) => o.textContent).join(" / ");
+  await openTalk("talk-1");
+  await settle(200);
+
+  // A second server nearby, switched off: the case that happened.
+  const gone = {
+    id: "o-gone",
+    engine: "local",
+    label: "Qwen3.8-27B - llama.cpp on 192.168.1.25",
+    settings: '{"provider":"llamacpp","base_url":"http://192.168.1.25:8081","model":"Qwen3.8-27B"}',
+    backend: null,
+    sort: 3,
+    mark: "local|http://192.168.1.25:8081|Qwen3.8-27B",
+  };
+  FIXTURE.offered.push(gone);
+  tell("models_changed", {});
+  await settle(100);
+
+  const locals = FIXTURE.offered
+    .filter((o) => o.engine === "local")
+    .map((o) => JSON.parse(o.settings).base_url);
+  const [up, ...down] = locals;
+  FIXTURE.answering = Object.fromEntries([[up, true], ...down.map((at) => [at, false])]);
+  const before = asked.length;
+  window.dispatchEvent(new Event("focus"));
+  await settle(400);
+  check(
+    "coming back to the window knocks on the model servers nearby",
+    asked.slice(before).some((a) => a.name === "answering" && a.args?.addresses?.length === locals.length),
+    asked.slice(before).map((a) => a.name).join(",") || "asked nothing",
+  );
+  const shown = [...picker.options].filter((o) => !o.value.startsWith("__")).map((o) => o.value);
+  const downKeys = FIXTURE.offered
+    .filter((o) => o.engine === "local" && down.includes(JSON.parse(o.settings).base_url))
+    .map((o) => `local|${JSON.parse(o.settings).base_url}|${JSON.parse(o.settings).model}`);
+  const selected = picker.value;
+  check(
+    "a model whose server does not answer is left out of the picker",
+    down.length >= 1 && downKeys.every((k) => !shown.includes(k) || k === selected),
+    said(),
+  );
+  check(
+    "and the picker says how many it left out",
+    [...picker.options].some((o) => o.disabled && /^1 more not answering, so not shown$/.test(o.textContent)),
+    said(),
+  );
+  check("Claude and what answers are still offered", shown.some((k) => k.startsWith("claude")), said());
+
+  const add = [...picker.options].find((o) => o.value === "__add__");
+  check("and the last choice is the way to add a model", add?.textContent === "Add a model…" && picker.options[picker.options.length - 1] === add, said());
+  const wasOn = picker.value;
+  picker.value = "__add__";
+  picker.dispatchEvent(new Event("change"));
+  await settle(300);
+  const models = document.getElementById("models");
+  check(
+    "choosing it opens Settings where models are added, and leaves the agent where it was",
+    !models.hidden && picker.value === wasOn && !asked.slice(before).some((a) => a.name === "use_engine"),
+    `settings ${models.hidden ? "closed" : "open"}, picker on ${picker.value}`,
+  );
+  document.getElementById("models-done").click();
+  await settle(150);
+
+  // Everything back as the other checks expect it.
+  FIXTURE.answering = Object.fromEntries(locals.map((at) => [at, true]));
+  window.dispatchEvent(new Event("focus"));
+  await settle(400);
+  check(
+    "and a server that answers again is offered again",
+    FIXTURE.offered.every((o) => [...picker.options].some((p) => p.value === (o.engine === "local" ? `local|${JSON.parse(o.settings).base_url}|${JSON.parse(o.settings).model}` : o.settings ? `claude|${o.settings}` : "claude"))),
+    said(),
+  );
+  delete FIXTURE.answering;
+  FIXTURE.offered.splice(FIXTURE.offered.indexOf(gone), 1);
+  tell("models_changed", {});
+  await settle(100);
   return found;
 }

@@ -253,9 +253,57 @@ body { display: grid; grid-template-columns: 232px 1fr; }
 .away .gist { color: var(--ink-soft); }
 .away .failed { color: var(--wrong); }
 
-/* A group of jobs: a heading, and tiles that wrap to the width there is. */
-.job-group { display: flex; flex-direction: column; gap: 10px; }
-.job-group h2 .count { font-weight: 400; letter-spacing: normal; text-transform: none; }
+/* A group of jobs: a panel of its own, its name on it, and room between one
+   and the next. The headings were small grey captions with nothing between
+   groups, so each sat as close to the tiles above it as to its own and read
+   as belonging to the wrong group. */
+#overview-tiles { display: flex; flex-direction: column; gap: 18px; }
+.job-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+  background: var(--side);
+  --lane: var(--faint);
+}
+.job-group[data-state="waiting"] { --lane: var(--accent); }
+.job-group[data-state="working"] { --lane: var(--ink); }
+.job-group[data-state="stopped"] { --lane: var(--wrong); }
+.job-group[data-state="finished"] { --lane: var(--good); }
+#overview .job-group h2 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--ink);
+}
+/* What the group is, in colour, beside what it is in words. */
+.job-group h2::before {
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--lane);
+}
+.job-group h2 .count {
+  font-size: 11.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-soft);
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 0 8px;
+  min-width: 22px;
+  text-align: center;
+  line-height: 18px;
+}
 .jobs {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
@@ -264,7 +312,7 @@ body { display: grid; grid-template-columns: 232px 1fr; }
 .job {
   border: 1px solid var(--rule);
   border-radius: 12px;
-  background: var(--side);
+  background: var(--card);
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -279,7 +327,7 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   margin: 0;
   font-size: 12px;
   color: var(--ink);
-  background: var(--card);
+  background: var(--side);
   border-radius: 7px;
   padding: 5px 8px;
   overflow: hidden;

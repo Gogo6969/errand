@@ -380,6 +380,70 @@ function thePickerHasChanged() {
   couldAnswer = null;
 }
 
+/**
+ * Which models in the picker are answering, by the key each is chosen by.
+ *
+ * The picker offers only what can answer. A model on a server nearby that has
+ * not answered a knock for a while is left out, rather than chosen and found
+ * dead in a red line afterwards; one that answered a few minutes ago and missed
+ * the last knock is kept, because a server restarting is not a server gone.
+ * Hosted models and Claude are never knocked on, and are always offered.
+ */
+const answeredAt = new Map();
+const answeredLast = new Map();
+const QUIET_FOR = 10 * 60_000;
+let knocking = false;
+
+/** Where a local model is served from, from its settings. */
+function addressOf(settings) {
+  try {
+    return JSON.parse(settings || "{}").base_url || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Knock on every model server nearby, and redraw the picker with what answered. */
+async function knockOnTheModels() {
+  if (knocking) return;
+  knocking = true;
+  try {
+    const nearbyOnes = (await whatCouldAnswer().catch(() => []))
+      .filter((c) => c.engine === "local")
+      .map((c) => [keyOf(c.engine, c.settings), addressOf(c.settings)])
+      .filter(([, at]) => at);
+    if (!nearbyOnes.length) return;
+    const answers = await invoke("answering", { addresses: nearbyOnes.map(([, at]) => at) });
+    if (!Array.isArray(answers)) return;
+    const now = Date.now();
+    nearbyOnes.forEach(([key], i) => {
+      // Nothing back means it is out on the internet and was not knocked on.
+      if (typeof answers[i] !== "boolean") return;
+      answeredLast.set(key, answers[i]);
+      if (answers[i]) answeredAt.set(key, now);
+    });
+  } catch {
+    return;
+  } finally {
+    knocking = false;
+  }
+  // Not while somebody has it open: the list changing under the pointer is
+  // worse than a list a minute out of date.
+  const current = agents.get(showingAgent);
+  if (current && document.activeElement !== el.engine) drawEngines(current);
+}
+
+/** Whether the picker offers this one: never knocked on, or answered lately. */
+function answersLately(key) {
+  if (!answeredLast.has(key)) return true;
+  return Date.now() - (answeredAt.get(key) || 0) < QUIET_FOR;
+}
+
+// Whenever somebody comes back to the window, which is when they are about to
+// choose, and every few minutes regardless.
+window.addEventListener("focus", () => knockOnTheModels());
+setInterval(knockOnTheModels, 3 * 60_000);
+
 /** How one choice is recognised again, since a model id alone does not say where it lives. */
 function keyOf(engine, settings) {
   if (engine !== "local") {
@@ -405,11 +469,20 @@ async function drawEngines(a) {
   // The window may have moved on while the probes were out.
   if (showingAgent !== a.id) return;
 
+  // Only what answers, and whatever this agent is on whether it answers or not:
+  // a picker that hides its own selection is claiming something else.
+  const offered = choices.filter((c) => {
+    const key = keyOf(c.engine, c.settings);
+    return key === mine || answersLately(key);
+  });
   el.engine.replaceChildren(
-    ...choices.map((c) => {
+    ...offered.map((c) => {
       const option = document.createElement("option");
       option.value = keyOf(c.engine, c.settings);
-      option.textContent = c.name;
+      option.textContent =
+        option.value === mine && answeredLast.get(option.value) === false
+          ? `${c.name} · not answering`
+          : c.name;
       option.selected = option.value === mine;
       return option;
     }),
@@ -430,6 +503,21 @@ async function drawEngines(a) {
     gone.selected = true;
     el.engine.prepend(gone);
   }
+
+  // Below the models: how many were left out and why, and the way to add one.
+  el.engine.append(document.createElement("hr"));
+  const quiet = choices.length - offered.length;
+  if (quiet) {
+    const left = document.createElement("option");
+    left.disabled = true;
+    left.value = "__quiet__";
+    left.textContent = `${quiet} more not answering, so not shown`;
+    el.engine.append(left);
+  }
+  const add = document.createElement("option");
+  add.value = "__add__";
+  add.textContent = "Add a model…";
+  el.engine.append(add);
 }
 
 /** What an agent is on, named the way the picker would name it. */
@@ -690,6 +778,7 @@ async function catchUp() {
   await whatIsNew();
   drawTrouble();
   drawThreads();
+  knockOnTheModels();
   // A version somebody has not been told about yet, said once. After the tour,
   // because a brand new copy has nothing to have changed from.
   if (known.length) await whatChanged(false);
@@ -2979,6 +3068,14 @@ el.what.addEventListener("input", () => {
 });
 
 el.engine.addEventListener("change", async () => {
+  // Not a model: the way to the place models are added. The picker goes back to
+  // what this agent is on, which nothing here has changed.
+  if (el.engine.value === "__add__") {
+    const on = whose();
+    if (on) drawEngines(on);
+    showModels();
+    return;
+  }
   const t = whose();
   if (!t) return;
   const choice = (await whatCouldAnswer()).find(
@@ -6082,23 +6179,29 @@ function drawOverview() {
   const byPriority = el.overviewOrder.value === "priority";
   const doing = new Map(everyone.map((a) => [a.id, whatItIsDoing(a)]));
 
+  // Each group with what it is, when that is a state: its panel says so in
+  // colour as well as in words.
   let groups;
   if (el.overviewGroup.value === "subject") {
-    groups = bySubject(everyone);
+    groups = bySubject(everyone).map(([subject, list]) => [null, subject, list]);
   } else {
     groups = STATES.map(([state, label]) => [
+      state,
       label,
       everyone.filter((a) => doing.get(a.id)[0] === state),
     ]);
   }
 
   const drawn = groups
-    .filter(([, list]) => list.length)
-    .map(([label, list]) => {
+    .filter(([, , list]) => list.length)
+    .map(([state, label, list]) => {
       const group = document.createElement("section");
       group.className = "job-group";
+      if (state) group.dataset.state = state;
       const head = document.createElement("h2");
-      head.append(label, " ", note("span", `(${list.length})`, "count"));
+      const count = note("span", String(list.length), "count");
+      count.title = `${list.length} ${list.length === 1 ? "job" : "jobs"}`;
+      head.append(note("span", label, "label"), count);
       const tiles = document.createElement("div");
       tiles.className = "jobs";
       tiles.append(...inOrder(list, byPriority).map((a) => aJob(a, doing.get(a.id))));
