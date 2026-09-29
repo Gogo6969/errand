@@ -1013,15 +1013,109 @@ async fn errand(
         }
     }
 
-    let stuck = format!(
-        "It went round {ENOUGH} times without finishing, so it was stopped. \
-         Whatever it is trying is not working."
-    );
+    // Out of rounds, and asked once more, with no tools, to say where it got
+    // to. This used to end on "Whatever it is trying is not working", which
+    // was a guess, and on 29 Sep it was wrong twice: a teammate asked for a
+    // video's transcript had got round a broken yt-dlp, made the transcript
+    // and checked it word for word, and the turn ended on that sentence with
+    // the transcript never handed over.
+    let said = match last_word(client, history, stopping, out, counted).await {
+        LastWord::Stopped => return Ok(Done::Abandoned),
+        LastWord::Said(answer) => {
+            history.push(ChatMessage::Assistant {
+                content: answer.clone(),
+                tool_calls: Vec::new(),
+                reasoning: None,
+            });
+            format!(
+                "{answer}\n\n(It used all {ENOUGH} rounds one turn allows, so it stopped \
+                 there. Say \"Continue\" to let it carry on.)"
+            )
+        }
+        LastWord::Nothing => format!(
+            "It used all {ENOUGH} rounds one turn allows and stopped before it had \
+             answered. Say \"Continue\" to let it carry on."
+        ),
+    };
     let _ = out.send(Event::Said {
-        text: stuck.clone(),
+        text: said.clone(),
         settled: true,
     });
-    Ok(Done::Finished(stuck))
+    Ok(Done::Finished(said))
+}
+
+/// Said to a model whose turn has run out of rounds, beside its last step's
+/// result. Beside it, where Errand's other notes to a model go, and never as a
+/// message of its own from the person: they did not write it.
+const OUT_OF_ROUNDS: &str = "(From Errand: that was the last step this turn allows, and \
+     there are no tools now. In a few plain sentences, tell them what you did, what you \
+     found or made and where it is, and what is left to do. Say only what the steps above \
+     show.)";
+
+/// What a turn that ran out of rounds had to show for them, in its own words.
+enum LastWord {
+    Said(String),
+    /// Nothing came back, or the request itself failed.
+    Nothing,
+    Stopped,
+}
+
+/// One more request, with no tools in it, so the answer can only be words.
+async fn last_word(
+    client: &LlmClient,
+    history: &[ChatMessage],
+    stopping: &CancellationToken,
+    out: &std::sync::mpsc::Sender<Event>,
+    counted: &mut Counted,
+) -> LastWord {
+    let mut asking = history.to_vec();
+    if let Some(ChatMessage::Tool { content, .. }) = asking.last_mut() {
+        content.push_str("\n\n");
+        content.push_str(OUT_OF_ROUNDS);
+    }
+    tokens::trim_to_fit(
+        &mut asking,
+        client
+            .settings
+            .context_window
+            .saturating_sub(client.settings.max_tokens),
+    );
+    let cancel = stopping.child_token();
+    let Ok(mut stream) = ask_it(client, &asking, &[], &cancel, out).await else {
+        return match stopping.is_cancelled() {
+            true => LastWord::Stopped,
+            false => LastWord::Nothing,
+        };
+    };
+    let mut wrote = String::new();
+    while let Some(delta) = stream.rx.recv().await {
+        match delta {
+            super::stream::ChatDelta::Token(t) => {
+                wrote.push_str(&t);
+                let _ = out.send(Event::Said {
+                    text: t,
+                    settled: false,
+                });
+            }
+            super::stream::ChatDelta::Used {
+                tokens_in,
+                tokens_out,
+            } => {
+                counted.tokens_in += tokens_in;
+                counted.tokens_out += tokens_out;
+            }
+            // What it wrote before a break is still what it wrote.
+            super::stream::ChatDelta::Done { .. } | super::stream::ChatDelta::Error(_) => break,
+            _ => {}
+        }
+    }
+    if stopping.is_cancelled() {
+        return LastWord::Stopped;
+    }
+    match wrote.trim() {
+        "" => LastWord::Nothing,
+        said => LastWord::Said(said.to_string()),
+    }
 }
 
 /// Whether a tool needs a card before it runs, on this agent's posture.
@@ -2280,6 +2374,157 @@ mod an_aside_leaves_no_trace {
             result.contains("only the first folder"),
             "what they typed was lost: {result}"
         );
+    }
+
+    /// A server that asks for a harmless command whenever it is offered tools,
+    /// and says where it got to when it is not.
+    async fn a_server_that_never_stops_on_its_own(asked: Arc<Mutex<Vec<String>>>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let where_it_is = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let asked = asked.clone();
+                tokio::spawn(async move {
+                    let mut got = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    let request = loop {
+                        let Ok(n) = stream.read(&mut buf).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        got.extend_from_slice(&buf[..n]);
+                        let text = String::from_utf8_lossy(&got).to_string();
+                        let Some(at) = text.find("\r\n\r\n") else {
+                            continue;
+                        };
+                        let want: usize = text
+                            .to_ascii_lowercase()
+                            .split("content-length:")
+                            .nth(1)
+                            .and_then(|rest| rest.split("\r\n").next())
+                            .and_then(|n| n.trim().parse().ok())
+                            .unwrap_or(0);
+                        if text.len() - (at + 4) >= want {
+                            break text[at + 4..].to_string();
+                        }
+                    };
+                    let offered_tools = serde_json::from_str::<serde_json::Value>(&request)
+                        .map(|body| body.get("tools").is_some())
+                        .unwrap_or(false);
+                    asked.lock().unwrap().push(request);
+                    let body = match offered_tools {
+                        true => {
+                            let arguments = serde_json::json!({ "command": "true" }).to_string();
+                            let call = serde_json::json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [{
+                                "index": 0, "id": uuid::Uuid::new_v4().simple().to_string(), "type": "function",
+                                "function": { "name": "run_command", "arguments": arguments }
+                            }]}}]});
+                            format!(
+                                "data: {call}\n\n\
+                                 data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
+                                 data: [DONE]\n\n"
+                            )
+                        }
+                        false => "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"The transcript is in transcript.txt; I was still tidying its paragraphs.\"}}]}\n\n\
+                                  data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                                  data: [DONE]\n\n"
+                            .to_string(),
+                    };
+                    let _ = stream
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                                 Content-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        where_it_is
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_runs_out_of_rounds_still_says_where_it_got_to() {
+        // A teammate made a transcript, spent the rest of its rounds tidying
+        // it, and the turn ended on "Whatever it is trying is not working"
+        // with the transcript never handed over. Twice.
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_never_stops_on_its_own(asked.clone()).await;
+        let home = std::env::temp_dir().join("errand-out-of-rounds-test");
+        std::fs::create_dir_all(&home).unwrap();
+        let settings = LlmSettings {
+            provider: "openai-compat".into(),
+            base_url: where_it_is,
+            model: "pretend".into(),
+            ..Default::default()
+        };
+        let (mut engine, events) = Local::open(
+            settings,
+            home,
+            "auto",
+            &crate::memory::Knowing::default(),
+            Vec::new(),
+            None,
+        )
+        .expect("a conversation to talk to");
+
+        engine.say("transcribe this video", &[]).unwrap();
+        let waited = std::time::Instant::now();
+        let said = loop {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(60),
+                "the turn never finished"
+            );
+            match events.try_recv() {
+                Ok(Event::Done { said, .. }) => break said,
+                Ok(Event::Failed { why }) => panic!("the turn failed: {why}"),
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        };
+
+        let seen = asked.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            ENOUGH + 1,
+            "every round, and one more for the last word"
+        );
+        let last: serde_json::Value = serde_json::from_str(seen.last().unwrap()).unwrap();
+        assert!(
+            last.get("tools").is_none(),
+            "the last word was offered tools"
+        );
+        let note = last["messages"]
+            .as_array()
+            .and_then(|all| all.last())
+            .map(|m| {
+                (
+                    m["role"].clone(),
+                    m["content"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            note.0, "tool",
+            "Errand's note went in as a message of its own"
+        );
+        assert!(note.1.ends_with(OUT_OF_ROUNDS), "{}", note.1);
+
+        assert!(
+            said.starts_with("The transcript is in transcript.txt"),
+            "{said}"
+        );
+        assert!(said.contains("Say \"Continue\""), "{said}");
+        assert!(!said.contains("not working"), "{said}");
     }
 
     #[tokio::test]
