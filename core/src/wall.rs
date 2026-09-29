@@ -141,10 +141,137 @@ fn profile_keeping_out(home: &Path, inside: Inside, errand: Option<&Path>) -> St
             .collect();
         profile.push_str(&format!("\n(deny file-write*\n{})", programs.join("\n")));
     }
+    if let Some(theirs) = &theirs {
+        profile.push_str(&keys_kept_out(theirs));
+    }
     if let Some(errand) = errand {
         profile.push_str(&keep_out(errand, inside));
     }
     profile
+}
+
+/// Where SSH keeps its keys, relative to the home directory.
+const SSH: &str = ".ssh";
+
+/// Reading the person's private keys, kept from every errand, walled or asking.
+///
+/// Reading was left open because an errand that can read what the person can
+/// read can do its job, and a private key is the exception the same way the
+/// app's own keys are: reading it is the whole of the harm, since a copy works
+/// anywhere, for anybody, for as long as the key does. It happened. An errand
+/// on an agent set never to ask could not get `ssh` to work inside the wall,
+/// which would not let it write `known_hosts`, so it copied the key, the
+/// config and `known_hosts` into `/tmp` and used the copy. Nothing stopped it.
+///
+/// Using a key is not reading it. `ssh-agent` signs for whoever asks it and
+/// never hands the key over, so SSH keeps working inside the wall for a key the
+/// person has added to their agent, and a copy of the key is out of reach.
+///
+/// Everything in `~/.ssh` is unreadable to begin with and then what is not a
+/// key is readable again, by name: the folder itself, the config, the known
+/// hosts, the public halves. That way round, so a key made after this profile
+/// was written is kept out too. A key kept elsewhere is kept out when the
+/// config names it, or when something in `~/.ssh` is a link to it.
+fn keys_kept_out(theirs: &Path) -> String {
+    let Ok(ssh) = theirs.join(SSH).canonicalize() else {
+        return String::new();
+    };
+    let mut readable = vec![format!("  (literal {})", quoted(&ssh))];
+    let mut elsewhere: Vec<PathBuf> = Vec::new();
+    let mut folders = vec![(ssh.clone(), 0)];
+    while let Some((folder, deep)) = folders.pop() {
+        let Ok(inside) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for one in inside.flatten() {
+            let path = one.path();
+            let Ok(real) = path.canonicalize() else {
+                continue;
+            };
+            if real.is_dir() {
+                // A folder of includes, or of the agent's own sockets. Two
+                // levels is more than anybody's `~/.ssh` has.
+                if real.starts_with(&ssh) && deep < 2 {
+                    readable.push(format!("  (literal {})", quoted(&real)));
+                    folders.push((real, deep + 1));
+                }
+            } else if a_private_key(&real) {
+                if !real.starts_with(&ssh) {
+                    elsewhere.push(real);
+                }
+            } else if real.starts_with(&ssh) {
+                readable.push(format!("  (literal {})", quoted(&real)));
+            }
+        }
+    }
+    for named in keys_the_config_names(&ssh, theirs) {
+        if !named.starts_with(&ssh) && !elsewhere.contains(&named) {
+            elsewhere.push(named);
+        }
+    }
+    let mut kept = format!(
+        "\n(deny file-read-data (subpath {}))\n(allow file-read-data\n{})",
+        quoted(&ssh),
+        readable.join("\n")
+    );
+    if !elsewhere.is_empty() {
+        let keys: Vec<String> = elsewhere
+            .iter()
+            .map(|key| format!("  (literal {})", quoted(key)))
+            .collect();
+        kept.push_str(&format!("\n(deny file-read-data\n{})", keys.join("\n")));
+    }
+    kept
+}
+
+/// Whether a file is a private key, by how every kind of one begins.
+///
+/// Anything that cannot be read to find out is counted as one, because the
+/// cost of that mistake is a file an errand cannot read, and the cost of the
+/// other is a key it can.
+fn a_private_key(path: &Path) -> bool {
+    use std::io::Read;
+    let named = path.file_name().map(|n| n.to_string_lossy().to_string());
+    let named = named.as_deref().unwrap_or_default();
+    if named.ends_with(".pub") || named == "config" || named.starts_with("known_hosts") {
+        return false;
+    }
+    let mut start = [0u8; 160];
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return true;
+    };
+    let Ok(read) = file.read(&mut start) else {
+        return true;
+    };
+    let start = String::from_utf8_lossy(&start[..read]);
+    start.contains("PRIVATE KEY") || start.starts_with("PuTTY-User-Key-File")
+}
+
+/// The keys the SSH config says to use, wherever they are kept.
+fn keys_the_config_names(ssh: &Path, theirs: &Path) -> Vec<PathBuf> {
+    let Ok(config) = std::fs::read_to_string(ssh.join("config")) else {
+        return Vec::new();
+    };
+    config
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let (key, value) = line.split_once(|c: char| c.is_whitespace() || c == '=')?;
+            if !key.eq_ignore_ascii_case("IdentityFile") {
+                return None;
+            }
+            let value = value
+                .trim()
+                .trim_start_matches('=')
+                .trim()
+                .trim_matches('"');
+            let path = match value.strip_prefix("~/") {
+                Some(rest) => theirs.join(rest),
+                None => PathBuf::from(value),
+            };
+            path.canonicalize().ok()
+        })
+        .collect()
 }
 
 /// Where the package managers above keep programs, rather than caches.
@@ -316,7 +443,13 @@ pub fn what_the_wall_means(home: &Path) -> String {
          Full Disk Access does not change it, so never send the person to System \
          Settings for it. If an errand needs a file somewhere else, say so plainly: the \
          person can allow that folder for you under Allowed, choosing \"a folder\", and \
-         then it works. Until then, do the work inside your own folder.",
+         then it works. Until then, do the work inside your own folder.\n\n\
+         Private keys are not readable here: the SSH keys in ~/.ssh are kept from you, \
+         and SSH works only with a key the person has added to their ssh-agent. If ssh \
+         fails because a key cannot be read, or because a host is not yet in known_hosts, \
+         stop and say so plainly. Never copy a key, an SSH config or known_hosts somewhere \
+         else, and never look for another way round the wall: the wall is the person's \
+         decision, and working round it is the one thing that is never the errand.",
         home.display()
     )
 }
@@ -376,7 +509,7 @@ pub fn around(program: &str, home: &Path, inside: Inside) -> tokio::process::Com
 }
 
 /// A command that runs `program` with nothing kept from it but the app's own
-/// things.
+/// things and the person's private keys.
 ///
 /// For Claude Code on an agent that asks. Asking is the wall there, and the
 /// better one while it is switched on; but a few of Claude Code's tools are
@@ -397,10 +530,13 @@ pub fn kept_out(program: &str, doorway: Option<&Path>) -> tokio::process::Comman
     }
 }
 
-/// The profile for that: everything allowed, and then the app's own things not.
+/// The profile for that: everything allowed, and then the app's own things and
+/// the person's private keys not.
 fn only_kept_out(errand: &Path, doorway: Option<&Path>) -> String {
+    let theirs = std::env::var("HOME").ok().map(PathBuf::from);
     format!(
-        "(version 1)\n(allow default){}",
+        "(version 1)\n(allow default){}{}",
+        theirs.as_deref().map(keys_kept_out).unwrap_or_default(),
         keep_out(errand, Inside::ClaudeCode { doorway })
     )
 }
@@ -831,6 +967,150 @@ mod tests {
         assert!(!looks_like_the_wall("No such file or directory"));
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_private_key_cannot_be_read_or_copied_and_ssh_still_signs_with_it() {
+        // An errand that could not get ssh working inside the wall copied the
+        // key into /tmp and used the copy. Run rather than read, because what
+        // matters is what the sandbox makes of the profile, and what ssh can
+        // still do through an agent. Every key here is made by the test, now.
+        if !possible() || !Path::new("/usr/bin/ssh-agent").exists() {
+            return;
+        }
+        let theirs = std::env::temp_dir().join(format!("errand-wall-keys-{}", std::process::id()));
+        std::fs::remove_dir_all(&theirs).ok();
+        std::fs::create_dir_all(theirs.join(".ssh").join("agent")).expect("a place");
+        std::fs::create_dir_all(theirs.join("keys")).expect("a place");
+        let theirs = theirs.canonicalize().expect("a real path");
+        let ssh = theirs.join(".ssh");
+        let make = |key: &Path| {
+            std::process::Command::new("/usr/bin/ssh-keygen")
+                .args([
+                    "-q",
+                    "-t",
+                    "ed25519",
+                    "-N",
+                    "",
+                    "-C",
+                    "errand-wall-test",
+                    "-f",
+                ])
+                .arg(key)
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        let key = ssh.join("id_test");
+        let kept_elsewhere = theirs.join("keys").join("id_elsewhere");
+        let linked_elsewhere = theirs.join("keys").join("id_linked");
+        if !make(&key) || !make(&kept_elsewhere) || !make(&linked_elsewhere) {
+            return;
+        }
+        std::fs::write(
+            ssh.join("config"),
+            "Host m5\n  HostName 192.0.2.1\n  IdentityFile ~/.ssh/id_test\n\
+             Host other\n  IdentityFile ~/keys/id_elsewhere\n",
+        )
+        .unwrap();
+        std::fs::write(ssh.join("known_hosts"), "192.0.2.1 ssh-ed25519 AAAA\n").unwrap();
+        std::os::unix::fs::symlink(&linked_elsewhere, ssh.join("id_through_a_link")).unwrap();
+
+        // An agent of the test's own, holding the key.
+        let socket = ssh.join("agent").join("test.sock");
+        let mut agent = std::process::Command::new("/usr/bin/ssh-agent")
+            .arg("-D")
+            .arg("-a")
+            .arg(&socket)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("an agent");
+        for _ in 0..50 {
+            if socket.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        let added = std::process::Command::new("/usr/bin/ssh-add")
+            .arg(&key)
+            .env("SSH_AUTH_SOCK", &socket)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(added, "the test's own agent took no key");
+
+        let profile = format!("(version 1)\n(allow default){}", keys_kept_out(&theirs));
+        // One made after the profile was written, which a list of keys would miss.
+        let later = ssh.join("id_later");
+        assert!(make(&later));
+        let run = |command: &str| {
+            let out = std::process::Command::new(THE_SANDBOX)
+                .arg("-p")
+                .arg(&profile)
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(command)
+                .env("SSH_AUTH_SOCK", &socket)
+                .current_dir(&theirs)
+                .output()
+                .expect("the sandbox runs");
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        for secret in [
+            &key,
+            &later,
+            &kept_elsewhere,
+            &ssh.join("id_through_a_link"),
+        ] {
+            let read = run(&format!("cat {}", quoted(secret)));
+            assert!(
+                read.is_empty(),
+                "{} was readable inside the wall",
+                secret.display()
+            );
+        }
+        let copy = theirs.join("copied");
+        run(&format!("cp {} {}", quoted(&key), quoted(&copy)));
+        assert!(!copy.exists(), "the key was copied from inside the wall");
+        run(&format!(
+            "ln {} {}",
+            quoted(&key),
+            quoted(&theirs.join("hard"))
+        ));
+        assert!(
+            run(&format!("cat {}", quoted(&theirs.join("hard")))).is_empty(),
+            "a hard link read the key"
+        );
+        assert!(
+            run(&format!("/usr/bin/ssh-keygen -y -f {}", quoted(&key))).is_empty(),
+            "ssh-keygen read the key"
+        );
+
+        // What ssh needs is still there, and so is the key, to sign with.
+        assert!(
+            run("cat .ssh/config").contains("Host m5"),
+            "the config went"
+        );
+        assert!(
+            run("cat .ssh/known_hosts").contains("192.0.2.1"),
+            "known_hosts went"
+        );
+        assert!(
+            run("cat .ssh/id_test.pub").contains("errand-wall-test"),
+            "the public half went"
+        );
+        assert!(
+            run("ls .ssh").contains("id_test.pub"),
+            "the folder could not be listed"
+        );
+        assert!(
+            run("/usr/bin/ssh-add -L").contains("errand-wall-test"),
+            "the agent could not be reached from inside the wall"
+        );
+
+        let _ = agent.kill();
+        let _ = agent.wait();
+        std::fs::remove_dir_all(&theirs).ok();
+    }
+
     #[test]
     fn what_a_model_is_told_about_the_wall_names_the_folders_it_may_use() {
         // The whole point of telling it: a model that reads a bare refusal
@@ -842,6 +1122,8 @@ mod tests {
         assert!(said.contains("/Volumes/Disk"), "{said}");
         assert!(said.contains("never a macOS setting"), "{said}");
         assert!(said.contains("Full Disk Access"), "{said}");
+        // And never to go round it, which is what an errand did with a key.
+        assert!(said.contains("Never copy a key"), "{said}");
         also_allow(home, vec![]);
     }
 }
