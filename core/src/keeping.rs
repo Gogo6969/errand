@@ -276,6 +276,7 @@ mod tests {
             paused_at: None,
             priority: crate::store::NORMALLY,
             finished_at: None,
+            keep_local: false,
         }
     }
 

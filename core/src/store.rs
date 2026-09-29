@@ -275,6 +275,10 @@ pub struct Blueprint {
     /// Its routines and watches, a conversation's worth each.
     #[serde(default)]
     pub standing: Vec<StandingJob>,
+    /// Whether its words stay on this network. Nothing in a file from before
+    /// there was such a thing, which is how every agent was then.
+    #[serde(default)]
+    pub keep_local: bool,
 }
 
 /// One conversation's schedule and watch, as a blueprint carries it.
@@ -383,6 +387,11 @@ pub struct Agent {
     /// When its person said its job was finished. Nothing while it is not.
     #[serde(default)]
     pub finished_at: Option<i64>,
+    /// Whether its words stay on this Mac and this network. It only ever runs
+    /// on a model served here, whatever Errand's model is, and refuses rather
+    /// than send them anywhere else.
+    #[serde(default)]
+    pub keep_local: bool,
 }
 
 /// A run as seen afterwards: which, when, how it ended, and what it said.
@@ -1085,6 +1094,10 @@ const CHANGES: &[&str] = &[
         SET priority = (SELECT a.priority FROM agents AS a WHERE a.id = conversations.agent),
             finished_at = (SELECT a.finished_at FROM agents AS a WHERE a.id = conversations.agent)
       WHERE agent IN (SELECT id FROM agents);",
+    // Teammates whose words stay on this network: they run only on a model
+    // served here, whatever Errand's model is. Last, as every change is:
+    // they are applied by position, and a store is as far along as its count.
+    "ALTER TABLE agents ADD COLUMN keep_local INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -1630,6 +1643,7 @@ impl Store {
             skills: self.skills(agent)?,
             allowed,
             standing,
+            keep_local: found.keep_local,
         })
     }
 
@@ -1643,8 +1657,8 @@ impl Store {
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO agents (id, name, cwd, model, opened, started_at, spoke_at, engine,
-                                 engine_settings, title, about, mark, hue, asks)
-             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                 engine_settings, title, about, mark, hue, asks, keep_local)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 to,
                 plan.name,
@@ -1660,7 +1674,8 @@ impl Store {
                 plan.about,
                 plan.mark,
                 plan.hue,
-                plan.asks
+                plan.asks,
+                plan.keep_local
             ],
         )?;
         tx.execute(
@@ -2797,6 +2812,16 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Keep an agent's words on this network, or let them go where Errand's
+    /// model is.
+    pub fn keep_local(&self, agent: &str, on: bool) -> Result<()> {
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE agents SET keep_local = ? WHERE id = ?",
+            params![on, agent],
+        )?;
+        Self::only_if_it_is_there(changed, "agent")
+    }
+
     /// Say an agent's job is finished, as of this moment, or that it is not
     /// finished after all.
     pub fn finish(&self, agent: &str, at: Option<i64>) -> Result<()> {
@@ -2866,7 +2891,7 @@ impl Store {
         let mut q = conn.prepare(
             "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
                     cwd, model, started_at, spoke_at, engine, engine_settings,
-                    paused_at, priority, finished_at
+                    paused_at, priority, finished_at, keep_local
                FROM agents ORDER BY pinned DESC, spoke_at DESC",
         )?;
         let rows = q.query_map([], |r| {
@@ -2889,6 +2914,7 @@ impl Store {
                 paused_at: r.get(15)?,
                 priority: r.get(16)?,
                 finished_at: r.get(17)?,
+                keep_local: r.get(18)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2901,7 +2927,7 @@ impl Store {
         let mut q = conn.prepare_cached(
             "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
                     cwd, model, started_at, spoke_at, engine, engine_settings,
-                    paused_at, priority, finished_at
+                    paused_at, priority, finished_at, keep_local
                FROM agents WHERE id = ?",
         )?;
         let mut rows = q.query_map([id], |r| {
@@ -2924,6 +2950,7 @@ impl Store {
                 paused_at: r.get(15)?,
                 priority: r.get(16)?,
                 finished_at: r.get(17)?,
+                keep_local: r.get(18)?,
             })
         })?;
         rows.next().transpose().map_err(Into::into)
@@ -3462,7 +3489,7 @@ impl Store {
         let mut q = conn.prepare(
             "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
                     cwd, model, started_at, spoke_at, engine, engine_settings,
-                    paused_at, priority, finished_at
+                    paused_at, priority, finished_at, keep_local
                FROM agents
               WHERE name LIKE ?1 ESCAPE '\\'
                  OR COALESCE(about, '') LIKE ?1 ESCAPE '\\'
@@ -3496,6 +3523,7 @@ impl Store {
                 paused_at: r.get(15)?,
                 priority: r.get(16)?,
                 finished_at: r.get(17)?,
+                keep_local: r.get(18)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -3833,6 +3861,31 @@ mod tests {
     }
 
     #[test]
+    fn a_teammate_kept_local_stays_so_and_so_does_a_copy_of_it() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a", "/tmp/a");
+        assert!(
+            !s.agent("a").unwrap().unwrap().keep_local,
+            "local only when asked"
+        );
+        s.keep_local("a", true).unwrap();
+        assert!(s.agent("a").unwrap().unwrap().keep_local);
+        assert!(s.agents().unwrap()[0].keep_local);
+        // A copy of it keeps its words here as well.
+        let plan = s.blueprint("a").unwrap();
+        assert!(plan.keep_local);
+        s.from_blueprint(&plan, "b", Path::new("/tmp/b")).unwrap();
+        assert!(s.agent("b").unwrap().unwrap().keep_local);
+        // A file from before there was such a thing reads as not kept.
+        let old: Blueprint = serde_json::from_str(
+            r#"{"errand_agent":1,"name":"Old","engine":"local","asks":"ask"}"#,
+        )
+        .unwrap();
+        assert!(!old.keep_local);
+        assert!(s.keep_local("nobody", true).is_err());
+    }
+
+    #[test]
     fn a_task_has_its_own_priority_and_can_be_finished() {
         let s = Store::in_memory().unwrap();
         one(&s, "a", "/tmp/a");
@@ -3881,7 +3934,13 @@ mod tests {
                 [],
             )
             .unwrap();
-            conn.execute_batch(CHANGES[CHANGES.len() - 2]).unwrap();
+            // Found by what it does, not where it is: every change after it
+            // moves it.
+            let rename = CHANGES
+                .iter()
+                .find(|c| c.contains("deepseek-v4-flash"))
+                .expect("the rename");
+            conn.execute_batch(rename).unwrap();
         }
         let d = s
             .offered()

@@ -5013,6 +5013,106 @@ export async function aNewTeammate() {
   return found;
 }
 
+/**
+ * A teammate whose words stay on this network: the switch, the line saying
+ * where its words go, and the local model it runs on when Errand's model is
+ * somebody else's server.
+ */
+export async function keepingItLocal() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  const words = document.getElementById("words-go");
+  const open = async (id) => {
+    const at = FIXTURE.agents.findIndex((a) => a.id === id);
+    [...document.querySelectorAll("#threads li")][at]?.click();
+    await settle(300);
+  };
+  const desk = "agent-bitcoin";
+
+  await open(desk);
+  check(
+    "the header says where a teammate's words go",
+    !words.hidden && words.dataset.state === "away" && /leave your network/.test(words.textContent),
+    `${words.dataset.state}: ${words.textContent}`,
+  );
+
+  // Errand's model on this Mac: its words stay here.
+  FIXTURE.settings.errand_model = "o-local";
+  await open(desk);
+  check(
+    "on a model on this Mac they stay on your network, said with the model",
+    words.dataset.state === "here" && /stay on your network/.test(words.textContent) && /qwen2\.5:7b/.test(words.textContent),
+    words.textContent,
+  );
+
+  // Kept local, from who it is.
+  document.getElementById("thread-name").click();
+  await settle(150);
+  const box = document.getElementById("whois-local");
+  box.checked = true;
+  box.dispatchEvent(new Event("change"));
+  await settle(200);
+  check(
+    "Keep it local is a switch under who it is, and it is kept",
+    asked.some((a) => a.name === "keep_local" && a.args?.id === desk && a.args?.on === true) &&
+      /Kept local/.test(words.textContent),
+    words.textContent,
+  );
+  document.getElementById("thread-name").click();
+  await settle(100);
+
+  // Errand's model out on the internet, and nothing local chosen: it says it
+  // will not run, rather than sending anything.
+  FIXTURE.offered.push({
+    id: "o-hosted", engine: "local", label: "deepseek-flash \u00b7 DeepSeek", backend: null, sort: 9, mark: "local|hosted",
+    settings: '{"provider":"openai-compat","base_url":"https://api.deepseek.com/v1","model":"deepseek-flash"}',
+  });
+  FIXTURE.settings.errand_model = "o-hosted";
+  await open(desk);
+  check(
+    "kept local with Errand's model elsewhere and nothing local chosen, it says it will not run",
+    words.dataset.state === "refused" && /Choose a Local model in Settings/.test(words.textContent),
+    `${words.dataset.state}: ${words.textContent}`,
+  );
+
+  // The local model, chosen in Settings from what is served here only.
+  document.getElementById("setup").click();
+  await settle(300);
+  const local = document.getElementById("local-model");
+  const offered = [...local.options].map((o) => o.value).filter(Boolean);
+  check(
+    "Settings offers as the local model only what is served here",
+    offered.includes("o-local") && !offered.includes("o-default") && !offered.includes("o-opus"),
+    offered.join(", ") || "nothing",
+  );
+  local.value = "o-local";
+  local.dispatchEvent(new Event("change"));
+  await settle(200);
+  check(
+    "choosing one is kept",
+    asked.some((a) => a.name === "set_setting" && a.args?.key === "local_model" && a.args?.value === "o-local") &&
+      /now run on qwen2\.5:7b/.test(document.getElementById("local-model-says").textContent),
+    document.getElementById("local-model-says").textContent,
+  );
+  document.getElementById("models-done").click();
+  await settle(150);
+  await open(desk);
+  check(
+    "and the teammate kept local now runs on it, its words on your network",
+    words.dataset.state === "here" && /Kept local: its words stay on your network/.test(words.textContent),
+    words.textContent,
+  );
+
+  // As it was.
+  FIXTURE.offered = FIXTURE.offered.filter((o) => o.id !== "o-hosted");
+  delete FIXTURE.settings.errand_model;
+  delete FIXTURE.settings.local_model;
+  const agent = FIXTURE.agents.find((a) => a.id === desk);
+  if (agent) delete agent.keep_local;
+  return found;
+}
+
 export async function aLongConversation() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });

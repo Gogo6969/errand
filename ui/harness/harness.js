@@ -433,6 +433,11 @@ export const FIXTURE = {
 /** Everything the window asked for, so a check can say what was never called. */
 export const asked = [];
 
+/** Whether a line of the picker is served on this Mac or this network. */
+function servedHere(o) {
+  return o.engine === "local" && /\/\/(127\.|192\.168\.|10\.|localhost)/.test(o.settings || "");
+}
+
 /** Everything the page is listening for, by name. */
 const listeners = {};
 
@@ -528,8 +533,33 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             );
           case "engines":
             return Promise.resolve(
-              fixture.offered.map((o) => ({ id: o.id, engine: o.engine, name: o.label, settings: o.settings })),
+              fixture.offered.map((o) => ({ id: o.id, engine: o.engine, name: o.label, settings: o.settings, here: servedHere(o) })),
             );
+          // Decided the way the app decides it: Errand's model, or what the
+          // teammate was put on; and for one kept local, a model served here
+          // or nothing at all.
+          case "where_words_go": {
+            const a = fixture.agents.find((x) => x.id === args.id);
+            const chosen = fixture.offered.find((o) => o.id === fixture.settings.errand_model);
+            if (!a?.keep_local || !chosen || servedHere(chosen)) {
+              return Promise.resolve({
+                stays: chosen ? servedHere(chosen) : false,
+                model: chosen ? chosen.label : "Claude",
+                refused: null,
+              });
+            }
+            const local = fixture.offered.find((o) => o.id === fixture.settings.local_model && servedHere(o));
+            return Promise.resolve(
+              local
+                ? { stays: true, model: local.label, refused: null }
+                : { stays: true, model: "", refused: "This teammate keeps its words on your network, and Errand's model sends them elsewhere." },
+            );
+          }
+          case "keep_local": {
+            const a = fixture.agents.find((x) => x.id === args.id);
+            if (a) a.keep_local = args.on;
+            return Promise.resolve(null);
+          }
           case "outside":
             return Promise.resolve(fixture.outside);
           case "checkup":
@@ -803,6 +833,13 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           // Refused the way the app refuses it, so the window's handling of a
           // refusal is what gets checked.
           case "set_setting":
+            if (args?.key === "local_model") {
+              if (!fixture.offered.some((o) => o.id === args.value && servedHere(o))) {
+                return Promise.reject("That model is not served on this Mac or your network, so it cannot be the local one.");
+              }
+              fixture.settings[args.key] = args.value;
+              return Promise.resolve(null);
+            }
             if (args?.key === "errand_model") {
               if (!fixture.offered.some((o) => o.id === args.value)) {
                 return Promise.reject("That model is not in the list to choose from.");

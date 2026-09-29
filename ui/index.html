@@ -87,6 +87,26 @@
         </div>
       </div>
 
+      <!--
+        Where teammates kept local run. Only models served on this Mac or this
+        network are offered: the point of the switch is that their words never
+        leave.
+      -->
+      <div class="card" id="local-model-card">
+        <div class="card-head">
+          <div>
+            <h2>Local model</h2>
+            <p id="local-model-says">
+              Teammates you keep local run on this one whenever Errand's model would send
+              their words elsewhere. Only models on this Mac or your network are offered.
+            </p>
+          </div>
+          <div class="doing">
+            <select id="local-model" title="The model teammates kept local run on"></select>
+          </div>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-head">
           <div>
@@ -273,6 +293,13 @@
         has eleven other things in it, so the name was squeezed to "Inb..." and
         what an agent handled was on screen nowhere but in a box behind it.
       -->
+      <!--
+        Where what this teammate is told, and everything it reads, goes: on
+        this network, or out to somebody else's servers. Said for every
+        teammate, because which model is Errand's is a choice in Settings that
+        nobody looks at while talking to one.
+      -->
+      <p id="words-go" hidden></p>
       <p id="purpose" hidden></p>
 
       <!--
@@ -293,6 +320,9 @@
         <label>Name <input id="whois-name" type="text" autocomplete="off" placeholder="Disk Watch" /></label>
         <label>Role <input id="whois-title" type="text" autocomplete="off" placeholder="Storage" /></label>
         <label>Job <input id="whois-about" type="text" autocomplete="off" placeholder="Keeps an eye on the external SSD" /></label>
+        <label class="keep-local" title="Its words stay on this Mac and your network: it runs only on a model served here, and refuses rather than send them anywhere else. Takes effect the next time it is given something.">
+          <input id="whois-local" type="checkbox" /> Keep it local
+        </label>
         <button id="whois-save" type="button">Save</button>
         <!--
           What it has written down, read into every conversation it has. Here,

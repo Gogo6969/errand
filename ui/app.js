@@ -205,6 +205,8 @@ let standingNow = [];
 let listeningTo = null;
 /** Which line of the picker every teammate works on: Errand's model, or none yet. */
 let errandModel = null;
+/** The line teammates kept local run on when Errand's model would send words elsewhere. */
+let localModel = null;
 /**
  * Every task, every teammate's, as the app last said: what matters and what
  * is finished is a task's. Read on opening and with the overview.
@@ -347,6 +349,10 @@ const el = {
   whoisAbout: document.getElementById("whois-about"),
   whoisSave: document.getElementById("whois-save"),
   whoisNew: document.getElementById("whois-new"),
+  whoisLocal: document.getElementById("whois-local"),
+  wordsGo: document.getElementById("words-go"),
+  localModel: document.getElementById("local-model"),
+  localModelSays: document.getElementById("local-model-says"),
   notesSummary: document.getElementById("notes-summary"),
   notesList: document.getElementById("notes-list"),
   noteNew: document.getElementById("note-new"),
@@ -970,6 +976,7 @@ async function show(id) {
     drawPinned(a);
     el.name.textContent = a.name;
     drawPurpose(a);
+    drawWordsGo();
     drawEngines(a);
   }
   drawTalks();
@@ -1335,6 +1342,8 @@ function asAgent(a, keeping) {
     kind: keeping?.kind,
     // When it was last spoken to, for ordering the overview by what is recent.
     spoke: a.spoke_at || 0,
+    // Its words stay on this network: it runs only on a model served here.
+    keepLocal: !!a.keep_local,
   };
 }
 
@@ -3308,6 +3317,7 @@ el.engine.addEventListener("change", async () => {
   try {
     await invoke("set_setting", { key: "errand_model", value: choice.id });
     errandModel = choice.id;
+    drawWordsGo();
     // When it takes effect, said plainly: nobody is cut off mid-task by it.
     el.errandModelSays.textContent = `Every teammate now works on ${choice.name}. One in the middle of something finishes on the model it started with.`;
   } catch (why) {
@@ -3611,6 +3621,7 @@ el.name.addEventListener("click", () => {
   el.whoisTitle.value = t.title;
   el.whoisAbout.value = t.about;
   el.whoisNew.hidden = t.name !== NOT_YET_NAMED;
+  el.whoisLocal.checked = !!t.keepLocal;
   el.whois.hidden = false;
   el.whoisName.focus();
   drawNotes();
@@ -5999,6 +6010,7 @@ const KNOWN_PLACES = [
 async function showModels() {
   el.models.hidden = false;
   drawEngines();
+  drawLocalModel();
   el.presets.replaceChildren(
     ...KNOWN_PLACES.map((place) => {
       const b = document.createElement("button");
@@ -6145,6 +6157,7 @@ el.setup.addEventListener("click", showModels);
 
 async function readTheSettings() {
   errandModel = (await invoke("setting", { key: "errand_model" }).catch(() => null)) || null;
+  localModel = (await invoke("setting", { key: "local_model" }).catch(() => null)) || null;
   try {
     const days = Number(await invoke("setting", { key: "finished_kept_days" }));
     if (days >= 1) finishedKeptDays = days;
@@ -6153,6 +6166,91 @@ async function readTheSettings() {
   }
   el.finishedDays.value = String(finishedKeptDays);
 }
+
+/**
+ * Where the words of the teammate on screen go: on this network, out to
+ * somebody else's servers, or nowhere, for one kept local with nothing local
+ * to run on. Asked of the app, which is what decides it.
+ */
+async function drawWordsGo() {
+  const a = whose();
+  if (!a) {
+    el.wordsGo.hidden = true;
+    return;
+  }
+  let where;
+  try {
+    where = await invoke("where_words_go", { id: a.id });
+  } catch {
+    el.wordsGo.hidden = true;
+    return;
+  }
+  // Somebody went on to another teammate while this was being asked.
+  if (whose() !== a || !where) return;
+  const kept = a.keepLocal ? "Kept local: " : "";
+  if (where.refused) {
+    el.wordsGo.dataset.state = "refused";
+    el.wordsGo.textContent = "Kept local, and there is nothing local to run it on. Choose a Local model in Settings.";
+    el.wordsGo.title = where.refused;
+  } else if (where.stays) {
+    el.wordsGo.dataset.state = "here";
+    el.wordsGo.textContent = `${kept}its words stay on your network \u00b7 ${where.model}`;
+    el.wordsGo.title = "What it is told, and everything it reads for you, stays on this Mac and your network.";
+  } else {
+    el.wordsGo.dataset.state = "away";
+    el.wordsGo.textContent = `Its words leave your network \u00b7 ${where.model}`;
+    el.wordsGo.title =
+      "What it is told, and everything it reads for you, goes to this model's servers. Keep it local under Who this is.";
+  }
+  el.wordsGo.hidden = false;
+}
+
+el.whoisLocal.addEventListener("change", async () => {
+  const a = whose();
+  if (!a) return;
+  const on = el.whoisLocal.checked;
+  try {
+    await invoke("keep_local", { id: a.id, on });
+    a.keepLocal = on;
+  } catch (why) {
+    el.whoisLocal.checked = !on;
+    complain(String(why));
+  }
+  drawWordsGo();
+});
+
+/** The models teammates kept local may run on: only those served here. */
+async function drawLocalModel() {
+  const here = (await whatCouldAnswer()).filter((c) => c.here);
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = here.length ? "Not chosen" : "None on this Mac or your network yet";
+  el.localModel.replaceChildren(
+    none,
+    ...here.map((c) => {
+      const option = document.createElement("option");
+      option.value = c.id;
+      option.textContent = c.name;
+      return option;
+    }),
+  );
+  el.localModel.value = here.some((c) => c.id === localModel) ? localModel : "";
+}
+
+el.localModel.addEventListener("change", async () => {
+  const id = el.localModel.value;
+  if (!id) return;
+  const choice = (await whatCouldAnswer()).find((c) => c.id === id);
+  try {
+    await invoke("set_setting", { key: "local_model", value: id });
+    localModel = id;
+    el.localModelSays.textContent = `Teammates kept local now run on ${choice?.name || "it"} whenever Errand's model would send their words elsewhere.`;
+  } catch (why) {
+    el.localModelSays.textContent = String(why);
+    drawLocalModel();
+  }
+  drawWordsGo();
+});
 
 el.finishedDays.addEventListener("change", async () => {
   const days = Math.round(Number(el.finishedDays.value));
