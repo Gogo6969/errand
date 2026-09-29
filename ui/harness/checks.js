@@ -5167,6 +5167,13 @@ export async function onlyModelsThatAnswer() {
   window.dispatchEvent(new Event("focus"));
   await settle(400);
   check(
+    "one knock unanswered is not enough to call a server down",
+    [...picker.options].some((o) => o.value === gone.mark),
+    said(),
+  );
+  window.dispatchEvent(new Event("focus"));
+  await settle(400);
+  check(
     "coming back to the window knocks on the model servers nearby",
     asked.slice(before).some((a) => a.name === "answering" && a.args?.addresses?.length === locals.length),
     asked.slice(before).map((a) => a.name).join(",") || "asked nothing",
@@ -5213,6 +5220,8 @@ export async function onlyModelsThatAnswer() {
   picker.dispatchEvent(new Event("change"));
   await settle(300);
   FIXTURE.answering[JSON.parse(gone.settings).base_url] = false;
+  window.dispatchEvent(new Event("focus"));
+  await settle(400);
   window.dispatchEvent(new Event("focus"));
   await settle(400);
   check(

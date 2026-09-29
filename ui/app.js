@@ -396,6 +396,12 @@ function thePickerHasChanged() {
  */
 const answeredAt = new Map();
 const answeredLast = new Map();
+// Knocks in a row a server has not answered. One is not enough to call it
+// down: the first knock after the app starts can go unanswered by a server
+// that is perfectly well, and that turned a working model red on every launch
+// it happened to. So a miss is knocked on again shortly, and only a second
+// miss in a row counts.
+const missed = new Map();
 const QUIET_FOR = 10 * 60_000;
 let knocking = false;
 
@@ -421,12 +427,22 @@ async function knockOnTheModels() {
     const answers = await invoke("answering", { addresses: nearbyOnes.map(([, at]) => at) });
     if (!Array.isArray(answers)) return;
     const now = Date.now();
+    let again = false;
     nearbyOnes.forEach(([key], i) => {
       // Nothing back means it is out on the internet and was not knocked on.
       if (typeof answers[i] !== "boolean") return;
-      answeredLast.set(key, answers[i]);
-      if (answers[i]) answeredAt.set(key, now);
+      if (answers[i]) {
+        answeredLast.set(key, true);
+        answeredAt.set(key, now);
+        missed.delete(key);
+        return;
+      }
+      const times = (missed.get(key) || 0) + 1;
+      missed.set(key, times);
+      if (times >= 2) answeredLast.set(key, false);
+      else again = true;
     });
+    if (again) setTimeout(knockOnTheModels, 15_000);
   } catch {
     return;
   } finally {
