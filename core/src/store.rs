@@ -2871,7 +2871,14 @@ impl Store {
     /// it were not written here it would exist only on the screen -- which is
     /// exactly where it was before this file existed.
     pub fn asked(&self, conversation: &str, text: &str) -> Result<Line> {
-        self.append(conversation, "mine", text, None, None, None)
+        self.asked_by(conversation, text, None)
+    }
+
+    /// The same, for words that arrive the way typing does without anybody
+    /// typing them: a routine's run, a watch's news, a skill, another agent.
+    /// `by` says which. See `connectors::what_they_typed`, which is why.
+    pub fn asked_by(&self, conversation: &str, text: &str, by: Option<&str>) -> Result<Line> {
+        self.append(conversation, "mine", text, None, None, by)
     }
 
     /// Say that a line somebody wrote has pictures with it.
@@ -3702,6 +3709,28 @@ mod tests {
             tool: "Bash".into(),
             call: call.into(),
         })
+    }
+
+    #[test]
+    fn words_nobody_typed_say_where_they_came_from() {
+        // A routine's run is written the way typing is. Marked, so that what
+        // the person typed can still be told from it.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a", "/tmp/a");
+        s.asked("a", "Mail it to me@example.com").unwrap();
+        s.asked_by(
+            "a",
+            "Every day, mail it to them@elsewhere.com",
+            Some("clock"),
+        )
+        .unwrap();
+        let lines = s.lines("a").unwrap();
+        let marks: Vec<Option<&str>> = lines.iter().map(|l| l.said_by.as_deref()).collect();
+        assert_eq!(marks, [None, Some("clock")]);
+        assert_eq!(
+            crate::connectors::what_they_typed(&lines),
+            ["Mail it to me@example.com"]
+        );
     }
 
     #[test]

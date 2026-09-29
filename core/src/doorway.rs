@@ -1059,7 +1059,8 @@ mod tests {
                 "unread_mail",
                 "search_mail",
                 "what_is_on",
-                "read_web_page"
+                "read_web_page",
+                "send_mail"
             ]
         );
         for tool in &tools {

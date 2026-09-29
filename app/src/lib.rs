@@ -1183,6 +1183,21 @@ async fn say(
     // conversation on from a message somebody has only just sent rather than
     // only from ones read back off disk.
 ) -> Result<Option<i64>, String> {
+    say_as(app, held, id, text, attached, None).await
+}
+
+/// Say something that nobody typed: a routine's run, a watch's news, a skill,
+/// another agent's request. `by` says which, on the line, so that what the
+/// person typed can be told apart from everything else that arrives the way
+/// typing does. Sending mail depends on it: see `connectors::what_they_typed`.
+async fn say_as(
+    app: AppHandle,
+    held: State<'_, Held>,
+    id: String,
+    text: String,
+    attached: Option<Vec<String>>,
+    by: Option<&str>,
+) -> Result<Option<i64>, String> {
     // Kept as given, for a room: each member is handed the same pictures.
     let as_given = attached.clone();
     let pictures = attached
@@ -1200,7 +1215,7 @@ async fn say(
     if a_room {
         claim_the_round(&held.doing, &id)?;
     }
-    let written = match write_down_what_was_said(&app, &held, &id, &text, &pictures) {
+    let written = match write_down_what_was_said(&app, &held, &id, &text, &pictures, by) {
         Ok(written) => written,
         Err(why) => {
             if a_room {
@@ -1221,7 +1236,7 @@ async fn say(
             seq: written.seq,
             kind: "mine".to_string(),
             text: text.clone(),
-            said_by: None,
+            said_by: by.map(str::to_string),
         },
     );
 
@@ -1289,12 +1304,16 @@ fn write_down_what_was_said(
     id: &str,
     text: &str,
     pictures: &[errand_core::Picture],
+    by: Option<&str>,
 ) -> Result<Line, String> {
     // Before the line, because the line points at it. An agent made in the
     // window is not written down until there is something to write, and this is
     // that moment.
     write_it_down_if_new(app, held, id)?;
-    let written = held.store.asked(id, text).map_err(|e| e.to_string())?;
+    let written = held
+        .store
+        .asked_by(id, text, by)
+        .map_err(|e| e.to_string())?;
 
     // Kept, beside the store rather than in it. The bytes used to reach the
     // engine and be thrown away, and the line said "(with a picture)" -- so a
@@ -2775,12 +2794,13 @@ async fn look_once(
                 }
                 Turn::claim(held.running.clone(), conversation.to_string())
             };
-            say(
+            say_as(
                 app.clone(),
                 app.state(),
                 conversation.to_string(),
                 said,
                 None,
+                Some("watch"),
             )
             .await?;
             turn.handed_to_the_engine();
@@ -3568,17 +3588,10 @@ fn reach_for_it(
         held.store.connected()?.iter().any(|one| one == wanted)
     };
     if !on {
-        let named = errand_core::connectors::KNOWN
-            .iter()
-            .find(|c| c.id == wanted)
-            .map_or(wanted, |c| c.name);
-        anyhow::bail!(
-            "{named} is not connected, so there is nothing to read. Say so: they can turn it \
-             on under Settings, and it takes effect at once."
-        );
+        anyhow::bail!(errand_core::connectors::switched_off(job));
     }
     if nobody_would_be_asked(app, job, from, args) {
-        anyhow::bail!(errand_core::connectors::NOBODY_NAMED_IT);
+        anyhow::bail!(errand_core::connectors::nobody_named(job));
     }
     errand_core::connectors::run(job, args)
 }
@@ -3595,14 +3608,10 @@ fn nobody_would_be_asked(app: &AppHandle, job: &str, from: &str, args: &serde_js
     let Ok(Some(agent)) = held.store.agent(&talk.agent) else {
         return false;
     };
-    let they_said: Vec<String> = held
-        .store
-        .lines(from)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|line| line.kind == "mine")
-        .map(|line| line.text)
-        .collect();
+    // What they typed, and not a routine's or a watch's words, which arrive
+    // the same way and can have been set by the agent itself.
+    let they_said =
+        errand_core::connectors::what_they_typed(&held.store.lines(from).unwrap_or_default());
     errand_core::connectors::refused_without_asking(
         &agent.engine,
         &agent.asks,
@@ -3740,7 +3749,15 @@ async fn run_a_skill(
         .begin_conversation_for(&talk, &agent, &skill::called(&found.name), None)
         .map_err(|e| e.to_string())?;
     let plan = skill::the_plan(&found, differently.as_deref().unwrap_or(""));
-    say(app.clone(), app.state(), talk.clone(), plan, None).await?;
+    say_as(
+        app.clone(),
+        app.state(),
+        talk.clone(),
+        plan,
+        None,
+        Some("skill"),
+    )
+    .await?;
     Ok(talk)
 }
 
@@ -4261,7 +4278,16 @@ async fn run_skill(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Strin
         let held: State<Held> = app.state();
         held.watching.lock().unwrap().insert(talk.clone(), finished);
     }
-    let said = match say(app.clone(), app.state(), talk.clone(), plan, None).await {
+    let said = match say_as(
+        app.clone(),
+        app.state(),
+        talk.clone(),
+        plan,
+        None,
+        Some("skill"),
+    )
+    .await
+    {
         Ok(_) => wait_for_the_answer(done, asked.along_the_way.clone()).await,
         Err(why) => Err(anyhow::anyhow!("{why}")),
     };
@@ -4395,13 +4421,14 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
         held.watching.lock().unwrap().insert(talk.clone(), finished);
     }
 
-    let said = match say(
+    let said = match say_as(
         app.clone(),
         app.state(),
         talk.clone(),
         heard.said,
         // An agent asking another sends words and nothing else.
         None,
+        Some("agent"),
     )
     .await
     {
@@ -5209,8 +5236,17 @@ async fn a_routines_turn(
             errand_core::routine::arriving_after_the_last_run(due, now)
         ),
     };
-    // A routine says what it was set to say, and nothing else.
-    say(app.clone(), app.state(), conversation.clone(), said, None).await?;
+    // A routine says what it was set to say, and nothing else. Marked as the
+    // clock's, because an agent can set one: see `connectors::what_they_typed`.
+    say_as(
+        app.clone(),
+        app.state(),
+        conversation.clone(),
+        said,
+        None,
+        Some("clock"),
+    )
+    .await?;
     // Cleared once the turn is under way rather than when the engine opened,
     // because a turn can open one more than once and every one of them has to
     // start clean.
