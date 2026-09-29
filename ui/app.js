@@ -18,11 +18,35 @@ window.addEventListener("error", (e) => complain(e.message));
 window.addEventListener("unhandledrejection", (e) => complain(String(e.reason)));
 
 import { tile, forTool, kindOf } from "./icons.js";
-import { STATES, stateOf, stillInTheList, inOrder, bySubject } from "./jobs.js";
+import { STATES, SHOWING, shown, stateOf, stillInTheList, inOrder, bySubject } from "./jobs.js";
 import { render, reachTheAppWith } from "./markdown.js";
 import { toSay } from "./speech.js";
 
-const { invoke } = window.__TAURI__.core;
+const { invoke: invokeTheApp } = window.__TAURI__.core;
+
+/**
+ * The commands that change what repeats: routines, watches, and anything that
+ * makes or removes an agent that has them. After each, the list of what repeats
+ * is read again, so the marks down the side and on the overview's tiles are
+ * never a step behind what was just saved.
+ */
+const CHANGES_WHAT_REPEATS = new Set([
+  "runs",
+  "routine_off",
+  "watch_it",
+  "look_again",
+  "pause",
+  "forget",
+  "forget_conversation",
+  "duplicate",
+  "load_agent",
+]);
+
+async function invoke(name, args) {
+  const answer = await invokeTheApp(name, args);
+  if (CHANGES_WHAT_REPEATS.has(name)) setTimeout(readStanding, 0);
+  return answer;
+}
 // The renderer draws pictures an agent made and reveals files it wrote, and
 // both of those are the app's to do rather than the window's.
 reachTheAppWith(invoke);
@@ -166,6 +190,12 @@ let showing = null; // the conversation on screen
  * that reads the setting has run.
  */
 let finishedKeptDays = 7;
+/**
+ * Every routine and watch, every agent's, as the app last said. Read when the
+ * page opens and whenever one changes, and shown as a mark beside each agent
+ * that has one, down the side and on the overview.
+ */
+let standingNow = [];
 
 const el = {
   threads: document.getElementById("threads"),
@@ -185,6 +215,8 @@ const el = {
   overviewOrder: document.getElementById("overview-order"),
   overviewAway: document.getElementById("overview-away"),
   overviewTiles: document.getElementById("overview-tiles"),
+  overviewFind: document.getElementById("overview-find"),
+  overviewShow: document.getElementById("overview-show"),
   finishedDays: document.getElementById("finished-days"),
   finishedDaysSays: document.getElementById("finished-days-says"),
   reachableList: document.getElementById("reachable-list"),
@@ -652,6 +684,7 @@ async function alsoAsk() {
  */
 async function catchUp() {
   await readTheSettings();
+  standingNow = (await invoke("standing").catch(() => [])) || [];
   const known = await invoke("agents");
   for (const a of known) agents.set(a.id, asAgent(a, agents.get(a.id)));
   await whatIsNew();
@@ -1605,6 +1638,7 @@ function drawThreads() {
       const name = document.createElement("span");
       name.className = "name";
       name.textContent = a.name;
+      name.append(...repeatMarks(a));
       if (a.title) {
         // The role, so a list of agents can be read at a glance rather than
         // deciphered from names somebody's agents chose for themselves.
@@ -1617,6 +1651,7 @@ function drawThreads() {
         name.append(note("span", "Finished", "finished-badge"));
         li.classList.add("is-finished");
       }
+      li.dataset.priority = String(a.priority || 2);
 
       // What it is for, rather than the last thing said to it. An agent is a
       // standing job, and the useful line under its name is the job -- the last
@@ -2339,6 +2374,7 @@ listen("paused", ({ payload }) => {
 
 // A schedule set or switched off by the agent itself, because it was asked to.
 listen("repeats", async ({ payload }) => {
+  readStanding();
   const t = talks.get(payload.conversation);
   if (!t) return;
   t.repeats = payload.repeats;
@@ -5795,6 +5831,84 @@ async function markFinished(a, finished) {
   }
 }
 
+/** Read what repeats again, and redraw what shows it if any of it changed. */
+async function readStanding() {
+  let now;
+  try {
+    now = (await invokeTheApp("standing")) || [];
+  } catch {
+    return;
+  }
+  // Every minute, so only when something is different: redrawing the list
+  // under somebody's pointer for nothing is how a list starts to flicker.
+  if (JSON.stringify(now) === JSON.stringify(standingNow)) return;
+  standingNow = now;
+  overviewKnows.standing = standingNow;
+  drawThreads();
+  if (!el.overview.hidden) drawOverview();
+}
+// And now and then regardless, for a watch the app stopped on its own, which
+// says so in its conversation rather than by any event of this kind.
+setInterval(readStanding, 60_000);
+
+/**
+ * The marks for what an agent does on its own: one for routines and one for
+ * watches, each saying in its tooltip when and what.
+ */
+function repeatMarks(a) {
+  const theirs = standingNow.filter((s) => s.agent === a.id);
+  const routines = theirs.filter((s) => s.kind === "routine");
+  const watches = theirs.filter((s) => s.kind === "watch");
+  const marks = [];
+  if (routines.length) {
+    marks.push(
+      aMark(
+        "repeat",
+        routines.every((r) => r.off || r.paused),
+        routines
+          .map((r) => {
+            const when = r.off
+              ? "switched off"
+              : r.paused
+                ? "paused"
+                : r.due
+                  ? `next ${whenNext(r.due)}`
+                  : "";
+            return `Repeats ${r.at}${when ? ` (${when})` : ""}: ${r.what}`;
+          })
+          .join("\n"),
+      ),
+    );
+  }
+  if (watches.length) {
+    marks.push(
+      aMark(
+        "watch",
+        watches.every((w) => w.stopped || w.paused),
+        watches
+          .map((w) => `Watches ${w.at}${w.stopped ? " (stopped)" : ""}: ${w.what}`)
+          .join("\n"),
+      ),
+    );
+  }
+  return marks;
+}
+
+/** One mark: a small picture, dimmed when nothing of it will run, and its tooltip. */
+function aMark(kind, idle, says) {
+  const mark = document.createElement("span");
+  mark.className = `${kind}-mark`;
+  if (idle) mark.classList.add("idle");
+  mark.title = says;
+  mark.setAttribute("role", "img");
+  mark.setAttribute("aria-label", says);
+  mark.innerHTML =
+    kind === "repeat"
+      ? '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M12.6 5.4A5 5 0 0 0 3.3 6.5M3.4 10.6a5 5 0 0 0 9.3-1.1" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M12.9 2.6v3h-3M3.1 13.4v-3h3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+      : '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8Z" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="2" fill="currentColor"/></svg>';
+  return mark;
+}
+
 /** What the overview last read from the app: what is running, and what repeats. */
 let overviewKnows = { running: [], standing: [] };
 let overviewTicking = null;
@@ -5823,6 +5937,7 @@ async function showOverview() {
   try {
     el.overviewGroup.value = localStorage.getItem("errand-overview-group") || "state";
     el.overviewOrder.value = localStorage.getItem("errand-overview-order") || "priority";
+    el.overviewShow.value = localStorage.getItem("errand-overview-show") || "all";
   } catch {
     // The first option of each stands.
   }
@@ -5855,6 +5970,47 @@ async function readTheOverview() {
     invoke("standing").catch(() => []),
   ]);
   overviewKnows = { running: running || [], standing: standing || [] };
+  standingNow = overviewKnows.standing;
+}
+
+/**
+ * What the overview's search found: which jobs, and the first line in each
+ * where the words are. Nothing while nothing is being searched for.
+ */
+let overviewFound = null;
+let overviewSearching = null;
+
+el.overviewFind.addEventListener("input", () => {
+  clearTimeout(overviewSearching);
+  overviewSearching = setTimeout(searchTheOverview, 160);
+});
+
+/**
+ * Search every job and everything said in it, the same way the list down the
+ * side does, and what each repeats as well: a routine's instructions are part
+ * of the job even before it has run and said them anywhere.
+ */
+async function searchTheOverview() {
+  const lookingFor = el.overviewFind.value.trim();
+  if (!lookingFor) {
+    overviewFound = null;
+    drawOverview();
+    return;
+  }
+  const [found, where] = await Promise.all([
+    invoke("matching", { lookingFor }).catch(() => []),
+    invoke("hits", { lookingFor }).catch(() => []),
+  ]);
+  const hits = new Map();
+  for (const hit of where || []) if (!hits.has(hit.agent)) hits.set(hit.agent, hit);
+  const ids = new Set((found || []).map((a) => a.id));
+  const lower = lookingFor.toLowerCase();
+  for (const s of standingNow) {
+    if (`${s.at} ${s.what}`.toLowerCase().includes(lower)) ids.add(s.agent);
+  }
+  for (const a of found || []) if (!agents.has(a.id)) agents.set(a.id, asAgent(a));
+  overviewFound = { ids, hits };
+  drawOverview();
 }
 
 el.overviewOpen.addEventListener("click", showOverview);
@@ -5862,9 +6018,16 @@ el.overviewDone.addEventListener("click", closeOverview);
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !el.overview.hidden) closeOverview();
 });
+for (const [value, label] of SHOWING) {
+  const option = document.createElement("option");
+  option.value = value;
+  option.textContent = label;
+  el.overviewShow.append(option);
+}
 for (const [box, key] of [
   [el.overviewGroup, "errand-overview-group"],
   [el.overviewOrder, "errand-overview-order"],
+  [el.overviewShow, "errand-overview-show"],
 ]) {
   box.addEventListener("change", () => {
     try {
@@ -5905,7 +6068,17 @@ function whenNext(at) {
 
 /** Every job, grouped and ordered the way the controls say. */
 function drawOverview() {
-  const everyone = [...agents.values()].filter((a) => a.name !== NOT_YET_NAMED || a.spoke);
+  const show = el.overviewShow.value || "all";
+  const everyone = [...agents.values()]
+    .filter((a) => a.name !== NOT_YET_NAMED || a.spoke)
+    .filter((a) => !overviewFound || overviewFound.ids.has(a.id))
+    .filter((a) =>
+      shown(
+        show,
+        whatItIsDoing(a)[0],
+        overviewKnows.standing.some((s) => s.agent === a.id),
+      ),
+    );
   const byPriority = el.overviewOrder.value === "priority";
   const doing = new Map(everyone.map((a) => [a.id, whatItIsDoing(a)]));
 
@@ -5932,9 +6105,12 @@ function drawOverview() {
       group.append(head, tiles);
       return group;
     });
-  el.overviewTiles.replaceChildren(
-    ...(drawn.length ? drawn : [note("p", "No jobs yet. Start one with + at the top of the list.", "quiet")]),
-  );
+  const nothing = overviewFound
+    ? "Nothing matches that."
+    : show !== "all"
+      ? "No jobs like that just now."
+      : "No jobs yet. Start one with + at the top of the list.";
+  el.overviewTiles.replaceChildren(...(drawn.length ? drawn : [note("p", nothing, "quiet")]));
 }
 
 /** One job, as a tile. */
@@ -5953,9 +6129,19 @@ function aJob(a, [state, line]) {
   if (a.title || a.hidden) {
     who.append(note("span", [a.title, a.hidden ? "hidden" : ""].filter(Boolean).join(" \u00b7 "), "job-role"));
   }
+  const marks = repeatMarks(a);
   head.append(tile(kindFor(a), state === "working", a.hue), who);
+  if (marks.length) {
+    const side = document.createElement("span");
+    side.className = "job-marks";
+    side.append(...marks);
+    head.append(side);
+  }
   job.append(head);
   if (a.about) job.append(note("p", a.about, "job-about"));
+  // Where the search found it, so a tile found by a word says where the word is.
+  const hit = overviewFound?.hits.get(a.id);
+  if (hit) job.append(note("p", hit.snippet, "job-hit"));
 
   const chip = note("span", line, "job-state");
   chip.dataset.state = state;
@@ -6003,7 +6189,9 @@ function aJob(a, [state, line]) {
   open.textContent = "Open";
   open.onclick = async () => {
     closeOverview();
-    await openAgent(a.id);
+    // At the line the search found, when it found one.
+    if (hit) await goToTheLine(hit);
+    else await openAgent(a.id);
   };
 
   foot.append(priority, finish, open);

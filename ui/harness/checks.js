@@ -4718,6 +4718,65 @@ export async function theOverview() {
     JSON.stringify(asked.filter((a) => a.name === "set_priority").slice(-1)),
   );
 
+  check(
+    "and a job that matters most has a frame round its tile",
+    getComputedStyle(tileOf("agent-bitcoin")).borderTopWidth === "2px",
+    getComputedStyle(tileOf("agent-bitcoin")).borderTopWidth,
+  );
+
+  // What repeats, marked beside the name, with when and what in its tooltip.
+  const deskRow = list.querySelector('li[data-agent="agent-bitcoin"]');
+  const repeatMark = deskRow?.querySelector(".repeat-mark");
+  check(
+    "a job that repeats has a mark in the list saying when and what",
+    repeatMark && /Repeats daily 07:00/.test(repeatMark.title) && /What moved overnight/.test(repeatMark.title) && !repeatMark.classList.contains("idle"),
+    repeatMark?.title || "no mark",
+  );
+  const watchMark = deskRow?.querySelector(".watch-mark");
+  check(
+    "and one that watches has a mark too, dimmed when the watch has stopped",
+    watchMark?.classList.contains("idle") && /stopped/.test(watchMark.title),
+    watchMark?.title || "no mark",
+  );
+  const pulseMark = list.querySelector('li[data-agent="agent-unnamed"] .repeat-mark');
+  check("a routine whose agent is paused is dimmed and says so", pulseMark?.classList.contains("idle") && /paused/.test(pulseMark.title), pulseMark?.title || "no mark");
+  check(
+    "and the same marks are on the tile",
+    tileOf("agent-bitcoin")?.querySelector(".job-marks .repeat-mark") && tileOf("agent-bitcoin")?.querySelector(".job-marks .watch-mark"),
+    tileOf("agent-bitcoin")?.querySelector(".job-marks")?.innerHTML.length || "no marks",
+  );
+
+  // Show: only what repeats, then everything again.
+  const show = document.getElementById("overview-show");
+  check("Show offers repeating, completed and finished", ["repeating", "idle", "finished"].every((v) => [...show.options].some((o) => o.value === v)), [...show.options].map((o) => o.textContent).join(", "));
+  show.value = "repeating";
+  show.dispatchEvent(new Event("change"));
+  await settle(150);
+  const repeating = [...tiles.querySelectorAll(".job")].map((j) => j.dataset.agent);
+  check(
+    "showing what repeats keeps exactly the jobs with a routine or a watch",
+    repeating.length >= 1 && repeating.every((id) => FIXTURE.standing.some((s) => s.agent === id)),
+    repeating.join(", ") || "none",
+  );
+  show.value = "all";
+  show.dispatchEvent(new Event("change"));
+  await settle(150);
+
+  // Search: every job and everything said in it.
+  const overviewFind = document.getElementById("overview-find");
+  overviewFind.value = "Write one small pulse file";
+  overviewFind.dispatchEvent(new Event("input"));
+  await settle(500);
+  check(
+    "the overview's search also finds what a routine does",
+    tileOf("agent-unnamed"),
+    [...tiles.querySelectorAll(".job")].map((j) => j.dataset.agent).join(", ") || "nothing",
+  );
+  overviewFind.value = "";
+  overviewFind.dispatchEvent(new Event("input"));
+  await settle(400);
+  check("and emptying it shows every job again", tiles.querySelectorAll(".job").length >= 2, `${tiles.querySelectorAll(".job").length} tiles`);
+
   const other = [...tiles.querySelectorAll(".job")].find((j) => j.dataset.agent !== "agent-bitcoin");
   const otherId = other?.dataset.agent;
   [...other.querySelectorAll("button")].find((b) => b.textContent === "Finished").click();
@@ -4752,7 +4811,7 @@ export async function theOverview() {
   const headings = [...tiles.querySelectorAll(".job-group h2")].map((h) => h.textContent.replace(/ \(\d+\)$/, ""));
   check(
     "grouped by subject, the headings are the roles jobs chose, with none last",
-    headings.length >= 1 && !headings.some((h) => /Waiting on you|Idle/.test(h)) && (!headings.includes("Other") || headings[headings.length - 1] === "Other"),
+    headings.length >= 1 && !headings.some((h) => /Waiting on you|Completed|Repeating/.test(h)) && (!headings.includes("Other") || headings[headings.length - 1] === "Other"),
     headings.join(", "),
   );
   group.value = "state";

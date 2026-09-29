@@ -12,11 +12,39 @@ export const STATES = [
   ["waiting", "Waiting on you"],
   ["working", "Working now"],
   ["stopped", "Stopped, needs a look"],
-  ["scheduled", "Runs on its own"],
-  ["idle", "Idle"],
+  ["scheduled", "Repeating"],
+  // Its errand is done and nothing of it is running, waiting or due: done for
+  // now, by its own account. Finished is the person's word, and is its own
+  // group: completed is what the agent says, finished what they do.
+  ["idle", "Completed, not marked finished"],
   ["paused", "Paused"],
   ["finished", "Finished"],
 ];
+
+/** What "Show" can be set to, and what each keeps. */
+export const SHOWING = [
+  ["all", "All jobs"],
+  ["waiting", "Waiting on you"],
+  ["working", "Working now"],
+  ["repeating", "Repeating"],
+  ["idle", "Completed"],
+  ["finished", "Finished"],
+  ["stopped", "Stopped"],
+  ["paused", "Paused"],
+];
+
+/**
+ * Whether a job is kept by what "Show" is set to.
+ *
+ * Repeating is any job with a routine or a watch, whatever it is doing this
+ * minute: one that is working through its seven o'clock run is still a job
+ * that repeats. Everything else is its state.
+ */
+export function shown(show, state, repeats) {
+  if (show === "all") return true;
+  if (show === "repeating") return repeats;
+  return show === state;
+}
 
 /**
  * What a job is doing, from what the app says is running and what repeats.

@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { STATES, stateOf, stillInTheList, inOrder, bySubject } from "./jobs.js";
+import { STATES, SHOWING, shown, stateOf, stillInTheList, inOrder, bySubject } from "./jobs.js";
 
 const day = 86_400_000;
 const job = (id, more = {}) => ({ id, name: id, title: "", priority: 2, spoke: 0, finished: null, paused: false, ...more });
@@ -85,4 +85,21 @@ test("by subject jobs are grouped by the role each chose, with none last", () =>
     groups.map(([subject, list]) => [subject, list.map((a) => a.id)]),
     [["Mail", ["c"]], ["Research", ["a", "d"]], ["Other", ["b"]]],
   );
+});
+
+test("completed and finished are two groups: what the agent says, and what its person does", () => {
+  const labels = Object.fromEntries(STATES);
+  assert.match(labels.idle, /^Completed/);
+  assert.equal(labels.finished, "Finished");
+  assert.equal(labels.scheduled, "Repeating");
+});
+
+test("showing repeating keeps every job that repeats, whatever it is doing now", () => {
+  assert.equal(shown("repeating", "working", true), true);
+  assert.equal(shown("repeating", "idle", false), false);
+  assert.equal(shown("finished", "finished", false), true);
+  assert.equal(shown("finished", "idle", true), false);
+  assert.equal(shown("all", "paused", false), true);
+  // Every choice offered is one this can answer.
+  for (const [show] of SHOWING) assert.equal(typeof shown(show, "idle", false), "boolean");
 });
