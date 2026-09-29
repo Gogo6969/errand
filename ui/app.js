@@ -18,7 +18,7 @@ window.addEventListener("error", (e) => complain(e.message));
 window.addEventListener("unhandledrejection", (e) => complain(String(e.reason)));
 
 import { tile, forTool, kindOf } from "./icons.js";
-import { STATES, SHOWING, shown, stateOf, stillInTheList, inOrder, bySubject } from "./jobs.js";
+import { STATES, SHOWING, shown, stateOf, stillInTheList, inOrder, byTeammate } from "./jobs.js";
 import { render, reachTheAppWith } from "./markdown.js";
 import { toSay, worthSaying } from "./speech.js";
 
@@ -205,6 +205,11 @@ let standingNow = [];
 let listeningTo = null;
 /** Which line of the picker every teammate works on: Errand's model, or none yet. */
 let errandModel = null;
+/**
+ * Every task, every teammate's, as the app last said: what matters and what
+ * is finished is a task's. Read on opening and with the overview.
+ */
+let tasksNow = [];
 
 const el = {
   threads: document.getElementById("threads"),
@@ -226,6 +231,7 @@ const el = {
   overviewTiles: document.getElementById("overview-tiles"),
   overviewFind: document.getElementById("overview-find"),
   overviewShow: document.getElementById("overview-show"),
+  taskDone: document.getElementById("task-done"),
   errandModelSays: document.getElementById("errand-model-says"),
   finishedDays: document.getElementById("finished-days"),
   finishedDaysSays: document.getElementById("finished-days-says"),
@@ -774,6 +780,7 @@ async function alsoAsk() {
  */
 async function catchUp() {
   await readTheSettings();
+  await readTasks();
   standingNow = (await invoke("standing").catch(() => [])) || [];
   const known = await invoke("agents");
   for (const a of known) agents.set(a.id, asAgent(a, agents.get(a.id)));
@@ -992,21 +999,28 @@ async function show(id) {
  */
 function drawTalks() {
   const a = whose();
-  const theirs = [...talks.values()].filter((t) => t.agent === showingAgent);
+  // Its tasks. A finished one stays, marked, for the days chosen in Settings,
+  // then lives only in the overview; the one on screen is always there.
+  const now = Date.now();
+  const theirs = [...talks.values()].filter(
+    (t) =>
+      t.agent === showingAgent &&
+      (t.id === showing || stillInTheList(t, now, finishedKeptDays)),
+  );
   el.talks.replaceChildren(
     ...theirs.map((t) => {
       const option = document.createElement("option");
       option.value = t.id;
-      // A clock on the name, so a scheduled conversation is recognisable
-      // without opening the panel that would tell you.
-      option.textContent = t.repeats ? `${t.name} ⏱` : t.name;
+      // A clock on the name, so a scheduled task is recognisable without
+      // opening the panel that would tell you, and a tick on a finished one.
+      option.textContent = `${t.name}${t.repeats ? " ⏱" : ""}${t.finished ? " ✓" : ""}`;
       option.selected = t.id === showing;
       return option;
     }),
   );
   const another = document.createElement("option");
   another.value = "+";
-  another.textContent = "New conversation…";
+  another.textContent = "New task…";
   el.talks.append(another);
   // Beside it, because a room is a way of starting talking, and this is
   // where somebody goes to start.
@@ -1015,6 +1029,19 @@ function drawTalks() {
   room.textContent = "New room…";
   el.talks.append(room);
   el.talks.hidden = !a;
+  drawTaskDone();
+}
+
+/** The Finished button beside the task menu, for the task on screen. */
+function drawTaskDone() {
+  const t = talking();
+  el.taskDone.hidden = !t || !whose();
+  const done = Boolean(t?.finished);
+  el.taskDone.textContent = done ? "Finished ✓" : "Mark finished";
+  el.taskDone.setAttribute("aria-pressed", String(done));
+  el.taskDone.title = done
+    ? "It is not done after all: press to open it again"
+    : "Mark this task done. It stays in the task menu for a while, then only in the overview";
 }
 
 /**
@@ -1299,10 +1326,6 @@ function asAgent(a, keeping) {
     kind: keeping?.kind,
     // When it was last spoken to, for ordering the overview by what is recent.
     spoke: a.spoke_at || 0,
-    // 1 high, 2 normal, 3 low.
-    priority: a.priority || 2,
-    // When its person said its job was finished, or null while it is not.
-    finished: a.finished_at || null,
   };
 }
 
@@ -1316,6 +1339,10 @@ function asTalk(c, keeping) {
     // Read without it, a routine paused under Repeat had its clock back after
     // the next relaunch.
     repeats: !!c.runs_at && !c.routine_off,
+    // What matters and what is finished are a task's, and a task is this.
+    priority: c.priority || 2,
+    finished: c.finished_at || null,
+    spoke: c.spoke_at || 0,
     messages: keeping?.messages ?? [],
     working: keeping?.working ?? false,
     // Who is in it, when it is a room. Empty for a conversation with one
@@ -1602,11 +1629,6 @@ function openTheMenu(a, x, y) {
     }
   });
 
-  item(a.finished ? "Not finished after all" : "Mark as finished", async () => {
-    closeTheMenu();
-    await markFinished(a, !a.finished);
-  });
-
   item(a.hidden ? "Show in the list" : "Hide from the list", async () => {
     a.hidden = !a.hidden;
     closeTheMenu();
@@ -1708,17 +1730,11 @@ function drawThreads() {
   // Hidden ones are out of the way, not gone: a search still finds them, and
   // so does the row at the bottom that says how many there are. With only the
   // search, "where did it go" had no answer anybody could see.
-  // A job marked finished goes to the bottom, and after the days somebody
-  // chose it leaves the list for the overview. A search still finds it.
-  const now = Date.now();
-  const stillListed = (a) => stillInTheList(a, now, finishedKeptDays, !!narrowedTo);
-  const visible = [...agents.values()].filter((a) =>
+  // Teammates, all of them: a teammate is a job that goes on and is never
+  // finished. What finishes is a task, in its teammate's task menu.
+  const listed = [...agents.values()].filter((a) =>
     narrowedTo ? narrowedTo.has(a.id) : !a.hidden,
   );
-  const listed = [
-    ...visible.filter((a) => !a.finished),
-    ...visible.filter((a) => a.finished && stillListed(a)),
-  ];
   const hiddenOnes = narrowedTo ? [] : [...agents.values()].filter((a) => a.hidden);
   if (!listed.length && !hiddenOnes.length) {
     const none = document.createElement("li");
@@ -1767,11 +1783,10 @@ function drawThreads() {
         role.textContent = a.title;
         name.append(role);
       }
-      if (a.finished) {
-        name.append(note("span", "Finished", "finished-badge"));
-        li.classList.add("is-finished");
+      // Framed when a task of its that matters most is still open.
+      if (tasksNow.some((t) => t.agent === a.id && t.priority === 1 && !t.finished)) {
+        li.dataset.priority = "1";
       }
-      li.dataset.priority = String(a.priority || 2);
 
       // What it is for, rather than the last thing said to it. An agent is a
       // standing job, and the useful line under its name is the job -- the last
@@ -3048,8 +3063,9 @@ el.form.addEventListener("submit", async (e) => {
   // what to do differently. Anything else starting with / is somebody's own
   // words, a path included, and goes as it is.
   const a = whose();
-  // Something new asked of a job marked finished is that job going again.
-  if (a?.finished) markFinished(a, false);
+  // Something new asked in a task marked finished is that task going again.
+  const going = talking();
+  if (going?.finished) markTaskFinished(going, false);
   if (a && text.startsWith("/")) {
     const called = aSkillCalledFor(text, await readSkills(a.id));
     if (called) {
@@ -4084,6 +4100,11 @@ function openTheTalkMenu(t, x, y) {
   el.menu.hidden = false;
   placeTheMenu(x, y);
 }
+
+el.taskDone.addEventListener("click", () => {
+  const t = talking();
+  if (t) markTaskFinished(t, !t.finished);
+});
 
 el.talks.addEventListener("change", async () => {
   if (el.talks.value === "+") return alsoAsk();
@@ -6117,7 +6138,7 @@ el.finishedDays.addEventListener("change", async () => {
   try {
     await invoke("set_setting", { key: "finished_kept_days", value: String(days) });
     finishedKeptDays = days;
-    el.finishedDaysSays.textContent = `Kept. A finished job stays in the list for ${days} day${days === 1 ? "" : "s"}.`;
+    el.finishedDaysSays.textContent = `Kept. A finished task stays in its teammate's task menu for ${days} day${days === 1 ? "" : "s"}.`;
     drawThreads();
   } catch (why) {
     el.finishedDaysSays.textContent = String(why);
@@ -6126,25 +6147,65 @@ el.finishedDays.addEventListener("change", async () => {
 });
 
 /**
- * Say a job is finished, or that it is not after all, here and in the app.
+ * Say a task is finished, or that it is not after all, here and in the app.
  *
- * Finished is somebody's word for it, never the app's guess: a one-off errand
- * that answered may still be waiting for them to read it, and a routine that
- * ran is not finished at all.
+ * Finished is somebody's word for it, never the app's guess: a task that was
+ * answered may still be waiting for them to read it, and a routine that ran
+ * is not finished at all. A teammate is never finished; its tasks are.
  */
-async function markFinished(a, finished) {
-  const was = a.finished;
-  a.finished = finished ? Date.now() : null;
-  drawThreads();
-  if (!el.overview.hidden) drawOverview();
-  try {
-    await invoke("finish", { id: a.id, finished });
-  } catch (why) {
-    a.finished = was;
+async function markTaskFinished(t, finished) {
+  const at = finished ? Date.now() : null;
+  const set = (when) => {
+    t.finished = when;
+    const held = talks.get(t.id);
+    if (held) held.finished = when;
+    for (const one of tasksNow) if (one.id === t.id) one.finished = when;
+    drawTalks();
     drawThreads();
     if (!el.overview.hidden) drawOverview();
+  };
+  const was = t.finished;
+  set(at);
+  try {
+    await invoke("finish_task", { id: t.id, finished });
+  } catch (why) {
+    set(was);
     complain(String(why));
   }
+}
+
+/** Every task, read again, and the list down the side drawn with it. */
+async function readTasks() {
+  try {
+    tasksNow = ((await invoke("tasks")) || []).map(asTask);
+  } catch {
+    return;
+  }
+  drawThreads();
+}
+
+/** One task, as the overview holds it. */
+function asTask(c) {
+  return {
+    id: c.id,
+    agent: c.agent,
+    name: c.name,
+    first: c.first || "",
+    // Whether anything was said in it: a teammate's first task is there from
+    // the moment the teammate is, and is not a piece of work until asked.
+    said: c.said !== false,
+    priority: c.priority || 2,
+    finished: c.finished_at || null,
+    spoke: c.spoke_at || 0,
+  };
+}
+
+/** What a task is called: its name, or what was asked in it when it has none. */
+function titleOf(t) {
+  if (t.name && t.name !== "First") return t.name;
+  const first = (t.first || "").trim().split("\n")[0];
+  if (!first) return "First task";
+  return first.length > 70 ? `${first.slice(0, 69)}…` : first;
 }
 
 /** Read what repeats again, and redraw what shows it if any of it changed. */
@@ -6171,8 +6232,10 @@ setInterval(readStanding, 60_000);
  * The marks for what an agent does on its own: one for routines and one for
  * watches, each saying in its tooltip when and what.
  */
-function repeatMarks(a) {
-  const theirs = standingNow.filter((s) => s.agent === a.id);
+function repeatMarks(a, conversation) {
+  const theirs = standingNow.filter(
+    (s) => s.agent === a.id && (!conversation || s.conversation === conversation),
+  );
   const routines = theirs.filter((s) => s.kind === "routine");
   const watches = theirs.filter((s) => s.kind === "watch");
   const marks = [];
@@ -6257,6 +6320,15 @@ async function showOverview() {
   } catch {
     // The first option of each stands.
   }
+  // One kept from before a choice was taken away, like grouping by subject,
+  // is no choice at all: the first one stands instead.
+  for (const [select, first] of [
+    [el.overviewGroup, "state"],
+    [el.overviewOrder, "priority"],
+    [el.overviewShow, "all"],
+  ]) {
+    if (!select.value) select.value = first;
+  }
   el.overview.hidden = false;
   await readTheOverview();
   drawOverview();
@@ -6281,12 +6353,14 @@ function closeOverview() {
 }
 
 async function readTheOverview() {
-  const [running, standing] = await Promise.all([
+  const [running, standing, tasks] = await Promise.all([
     invoke("whats_running").catch(() => []),
     invoke("standing").catch(() => []),
+    invoke("tasks").catch(() => null),
   ]);
   overviewKnows = { running: running || [], standing: standing || [] };
   standingNow = overviewKnows.standing;
+  if (Array.isArray(tasks)) tasksNow = tasks.map(asTask);
 }
 
 /**
@@ -6317,12 +6391,18 @@ async function searchTheOverview() {
     invoke("matching", { lookingFor }).catch(() => []),
     invoke("hits", { lookingFor }).catch(() => []),
   ]);
+  // Tasks: the ones the words are in, every task of a teammate whose name or
+  // job has them, and one whose routine or watch says them.
   const hits = new Map();
-  for (const hit of where || []) if (!hits.has(hit.agent)) hits.set(hit.agent, hit);
-  const ids = new Set((found || []).map((a) => a.id));
+  for (const hit of where || []) if (!hits.has(hit.conversation)) hits.set(hit.conversation, hit);
+  const ids = new Set(hits.keys());
+  const teammates = new Set((found || []).map((a) => a.id));
   const lower = lookingFor.toLowerCase();
+  for (const t of tasksNow) {
+    if (teammates.has(t.agent) || `${t.name} ${t.first}`.toLowerCase().includes(lower)) ids.add(t.id);
+  }
   for (const s of standingNow) {
-    if (`${s.at} ${s.what}`.toLowerCase().includes(lower)) ids.add(s.agent);
+    if (`${s.at} ${s.what}`.toLowerCase().includes(lower)) ids.add(s.conversation);
   }
   for (const a of found || []) if (!agents.has(a.id)) agents.set(a.id, asAgent(a));
   overviewFound = { ids, hits };
@@ -6355,18 +6435,19 @@ for (const [box, key] of [
   });
 }
 
-/** What a job is doing, and the line that says so. */
-function whatItIsDoing(a) {
-  const is = stateOf(a, overviewKnows.running, overviewKnows.standing);
+/** What a task is doing, and the line that says so. */
+function whatItIsDoing(t) {
+  const a = agents.get(t.agent);
+  const is = stateOf(t, a, overviewKnows.running, overviewKnows.standing);
   const line = {
-    finished: () => `Finished ${howLongAgo(a.finished)}`,
+    finished: () => `Finished ${howLongAgo(t.finished)}`,
     waiting: () => is.waiting.what,
     working: () => is.working.what,
     paused: () => "Paused: nothing of it runs on its own",
     stopped: () => is.stopped.stopped || `Its routine (${is.stopped.at}) is switched off`,
     scheduled: () =>
       is.next ? `Next: ${whenNext(is.next.due)}, ${is.next.what}` : `Watching ${is.watch.at}`,
-    idle: () => (a.spoke ? `Last spoke ${howLongAgo(a.spoke)}` : "Not asked anything yet"),
+    idle: () => (t.spoke ? `Last spoke ${howLongAgo(t.spoke)}` : "Not asked anything yet"),
   }[is.state]();
   return [is.state, line];
 }
@@ -6382,32 +6463,39 @@ function whenNext(at) {
   return `${when.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })} ${time}`;
 }
 
-/** Every job, grouped and ordered the way the controls say. */
+/** Every task, grouped and ordered the way the controls say. */
 function drawOverview() {
   const show = el.overviewShow.value || "all";
-  const everyone = [...agents.values()]
-    .filter((a) => a.name !== NOT_YET_NAMED || a.spoke)
-    .filter((a) => !overviewFound || overviewFound.ids.has(a.id))
-    .filter((a) =>
+  const everyone = tasksNow
+    .filter((t) => agents.has(t.agent))
+    .filter(
+      (t) =>
+        t.said ||
+        overviewKnows.running.some((w) => w.conversation === t.id) ||
+        overviewKnows.standing.some((s) => s.conversation === t.id),
+    )
+    .filter((t) => !overviewFound || overviewFound.ids.has(t.id))
+    .filter((t) =>
       shown(
         show,
-        whatItIsDoing(a)[0],
-        overviewKnows.standing.some((s) => s.agent === a.id),
+        whatItIsDoing(t)[0],
+        overviewKnows.standing.some((s) => s.conversation === t.id),
       ),
     );
+  for (const t of everyone) t.who = agents.get(t.agent)?.name || "";
   const byPriority = el.overviewOrder.value === "priority";
-  const doing = new Map(everyone.map((a) => [a.id, whatItIsDoing(a)]));
+  const doing = new Map(everyone.map((t) => [t.id, whatItIsDoing(t)]));
 
   // Each group with what it is, when that is a state: its panel says so in
-  // colour as well as in words.
+  // colour as well as in words. Or each teammate's tasks together.
   let groups;
-  if (el.overviewGroup.value === "subject") {
-    groups = bySubject(everyone).map(([subject, list]) => [null, subject, list]);
+  if (el.overviewGroup.value !== "state") {
+    groups = byTeammate(everyone).map(([who, list]) => [null, who, list]);
   } else {
     groups = STATES.map(([state, label]) => [
       state,
       label,
-      everyone.filter((a) => doing.get(a.id)[0] === state),
+      everyone.filter((t) => doing.get(t.id)[0] === state),
     ]);
   }
 
@@ -6419,40 +6507,43 @@ function drawOverview() {
       if (state) group.dataset.state = state;
       const head = document.createElement("h2");
       const count = note("span", String(list.length), "count");
-      count.title = `${list.length} ${list.length === 1 ? "job" : "jobs"}`;
+      count.title = `${list.length} ${list.length === 1 ? "task" : "tasks"}`;
       head.append(note("span", label, "label"), count);
       const tiles = document.createElement("div");
       tiles.className = "jobs";
-      tiles.append(...inOrder(list, byPriority).map((a) => aJob(a, doing.get(a.id))));
+      tiles.append(...inOrder(list, byPriority).map((t) => aTask(t, doing.get(t.id))));
       group.append(head, tiles);
       return group;
     });
   const nothing = overviewFound
     ? "Nothing matches that."
     : show !== "all"
-      ? "No jobs like that just now."
-      : "No jobs yet. Start one with + at the top of the list.";
+      ? "No tasks like that just now."
+      : "No tasks yet. Give a teammate something to do.";
   el.overviewTiles.replaceChildren(...(drawn.length ? drawn : [note("p", nothing, "quiet")]));
 }
 
-/** One job, as a tile. */
-function aJob(a, [state, line]) {
+/** One task, as a tile, with its teammate on it. */
+function aTask(t, [state, line]) {
+  const a = agents.get(t.agent);
   const job = document.createElement("article");
   job.className = "job";
-  job.dataset.agent = a.id;
-  job.dataset.priority = String(a.priority);
-  if (a.finished) job.classList.add("is-finished");
+  job.dataset.task = t.id;
+  job.dataset.agent = t.agent;
+  job.dataset.priority = String(t.priority);
+  if (t.finished) job.classList.add("is-finished");
 
   const head = document.createElement("div");
   head.className = "job-head";
   const who = document.createElement("div");
   who.className = "job-who";
-  who.append(note("span", a.name, "job-name"));
-  if (a.title || a.hidden) {
-    who.append(note("span", [a.title, a.hidden ? "hidden" : ""].filter(Boolean).join(" \u00b7 "), "job-role"));
-  }
-  const marks = repeatMarks(a);
-  head.append(tile(kindFor(a), state === "working", a.hue), who);
+  const title = note("span", titleOf(t), "job-name");
+  // All of it, when the tile has room for only some.
+  title.title = t.name && t.name !== "First" ? t.name : (t.first || titleOf(t)).trim();
+  who.append(title);
+  who.append(note("span", [a?.name, a?.title].filter(Boolean).join(" \u00b7 "), "job-role"));
+  const marks = a ? repeatMarks(a, t.id) : [];
+  head.append(tile(a ? kindFor(a) : "default", state === "working", a?.hue), who);
   if (marks.length) {
     const side = document.createElement("span");
     side.className = "job-marks";
@@ -6460,9 +6551,8 @@ function aJob(a, [state, line]) {
     head.append(side);
   }
   job.append(head);
-  if (a.about) job.append(note("p", a.about, "job-about"));
   // Where the search found it, so a tile found by a word says where the word is.
-  const hit = overviewFound?.hits.get(a.id);
+  const hit = overviewFound?.hits.get(t.id);
   if (hit) job.append(note("p", hit.snippet, "job-hit"));
 
   const chip = note("span", line, "job-state");
@@ -6472,38 +6562,40 @@ function aJob(a, [state, line]) {
 
   const foot = document.createElement("div");
   foot.className = "job-foot";
-  foot.append(note("span", a.spoke ? howLongAgo(a.spoke) : "", "when"));
+  foot.append(note("span", t.spoke ? howLongAgo(t.spoke) : "", "when"));
 
   const priority = document.createElement("select");
-  priority.title = "How much this job matters";
-  priority.setAttribute("aria-label", `Priority of ${a.name}`);
+  priority.title = "How much this task matters";
+  priority.setAttribute("aria-label", `Priority of ${titleOf(t)}`);
   for (const [value, label] of [["1", "High"], ["2", "Normal"], ["3", "Low"]]) {
     const option = document.createElement("option");
     option.value = value;
     option.textContent = label;
     priority.append(option);
   }
-  priority.value = String(a.priority);
+  priority.value = String(t.priority);
   priority.onchange = async () => {
-    const was = a.priority;
-    a.priority = Number(priority.value);
+    const was = t.priority;
+    t.priority = Number(priority.value);
     drawOverview();
+    drawThreads();
     try {
-      await invoke("set_priority", { id: a.id, priority: a.priority });
+      await invoke("set_task_priority", { id: t.id, priority: t.priority });
     } catch (why) {
-      a.priority = was;
+      t.priority = was;
       drawOverview();
+      drawThreads();
       complain(String(why));
     }
   };
 
   const finish = document.createElement("button");
   finish.type = "button";
-  finish.textContent = a.finished ? "Not finished" : "Finished";
-  finish.title = a.finished
-    ? "It is not done after all: back into the list with the rest"
-    : "Mark this job as done: it moves to the bottom of the list, and later only lives here";
-  finish.onclick = () => markFinished(a, !a.finished);
+  finish.textContent = t.finished ? "Not finished" : "Finished";
+  finish.title = t.finished
+    ? "It is not done after all: back with the open tasks"
+    : "Mark this task done: its teammate carries on, and the task moves to Finished";
+  finish.onclick = () => markTaskFinished(t, !t.finished);
 
   const open = document.createElement("button");
   open.type = "button";
@@ -6511,9 +6603,10 @@ function aJob(a, [state, line]) {
   open.textContent = "Open";
   open.onclick = async () => {
     closeOverview();
-    // At the line the search found, when it found one.
-    if (hit) await goToTheLine(hit);
-    else await openAgent(a.id);
+    // At the line the search found, when it found one; otherwise at the task.
+    if (hit) return goToTheLine(hit);
+    await openAgent(t.agent);
+    if (talks.has(t.id) && showing !== t.id) await show(t.id);
   };
 
   foot.append(priority, finish, open);
@@ -6559,6 +6652,10 @@ async function drawAway() {
     who.onclick = async () => {
       closeOverview();
       await openAgent(r.agent);
+      // At the task that ran, not whichever of its teammate's was open last.
+      if (r.conversation && talks.has(r.conversation) && showing !== r.conversation) {
+        await show(r.conversation);
+      }
     };
     const when = new Date(r.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     li.append(who, ` at ${when}: `);
@@ -6573,8 +6670,12 @@ async function drawAway() {
 
   const open = document.createElement("section");
   open.append(note("h2", "Open now", ""));
+  // Tasks, each with its teammate: two of one teammate's tasks can be in two
+  // different states, and it is the task somebody goes to look at.
   const byState = (state) =>
-    [...agents.values()].filter((a) => whatItIsDoing(a)[0] === state).map((a) => a.name);
+    tasksNow
+      .filter((t) => agents.has(t.agent) && whatItIsDoing(t)[0] === state)
+      .map((t) => `${titleOf(t)} (${agents.get(t.agent).name})`);
   const said = [
     ["Waiting on you", byState("waiting")],
     ["Working", byState("working")],
@@ -6582,7 +6683,7 @@ async function drawAway() {
   ].filter(([, names]) => names.length);
   if (!said.length) open.append(note("p", "Nothing is waiting on you, working, or stopped.", ""));
   for (const [label, names] of said) {
-    open.append(note("p", `${label}: ${names.join(", ")}`, ""));
+    open.append(note("p", `${label}: ${names.join("; ")}`, ""));
   }
   el.overviewAway.replaceChildren(away, open);
 }

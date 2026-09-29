@@ -22,8 +22,8 @@
           autocomplete="off"
           aria-label="Search every errand"
         />
-        <!-- Every job at once, rather than one agent at a time. -->
-        <button id="overview-open" type="button" title="Overview: every job, what happened while you were away, and what is open">
+        <!-- Every task at once, rather than one teammate at a time. -->
+        <button id="overview-open" type="button" title="Overview: every task, what happened while you were away, and what is open">
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
             <rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1.3" fill="none" stroke="currentColor" stroke-width="1.4"/>
             <rect x="9" y="1.5" width="5.5" height="5.5" rx="1.3" fill="none" stroke="currentColor" stroke-width="1.4"/>
@@ -203,15 +203,16 @@
       <div class="card">
         <div class="card-head">
           <div>
-            <h2>Finished jobs</h2>
+            <h2>Finished tasks</h2>
             <p>
-              A job you mark as finished moves to the bottom of the list with a
-              Finished badge. After this many days it leaves the list, and stays in
-              the Overview, where it can still be opened or marked as not finished.
+              A task you mark as finished stays in its teammate's task menu with a
+              tick. After this many days it leaves the menu, and stays in the
+              Overview, where it can still be opened or marked as not finished.
+              Teammates themselves are never finished.
             </p>
           </div>
         </div>
-        <label class="days">Keep them in the list for
+        <label class="days">Keep them in the menu for
           <input id="finished-days" type="number" min="1" max="365" step="1" value="7" />
           days</label>
         <p id="finished-days-says" class="quiet"></p>
@@ -219,7 +220,7 @@
     </section>
 
     <!--
-      Every job at once: what each is doing, grouped and ordered the way
+      Every task at once: what each is doing, grouped and ordered the way
       somebody decides what to look at first, and what happened while they
       were away. Over the whole window, like Settings, because it is somewhere
       you go rather than something beside a conversation.
@@ -227,15 +228,15 @@
     <section id="overview" hidden>
       <header>
         <h1>Overview</h1>
-        <input id="overview-find" type="search" placeholder="Search every job and everything said in it"
-               autocomplete="off" aria-label="Search every job" />
+        <input id="overview-find" type="search" placeholder="Search every task and everything said in it"
+               autocomplete="off" aria-label="Search every task" />
         <label>Show
           <select id="overview-show"></select>
         </label>
         <label>Group by
           <select id="overview-group">
             <option value="state">What it is doing</option>
-            <option value="subject">Subject</option>
+            <option value="teammate">Teammate</option>
           </select>
         </label>
         <label>Order by
@@ -257,7 +258,8 @@
         <button id="pin" type="button" title="Keep at the top">Pin</button>
         <button id="hide" type="button" title="Out of the way, still running">Hide</button>
         <button id="pause" type="button" title="Nothing runs on its own until you start it again">Pause</button>
-        <select id="talks" title="Which conversation"></select>
+        <select id="talks" title="Which task"></select>
+        <button id="task-done" type="button" aria-pressed="false" hidden>Mark finished</button>
         <!-- Who is in the room, when this is one. Empty and hidden otherwise. -->
         <button id="members" type="button" hidden title="Change who is in this room"></button>
         <button id="repeat" type="button" title="Make this run on a schedule">Repeat</button>

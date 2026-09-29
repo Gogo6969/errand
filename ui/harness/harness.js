@@ -73,6 +73,13 @@ export const FIXTURE = {
       { id: "talk-room", agent: "agent-bitcoin", name: "Bitcoin room", opened: false },
     ],
   },
+  // What the overview knows of a task besides the conversation: the first
+  // thing asked in it, what matters, what is finished. Anything not here is a
+  // task asked something, normal, not finished, never spoken to.
+  tasks: {
+    "talk-2": { first: "What moved overnight in Bitcoin?", spoke_at: 50 },
+    "talk-3": { spoke_at: 40 },
+  },
   // Who is in each room. Anything not listed here is an ordinary conversation.
   members: {
     "talk-room": [
@@ -479,8 +486,25 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
         }
         switch (name) {
           case "agents":
-          case "matching":
             return Promise.resolve(fixture.agents);
+          // Every agent, unless a check says which ones its words name.
+          case "matching":
+            return Promise.resolve(fixture.matching ?? fixture.agents);
+          // Every conversation, as a task.
+          case "tasks":
+            return Promise.resolve(
+              Object.values(fixture.conversations)
+                .flat()
+                .map((c) => ({
+                  priority: 2,
+                  finished_at: null,
+                  spoke_at: 0,
+                  first: null,
+                  said: true,
+                  ...c,
+                  ...(fixture.tasks?.[c.id] || {}),
+                })),
+            );
           case "conversations":
             return Promise.resolve(fixture.conversations[args.agent] || []);
           case "lines":

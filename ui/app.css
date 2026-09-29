@@ -396,18 +396,7 @@ body { display: grid; grid-template-columns: 232px 1fr; }
 .job-foot button:focus-visible, .away li button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .job-foot .open { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 500; }
 
-/* A job marked finished, in the list down the side. */
-#threads .finished-badge {
-  margin-left: 6px;
-  font-size: 10.5px;
-  font-weight: 500;
-  padding: 1px 6px;
-  border-radius: 999px;
-  border: 1px solid var(--good);
-  color: var(--good);
-  vertical-align: 1px;
-}
-#threads li.is-finished { opacity: .78; }
+/* A teammate with an open task that matters most, in the list down the side. */
 #threads li[data-priority="1"] { box-shadow: inset 0 0 0 1.5px var(--accent); }
 
 /* What an agent does on its own, beside its name: a routine or a watch. */
@@ -891,6 +880,7 @@ main > aside, main > #title, main > #composer { flex: none; }
 #pin,
 #hide,
 #pause,
+#task-done,
 #repeat,
 #watch,
 #goal,
@@ -1610,7 +1600,7 @@ body.catching #what { border-color: var(--accent); }
 #thread-name:hover { background: var(--card); border-color: var(--rule); }
 #thread-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-#pin, #hide, #pause {
+#pin, #hide, #pause, #task-done {
   border: 1px solid var(--rule);
   background: transparent;
   color: var(--ink-soft);
@@ -1620,7 +1610,9 @@ body.catching #what { border-color: var(--accent); }
   border-radius: 7px;
   cursor: pointer;
 }
-#pin:hover, #hide:hover, #pause:hover { color: var(--ink); border-color: var(--edge); }
+#pin:hover, #hide:hover, #pause:hover, #task-done:hover { color: var(--ink); border-color: var(--edge); }
+/* A task marked done, said in the colour done things are said in. */
+#task-done[aria-pressed="true"] { color: var(--good); border-color: var(--good); }
 #pin[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 /* Paused is the one state here that means nothing will happen, and it should
    not look like a preference. The same red as a watch that has given up. */

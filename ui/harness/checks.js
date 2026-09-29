@@ -2557,6 +2557,11 @@ export async function theMenuOnAnAgent() {
     labels.some((l) => /Pin/.test(l)) && labels.some((l) => /Hide/.test(l)) && labels.some((l) => /Who this is/.test(l)),
     labels.join(" | "),
   );
+  check(
+    "and nothing that would finish a teammate: what finishes is a task",
+    !labels.some((l) => /finished/i.test(l)),
+    labels.join(" | "),
+  );
   // Asking about an agent is not asking to go and look at it: switching under
   // somebody loses whatever they were reading. Asked of a different agent than
   // the open one, since the one just made is open by definition.
@@ -4679,8 +4684,9 @@ export async function whatItIsForAndWhereItWent() {
 }
 
 /**
- * Every job at once: what happened while you were away, what is open, tiles
- * grouped by what each is doing, priorities, and jobs marked finished.
+ * Every task at once: what happened while you were away, what is open, a tile
+ * for each task with its teammate on it, grouped by what each is doing or by
+ * teammate, priorities, and tasks marked finished while teammates never are.
  */
 export async function theOverview() {
   const found = [];
@@ -4691,9 +4697,20 @@ export async function theOverview() {
   const tiles = document.getElementById("overview-tiles");
   const list = document.getElementById("threads");
 
+  // Grouped by subject, the last time somebody looked, before tasks.
+  try {
+    localStorage.setItem("errand-overview-group", "subject");
+  } catch {
+    // Without storage there is nothing kept to fall back from.
+  }
   document.getElementById("overview-open").click();
   await settle(300);
   check("the overview opens over the window", !overview.hidden && getComputedStyle(overview).display !== "none", `hidden=${overview.hidden}`);
+  check(
+    "a grouping kept from before that is no longer offered falls back to what each is doing",
+    document.getElementById("overview-group").value === "state",
+    document.getElementById("overview-group").value || "nothing",
+  );
   check(
     "it says what ran while you were away, and how much of it failed",
     /2 runs on their own, 1 of them failed/.test(away.textContent) &&
@@ -4703,38 +4720,56 @@ export async function theOverview() {
   );
   check("and what is open now, starting with what waits on you", /Waiting on you: [^\n]*Bitcoin Desk/.test(away.textContent), away.textContent.slice(-160));
 
-  const tileOf = (id) => tiles.querySelector(`.job[data-agent="${id}"]`);
-  const desk = tileOf("agent-bitcoin");
-  check("every job has a tile", desk && tiles.querySelectorAll(".job").length >= 2, `${tiles.querySelectorAll(".job").length} tiles`);
+  const tileOf = (id) => tiles.querySelector(`.job[data-task="${id}"]`);
+  const stateOn = (id) => tileOf(id)?.querySelector(".job-state")?.dataset.state;
+  const all = () => [...tiles.querySelectorAll(".job")].map((j) => j.dataset.task);
   check(
-    "grouped by what each is doing, what waits on you first",
+    "every task has a tile of its own, with its teammate on it",
+    all().length >= 6 && /Bitcoin Desk/.test(tileOf("talk-3")?.querySelector(".job-role")?.textContent || ""),
+    `${all().length} tiles; ${tileOf("talk-3")?.querySelector(".job-role")?.textContent || "no talk-3"}`,
+  );
+  check(
+    "one teammate's tasks are each in their own state, what waits on you first",
     tiles.querySelector(".job-group h2")?.textContent.startsWith("Waiting on you") &&
-      desk?.querySelector(".job-state")?.dataset.state === "waiting",
-    tiles.querySelector(".job-group h2")?.textContent || "no groups",
+      stateOn("talk-3") === "waiting" &&
+      stateOn("talk-2") === "working",
+    `${tiles.querySelector(".job-group h2")?.textContent || "no groups"}: talk-3 ${stateOn("talk-3")}, talk-2 ${stateOn("talk-2")}`,
+  );
+  check(
+    "a task nobody named is called by the first thing asked in it",
+    tileOf("talk-2")?.querySelector(".job-name")?.textContent === "What moved overnight in Bitcoin?" &&
+      tileOf("talk-3")?.querySelector(".job-name")?.textContent === "Asked by Day Check",
+    `${tileOf("talk-2")?.querySelector(".job-name")?.textContent} / ${tileOf("talk-3")?.querySelector(".job-name")?.textContent}`,
   );
 
-  const priority = desk.querySelector("select");
+  const priority = tileOf("talk-2").querySelector("select");
   priority.value = "1";
   priority.dispatchEvent(new Event("change"));
   await settle(150);
   check(
-    "a priority chosen on a tile is kept",
-    asked.some((a) => a.name === "set_priority" && a.args?.id === "agent-bitcoin" && a.args?.priority === 1) &&
-      tileOf("agent-bitcoin")?.dataset.priority === "1",
-    JSON.stringify(asked.filter((a) => a.name === "set_priority").slice(-1)),
+    "a priority chosen on a tile is the task's, and is kept",
+    asked.some((a) => a.name === "set_task_priority" && a.args?.id === "talk-2" && a.args?.priority === 1) &&
+      tileOf("talk-2")?.dataset.priority === "1" &&
+      tileOf("talk-3")?.dataset.priority === "2",
+    JSON.stringify(asked.filter((a) => a.name === "set_task_priority").slice(-1)),
   );
-
   check(
-    "and a job that matters most has a frame round its tile",
-    getComputedStyle(tileOf("agent-bitcoin")).borderTopWidth === "2px",
-    getComputedStyle(tileOf("agent-bitcoin")).borderTopWidth,
+    "and a task that matters most has a frame round its tile",
+    getComputedStyle(tileOf("talk-2")).borderTopWidth === "2px",
+    getComputedStyle(tileOf("talk-2")).borderTopWidth,
+  );
+  const deskRow = list.querySelector('li[data-agent="agent-bitcoin"]');
+  check(
+    "and its teammate is framed in the list while that task is open",
+    deskRow?.dataset.priority === "1" && getComputedStyle(deskRow).boxShadow !== "none",
+    `${deskRow?.dataset.priority} ${deskRow ? getComputedStyle(deskRow).boxShadow : "no row"}`,
   );
 
-  // What repeats, marked beside the name, with when and what in its tooltip.
-  const deskRow = list.querySelector('li[data-agent="agent-bitcoin"]');
+  // What repeats, marked beside the teammate's name, with when and what in
+  // its tooltip; and on each task, only its own.
   const repeatMark = deskRow?.querySelector(".repeat-mark");
   check(
-    "a job that repeats has a mark in the list saying when and what",
+    "a teammate that repeats something has a mark in the list saying when and what",
     repeatMark && /Repeats daily 07:00/.test(repeatMark.title) && /What moved overnight/.test(repeatMark.title) && !repeatMark.classList.contains("idle"),
     repeatMark?.title || "no mark",
   );
@@ -4745,11 +4780,14 @@ export async function theOverview() {
     watchMark?.title || "no mark",
   );
   const pulseMark = list.querySelector('li[data-agent="agent-unnamed"] .repeat-mark');
-  check("a routine whose agent is paused is dimmed and says so", pulseMark?.classList.contains("idle") && /paused/.test(pulseMark.title), pulseMark?.title || "no mark");
+  check("a routine whose teammate is paused is dimmed and says so", pulseMark?.classList.contains("idle") && /paused/.test(pulseMark.title), pulseMark?.title || "no mark");
   check(
-    "and the same marks are on the tile",
-    tileOf("agent-bitcoin")?.querySelector(".job-marks .repeat-mark") && tileOf("agent-bitcoin")?.querySelector(".job-marks .watch-mark"),
-    tileOf("agent-bitcoin")?.querySelector(".job-marks")?.innerHTML.length || "no marks",
+    "and each task's tile has its own marks, not its teammate's whole lot",
+    tileOf("talk-2")?.querySelector(".job-marks .repeat-mark") &&
+      !tileOf("talk-2")?.querySelector(".job-marks .watch-mark") &&
+      tileOf("talk-4")?.querySelector(".job-marks .watch-mark") &&
+      !tileOf("talk-overnight")?.querySelector(".job-marks"),
+    `talk-2: ${tileOf("talk-2")?.querySelector(".job-marks")?.children.length || 0} marks, talk-4: ${tileOf("talk-4")?.querySelector(".job-marks")?.children.length || 0}`,
   );
 
   // Show: only what repeats, then everything again.
@@ -4758,67 +4796,72 @@ export async function theOverview() {
   show.value = "repeating";
   show.dispatchEvent(new Event("change"));
   await settle(150);
-  const repeating = [...tiles.querySelectorAll(".job")].map((j) => j.dataset.agent);
+  const repeating = all();
   check(
-    "showing what repeats keeps exactly the jobs with a routine or a watch",
-    repeating.length >= 1 && repeating.every((id) => FIXTURE.standing.some((s) => s.agent === id)),
+    "showing what repeats keeps exactly the tasks with a routine or a watch",
+    repeating.length === new Set(FIXTURE.standing.map((s) => s.conversation)).size &&
+      repeating.every((id) => FIXTURE.standing.some((s) => s.conversation === id)),
     repeating.join(", ") || "none",
   );
   show.value = "all";
   show.dispatchEvent(new Event("change"));
   await settle(150);
 
-  // Search: every job and everything said in it.
+  // Search: every task and everything said in it. Named for no teammate, so
+  // what is found is found by what the routine does.
+  FIXTURE.matching = [];
   const overviewFind = document.getElementById("overview-find");
   overviewFind.value = "Write one small pulse file";
   overviewFind.dispatchEvent(new Event("input"));
   await settle(500);
   check(
-    "the overview's search also finds what a routine does",
-    tileOf("agent-unnamed"),
-    [...tiles.querySelectorAll(".job")].map((j) => j.dataset.agent).join(", ") || "nothing",
+    "the overview's search finds the task whose routine does it, and only that",
+    all().join(",") === "talk-1",
+    all().join(", ") || "nothing",
   );
+  delete FIXTURE.matching;
   overviewFind.value = "";
   overviewFind.dispatchEvent(new Event("input"));
   await settle(400);
-  check("and emptying it shows every job again", tiles.querySelectorAll(".job").length >= 2, `${tiles.querySelectorAll(".job").length} tiles`);
+  check("and emptying it shows every task again", all().length >= 6, `${all().length} tiles`);
 
-  const other = [...tiles.querySelectorAll(".job")].find((j) => j.dataset.agent !== "agent-bitcoin");
-  const otherId = other?.dataset.agent;
-  [...other.querySelectorAll("button")].find((b) => b.textContent === "Finished").click();
+  [...tileOf("talk-4").querySelectorAll("button")].find((b) => b.textContent === "Finished").click();
   await settle(200);
   const finishedGroup = [...tiles.querySelectorAll(".job-group")].find((g) => g.querySelector("h2").textContent.startsWith("Finished"));
   check(
-    "marking a job finished moves it to Finished",
-    asked.some((a) => a.name === "finish" && a.args?.id === otherId && a.args?.finished === true) &&
-      finishedGroup?.querySelector(`.job[data-agent="${otherId}"]`),
+    "marking a task finished moves it to Finished",
+    asked.some((a) => a.name === "finish_task" && a.args?.id === "talk-4" && a.args?.finished === true) &&
+      finishedGroup?.querySelector('.job[data-task="talk-4"]'),
     finishedGroup ? "in Finished" : "no Finished group",
   );
-  const rows = [...list.querySelectorAll("li[data-agent]")];
-  const row = list.querySelector(`li[data-agent="${otherId}"]`);
   check(
-    "and in the list it has a Finished badge and goes to the bottom",
-    row?.querySelector(".finished-badge") && rows.filter((r) => !r.classList.contains("is-hidden")).pop() === row,
-    row ? row.textContent.slice(0, 60) : "not in the list",
+    "and its teammate carries on, as it was, with its other tasks",
+    list.querySelector('li[data-agent="agent-bitcoin"]') &&
+      !list.querySelector(".finished-badge") &&
+      stateOn("talk-3") === "waiting",
+    list.querySelector('li[data-agent="agent-bitcoin"]')?.textContent.slice(0, 60) || "not in the list",
   );
-  [...tileOf(otherId).querySelectorAll("button")].find((b) => b.textContent === "Not finished").click();
+  [...tileOf("talk-4").querySelectorAll("button")].find((b) => b.textContent === "Not finished").click();
   await settle(200);
   check(
     "and not finished after all puts it back",
-    asked.some((a) => a.name === "finish" && a.args?.id === otherId && a.args?.finished === false) &&
-      !list.querySelector(`li[data-agent="${otherId}"] .finished-badge`),
-    "back",
+    asked.some((a) => a.name === "finish_task" && a.args?.id === "talk-4" && a.args?.finished === false) &&
+      stateOn("talk-4") === "stopped",
+    stateOn("talk-4"),
   );
 
   const group = document.getElementById("overview-group");
-  group.value = "subject";
+  group.value = "teammate";
   group.dispatchEvent(new Event("change"));
   await settle(150);
   const headings = [...tiles.querySelectorAll(".job-group h2 .label")].map((h) => h.textContent);
+  const deskPanel = [...tiles.querySelectorAll(".job-group")].find((g) => g.querySelector("h2 .label")?.textContent === "Bitcoin Desk");
   check(
-    "grouped by subject, the headings are the roles jobs chose, with none last",
-    headings.length >= 1 && !headings.some((h) => /Waiting on you|Completed|Repeating/.test(h)) && (!headings.includes("Other") || headings[headings.length - 1] === "Other"),
-    headings.join(", "),
+    "grouped by teammate, each teammate's tasks are together under its name",
+    headings.includes("Bitcoin Desk") &&
+      !headings.some((h) => /Waiting on you|Completed|Repeating/.test(h)) &&
+      deskPanel?.querySelectorAll(".job").length >= 6,
+    `${headings.join(", ")}; ${deskPanel?.querySelectorAll(".job").length || 0} under Bitcoin Desk`,
   );
   group.value = "state";
   group.dispatchEvent(new Event("change"));
@@ -4840,9 +4883,51 @@ export async function theOverview() {
     `${first?.dataset.state}: ${first ? getComputedStyle(first.querySelector("h2"), "::before").backgroundColor : "none"}`,
   );
 
-  document.getElementById("overview-done").click();
-  await settle(100);
-  check("Back to chat closes it", overview.hidden, `hidden=${overview.hidden}`);
+  // Open, on a task: its teammate, at that task.
+  [...tileOf("talk-overnight").querySelectorAll("button")].find((b) => b.textContent === "Open").click();
+  await settle(400);
+  const talks = document.getElementById("talks");
+  check(
+    "Open on a tile goes to its teammate, at that task",
+    overview.hidden && talks.value === "talk-overnight",
+    `hidden=${overview.hidden}, on ${talks.value}`,
+  );
+  check(
+    "and the task menu offers a new task, not a new conversation",
+    [...talks.options].some((o) => o.textContent === "New task…"),
+    [...talks.options].map((o) => o.textContent).join(" | "),
+  );
+
+  // Finished, from the header: the task on screen, not the teammate.
+  const done = document.getElementById("task-done");
+  check("beside the task menu there is a way to say the task is done", done && !done.hidden && done.getAttribute("aria-pressed") === "false", done ? `hidden=${done.hidden} ${done.textContent}` : "no button");
+  done.click();
+  await settle(200);
+  const option = [...talks.options].find((o) => o.value === "talk-overnight");
+  check(
+    "pressing it marks that task finished, ticked in the menu",
+    asked.some((a) => a.name === "finish_task" && a.args?.id === "talk-overnight" && a.args?.finished === true) &&
+      done.getAttribute("aria-pressed") === "true" &&
+      /✓$/.test(option?.textContent || ""),
+    `${done.textContent}; ${option?.textContent}`,
+  );
+  check(
+    "and its teammate is still an ordinary row in the list",
+    list.querySelector('li[data-agent="agent-bitcoin"]') && !list.querySelector(".finished-badge, li.is-finished"),
+    list.querySelector('li[data-agent="agent-bitcoin"]')?.className ?? "gone",
+  );
+  // Something new asked in a finished task is that task going again.
+  const what = document.getElementById("what");
+  what.value = "One more thing about last night";
+  what.dispatchEvent(new Event("input"));
+  document.getElementById("composer").dispatchEvent(new Event("submit", { cancelable: true }));
+  await settle(300);
+  check(
+    "asking something new in a finished task opens it again",
+    asked.some((a) => a.name === "finish_task" && a.args?.id === "talk-overnight" && a.args?.finished === false) &&
+      done.getAttribute("aria-pressed") === "false",
+    `${done.textContent}`,
+  );
 
   const days = document.getElementById("finished-days");
   const says = document.getElementById("finished-days-says");
@@ -4850,7 +4935,7 @@ export async function theOverview() {
   days.dispatchEvent(new Event("change"));
   await settle(150);
   check(
-    "how long a finished job stays in the list is a setting that is kept",
+    "how long a finished task stays in the task menu is a setting that is kept",
     asked.some((a) => a.name === "set_setting" && a.args?.key === "finished_kept_days" && a.args?.value === "3") && /3 days/.test(says.textContent),
     says.textContent,
   );

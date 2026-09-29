@@ -6678,6 +6678,51 @@ fn model_key(engine: &str, settings: Option<&str>) -> String {
     format!("{engine}|{}", settings.unwrap_or(""))
 }
 
+/// One task, as the overview shows it: the conversation, the first thing
+/// asked in it, which is what it is called when nobody named it, and whether
+/// anything was said in it at all.
+#[derive(Serialize)]
+struct Task {
+    #[serde(flatten)]
+    talk: Conversation,
+    first: Option<String>,
+    said: bool,
+}
+
+/// Every task, whoever's it is: every conversation, with what matters and
+/// what is finished carried on it.
+#[tauri::command]
+async fn tasks(held: State<'_, Held>) -> Result<Vec<Task>, String> {
+    let mut first = held.store.first_things_said().map_err(|e| e.to_string())?;
+    let said = held.store.tasks_with_words().map_err(|e| e.to_string())?;
+    Ok(held
+        .store
+        .tasks()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|talk| Task {
+            first: first.remove(&talk.id),
+            said: said.contains(&talk.id),
+            talk,
+        })
+        .collect())
+}
+
+/// How much a task matters, 1 to 3.
+#[tauri::command]
+async fn set_task_priority(held: State<'_, Held>, id: String, priority: i64) -> Result<(), String> {
+    held.store
+        .set_task_priority(&id, priority)
+        .map_err(|e| e.to_string())
+}
+
+/// Say a task is finished, or that it is not after all.
+#[tauri::command]
+async fn finish_task(held: State<'_, Held>, id: String, finished: bool) -> Result<(), String> {
+    let at = finished.then(|| chrono::Local::now().timestamp_millis());
+    held.store.finish_task(&id, at).map_err(|e| e.to_string())
+}
+
 /// One of the app's own settings, or nothing if it was never set.
 #[tauri::command]
 async fn setting(held: State<'_, Held>, key: String) -> Result<Option<String>, String> {
@@ -7327,6 +7372,9 @@ pub fn run() {
             answering,
             send_draft,
             draft_to_mail,
+            tasks,
+            set_task_priority,
+            finish_task,
             discard_draft,
             use_engine,
             runs,

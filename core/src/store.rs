@@ -174,6 +174,14 @@ pub struct Conversation {
     /// Why it ended, if it has: finished, ran out of turns, went round, or
     /// stopped saying where it was. Four different things to do about it.
     pub goal_over: Option<String>,
+    /// How much this task matters: 1 high, 2 normal, 3 low. A task's, not its
+    /// teammate's: a teammate is a job that goes on, and what can matter more
+    /// or less is a piece of work.
+    #[serde(default = "normally")]
+    pub priority: i64,
+    /// When its person said this task was finished. Nothing while it is not.
+    #[serde(default)]
+    pub finished_at: Option<i64>,
 }
 
 /// Somewhere models are served from.
@@ -1068,6 +1076,15 @@ const CHANGES: &[&str] = &[
      UPDATE agents
         SET engine_settings = REPLACE(engine_settings, '\"model\":\"deepseek-v4-flash\"', '\"model\":\"deepseek-flash\"')
       WHERE engine_settings LIKE '%api.deepseek.com%';",
+    // Teammates and their tasks. What matters and what is finished is a task's,
+    // a conversation's, not an agent's: an agent is a teammate with a job that
+    // goes on. What was set on an agent before carries down to its tasks.
+    "ALTER TABLE conversations ADD COLUMN priority INTEGER NOT NULL DEFAULT 2;
+     ALTER TABLE conversations ADD COLUMN finished_at INTEGER;
+     UPDATE conversations
+        SET priority = (SELECT a.priority FROM agents AS a WHERE a.id = conversations.agent),
+            finished_at = (SELECT a.finished_at FROM agents AS a WHERE a.id = conversations.agent)
+      WHERE agent IN (SELECT id FROM agents);",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -2320,7 +2337,7 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at
                FROM conversations",
         )?;
         let rows = q.query_map([], read_conversation)?;
@@ -2385,7 +2402,7 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at
                FROM conversations WHERE agent = ? ORDER BY spoke_at DESC",
         )?;
         let rows = q.query_map([agent], read_conversation)?;
@@ -2401,7 +2418,7 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at
                FROM conversations WHERE id = ?",
         )?;
         let mut rows = q.query_map([id], read_conversation)?;
@@ -2669,7 +2686,7 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at
                FROM conversations
               WHERE runs_at IS NOT NULL AND runs_what IS NOT NULL AND routine_off = 0
                 AND agent NOT IN (SELECT id FROM agents WHERE paused_at IS NOT NULL)
@@ -2693,7 +2710,7 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at
                FROM conversations
               WHERE runs_at IS NOT NULL AND runs_what IS NOT NULL
               ORDER BY spoke_at DESC",
@@ -2722,6 +2739,62 @@ impl Store {
             params![priority, agent],
         )?;
         Self::only_if_it_is_there(changed, "agent")
+    }
+
+    /// How much one task matters, 1 to 3.
+    pub fn set_task_priority(&self, conversation: &str, priority: i64) -> Result<()> {
+        anyhow::ensure!(
+            (1..=3).contains(&priority),
+            "a priority is 1, 2 or 3, not {priority}"
+        );
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE conversations SET priority = ? WHERE id = ?",
+            params![priority, conversation],
+        )?;
+        Self::only_if_it_is_there(changed, "conversation")
+    }
+
+    /// Say a task is finished, as of this moment, or that it is not after all.
+    pub fn finish_task(&self, conversation: &str, at: Option<i64>) -> Result<()> {
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE conversations SET finished_at = ? WHERE id = ?",
+            params![at, conversation],
+        )?;
+        Self::only_if_it_is_there(changed, "conversation")
+    }
+
+    /// Every task there is, whoever's it is.
+    pub fn tasks(&self) -> Result<Vec<Conversation>> {
+        self.every_conversation()
+    }
+
+    /// The first thing the person said in each task, by task.
+    ///
+    /// What a task is called when nobody named it: most first conversations are
+    /// called "First", which says nothing about what was asked in them.
+    pub fn first_things_said(&self) -> Result<HashMap<String, String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT l.conversation, l.text FROM lines AS l
+              WHERE l.kind = 'mine' AND l.said_by IS NULL
+                AND l.seq = (SELECT min(seq) FROM lines AS m
+                              WHERE m.conversation = l.conversation
+                                AND m.kind = 'mine' AND m.said_by IS NULL)",
+        )?;
+        let rows = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The tasks anything was said in, by the person or to them.
+    ///
+    /// A teammate's first task is there from the moment it is made; until
+    /// somebody asks something in it, it is not a piece of work yet.
+    pub fn tasks_with_words(&self) -> Result<HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q =
+            conn.prepare("SELECT DISTINCT conversation FROM lines WHERE kind IN ('mine', 'said')")?;
+        let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Say an agent's job is finished, as of this moment, or that it is not
@@ -3659,6 +3732,8 @@ fn read_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
         goal_tries: r.get(27)?,
         goal_left: r.get(28)?,
         goal_over: r.get(29)?,
+        priority: r.get(32)?,
+        finished_at: r.get(33)?,
     })
 }
 
@@ -3758,6 +3833,42 @@ mod tests {
     }
 
     #[test]
+    fn a_task_has_its_own_priority_and_can_be_finished() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a", "/tmp/a");
+        let task = s.conversations("a").unwrap().pop().unwrap();
+        assert_eq!(task.priority, 2, "a new task matters normally");
+        assert!(task.finished_at.is_none());
+        s.set_task_priority(&task.id, 1).unwrap();
+        s.finish_task(&task.id, Some(1234)).unwrap();
+        let task = s.conversation(&task.id).unwrap().unwrap();
+        assert_eq!(task.priority, 1);
+        assert_eq!(task.finished_at, Some(1234));
+        assert!(s.set_task_priority(&task.id, 7).is_err());
+        s.finish_task(&task.id, None).unwrap();
+        assert!(s
+            .conversation(&task.id)
+            .unwrap()
+            .unwrap()
+            .finished_at
+            .is_none());
+        assert_eq!(s.tasks().unwrap().len(), 1);
+        assert!(
+            s.tasks_with_words().unwrap().is_empty(),
+            "nothing asked yet"
+        );
+        // Named, when nobody named it, by the first thing asked in it.
+        s.asked(&task.id, "Check the drive every hour").unwrap();
+        s.asked(&task.id, "and then write a note").unwrap();
+        let first = s.first_things_said().unwrap();
+        assert_eq!(
+            first.get(&task.id).map(String::as_str),
+            Some("Check the drive every hour")
+        );
+        assert!(s.tasks_with_words().unwrap().contains(&task.id));
+    }
+
+    #[test]
     fn a_retired_deepseek_name_is_moved_to_the_one_that_replaced_it() {
         let s = Store::in_memory().unwrap();
         {
@@ -3770,7 +3881,7 @@ mod tests {
                 [],
             )
             .unwrap();
-            conn.execute_batch(CHANGES.last().unwrap()).unwrap();
+            conn.execute_batch(CHANGES[CHANGES.len() - 2]).unwrap();
         }
         let d = s
             .offered()
