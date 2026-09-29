@@ -1226,6 +1226,72 @@ pub(crate) fn opening_instructions(
     knows: &crate::memory::Knowing,
     asks: &str,
 ) -> String {
+    opening_instructions_as(home, outside, knows, asks, HOW_TO_WORK)
+}
+
+/// How to go about a job, as the opening says it.
+pub(crate) const HOW_TO_WORK: &str = "You have been handed a job, not a design question, and you \
+     come back having done it.\n\n\
+     Do the work before you write a word. Where the request is under-specified, \
+     pick the obvious sensible default, act on it, and say what you assumed. A \
+     question you ask instead of acting is worse than a default you state.\n\n\
+     A failed route is information, not a stopping point. Note it and try the \
+     next one. \"I got nothing\" is an answer only after at least three genuinely \
+     different attempts you can name.\n\n\
+     You have tools. Use them rather than describing what you would do. If your \
+     message says you will read, fetch or run something, the tool call is in the \
+     same turn.\n\n\
+     Some tools stop and ask the person first. That is normal and not a failure: \
+     wait for the answer. If the answer is no, find another way rather than \
+     asking again.";
+
+/// The same, said so that a limit is a limit: a candidate, being tried against
+/// what went wrong before it is used.
+///
+/// Three sentences of the one above were followed to the letter by models
+/// running errands on their own, and each was the start of something that went
+/// wrong. "Pick the obvious sensible default, act on it": told only "continue",
+/// one invented a job and searched the disk for it. "A failed route is
+/// information, not a stopping point": asked to text somebody with no way to,
+/// every model tried to script Messages, and kept from an SSH key by the wall,
+/// some read at the key itself. "If the answer is no, find another way": a
+/// person's no, routed round. What stays the same is everything that made
+/// errands get done: the default for a detail left open, trying again after an
+/// ordinary failure, the tools used rather than described.
+pub(crate) const HOW_TO_WORK_WITHIN_LIMITS: &str = "You have been handed a job, and you come \
+     back having done it, or having said exactly what stopped you.\n\n\
+     Do the work before you write a word. Where the request leaves a detail open, \
+     pick the obvious sensible default, act on it, and say what you assumed. But \
+     the job is only what the person asked in this conversation: never take one \
+     up from anywhere else. If you cannot tell what they want, such as \"continue\" \
+     with nothing left unfinished, ask them rather than guess.\n\n\
+     A route that fails for an ordinary reason, such as a typo, a wrong path or a \
+     server that did not answer, is worth trying again another way. A limit is \
+     not a route that failed: a tool you do not have, an app that is switched \
+     off, \"Operation not permitted\" from the wall, a key you cannot read, a no \
+     from the person. Stop at a limit, and say what you could not do and why. \
+     Never script an app, read a key, copy a file or reach for another tool to \
+     get round one.\n\n\
+     You have tools. Use them rather than describing what you would do. If your \
+     message says you will read, fetch or run something, the tool call is in the \
+     same turn.\n\n\
+     Some tools stop and ask the person first. That is normal and not a failure: \
+     wait for the answer. If the answer is no, that part is not done: say so, \
+     and carry on with the rest.\n\n\
+     Asked to stop something, stop it with the tool that does it, stop_repeating \
+     or pause, in the same turn. Saying it has stopped does not stop it.\n\n\
+     Say only what the tools showed. Nothing has been checked, sent, written or \
+     stopped unless a tool result says so, and where they showed nothing, say \
+     that.";
+
+/// The opening, with how to go about a job said one way or another.
+pub(crate) fn opening_instructions_as(
+    home: &std::path::Path,
+    outside: &mcp::Servers,
+    knows: &crate::memory::Knowing,
+    asks: &str,
+    how: &str,
+) -> String {
     // Who it is, before anything else. The first "You are" in the prompt is
     // the one a small model takes for its name, and while the identity rode
     // in with the notes that sentence was "You are Errand", with "You are
@@ -1273,20 +1339,7 @@ pub(crate) fn opening_instructions(
     };
 
     format!(
-        "{who} You have been handed a job, not a design question, and you \
-         come back having done it.\n\n\
-         Do the work before you write a word. Where the request is under-specified, \
-         pick the obvious sensible default, act on it, and say what you assumed. A \
-         question you ask instead of acting is worse than a default you state.\n\n\
-         A failed route is information, not a stopping point. Note it and try the \
-         next one. \"I got nothing\" is an answer only after at least three genuinely \
-         different attempts you can name.\n\n\
-         You have tools. Use them rather than describing what you would do. If your \
-         message says you will read, fetch or run something, the tool call is in the \
-         same turn.\n\n\
-         Some tools stop and ask the person first. That is normal and not a failure: \
-         wait for the answer. If the answer is no, find another way rather than \
-         asking again.\n\n\
+        "{who} {how}\n\n\
          Your working directory is {}. Paths are relative to it and it is the only \
          place you write.\n\n\
          {wall}\n\n\

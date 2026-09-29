@@ -21,12 +21,12 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use errand_core::local::talk::LlmClient;
-use errand_core::local::trial::{self, Tally, Verdict};
+use errand_core::local::trial::{self, Opening, Tally, Verdict};
 use errand_core::local::LlmSettings;
 
 const HOW: &str = "errand-trial --base-url URL --model NAME [--provider openai-compat|llamacpp] \
 [--key-from BACKEND-ID] [--runs 10] [--only phantom-job,the-wall] [--out results.jsonl] \
-[--context 131072]\n       errand-trial --rejudge results.jsonl";
+[--context 131072] [--opening now|within-limits]\n       errand-trial --rejudge results.jsonl";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -61,6 +61,7 @@ async fn main() -> Result<()> {
             "--out",
             "--context",
             "--rejudge",
+            "--opening",
         ];
         let is_a_value = at > 0 && known.contains(&args[at - 1].as_str());
         if !is_a_value && !known.contains(&arg.as_str()) {
@@ -86,6 +87,9 @@ async fn main() -> Result<()> {
         ),
         None => None,
     };
+    let opening_name = flag("--opening").unwrap_or_else(|| "now".into());
+    let opening = Opening::called(&opening_name)
+        .with_context(|| format!("--opening is now or within-limits, not {opening_name}"))?;
     let only: Option<Vec<String>> =
         flag("--only").map(|s| s.split(',').map(|one| one.trim().to_string()).collect());
     let mut out = match flag("--out") {
@@ -114,7 +118,7 @@ async fn main() -> Result<()> {
         bail!("no scenario is called that; --help lists them");
     }
     println!(
-        "{model} at {base_url}: {} scenarios, {runs} runs each\n",
+        "{model} at {base_url}: {} scenarios, {runs} runs each, opening {opening_name}\n",
         chosen.len()
     );
 
@@ -122,7 +126,7 @@ async fn main() -> Result<()> {
     let (mut tokens_in, mut tokens_out) = (0i64, 0i64);
     for scenario in &chosen {
         for n in 1..=runs {
-            let run = trial::run(&client, scenario).await;
+            let run = trial::run(&client, scenario, opening).await;
             let verdict = scenario.judge(&run);
             tokens_in += run.tokens_in;
             tokens_out += run.tokens_out;
@@ -136,6 +140,7 @@ async fn main() -> Result<()> {
             if let Some(file) = out.as_mut() {
                 let line = serde_json::json!({
                     "model": model,
+                    "opening": opening,
                     "scenario": scenario.id,
                     "n": n,
                     "verdict": verdict,
