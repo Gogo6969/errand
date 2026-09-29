@@ -2765,7 +2765,11 @@ mod tests {
         let they_said =
             vec!["If there is something new send an email to Kim@mailbox.example".to_string()];
         let to = |to: &str| json!({ "to": to, "subject": "News", "body": "Hello" });
-        assert!(!asks_first("send_mail", &to("kim@mailbox.example"), &they_said));
+        assert!(!asks_first(
+            "send_mail",
+            &to("kim@mailbox.example"),
+            &they_said
+        ));
         // Somebody else, or somebody else as well, is a question.
         assert!(asks_first(
             "send_mail",
@@ -2778,7 +2782,11 @@ mod tests {
             &they_said
         ));
         // The whole address, not the provider: they named themselves, not mailbox.example.
-        assert!(asks_first("send_mail", &to("admin@mailbox.example"), &they_said));
+        assert!(asks_first(
+            "send_mail",
+            &to("admin@mailbox.example"),
+            &they_said
+        ));
         // Nor something longer that happens to start the same.
         assert!(asks_first(
             "send_mail",
