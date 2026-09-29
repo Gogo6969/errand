@@ -504,7 +504,7 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             );
           case "engines":
             return Promise.resolve(
-              fixture.offered.map((o) => ({ engine: o.engine, name: o.label, settings: o.settings })),
+              fixture.offered.map((o) => ({ id: o.id, engine: o.engine, name: o.label, settings: o.settings })),
             );
           case "outside":
             return Promise.resolve(fixture.outside);
@@ -779,6 +779,13 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           // Refused the way the app refuses it, so the window's handling of a
           // refusal is what gets checked.
           case "set_setting":
+            if (args?.key === "errand_model") {
+              if (!fixture.offered.some((o) => o.id === args.value)) {
+                return Promise.reject("That model is not in the list to choose from.");
+              }
+              fixture.settings[args.key] = args.value;
+              return Promise.resolve(null);
+            }
             if (!(Number(args?.value) >= 1 && Number(args?.value) <= 365)) {
               return Promise.reject("somewhere between 1 and 365 days");
             }

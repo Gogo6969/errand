@@ -1053,6 +1053,21 @@ const CHANGES: &[&str] = &[
          key   TEXT PRIMARY KEY,
          value TEXT NOT NULL
      );",
+    // DeepSeek retired the name deepseek-v4-flash on 10 September in favour of
+    // deepseek-flash, which is V4.1 Flash, and routes the old name to it only
+    // for now. A line kept under the old name stops answering the day that
+    // ends, so it is moved to the new one, unless the new one is already there.
+    "UPDATE offered
+        SET settings = REPLACE(settings, '\"model\":\"deepseek-v4-flash\"', '\"model\":\"deepseek-flash\"'),
+            label = REPLACE(label, 'deepseek-v4-flash', 'deepseek-flash'),
+            mark = REPLACE(mark, 'deepseek-v4-flash', 'deepseek-flash')
+      WHERE settings LIKE '%api.deepseek.com%'
+        AND settings LIKE '%\"model\":\"deepseek-v4-flash\"%'
+        AND NOT EXISTS (SELECT 1 FROM offered AS already
+                         WHERE already.mark = REPLACE(offered.mark, 'deepseek-v4-flash', 'deepseek-flash'));
+     UPDATE agents
+        SET engine_settings = REPLACE(engine_settings, '\"model\":\"deepseek-v4-flash\"', '\"model\":\"deepseek-flash\"')
+      WHERE engine_settings LIKE '%api.deepseek.com%';",
 ];
 
 /// What makes two lines in the picker the same line.
@@ -3740,6 +3755,32 @@ mod tests {
             tool: "Bash".into(),
             call: call.into(),
         })
+    }
+
+    #[test]
+    fn a_retired_deepseek_name_is_moved_to_the_one_that_replaced_it() {
+        let s = Store::in_memory().unwrap();
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO offered (id, engine, label, settings, backend, sort, mark)
+                 VALUES ('d', 'local', 'deepseek-v4-flash · DeepSeek',
+                         '{\"provider\":\"openai-compat\",\"base_url\":\"https://api.deepseek.com/v1\",\"model\":\"deepseek-v4-flash\",\"wire\":\"openai\"}',
+                         NULL, 0, 'https://api.deepseek.com/v1|deepseek-v4-flash')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(CHANGES.last().unwrap()).unwrap();
+        }
+        let d = s
+            .offered()
+            .unwrap()
+            .into_iter()
+            .find(|o| o.id == "d")
+            .unwrap();
+        assert_eq!(d.label, "deepseek-flash · DeepSeek");
+        assert!(d.settings.unwrap().contains("\"model\":\"deepseek-flash\""));
+        assert!(d.mark.ends_with("|deepseek-flash"));
     }
 
     #[test]

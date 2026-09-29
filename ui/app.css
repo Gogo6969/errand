@@ -1346,6 +1346,18 @@ main > aside, main > #title, main > #composer { flex: none; }
 /* The model this agent is on, when its server is not answering. */
 #engine.quiet, #engine.quiet:hover { color: var(--wrong); border-color: var(--wrong-soft); }
 #engine:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Where it lives now: Settings, choosing for every teammate at once, so it
+   looks like the other controls there rather than a quiet header chip. */
+#models #engine {
+  max-width: 100%;
+  min-width: 240px;
+  border-color: var(--rule);
+  background-color: var(--card);
+  color: var(--ink);
+  font-size: 13px;
+  padding: 6px 26px 6px 10px;
+}
+#models #engine.quiet { color: var(--wrong); border-color: var(--wrong-soft); }
 
 /* ---------------------------------------------------------- prose ----- */
 

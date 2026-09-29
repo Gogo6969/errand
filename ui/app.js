@@ -203,6 +203,8 @@ let finishedKeptDays = 7;
 let standingNow = [];
 /** The answer being read aloud this moment, when one is. */
 let listeningTo = null;
+/** Which line of the picker every teammate works on: Errand's model, or none yet. */
+let errandModel = null;
 
 const el = {
   threads: document.getElementById("threads"),
@@ -224,6 +226,7 @@ const el = {
   overviewTiles: document.getElementById("overview-tiles"),
   overviewFind: document.getElementById("overview-find"),
   overviewShow: document.getElementById("overview-show"),
+  errandModelSays: document.getElementById("errand-model-says"),
   finishedDays: document.getElementById("finished-days"),
   finishedDaysSays: document.getElementById("finished-days-says"),
   reachableList: document.getElementById("reachable-list"),
@@ -423,7 +426,7 @@ async function knockOnTheModels() {
   try {
     const nearbyOnes = (await whatCouldAnswer().catch(() => []))
       .filter((c) => c.engine === "local")
-      .map((c) => [keyOf(c.engine, c.settings), addressOf(c.settings)])
+      .map((c) => [c.id, addressOf(c.settings)])
       .filter(([, at]) => at);
     if (!nearbyOnes.length) return;
     const answers = await invoke("answering", { addresses: nearbyOnes.map(([, at]) => at) });
@@ -452,8 +455,7 @@ async function knockOnTheModels() {
   }
   // Not while somebody has it open: the list changing under the pointer is
   // worse than a list a minute out of date.
-  const current = agents.get(showingAgent);
-  if (current && document.activeElement !== el.engine) drawEngines(current);
+  if (document.activeElement !== el.engine) drawEngines();
 }
 
 /** Whether the picker offers this one: never knocked on, or answered lately. */
@@ -467,70 +469,50 @@ function answersLately(key) {
 window.addEventListener("focus", () => knockOnTheModels());
 setInterval(knockOnTheModels, 3 * 60_000);
 
-/** How one choice is recognised again, since a model id alone does not say where it lives. */
-function keyOf(engine, settings) {
-  if (engine !== "local") {
-    // Claude with a model named is not the same choice as Claude without one.
-    // Collapsing them all to "claude" meant the picker could show which engine
-    // was answering but never which model, so every one of them looked
-    // selected and choosing between them did nothing.
-    return settings ? `claude|${settings}` : "claude";
-  }
-  if (!settings) return "claude";
-  try {
-    const s = JSON.parse(settings);
-    return `local|${s.base_url}|${s.model}`;
-  } catch {
-    return "claude";
-  }
-}
-
-/** Fill the picker, and mark what this agent is on. */
-async function drawEngines(a) {
-  const mine = keyOf(a.on, a.onSettings);
+/**
+ * Fill Errand's model's menu, in Settings, and mark which it is.
+ *
+ * One model for every teammate, so this no longer belongs to whichever agent
+ * is on screen: the argument some callers still pass is ignored.
+ */
+async function drawEngines() {
+  const mine = errandModel;
   const choices = await whatCouldAnswer();
-  // The window may have moved on while the probes were out.
-  if (showingAgent !== a.id) return;
 
-  // Only what answers, and whatever this agent is on whether it answers or not:
-  // a picker that hides its own selection is claiming something else.
-  const offered = choices.filter((c) => {
-    const key = keyOf(c.engine, c.settings);
-    return key === mine || answersLately(key);
-  });
+  // Only what answers, and whatever is chosen whether it answers or not: a
+  // menu that hides its own selection is claiming something else.
+  const offered = choices.filter((c) => c.id === mine || answersLately(c.id));
   el.engine.replaceChildren(
     ...offered.map((c) => {
       const option = document.createElement("option");
-      option.value = keyOf(c.engine, c.settings);
+      option.value = c.id;
       option.textContent =
-        option.value === mine && answeredLast.get(option.value) === false
-          ? `${c.name} · not answering`
-          : c.name;
-      option.selected = option.value === mine;
+        c.id === mine && answeredLast.get(c.id) === false ? `${c.name} · not answering` : c.name;
+      option.selected = c.id === mine;
       return option;
     }),
   );
-  // And on the closed picker, which shows only the start of a long name: a note
-  // at the end of it is exactly the part nobody sees.
-  const quietNow = answeredLast.get(mine) === false;
+  const quietNow = Boolean(mine) && answeredLast.get(mine) === false;
   el.engine.classList.toggle("quiet", quietNow);
   el.engine.title = quietNow
-    ? "The server for this model is not answering. Choose another model, or start it."
-    : "What answers this agent";
+    ? "The server for Errand's model is not answering. Choose another model, or start it."
+    : "The model every teammate works on";
 
-  // An agent on something that is not in the list still has to say what it is
-  // on, or the picker quietly claims it is something else.
-  //
-  // "Not listed" rather than "not running", which is what this used to say and
-  // is no longer true: when the picker was a live search, missing meant the
-  // server had not answered. Now it means somebody took it out of the list, or
-  // never put it in, and the model may be perfectly well. Telling them it is
-  // down sends them to go and look at a server that is fine.
-  if (!choices.some((c) => keyOf(c.engine, c.settings) === mine)) {
+  if (!mine) {
+    // Nothing chosen yet, so each teammate is still on whatever it was given
+    // one at a time. Said, rather than showing the first model as though it
+    // were chosen.
+    const none = document.createElement("option");
+    none.value = "__none__";
+    none.disabled = true;
+    none.selected = true;
+    none.textContent = "Not chosen yet";
+    el.engine.prepend(none);
+  } else if (!choices.some((c) => c.id === mine)) {
     const gone = document.createElement("option");
     gone.value = mine;
-    gone.textContent = `${whatItIsOn(a)} · not in the list`;
     gone.selected = true;
+    gone.textContent = "The chosen model · not in the list";
     el.engine.prepend(gone);
   }
 
@@ -548,16 +530,6 @@ async function drawEngines(a) {
   add.value = "__add__";
   add.textContent = "Add a model…";
   el.engine.append(add);
-}
-
-/** What an agent is on, named the way the picker would name it. */
-function whatItIsOn(a) {
-  if (a.on !== "local") return a.onSettings ? `Claude · ${a.onSettings}` : "Claude";
-  try {
-    return JSON.parse(a.onSettings || "{}").model || "a local model";
-  } catch {
-    return "a local model";
-  }
 }
 
 /**
@@ -3298,57 +3270,25 @@ el.what.addEventListener("input", () => {
 });
 
 el.engine.addEventListener("change", async () => {
-  // Not a model: the way to the place models are added. The picker goes back to
-  // what this agent is on, which nothing here has changed.
+  // Not a model: the way to where models are added, which is this same screen.
   if (el.engine.value === "__add__") {
-    const on = whose();
-    if (on) drawEngines(on);
-    showModels();
+    drawEngines();
+    const hand = document.getElementById("hand-label");
+    hand?.scrollIntoView({ block: "center" });
+    hand?.focus();
     return;
   }
-  const t = whose();
-  if (!t) return;
-  const choice = (await whatCouldAnswer()).find(
-    (c) => keyOf(c.engine, c.settings) === el.engine.value,
-  );
+  const choice = (await whatCouldAnswer()).find((c) => c.id === el.engine.value);
   if (!choice) return;
-
-  t.on = choice.engine;
-  t.onSettings = choice.settings;
-  // Drawn again for what it is on now, or a picker marked as not answering
-  // stays marked after somebody has moved it to one that does.
-  drawEngines(t);
-
-  const talk = talking();
-  // Whatever was answering has been killed, and a killed engine says nothing
-  // about having stopped.
-  itHasStopped(talk);
   try {
-    // The choice is the agent's; the session that has to be restarted is this
-    // conversation's. Two ids, and passing either one to both is the mistake
-    // this whole change exists to make impossible.
-    await invoke("use_engine", { id: t.id, engine: choice.engine, settings: choice.settings });
-    // Whatever was answering has been stopped. The new one starts when there
-    // is something to say to it, which is the only moment it has any work.
-    // Said in the conversation rather than in a toast that disappears.
-    // Somebody scrolling back next week needs to see where it changed hands,
-    // or the gap in what it remembers looks like a fault.
-    talk?.messages.push({
-      kind: "ended",
-      failed: false,
-      // Which is true of Claude, and was said of a local model too, which is
-      // handed everything said here when it starts: somebody told it had seen
-      // nothing typed "continue", and had no reason to think that would work.
-      text:
-        choice.engine === "local"
-          ? `Now on ${choice.name}. It is handed what was said here so far.`
-          : `Now on ${choice.name}. It has not seen anything said before this line.`,
-    });
+    await invoke("set_setting", { key: "errand_model", value: choice.id });
+    errandModel = choice.id;
+    // When it takes effect, said plainly: nobody is cut off mid-task by it.
+    el.errandModelSays.textContent = `Every teammate now works on ${choice.name}. One in the middle of something finishes on the model it started with.`;
   } catch (why) {
-    talk?.messages.push({ kind: "ended", failed: true, text: String(why) });
+    el.errandModelSays.textContent = String(why);
   }
-  drawMessages();
-  drawThreads();
+  drawEngines();
 });
 
 // One handler for every link in every thread, rather than one per link: the
@@ -6016,6 +5956,7 @@ const KNOWN_PLACES = [
 
 async function showModels() {
   el.models.hidden = false;
+  drawEngines();
   el.presets.replaceChildren(
     ...KNOWN_PLACES.map((place) => {
       const b = document.createElement("button");
@@ -6161,6 +6102,7 @@ el.setup.addEventListener("click", showModels);
 /* ------------------------------------------------------------ overview -- */
 
 async function readTheSettings() {
+  errandModel = (await invoke("setting", { key: "errand_model" }).catch(() => null)) || null;
   try {
     const days = Number(await invoke("setting", { key: "finished_kept_days" }));
     if (days >= 1) finishedKeptDays = days;

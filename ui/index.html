@@ -69,6 +69,24 @@
         <button id="models-done" type="button">&#8592; Back to chat</button>
       </header>
 
+      <!--
+        The one model every teammate works on. Chosen here, once, rather than
+        per agent in the header: which model does a job is the app's business,
+        and choosing it one agent at a time was choosing how good each errand
+        would be.
+      -->
+      <div class="card" id="errand-model">
+        <div class="card-head">
+          <div>
+            <h2>Errand's model</h2>
+            <p id="errand-model-says">Every teammate works on this one. Only models that are answering are offered.</p>
+          </div>
+          <div class="doing">
+            <select id="engine" title="The model every teammate works on"></select>
+          </div>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-head">
           <div>
@@ -130,8 +148,8 @@
       <div class="card">
         <div class="card-head">
           <div>
-            <h2>In the picker</h2>
-            <p>Exactly this, in this order. Nothing else is offered anywhere in the app.</p>
+            <h2>To choose from</h2>
+            <p>Exactly these, in this order, for Errand's model. Nothing else is offered anywhere in the app.</p>
           </div>
         </div>
         <ul id="chosen"></ul>
@@ -242,7 +260,6 @@
         <select id="talks" title="Which conversation"></select>
         <!-- Who is in the room, when this is one. Empty and hidden otherwise. -->
         <button id="members" type="button" hidden title="Change who is in this room"></button>
-        <select id="engine" title="What answers this agent"></select>
         <button id="repeat" type="button" title="Make this run on a schedule">Repeat</button>
         <button id="watch" type="button" title="Wake this when something changes">Watch</button>
         <button id="goal" type="button" title="Something to get to, rather than something to do">Goal</button>

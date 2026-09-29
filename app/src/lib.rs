@@ -63,6 +63,10 @@ struct Held {
     /// it is talking to -- that is the whole point of the protocol, and it
     /// stops being true the moment this map knows.
     live: Mutex<HashMap<String, Box<dyn Engine + Send>>>,
+    /// Which model each open conversation's engine was opened on, so that one
+    /// opened before the Errand model was changed can be noticed and replaced
+    /// the next time it is given something.
+    opened_with: Mutex<HashMap<String, String>>,
     settling: Settling,
     /// Where an engine posts the things only the app can do.
     wants: tokio::sync::mpsc::UnboundedSender<team::Wants>,
@@ -491,6 +495,10 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         .as_ref()
         .map_or_else(|| "claude".to_string(), |a| a.engine.clone());
     let settings = known.as_ref().and_then(|a| a.engine_settings.clone());
+    // The Errand model, once one is chosen, for every teammate alike. What an
+    // agent was put on before there was one is only what it falls back to.
+    let (on_engine, settings) = the_model_now(&held).unwrap_or((on_engine, settings));
+    let opened_on = model_key(&on_engine, settings.as_deref());
     let (home, again) = match &known {
         Some(a) => (
             std::path::PathBuf::from(&a.cwd),
@@ -700,6 +708,10 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         *count
     };
     held.live.lock().unwrap().insert(id.clone(), engine);
+    held.opened_with
+        .lock()
+        .unwrap()
+        .insert(id.clone(), opened_on);
 
     // Everything it says: written down, then forwarded. In that order, so that
     // a window which reloads a moment later reads the same conversation it was
@@ -1278,6 +1290,27 @@ async fn say_as(
     // again on the next resume. So opening the window ran an errand nobody had
     // asked for that minute, over and over, until one of them was left alone
     // long enough to finish.
+    // On the model the app is set to now. An engine opened on another before
+    // the Errand model was changed is closed here, between tasks, so the change
+    // reaches every teammate the next time it is given something and never
+    // part way through what it is doing.
+    if let Some((engine, settings)) = the_model_now(&held) {
+        let now = model_key(&engine, settings.as_deref());
+        let stale = held
+            .opened_with
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|was| *was != now);
+        if stale && !mid_turn(&held, &id) {
+            held.opened_with.lock().unwrap().remove(&id);
+            held.doorways.lock().unwrap().remove(&id);
+            let was = held.live.lock().unwrap().remove(&id);
+            if let Some(mut was) = was {
+                let _ = was.stop();
+            }
+        }
+    }
     if !held.live.lock().unwrap().contains_key(&id) {
         open_thread(app.clone(), held.clone(), id.clone()).await?;
     }
@@ -1691,6 +1724,8 @@ async fn answer(
 /// One thing that could answer a thread.
 #[derive(Clone, Serialize)]
 struct Choice {
+    /// Its line in the picker, which is what the Errand model setting names.
+    id: String,
     /// `claude`, or `local`.
     engine: String,
     /// What it is called on screen.
@@ -1716,6 +1751,7 @@ async fn engines(held: State<'_, Held>) -> Result<Vec<Choice>, String> {
         .map_err(|e| e.to_string())?
         .into_iter()
         .map(|one| Choice {
+            id: one.id,
             engine: one.engine,
             name: one.label,
             settings: one.settings,
@@ -6618,7 +6654,29 @@ async fn finish(held: State<'_, Held>, id: String, finished: bool) -> Result<(),
 }
 
 /// The settings the window may read and write, and nothing else.
-const SETTINGS: &[&str] = &["finished_kept_days"];
+const SETTINGS: &[&str] = &["finished_kept_days", "errand_model"];
+
+/// The model every teammate works on, when one has been chosen in Settings:
+/// the line of the picker it names, as the engine and its settings.
+///
+/// One model for the whole app rather than one per agent. A teammate is a
+/// job, and which model does the job is the app's business: somebody choosing
+/// per agent was choosing, one agent at a time, how good each errand would be.
+fn the_model_now(held: &Held) -> Option<(String, Option<String>)> {
+    let chosen = held.store.setting("errand_model").ok().flatten()?;
+    let one = held
+        .store
+        .offered()
+        .ok()?
+        .into_iter()
+        .find(|o| o.id == chosen)?;
+    Some((one.engine, one.settings))
+}
+
+/// How an engine's model is compared with the one chosen now.
+fn model_key(engine: &str, settings: Option<&str>) -> String {
+    format!("{engine}|{}", settings.unwrap_or(""))
+}
 
 /// One of the app's own settings, or nothing if it was never set.
 #[tauri::command]
@@ -6643,6 +6701,21 @@ async fn set_setting(held: State<'_, Held>, key: String, value: String) -> Resul
             }
             held.store
                 .set_setting(&key, &days.to_string())
+                .map_err(|e| e.to_string())
+        }
+        // A line of the picker, by its id: nothing else can be answered with.
+        "errand_model" => {
+            let known = held
+                .store
+                .offered()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .any(|o| o.id == value);
+            if !known {
+                return Err("That model is not in the list to choose from.".to_string());
+            }
+            held.store
+                .set_setting(&key, &value)
                 .map_err(|e| e.to_string())
         }
         _ => Err(format!("there is no setting called {key}")),
@@ -7175,6 +7248,7 @@ pub fn run() {
             let (goals, ended) = tokio::sync::mpsc::unbounded_channel();
             app.manage(Held {
                 live: Mutex::new(HashMap::new()),
+                opened_with: Mutex::new(HashMap::new()),
                 settling: Settling::default(),
                 wants,
                 goals,

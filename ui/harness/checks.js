@@ -874,6 +874,11 @@ export async function whichModels() {
   document.getElementById("setup").click();
   await new Promise((r) => setTimeout(r, 250));
   const kept = FIXTURE.offered;
+  // Errand's model is the first in the list, and then it is taken out.
+  const menu = document.getElementById("engine");
+  menu.value = kept[0].id;
+  menu.dispatchEvent(new Event("change"));
+  await new Promise((r) => setTimeout(r, 200));
   const mine = [...document.querySelectorAll("#chosen li button")].find(
     (b) => b.textContent === "Remove",
   );
@@ -883,7 +888,7 @@ export async function whichModels() {
 
   const options = [...document.getElementById("engine").options].map((o) => o.textContent);
   check(
-    "an agent on something no longer in the list still says what it is on",
+    "Errand's model, once taken out of the list, is still shown as the one chosen",
     options.some((o) => o.includes("not in the list")),
     options.join(" / "),
   );
@@ -5143,6 +5148,14 @@ export async function onlyModelsThatAnswer() {
   const said = () => [...picker.options].map((o) => o.textContent).join(" / ");
   await openTalk("talk-1");
   await settle(200);
+  // Errand's model is chosen in Settings now, once, for every teammate.
+  document.getElementById("setup").click();
+  await settle(250);
+  check(
+    "Errand's model is chosen in Settings, and the header has no model menu",
+    picker.closest("#models") && !document.querySelector("header #engine, #title #engine"),
+    picker.closest("#models") ? "in Settings" : "somewhere else",
+  );
 
   // A second server nearby, switched off: the case that happened.
   const gone = {
@@ -5168,7 +5181,7 @@ export async function onlyModelsThatAnswer() {
   await settle(400);
   check(
     "one knock unanswered is not enough to call a server down",
-    [...picker.options].some((o) => o.value === gone.mark),
+    [...picker.options].some((o) => o.value === gone.id),
     said(),
   );
   window.dispatchEvent(new Event("focus"));
@@ -5179,21 +5192,22 @@ export async function onlyModelsThatAnswer() {
     asked.slice(before).map((a) => a.name).join(",") || "asked nothing",
   );
   const shown = [...picker.options].filter((o) => !o.value.startsWith("__")).map((o) => o.value);
-  const downKeys = FIXTURE.offered
+  const downIds = FIXTURE.offered
     .filter((o) => o.engine === "local" && down.includes(JSON.parse(o.settings).base_url))
-    .map((o) => `local|${JSON.parse(o.settings).base_url}|${JSON.parse(o.settings).model}`);
+    .map((o) => o.id);
   const selected = picker.value;
   check(
-    "a model whose server does not answer is left out of the picker",
-    down.length >= 1 && downKeys.every((k) => !shown.includes(k) || k === selected),
+    "a model whose server does not answer is left out of the menu",
+    down.length >= 1 && downIds.every((id) => !shown.includes(id) || id === selected),
     said(),
   );
   check(
-    "and the picker says how many it left out",
+    "and the menu says how many it left out",
     [...picker.options].some((o) => o.disabled && /^1 more not answering, so not shown$/.test(o.textContent)),
     said(),
   );
-  check("Claude and what answers are still offered", shown.some((k) => k.startsWith("claude")), said());
+  const claudes = FIXTURE.offered.filter((o) => o.engine === "claude").map((o) => o.id);
+  check("Claude and what answers are still offered", claudes.every((id) => shown.includes(id)), said());
 
   const add = [...picker.options].find((o) => o.value === "__add__");
   check("and the last choice is the way to add a model", add?.textContent === "Add a model…" && picker.options[picker.options.length - 1] === add, said());
@@ -5201,40 +5215,41 @@ export async function onlyModelsThatAnswer() {
   picker.value = "__add__";
   picker.dispatchEvent(new Event("change"));
   await settle(300);
-  const models = document.getElementById("models");
   check(
-    "choosing it opens Settings where models are added, and leaves the agent where it was",
-    !models.hidden && picker.value === wasOn && !asked.slice(before).some((a) => a.name === "use_engine"),
-    `settings ${models.hidden ? "closed" : "open"}, picker on ${picker.value}`,
+    "choosing it goes to where models are added, and changes no model",
+    document.activeElement?.id === "hand-label" && picker.value === wasOn && !asked.slice(before).some((a) => a.name === "set_setting"),
+    `focus on ${document.activeElement?.id || "nothing"}, menu on ${picker.value}`,
   );
-  document.getElementById("models-done").click();
-  await settle(150);
 
-  // The model this agent is on, when it stops answering: said on the closed
-  // picker, where a note at the end of a long name is never seen.
+  // Errand's model, when it stops answering: said on the menu itself.
   FIXTURE.answering = Object.fromEntries(locals.map((at) => [at, true]));
   window.dispatchEvent(new Event("focus"));
   await settle(400);
-  const original = picker.value;
-  picker.value = gone.mark;
+  picker.value = gone.id;
   picker.dispatchEvent(new Event("change"));
   await settle(300);
+  check(
+    "choosing a model makes it every teammate's, and says when that takes effect",
+    asked.some((a) => a.name === "set_setting" && a.args?.key === "errand_model" && a.args?.value === gone.id) &&
+      /Every teammate now works on/.test(document.getElementById("errand-model-says").textContent),
+    document.getElementById("errand-model-says").textContent,
+  );
   FIXTURE.answering[JSON.parse(gone.settings).base_url] = false;
   window.dispatchEvent(new Event("focus"));
   await settle(400);
   window.dispatchEvent(new Event("focus"));
   await settle(400);
   check(
-    "the model an agent is on, when it stops answering, is marked on the closed picker",
+    "Errand's model, when it stops answering, is marked on the menu",
     picker.classList.contains("quiet") &&
       picker.selectedOptions[0]?.textContent.endsWith("· not answering") &&
       /not answering/.test(picker.title),
     `${picker.className} / ${picker.selectedOptions[0]?.textContent} / ${picker.title}`,
   );
-  picker.value = original;
+  picker.value = claudes[0];
   picker.dispatchEvent(new Event("change"));
   await settle(300);
-  check("and not once it is on one that answers", !picker.classList.contains("quiet") && picker.value === original, `${picker.className} / ${picker.value}`);
+  check("and not once it is one that answers", !picker.classList.contains("quiet") && picker.value === claudes[0], `${picker.className} / ${picker.value}`);
 
   // Everything back as the other checks expect it.
   FIXTURE.answering = Object.fromEntries(locals.map((at) => [at, true]));
@@ -5242,13 +5257,15 @@ export async function onlyModelsThatAnswer() {
   await settle(400);
   check(
     "and a server that answers again is offered again",
-    FIXTURE.offered.every((o) => [...picker.options].some((p) => p.value === (o.engine === "local" ? `local|${JSON.parse(o.settings).base_url}|${JSON.parse(o.settings).model}` : o.settings ? `claude|${o.settings}` : "claude"))),
+    FIXTURE.offered.every((o) => [...picker.options].some((p) => p.value === o.id)),
     said(),
   );
   delete FIXTURE.answering;
   FIXTURE.offered.splice(FIXTURE.offered.indexOf(gone), 1);
   tell("models_changed", {});
   await settle(100);
+  document.getElementById("models-done").click();
+  await settle(150);
   return found;
 }
 
