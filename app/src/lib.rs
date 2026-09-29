@@ -4821,6 +4821,7 @@ async fn take_it_round(
     let to: Vec<Member> = match room::addressed(said, &members) {
         room::Addressed::Everyone => members.clone(),
         room::Addressed::One(one) => vec![one.clone()],
+        room::Addressed::Several(these) => these.into_iter().cloned().collect(),
         room::Addressed::Nobody(who) => {
             say_in_the_room(
                 app,

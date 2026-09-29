@@ -1073,7 +1073,7 @@ function askedForAnAnswer(t) {
     el.what.placeholder = question
       ? `Answer: ${question.length > 90 ? `${question.slice(0, 89)}…` : question}`
       : aRoom
-        ? "Say it to everyone, or start with @Name to say it to one of them"
+        ? "Say it to everyone, or start with @Name, or several, to say it to only them"
         : "What would you like done?";
   }
   // Out of the way once somebody is answering in words of their own.

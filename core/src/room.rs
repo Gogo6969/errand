@@ -34,6 +34,8 @@ pub enum Addressed<'a> {
     Everyone,
     /// The one member named at the front with `@`.
     One(&'a Member),
+    /// Several named at the front, each with its own `@`, in the order named.
+    Several(Vec<&'a Member>),
     /// Somebody was named and nobody in the room is called that. Carries the
     /// name as it was typed, so the answer can say it back.
     Nobody(String),
@@ -83,36 +85,67 @@ pub fn called(room: &str) -> String {
 ///
 /// `@Name` at the very front picks one member, by the longest member name that
 /// fits, so that `@Trend Scout` reaches Trend Scout in a room that also has a
-/// Scout. Case does not matter. Anything else is for everyone, including an `@`
-/// later in the sentence, which is somebody quoting an address.
+/// Scout. Several in a row, `@Trend Scout @Disk Watch`, pick those, in the
+/// order named, and `@everyone` is everyone, said out loud. Case does not
+/// matter. Anything else is for everyone, including an `@` later in the
+/// sentence, which is somebody quoting an address.
 pub fn addressed<'a>(said: &str, members: &'a [Member]) -> Addressed<'a> {
-    let Some(rest) = said.trim_start().strip_prefix('@') else {
+    let mut rest = said.trim_start();
+    if !rest.starts_with('@') {
         return Addressed::Everyone;
-    };
-    let fits = |m: &Member| {
-        let name = m.name.trim();
-        !name.is_empty()
-            && rest
-                .get(..name.len())
-                .is_some_and(|front| front.eq_ignore_ascii_case(name))
-            && rest[name.len()..]
-                .chars()
-                .next()
-                .is_none_or(|next| !next.is_alphanumeric())
-    };
-    match members
-        .iter()
-        .filter(|m| fits(m))
-        .max_by_key(|m| m.name.trim().len())
-    {
-        Some(one) => Addressed::One(one),
-        None => Addressed::Nobody(
-            rest.split_whitespace()
-                .next()
-                .unwrap_or("")
-                .trim_end_matches([',', ':', ';'])
-                .to_string(),
-        ),
+    }
+    let mut named: Vec<&'a Member> = Vec::new();
+    let mut everyone = false;
+    // Each `@` at the front in turn, with commas or "and" between them, until
+    // what follows is the message itself.
+    while let Some(after) = rest.strip_prefix('@') {
+        let fits = |name: &str| {
+            !name.is_empty()
+                && after
+                    .get(..name.len())
+                    .is_some_and(|front| front.eq_ignore_ascii_case(name))
+                && after[name.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|next| !next.is_alphanumeric())
+        };
+        let length = match members
+            .iter()
+            .filter(|m| fits(m.name.trim()))
+            .max_by_key(|m| m.name.trim().len())
+        {
+            Some(one) => {
+                if !named.iter().any(|already| std::ptr::eq(*already, one)) {
+                    named.push(one);
+                }
+                one.name.trim().len()
+            }
+            None if fits("everyone") => {
+                everyone = true;
+                "everyone".len()
+            }
+            None => {
+                return Addressed::Nobody(
+                    after
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .trim_end_matches([',', ':', ';'])
+                        .to_string(),
+                )
+            }
+        };
+        rest = after[length..].trim_start_matches([',', ':', ';', ' ']);
+        if let Some(more) = rest.strip_prefix("and ") {
+            if more.trim_start().starts_with('@') {
+                rest = more.trim_start();
+            }
+        }
+    }
+    match (everyone, named.len()) {
+        (true, _) | (false, 0) => Addressed::Everyone,
+        (false, 1) => Addressed::One(named[0]),
+        (false, _) => Addressed::Several(named),
     }
 }
 
@@ -136,12 +169,14 @@ pub fn nobody_called(name: &str, members: &[Member]) -> String {
     match name.is_empty() {
         true => format!(
             "There is no name after the @. This room has {}. Start with @{first} to speak to \
-             one of them, or leave the @ off to speak to everyone.",
+             one of them, with several to speak to those, or leave the @ off to speak to \
+             everyone.",
             listed(&names)
         ),
         false => format!(
             "Nobody in this room is called {name}. It has {}. Start with @{first} to speak to \
-             one of them, or leave the @ off to speak to everyone.",
+             one of them, with several to speak to those, or leave the @ off to speak to \
+             everyone.",
             listed(&names)
         ),
     }
@@ -311,6 +346,43 @@ mod tests {
         assert_eq!(
             addressed("@Scouting report please", &members),
             Addressed::Nobody("Scouting".into())
+        );
+    }
+
+    #[test]
+    fn several_names_at_the_front_go_to_those_in_the_order_named() {
+        let members = three();
+        assert_eq!(
+            addressed("@Disk Watch @Trend Scout how are things?", &members),
+            Addressed::Several(vec![&members[2], &members[0]])
+        );
+        // With commas, or "and", between them, and the same one twice once.
+        assert_eq!(
+            addressed("@Scout, @Disk Watch and @scout: status?", &members),
+            Addressed::Several(vec![&members[1], &members[2]])
+        );
+        // One of them nobody's, and the message goes nowhere, saying why.
+        assert_eq!(
+            addressed("@Disk Watch @Pixel Hand draw it", &members),
+            Addressed::Nobody("Pixel".into())
+        );
+    }
+
+    #[test]
+    fn everyone_can_be_said_out_loud() {
+        let members = three();
+        assert_eq!(
+            addressed("@everyone stand up", &members),
+            Addressed::Everyone
+        );
+        assert_eq!(
+            addressed("@Everyone, stand up", &members),
+            Addressed::Everyone
+        );
+        // A member named Everyone would win, being a member.
+        assert_eq!(
+            addressed("@everyone and @Scout go", &members),
+            Addressed::Everyone
         );
     }
 
