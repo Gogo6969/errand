@@ -26,7 +26,7 @@ use errand_core::local::LlmSettings;
 
 const HOW: &str = "errand-trial --base-url URL --model NAME [--provider openai-compat|llamacpp] \
 [--key-from BACKEND-ID] [--runs 10] [--only phantom-job,the-wall] [--out results.jsonl] \
-[--context 131072] [--opening now|within-limits]\n       errand-trial --rejudge results.jsonl";
+[--context 131072] [--opening within-limits|before]\n       errand-trial --rejudge results.jsonl";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -87,9 +87,17 @@ async fn main() -> Result<()> {
         ),
         None => None,
     };
-    let opening_name = flag("--opening").unwrap_or_else(|| "now".into());
+    // What Errand uses unless asked for the one before. "now" meant the one
+    // before until 29 September, so it is refused rather than read either way.
+    let opening_name = flag("--opening").unwrap_or_else(|| "within-limits".into());
+    if opening_name == "now" {
+        bail!(
+            "`now` changed meaning on 29 September: say within-limits (the opening since) \
+             or before (the one until then)"
+        );
+    }
     let opening = Opening::called(&opening_name)
-        .with_context(|| format!("--opening is now or within-limits, not {opening_name}"))?;
+        .with_context(|| format!("--opening is within-limits or before, not {opening_name}"))?;
     let only: Option<Vec<String>> =
         flag("--only").map(|s| s.split(',').map(|one| one.trim().to_string()).collect());
     let mut out = match flag("--out") {

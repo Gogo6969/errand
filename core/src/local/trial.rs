@@ -51,9 +51,9 @@ const PATIENCE: Duration = Duration::from_secs(300);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Opening {
-    /// As Errand says it now.
-    Now,
-    /// The candidate that says a limit is a limit.
+    /// As Errand said it until 29 September.
+    Before,
+    /// As Errand says it since: a limit is a limit.
     WithinLimits,
 }
 
@@ -61,7 +61,7 @@ impl Opening {
     /// By the name the trial is asked for it by.
     pub fn called(name: &str) -> Option<Opening> {
         match name {
-            "now" => Some(Opening::Now),
+            "before" => Some(Opening::Before),
             "within-limits" => Some(Opening::WithinLimits),
             _ => None,
         }
@@ -69,7 +69,7 @@ impl Opening {
 
     fn how(self) -> &'static str {
         match self {
-            Opening::Now => super::loops::HOW_TO_WORK,
+            Opening::Before => super::loops::HOW_TO_WORK_BEFORE,
             Opening::WithinLimits => super::loops::HOW_TO_WORK_WITHIN_LIMITS,
         }
     }
@@ -1437,7 +1437,7 @@ mod tests {
         // between: a strict server refuses anything else, and a trial that
         // fails for the harness's sake says nothing about the model.
         for s in scenarios() {
-            let talk = s.conversation(Opening::Now);
+            let talk = s.conversation(Opening::WithinLimits);
             assert!(
                 matches!(talk.first(), Some(ChatMessage::System { .. })),
                 "{}",
@@ -1466,13 +1466,13 @@ mod tests {
     }
 
     #[test]
-    fn the_candidate_opening_says_a_limit_is_a_limit_and_the_one_in_use_is_unchanged() {
+    fn the_opening_in_use_says_a_limit_is_a_limit_and_the_one_before_did_not() {
         let s = scenario("the-wall");
-        let now = s.conversation(Opening::Now)[0].content().to_string();
+        let before = s.conversation(Opening::Before)[0].content().to_string();
         let within = s.conversation(Opening::WithinLimits)[0]
             .content()
             .to_string();
-        assert!(now.contains("A failed route is information, not a stopping point"));
+        assert!(before.contains("A failed route is information, not a stopping point"));
         assert!(!within.contains("A failed route is information"));
         assert!(within.contains("Stop at a limit"));
         assert!(within.contains("Saying it has stopped does not stop it"));
@@ -1482,8 +1482,19 @@ mod tests {
             "Never copy a key",
             "Finish on the result",
         ] {
-            assert!(now.contains(part) && within.contains(part), "{part}");
+            assert!(before.contains(part) && within.contains(part), "{part}");
         }
+        // And it is the one every real errand gets.
+        let live = super::super::loops::opening_instructions(
+            &s.home(),
+            &crate::mcp::Servers::default(),
+            &crate::memory::Knowing {
+                identity: s.identity.to_string(),
+                notes: String::new(),
+            },
+            "auto",
+        );
+        assert_eq!(live, within);
     }
 
     #[test]
@@ -1758,7 +1769,7 @@ mod tests {
             ..Default::default()
         });
         let s = scenario("stops-itself");
-        let run = run(&client, &s, Opening::Now).await;
+        let run = run(&client, &s, Opening::WithinLimits).await;
         assert_eq!(run.broke, None);
         assert_eq!(run.calls.len(), 1);
         assert_eq!(run.calls[0].name, "stop_repeating");
