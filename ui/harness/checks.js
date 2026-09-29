@@ -5356,6 +5356,20 @@ export async function aDraftToCheck() {
     cardAt(9801)?.textContent.slice(0, 60) || "no card",
   );
 
+  tell("drafted", {
+    conversation: "talk-1",
+    seq: 9802,
+    draft: { to: "kim@mailbox.example", subject: "For later", body: "Finish on the phone" },
+  });
+  await settle(200);
+  [...cardAt(9802).querySelectorAll("button")].find((b) => b.textContent === "Keep in Mail").click();
+  await settle(250);
+  check(
+    "Keep in Mail puts it in Mail's Drafts, unsent",
+    asked.some((a) => a.name === "draft_to_mail" && a.args?.seq === 9802) && /Kept in Mail's Drafts/.test(cardAt(9802)?.textContent || "") && !asked.some((a) => a.name === "send_draft" && a.args?.seq === 9802),
+    cardAt(9802)?.textContent.slice(0, 60) || "no card",
+  );
+
   // Read back later: one sent, one still waiting.
   FIXTURE.lines["talk-drafts"] = [
     { seq: 1, at: Date.now() - 60000, kind: "mine", text: "Draft me a mail to Kim", call: null, tool: null, outcome: null },

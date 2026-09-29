@@ -131,8 +131,9 @@ pub const KNOWN: &[Connector] = &[
         name: "Sending mail",
         sees: "Sends mail from your Mail app, as you, to an address you wrote yourself in \
                that conversation. Any other address is asked about first, and refused when \
-               nobody is there to ask. It sends at once: there is no draft and no taking it \
-               back. It never reads, moves or deletes anything.",
+               nobody is there to ask. What it sends goes at once, with no taking it back. It \
+               can also leave a draft instead, in the conversation or in Mail's Drafts, for \
+               you to check and send. It never reads, moves or deletes anything.",
         app: "Mail",
     },
     Connector {
@@ -207,6 +208,7 @@ const JOBS: &[&str] = &[
     "send_mail",
     "write_note",
     "draft_mail",
+    "save_mail_draft",
 ];
 
 /// Whether a job is worth stopping for, whatever posture an agent is on.
@@ -297,6 +299,10 @@ pub fn switched_off(job: &str) -> String {
         "draft_mail" => format!(
             "{named} is not switched on, so no draft was put in front of them. Say so: they can \
              turn it on under Settings, and it takes effect at once."
+        ),
+        "save_mail_draft" => format!(
+            "{named} is not switched on, so no draft was saved. Say so: they can turn it on \
+             under Settings, and it takes effect at once."
         ),
         _ => format!(
             "{named} is not connected, so there is nothing to read. Say so: they can turn it \
@@ -467,7 +473,7 @@ pub fn needs(job: &str) -> &'static str {
     match job {
         "what_is_on" => "calendar",
         "read_web_page" => "browser",
-        "send_mail" | "draft_mail" => "sending",
+        "send_mail" | "draft_mail" | "save_mail_draft" => "sending",
         "write_note" => "notes",
         _ => "mail",
     }
@@ -506,6 +512,10 @@ pub fn in_plain_words(job: &str, args: &Value) -> String {
             ("", _) => "Drafting an email".to_string(),
             (to, "") => format!("Drafting an email to {to}"),
             (to, subject) => format!("Drafting an email to {to}: {subject}"),
+        },
+        "save_mail_draft" => match get("subject") {
+            "" => "Saving a draft in Mail".to_string(),
+            subject => format!("Saving a draft in Mail: {subject}"),
         },
         _ => match get("when") {
             "" => "Looking at your calendar".to_string(),
@@ -730,6 +740,36 @@ pub fn declarations() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "save_mail_draft",
+                "description":
+                    "Save an email as a draft in the person's own Mail, in its Drafts mailbox, \
+                     without sending it: they finish it and send it from Mail, on this Mac or \
+                     their phone. Use it when they ask for a draft in Mail, or to have \
+                     something ready for them to send later. Nothing is sent, so never say it \
+                     was. Plain text. Answers with a sentence saying so if sending mail is not \
+                     switched on.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "to": {
+                            "type": "string",
+                            "description":
+                                "Who it is to: one address, or several separated by commas. \
+                                 Addresses only. Empty for a draft they will address themselves."
+                        },
+                        "subject": { "type": "string", "description": "The subject line" },
+                        "body": {
+                            "type": "string",
+                            "description": "The message itself, as plain text"
+                        }
+                    },
+                    "required": ["subject", "body"]
+                }
+            }
+        }),
     ]
 }
 
@@ -761,6 +801,7 @@ pub fn run(job: &str, args: &Value) -> Result<String> {
         // conversation; there is nothing to do on this Mac until they press
         // Send on it, and then it is `send_the_draft`.
         "draft_mail" => bail!("a draft is shown to them by the app, and this is not the app"),
+        "save_mail_draft" => save_mail_draft(text("to"), text("subject"), text("body")),
         _ => bail!("there is no {job} here"),
     }
 }
@@ -819,6 +860,65 @@ pub fn send_the_draft(draft: &Draft) -> Result<String> {
     draft.check()?;
     send_mail(&draft.to, &draft.subject, &draft.body)
 }
+
+/// Keep a draft somebody pressed "Keep in Mail" on, in Mail's Drafts.
+pub fn keep_the_draft_in_mail(draft: &Draft) -> Result<String> {
+    draft.check()?;
+    save_mail_draft(&draft.to, &draft.subject, &draft.body)
+}
+
+/// Save one mail in Mail's Drafts, unsent.
+///
+/// Nobody is asked, whoever it is to, because nothing leaves: it waits in their
+/// Drafts, where they read it before it goes anywhere, on this Mac or on their
+/// phone. The words reach the script as its arguments, like everything here.
+fn save_mail_draft(to: &str, subject: &str, body: &str) -> Result<String> {
+    let going_to = match to.trim().is_empty() {
+        true => Vec::new(),
+        false => recipients(to)?,
+    };
+    let subject = subject.split_whitespace().collect::<Vec<_>>().join(" ");
+    if subject.is_empty() {
+        bail!("give it a subject");
+    }
+    if body.trim().is_empty() {
+        bail!("there is nothing in it to keep");
+    }
+    if body.chars().count() > THE_LONGEST_MAIL {
+        bail!("that is longer than a mail should be: {THE_LONGEST_MAIL} characters at the most");
+    }
+    let mut words = vec![subject.clone(), body.to_string()];
+    words.extend(going_to.iter().cloned());
+    match ask_the_mac_with("Mail", THE_SCRIPT_FOR_A_MAIL_DRAFT, &words, PATIENCE)?.as_str() {
+        "saved" => Ok(match going_to.is_empty() {
+            true => format!("Saved in Mail's Drafts, not sent: {subject}."),
+            false => format!(
+                "Saved in Mail's Drafts, not sent: {subject}, to {}.",
+                going_to.join(", ")
+            ),
+        }),
+        other => bail!("Mail did not say it had kept it. It said: {other}"),
+    }
+}
+
+/// Save one mail as a draft: the subject, the text, and then any addresses it
+/// is to, as the script's arguments. Out of sight, and never sent: `save` puts
+/// it in Drafts and `close` lets it go without a window ever having opened.
+pub const THE_SCRIPT_FOR_A_MAIL_DRAFT: &str = r#"on run argv
+  set theSubject to item 1 of argv
+  set theText to item 2 of argv
+  tell application "Mail"
+    set theMail to make new outgoing message with properties {subject:theSubject, content:theText, visible:false}
+    tell theMail
+      repeat with i from 3 to (count of argv)
+        make new to recipient at end of to recipients with properties {address:(item i of argv)}
+      end repeat
+    end tell
+    save theMail
+    close theMail saving yes
+  end tell
+  return "saved"
+end run"#;
 
 /// The longest a note may be, in characters.
 const THE_LONGEST_NOTE: usize = 100_000;
@@ -2990,6 +3090,43 @@ fn ask_the_mac_with(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_draft_in_mail_is_saved_unasked_and_never_sent() {
+        let draft = json!({ "to": "someone@elsewhere.com", "subject": "Later", "body": "Hi" });
+        assert!(!asks_first("save_mail_draft", &draft, &[]));
+        assert_eq!(needs("save_mail_draft"), "sending");
+        assert!(switched_off("save_mail_draft").contains("no draft was saved"));
+        assert_eq!(
+            in_plain_words("save_mail_draft", &draft),
+            "Saving a draft in Mail: Later"
+        );
+        // The script keeps it and never sends it.
+        assert!(THE_SCRIPT_FOR_A_MAIL_DRAFT.contains("save theMail"));
+        assert!(!THE_SCRIPT_FOR_A_MAIL_DRAFT.contains("send "));
+    }
+
+    #[test]
+    fn the_script_that_saves_a_draft_is_one_mail_understands() {
+        if !std::path::Path::new("/System/Applications/Mail.app").exists() {
+            return;
+        }
+        let out =
+            std::env::temp_dir().join(format!("errand-mail-draft-{}.scpt", std::process::id()));
+        let compiled = Command::new("osacompile")
+            .arg("-o")
+            .arg(&out)
+            .arg("-e")
+            .arg(THE_SCRIPT_FOR_A_MAIL_DRAFT)
+            .output()
+            .expect("osacompile runs");
+        let _ = std::fs::remove_file(&out);
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+    }
+
     #[test]
     fn a_draft_goes_nowhere_and_says_why_it_is_not_one() {
         // Drafting sends nothing, so it never stops to ask, whoever it is to:

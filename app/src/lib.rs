@@ -3717,6 +3717,72 @@ async fn send_draft(
     }
 }
 
+/// Keep a draft in Mail's Drafts instead of sending it from here, as it
+/// stands in the window now: to finish on the phone, or to send later.
+#[tauri::command]
+async fn draft_to_mail(
+    held: State<'_, Held>,
+    conversation: String,
+    seq: i64,
+    to: String,
+    subject: String,
+    body: String,
+) -> Result<String, String> {
+    let on = held
+        .store
+        .connected()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|one| one == "sending");
+    if !on {
+        return Err(
+            "Sending mail is switched off. Turn it on under Settings, then press Keep in Mail \
+             again."
+                .to_string(),
+        );
+    }
+    let draft = errand_core::connectors::Draft {
+        to: to.trim().to_string(),
+        subject: subject.trim().to_string(),
+        body: body.trim_end().to_string(),
+    };
+    draft.check().map_err(|e| e.to_string())?;
+    let text = serde_json::to_string(&draft).map_err(|e| e.to_string())?;
+    if !held
+        .store
+        .claim_draft(&conversation, seq)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("That draft has already been sent or discarded.".to_string());
+    }
+    let keeping = draft.clone();
+    let kept = tauri::async_runtime::spawn_blocking(move || {
+        errand_core::connectors::keep_the_draft_in_mail(&keeping)
+    })
+    .await
+    .map_err(|_| "Keeping it stopped part way through.".to_string())?;
+    match kept {
+        Ok(said) => {
+            let now = chrono::Local::now().timestamp_millis();
+            held.store
+                .settle_draft(
+                    &conversation,
+                    seq,
+                    Some(&text),
+                    Some(&format!("kept|{now}")),
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(said)
+        }
+        Err(why) => {
+            let _ = held
+                .store
+                .settle_draft(&conversation, seq, Some(&text), None);
+            Err(why.to_string())
+        }
+    }
+}
+
 /// Throw a draft away, unsent.
 #[tauri::command]
 async fn discard_draft(
@@ -7186,6 +7252,7 @@ pub fn run() {
             engines,
             answering,
             send_draft,
+            draft_to_mail,
             discard_draft,
             use_engine,
             runs,

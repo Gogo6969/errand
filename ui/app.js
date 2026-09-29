@@ -2132,6 +2132,7 @@ function aDraft(m) {
   const at = m.when ? ` at ${new Date(m.when).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
   const headline = {
     sent: `Sent${at}`,
+    kept: `Kept in Mail's Drafts${at}, not sent`,
     discarded: "Discarded, not sent",
     unsure: "Mail did not say whether it went. Look in Sent before sending it again.",
   }[m.how] || "An email to check before it goes";
@@ -2196,6 +2197,34 @@ function aDraft(m) {
     m.sending = false;
     drawMessages();
   };
+  // Into Mail's own Drafts rather than out: to finish on the phone, or send
+  // later from Mail, with nothing sent from here.
+  const keep = document.createElement("button");
+  keep.type = "button";
+  keep.textContent = "Keep in Mail";
+  keep.title = "Save it in Mail's Drafts, unsent";
+  keep.disabled = Boolean(m.sending);
+  keep.onclick = async () => {
+    m.sending = true;
+    m.problem = "";
+    drawMessages();
+    try {
+      await invoke("draft_to_mail", {
+        conversation,
+        seq: m.seq,
+        to: m.to,
+        subject: m.subject,
+        body: m.body,
+      });
+      m.how = "kept";
+      m.when = Date.now();
+    } catch (why) {
+      m.problem = String(why);
+      if (/already been sent or discarded/.test(m.problem)) m.how = "discarded";
+    }
+    m.sending = false;
+    drawMessages();
+  };
   const discard = document.createElement("button");
   discard.type = "button";
   discard.textContent = "Discard";
@@ -2210,7 +2239,7 @@ function aDraft(m) {
     }
     drawMessages();
   };
-  choices.append(send, discard);
+  choices.append(send, keep, discard);
   words.append(choices);
   card.append(words);
   return card;

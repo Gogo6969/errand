@@ -1062,7 +1062,8 @@ mod tests {
                 "read_web_page",
                 "send_mail",
                 "write_note",
-                "draft_mail"
+                "draft_mail",
+                "save_mail_draft"
             ]
         );
         for tool in &tools {
