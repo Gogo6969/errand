@@ -185,7 +185,10 @@ pub fn declarations() -> Vec<Value> {
                      substitute: it is not under Repeat, nobody can see or stop it there, and \
                      none of its runs is written down. It replaces whatever this conversation \
                      was already set to do, and it appears under Repeat, where they can see it \
-                     and stop it. Say nothing about it having been set: they will be told.",
+                     and stop it. A schedule has no end of its own: for \"every hour until 9 \
+                     tomorrow\", say in what it does each time that the run which finishes the \
+                     job calls stop_repeating, and that run switches it off. Say nothing about \
+                     it having been set: they will be told.",
                     floor = crate::routine::most_often()
                 ),
                 "parameters": {
@@ -387,8 +390,11 @@ pub fn declarations() -> Vec<Value> {
                      both, or every one this agent has. Use it the moment somebody asks you to \
                      stop, cancel or pause something that runs on its own, and before you say \
                      it has stopped: nothing else stops it, and saying so without calling this \
-                     leaves it running. Switched off rather than thrown away, it stays under \
-                     Repeat and Watch, where they can start it again.",
+                     leaves it running. Use it too when a job of your own is done: a run of a \
+                     schedule or a watch can switch itself off, and the run that finishes \
+                     something meant to go on until a time or an event is the one that should. \
+                     Switched off rather than thrown away, it stays under Repeat and Watch, \
+                     where they can start it again.",
                 "parameters": {
                     "type": "object",
                     "properties": {
