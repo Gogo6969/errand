@@ -20,7 +20,7 @@ window.addEventListener("unhandledrejection", (e) => complain(String(e.reason)))
 import { tile, forTool, kindOf } from "./icons.js";
 import { STATES, SHOWING, shown, stateOf, stillInTheList, inOrder, bySubject } from "./jobs.js";
 import { render, reachTheAppWith } from "./markdown.js";
-import { toSay } from "./speech.js";
+import { toSay, worthSaying } from "./speech.js";
 
 const { invoke: invokeTheApp } = window.__TAURI__.core;
 
@@ -201,6 +201,8 @@ let finishedKeptDays = 7;
  * that has one, down the side and on the overview.
  */
 let standingNow = [];
+/** The answer being read aloud this moment, when one is. */
+let listeningTo = null;
 
 const el = {
   threads: document.getElementById("threads"),
@@ -925,6 +927,10 @@ async function show(id) {
   // somebody else's composer where Enter would send it. The only item on this
   // list that could lose work rather than merely fail to show it.
   putItDown(showing);
+  // An answer being read aloud stops with its conversation: its Stop button
+  // goes with it, and a voice nobody can find the off switch for is worse
+  // than one cut short.
+  if (showing !== id) stopReadingAloud();
   showing = id;
   showingAgent = t.agent;
 
@@ -2861,6 +2867,21 @@ function doneWith(m) {
     setTimeout(() => (copy.textContent = "Copy"), 1400);
   };
   row.append(copy);
+
+  // Read aloud, the way an answer is read in a call. Kept in view while it is
+  // being read, so Stop is there without hovering for it.
+  if (m.kind === "said") {
+    const on = listeningTo === m;
+    const listen = document.createElement("button");
+    listen.type = "button";
+    listen.textContent = on ? "Stop" : "Listen";
+    if (on) {
+      listen.className = "on";
+      row.classList.add("listening");
+    }
+    listen.onclick = () => readAloud(m);
+    row.append(listen);
+  }
 
   // Carrying on from here is the answer to the limit below. "Ask again" can
   // only be offered on the last answer, because a reply to something halfway
@@ -5454,6 +5475,44 @@ document.addEventListener("keydown", (e) => {
   if (!el.palette.hidden || !el.whois.hidden) return;
   endTheCall();
 });
+
+/**
+ * Read one answer out, or stop reading it.
+ *
+ * Grok Bot answers with voice memos; a call here already read every answer out
+ * while it lasted. This is the same voice and the same reading, for one answer
+ * somebody asked to hear. All of it, rather than a call's mouthful: somebody
+ * who asks to hear an answer has asked for the whole answer. A call owns the
+ * voice while it lasts, so this does nothing during one.
+ */
+function readAloud(m) {
+  const was = listeningTo;
+  stopReadingAloud();
+  if (was !== m && !inACall) {
+    const saying = worthSaying(m.text);
+    if (saying) {
+      const utterance = new SpeechSynthesisUtterance(saying);
+      utterance.lang = navigator.language || "en-US";
+      const over = () => {
+        if (listeningTo !== m) return;
+        listeningTo = null;
+        drawMessages();
+      };
+      utterance.onend = over;
+      utterance.onerror = over;
+      listeningTo = m;
+      Speaking.speak(utterance);
+    }
+  }
+  drawMessages();
+}
+
+/** Stop an answer being read aloud, when one is. */
+function stopReadingAloud() {
+  if (!listeningTo) return;
+  listeningTo = null;
+  Speaking.cancel();
+}
 
 /**
  * Read a line of the answer out, and listen again when there is nothing left.

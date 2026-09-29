@@ -5372,3 +5372,45 @@ export async function aDraftToCheck() {
   );
   return found;
 }
+
+/**
+ * An answer read aloud on asking, the way a call reads every answer.
+ *
+ * Grok Bot answers with voice memos to play; here any answer can be heard,
+ * whole, and stopped.
+ */
+export async function listeningToAnAnswer() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  FIXTURE.lines["talk-listen"] = [
+    { seq: 1, at: Date.now() - 60000, kind: "mine", text: "What moved overnight?", call: null, tool: null, outcome: null },
+    { seq: 2, at: Date.now() - 50000, kind: "said", text: "**BTC** is up 2% overnight.\n\n```\nprice: 81,200\n```\nNothing else moved.", call: null, tool: null, outcome: null },
+  ];
+  FIXTURE.conversations["agent-outside"].push({ id: "talk-listen", agent: "agent-outside", name: "Listen", opened: true });
+  await openTalk("talk-listen");
+  await settle(200);
+  const box = document.getElementById("messages");
+  const button = (label) =>
+    [...(([...box.querySelectorAll("li.said")].pop())?.querySelectorAll(".did-with button") || [])].find((b) => b.textContent === label);
+  check("an answer can be listened to", button("Listen"), "no Listen button");
+  const before = window.__SAID__.length;
+  button("Listen").click();
+  const stop = button("Stop");
+  check(
+    "and while it is read, Stop is there without hovering",
+    stop && stop.closest(".did-with").classList.contains("listening"),
+    stop ? stop.closest(".did-with").className : "no Stop",
+  );
+  const heard = window.__SAID__.slice(before).join(" ");
+  check(
+    "what is read is the answer, without its markup or its code",
+    /BTC is up 2% overnight/.test(heard) && !/\*\*|```|81,200/.test(heard),
+    heard.slice(0, 120),
+  );
+  stop.click();
+  check("and Stop stops it", window.__SAID__.slice(before).includes("<cut off>"), window.__SAID__.slice(before).join(" | ").slice(0, 120));
+  await settle(100);
+  check("after which it can be listened to again", button("Listen") && !button("Stop"), "still stopping");
+  return found;
+}

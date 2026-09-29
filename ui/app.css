@@ -1514,6 +1514,10 @@ main > aside, main > #title, main > #composer { flex: none; }
 }
 .did-with button:hover { color: var(--ink); border-color: var(--edge); }
 .did-with button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* An answer being read aloud: in view for as long as it lasts, so Stop is
+   always there to press. */
+.did-with.listening { opacity: 1; }
+.did-with button.on { color: var(--accent); border-color: var(--accent); }
 
 @media (prefers-reduced-motion: reduce) { .did-with { transition: none; } }
 
