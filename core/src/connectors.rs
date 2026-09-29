@@ -206,6 +206,7 @@ const JOBS: &[&str] = &[
     "read_web_page",
     "send_mail",
     "write_note",
+    "draft_mail",
 ];
 
 /// Whether a job is worth stopping for, whatever posture an agent is on.
@@ -292,6 +293,10 @@ pub fn switched_off(job: &str) -> String {
         "write_note" => format!(
             "{named} is not switched on, so nothing was written. Say so: they can turn it on \
              under Settings, and it takes effect at once."
+        ),
+        "draft_mail" => format!(
+            "{named} is not switched on, so no draft was put in front of them. Say so: they can \
+             turn it on under Settings, and it takes effect at once."
         ),
         _ => format!(
             "{named} is not connected, so there is nothing to read. Say so: they can turn it \
@@ -462,7 +467,7 @@ pub fn needs(job: &str) -> &'static str {
     match job {
         "what_is_on" => "calendar",
         "read_web_page" => "browser",
-        "send_mail" => "sending",
+        "send_mail" | "draft_mail" => "sending",
         "write_note" => "notes",
         _ => "mail",
     }
@@ -496,6 +501,11 @@ pub fn in_plain_words(job: &str, args: &Value) -> String {
         "write_note" => match get("title") {
             "" => "Writing a note".to_string(),
             title => format!("Writing a note: {title}"),
+        },
+        "draft_mail" => match (get("to"), get("subject")) {
+            ("", _) => "Drafting an email".to_string(),
+            (to, "") => format!("Drafting an email to {to}"),
+            (to, subject) => format!("Drafting an email to {to}: {subject}"),
         },
         _ => match get("when") {
             "" => "Looking at your calendar".to_string(),
@@ -689,6 +699,37 @@ pub fn declarations() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "draft_mail",
+                "description":
+                    "Put an email in front of the person to check before it goes: a draft in \
+                     this conversation that they can change, then send or discard. Nothing is \
+                     sent until they press Send, so never say it was. Use it when they asked \
+                     for a draft or to see what goes out first, and for anybody whose address \
+                     they did not write themselves in this conversation, which send_mail \
+                     refuses when nobody is there to ask. Your part ends with the draft: it \
+                     waits for them however long they take. Plain text.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "to": {
+                            "type": "string",
+                            "description":
+                                "Who it is to: one address, or several separated by commas. \
+                                 Addresses only, no names."
+                        },
+                        "subject": { "type": "string", "description": "The subject line" },
+                        "body": {
+                            "type": "string",
+                            "description": "The message itself, as plain text"
+                        }
+                    },
+                    "required": ["to", "subject", "body"]
+                }
+            }
+        }),
     ]
 }
 
@@ -716,8 +757,67 @@ pub fn run(job: &str, args: &Value) -> Result<String> {
         ),
         "send_mail" => send_mail(text("to"), text("subject"), text("body")),
         "write_note" => write_note(text("title"), text("text"), text("folder")),
+        // Put in front of them by the app, which writes it into the
+        // conversation; there is nothing to do on this Mac until they press
+        // Send on it, and then it is `send_the_draft`.
+        "draft_mail" => bail!("a draft is shown to them by the app, and this is not the app"),
         _ => bail!("there is no {job} here"),
     }
+}
+
+/// An email somebody is to check before it goes: who to, the subject and the
+/// text, each as it would be sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct Draft {
+    pub to: String,
+    pub subject: String,
+    pub body: String,
+}
+
+impl Draft {
+    /// A draft from what an agent asked for, or why it is not one.
+    pub fn from_args(args: &Value) -> Result<Draft> {
+        let text = |k: &str| {
+            args.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        let draft = Draft {
+            to: text("to"),
+            subject: text("subject"),
+            body: text("body"),
+        };
+        draft.check()?;
+        Ok(draft)
+    }
+
+    /// Whether this could be sent as it stands, and why not when it could not.
+    pub fn check(&self) -> Result<()> {
+        recipients(&self.to)?;
+        if self.subject.split_whitespace().next().is_none() {
+            bail!("give it a subject");
+        }
+        if self.body.trim().is_empty() {
+            bail!("there is nothing in it to send");
+        }
+        if self.body.chars().count() > THE_LONGEST_MAIL {
+            bail!(
+                "that is longer than a mail should be: {THE_LONGEST_MAIL} characters at the most"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Send a draft somebody has just pressed Send on.
+///
+/// With no rule about who it may go to: they read the addresses and pressed the
+/// button, which is everything that rule is there to make sure of.
+pub fn send_the_draft(draft: &Draft) -> Result<String> {
+    draft.check()?;
+    send_mail(&draft.to, &draft.subject, &draft.body)
 }
 
 /// The longest a note may be, in characters.
@@ -2890,6 +2990,38 @@ fn ask_the_mac_with(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_draft_goes_nowhere_and_says_why_it_is_not_one() {
+        // Drafting sends nothing, so it never stops to ask, whoever it is to:
+        // the person reads the addresses and presses Send themselves.
+        let draft = json!({ "to": "someone@elsewhere.com", "subject": "Hello", "body": "Hi" });
+        assert!(!asks_first("draft_mail", &draft, &[]));
+        assert_eq!(needs("draft_mail"), "sending");
+        assert!(Draft::from_args(&draft).is_ok());
+        for (wrong, why) in [
+            (
+                json!({ "to": "Kim", "subject": "Hello", "body": "Hi" }),
+                "not an address",
+            ),
+            (
+                json!({ "to": "kim@mailbox.example", "subject": " ", "body": "Hi" }),
+                "subject",
+            ),
+            (
+                json!({ "to": "kim@mailbox.example", "subject": "Hello", "body": "" }),
+                "nothing in it",
+            ),
+        ] {
+            let said = Draft::from_args(&wrong).unwrap_err().to_string();
+            assert!(said.contains(why), "{said}");
+        }
+        assert!(switched_off("draft_mail").contains("no draft"));
+        assert_eq!(
+            in_plain_words("draft_mail", &draft),
+            "Drafting an email to someone@elsewhere.com: Hello"
+        );
+    }
+
     #[test]
     fn writing_a_note_is_a_switch_of_its_own_and_never_stops_to_ask() {
         assert_eq!(needs("write_note"), "notes");

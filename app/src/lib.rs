@@ -3593,7 +3593,148 @@ fn reach_for_it(
     if nobody_would_be_asked(app, job, from, args) {
         anyhow::bail!(errand_core::connectors::nobody_named(job));
     }
+    if job == "draft_mail" {
+        return put_down_a_draft(app, from, args);
+    }
     errand_core::connectors::run(job, args)
+}
+
+/// Put an email in front of somebody to check before it goes.
+///
+/// A line of its own in the conversation, which the window draws as a draft
+/// they can change and then send or throw away. Nothing leaves from here. The
+/// agent's part ends with the draft, so an errand at seven in the morning can
+/// leave one for whoever reads it at nine, and a draft waiting on somebody
+/// never holds a turn open the way a handover does.
+fn put_down_a_draft(
+    app: &AppHandle,
+    from: &str,
+    args: &serde_json::Value,
+) -> anyhow::Result<String> {
+    let draft = errand_core::connectors::Draft::from_args(args)?;
+    let held: State<Held> = app.state();
+    let line =
+        held.store
+            .the_app_says_about(from, "draft", &serde_json::to_string(&draft)?, "draft")?;
+    let _ = app.emit(
+        "drafted",
+        Drafted {
+            conversation: from.to_string(),
+            seq: line.seq,
+            draft: draft.clone(),
+        },
+    );
+    Ok(format!(
+        "The draft to {} is in front of them in this conversation, where they can change it and \
+         send it, or discard it. Nothing has been sent: do not say it has.",
+        draft.to
+    ))
+}
+
+/// A draft, as the window is told about it the moment it is written.
+#[derive(Clone, Serialize)]
+struct Drafted {
+    conversation: String,
+    seq: i64,
+    draft: errand_core::connectors::Draft,
+}
+
+/// Send a draft somebody has pressed Send on, as it stands in the window now.
+///
+/// Taken first, so that a second press, or a second window, finds it already
+/// gone rather than sending it twice. Put back to waiting when Mail refused
+/// it, with whatever was changed kept; and not when Mail did not answer, which
+/// is not the same as not sending, so nobody is invited to send it again.
+#[tauri::command]
+async fn send_draft(
+    held: State<'_, Held>,
+    conversation: String,
+    seq: i64,
+    to: String,
+    subject: String,
+    body: String,
+) -> Result<String, String> {
+    let on = held
+        .store
+        .connected()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|one| one == "sending");
+    if !on {
+        return Err(
+            "Sending mail is switched off. Turn it on under Settings, then press Send again."
+                .to_string(),
+        );
+    }
+    let draft = errand_core::connectors::Draft {
+        to: to.trim().to_string(),
+        subject: subject.trim().to_string(),
+        body: body.trim_end().to_string(),
+    };
+    draft.check().map_err(|e| e.to_string())?;
+    let text = serde_json::to_string(&draft).map_err(|e| e.to_string())?;
+    if !held
+        .store
+        .claim_draft(&conversation, seq)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("That draft has already been sent or discarded.".to_string());
+    }
+    let sending = draft.clone();
+    let sent = tauri::async_runtime::spawn_blocking(move || {
+        errand_core::connectors::send_the_draft(&sending)
+    })
+    .await
+    .map_err(|_| "Sending it stopped part way through.".to_string())?;
+    let now = chrono::Local::now().timestamp_millis();
+    match sent {
+        Ok(said) => {
+            held.store
+                .settle_draft(
+                    &conversation,
+                    seq,
+                    Some(&text),
+                    Some(&format!("sent|{now}")),
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(said)
+        }
+        Err(why) if why.to_string().contains("did not answer within") => {
+            let _ = held.store.settle_draft(
+                &conversation,
+                seq,
+                Some(&text),
+                Some(&format!("unsure|{now}")),
+            );
+            Err(why.to_string())
+        }
+        Err(why) => {
+            let _ = held
+                .store
+                .settle_draft(&conversation, seq, Some(&text), None);
+            Err(why.to_string())
+        }
+    }
+}
+
+/// Throw a draft away, unsent.
+#[tauri::command]
+async fn discard_draft(
+    held: State<'_, Held>,
+    conversation: String,
+    seq: i64,
+) -> Result<(), String> {
+    if !held
+        .store
+        .claim_draft(&conversation, seq)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("That draft has already been sent or discarded.".to_string());
+    }
+    let now = chrono::Local::now().timestamp_millis();
+    held.store
+        .settle_draft(&conversation, seq, None, Some(&format!("discarded|{now}")))
+        .map_err(|e| e.to_string())
 }
 
 /// Whether this page would open with nobody asked, at an address nobody typed.
@@ -7043,6 +7184,8 @@ pub fn run() {
             answer,
             engines,
             answering,
+            send_draft,
+            discard_draft,
             use_engine,
             runs,
             routines,

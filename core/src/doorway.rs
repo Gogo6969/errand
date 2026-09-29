@@ -1061,7 +1061,8 @@ mod tests {
                 "what_is_on",
                 "read_web_page",
                 "send_mail",
-                "write_note"
+                "write_note",
+                "draft_mail"
             ]
         );
         for tool in &tools {

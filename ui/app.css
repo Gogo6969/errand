@@ -1172,6 +1172,51 @@ main > aside, main > #title, main > #composer { flex: none; }
 /* A link the Mac would not open, said on the link itself. */
 .handover a.detail.refused { color: var(--faint); text-decoration: line-through; }
 
+/* An email left to be checked: the handover's shape, with the draft itself in
+   it to change before anything is sent. */
+.draft {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  width: min(74ch, 100%);
+  padding: 12px 13px;
+  border-radius: 14px;
+  background: var(--card);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--rule));
+}
+.draft.done { border-color: var(--rule); }
+.draft .tile { margin-top: 1px; }
+.draft .question { flex: 1; min-width: 0; }
+.draft .field {
+  display: grid;
+  grid-template-columns: 58px 1fr;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.draft .field.whole { grid-template-columns: 1fr; }
+.draft .field .label { font-size: 12.5px; color: var(--ink-soft); }
+.draft input,
+.draft textarea {
+  min-width: 0;
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+.draft textarea { min-height: 150px; resize: vertical; line-height: 1.45; }
+.draft input:focus,
+.draft textarea:focus { outline: none; border-color: var(--edge); }
+.draft .sent-to { margin: 6px 0 0; font-size: 12.5px; color: var(--ink-soft); }
+.draft .sent-subject { margin: 4px 0 0; font-weight: 600; }
+.draft .sent-body { margin: 6px 0 0; white-space: pre-wrap; color: var(--ink-soft); font-size: 13px; }
+.draft .problem { margin: 8px 0 0; color: var(--wrong); font-size: 12.5px; }
+.choices .send-it { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 500; }
+.choices .send-it:disabled { opacity: .6; cursor: default; }
+
 /* ------------------------------------------------------------ asking -- */
 
 /*

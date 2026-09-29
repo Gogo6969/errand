@@ -3455,6 +3455,37 @@ impl Store {
         Ok(())
     }
 
+    /// Take a draft that is waiting, so that only one press does anything to
+    /// it. False when it is not waiting any more: sent, discarded, or being
+    /// sent this moment, from this window or another.
+    pub fn claim_draft(&self, conversation: &str, seq: i64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE lines SET outcome = 'sending'
+              WHERE conversation = ?1 AND seq = ?2 AND kind = 'draft' AND outcome IS NULL",
+            params![conversation, seq],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Settle a draft: what it said when it went, where it changed, and how it
+    /// ended. `None` puts it back to waiting, when sending it failed.
+    pub fn settle_draft(
+        &self,
+        conversation: &str,
+        seq: i64,
+        text: Option<&str>,
+        outcome: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE lines SET text = COALESCE(?1, text), outcome = ?2
+              WHERE conversation = ?3 AND seq = ?4 AND kind = 'draft'",
+            params![text, outcome, conversation, seq],
+        )?;
+        Ok(())
+    }
+
     /// Write down what somebody said to a question.
     ///
     /// Onto the question rather than under it, the same way an outcome goes
@@ -3709,6 +3740,32 @@ mod tests {
             tool: "Bash".into(),
             call: call.into(),
         })
+    }
+
+    #[test]
+    fn a_draft_is_taken_once_and_can_go_back_to_waiting() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a", "/tmp/a");
+        let line = s
+            .the_app_says_about("a", "draft", r#"{"to":"k@mailbox.example"}"#, "draft")
+            .unwrap();
+        assert!(s.claim_draft("a", line.seq).unwrap());
+        assert!(
+            !s.claim_draft("a", line.seq).unwrap(),
+            "a second press sent it twice"
+        );
+        // Sending failed: back to waiting, with what it said kept.
+        s.settle_draft("a", line.seq, Some(r#"{"to":"kim@mailbox.example"}"#), None)
+            .unwrap();
+        assert!(s.claim_draft("a", line.seq).unwrap());
+        s.settle_draft("a", line.seq, None, Some("discarded|1"))
+            .unwrap();
+        let kept = s.lines("a").unwrap().pop().unwrap();
+        assert_eq!(kept.outcome.as_deref(), Some("discarded|1"));
+        assert_eq!(kept.text, r#"{"to":"kim@mailbox.example"}"#);
+        // And only a draft: nothing else is taken this way.
+        let other = s.asked("a", "hello").unwrap();
+        assert!(!s.claim_draft("a", other.seq).unwrap());
     }
 
     #[test]

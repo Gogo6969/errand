@@ -1459,6 +1459,27 @@ function fromStoreLine(line, live = false) {
         stillThere: still,
       };
     }
+    // An email left to be checked: its words as they were last kept, and how
+    // it ended if it has. "sending" on disk is a send the app did not see
+    // finish, which is not a send anybody should be invited to repeat.
+    case "draft": {
+      let draft = {};
+      try {
+        draft = JSON.parse(line.text) || {};
+      } catch {
+        draft = {};
+      }
+      const [how, when] = String(line.outcome || "").split("|");
+      return {
+        kind: "draft",
+        seq: line.seq,
+        to: draft.to || "",
+        subject: draft.subject || "",
+        body: draft.body || "",
+        how: how === "sending" ? "unsure" : how || "",
+        when: Number(when) || null,
+      };
+    }
     case "doing":
       return {
         kind: "doing",
@@ -2040,6 +2061,8 @@ function draw(m) {
       return asks(m);
     case "over_to_you":
       return handItOver(m);
+    case "draft":
+      return aDraft(m);
     case "ended": {
       node.className = m.failed ? "ended failed" : "ended";
       node.append(note("span", m.text, "why"));
@@ -2080,6 +2103,113 @@ function draw(m) {
  * Once answered the card becomes a line of history rather than disappearing.
  * What you allowed is worth being able to look back at.
  */
+/**
+ * An email an agent left to be checked before it goes.
+ *
+ * Nothing about it has gone anywhere. The addresses, the subject and the text
+ * can all be changed here, and it is sent only when somebody presses Send,
+ * through their own Mail. Afterwards it stays, as what was sent or as a draft
+ * that was not: something that went out on somebody's behalf is worth being
+ * able to look back at.
+ */
+function aDraft(m) {
+  // Whose it is, taken now: the card only ever belongs to the conversation it
+  // was drawn in, whatever is on screen by the time a button is pressed.
+  const conversation = showing;
+  const card = document.createElement("li");
+  card.className = m.how ? "draft done" : "draft";
+  card.dataset.seq = String(m.seq);
+  card.append(tile("mail", Boolean(m.sending)));
+
+  const words = document.createElement("div");
+  words.className = "question";
+  const at = m.when ? ` at ${new Date(m.when).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
+  const headline = {
+    sent: `Sent${at}`,
+    discarded: "Discarded, not sent",
+    unsure: "Mail did not say whether it went. Look in Sent before sending it again.",
+  }[m.how] || "An email to check before it goes";
+  words.append(note("p", headline, "wants"));
+
+  if (m.how) {
+    // What went, or what did not: history now, not a form.
+    words.append(note("p", `To ${m.to}`, "sent-to"));
+    words.append(note("p", m.subject, "sent-subject"));
+    words.append(note("p", m.body, "sent-body"));
+    card.append(words);
+    return card;
+  }
+
+  // Changes are kept on the message as they are typed, so that the card being
+  // drawn again for any other reason does not take them back.
+  const field = (label, name, multiline) => {
+    const row = document.createElement("label");
+    row.className = multiline ? "field whole" : "field";
+    const input = document.createElement(multiline ? "textarea" : "input");
+    input.name = name;
+    input.value = m[name];
+    input.spellcheck = multiline;
+    input.oninput = () => {
+      m[name] = input.value;
+    };
+    if (label) row.append(note("span", label, "label"));
+    row.append(input);
+    return row;
+  };
+  words.append(field("To", "to", false), field("Subject", "subject", false), field("", "body", true));
+  if (m.problem) words.append(note("p", m.problem, "problem"));
+
+  const choices = document.createElement("div");
+  choices.className = "choices";
+  const send = document.createElement("button");
+  send.type = "button";
+  send.className = "send-it";
+  send.textContent = m.sending ? "Sending…" : "Send email";
+  send.disabled = Boolean(m.sending);
+  send.onclick = async () => {
+    m.sending = true;
+    m.problem = "";
+    drawMessages();
+    try {
+      await invoke("send_draft", {
+        conversation,
+        seq: m.seq,
+        to: m.to,
+        subject: m.subject,
+        body: m.body,
+      });
+      m.how = "sent";
+      m.when = Date.now();
+    } catch (why) {
+      m.problem = String(why);
+      // Gone already, from another window or a second press: say so, and
+      // stop offering to send it.
+      if (/already been sent or discarded/.test(m.problem)) m.how = "discarded";
+      if (/did not answer within/.test(m.problem)) m.how = "unsure";
+    }
+    m.sending = false;
+    drawMessages();
+  };
+  const discard = document.createElement("button");
+  discard.type = "button";
+  discard.textContent = "Discard";
+  discard.disabled = Boolean(m.sending);
+  discard.onclick = async () => {
+    try {
+      await invoke("discard_draft", { conversation, seq: m.seq });
+      m.how = "discarded";
+      m.when = Date.now();
+    } catch (why) {
+      m.problem = String(why);
+    }
+    drawMessages();
+  };
+  choices.append(send, discard);
+  words.append(choices);
+  card.append(words);
+  return card;
+}
+
 /**
  * Somebody is being asked to come and do one thing.
  *
@@ -2524,6 +2654,23 @@ listen("handing_over", async ({ payload }) => {
     why: payload.why,
     where: payload.where,
     answered: null,
+  });
+  if (showing === payload.conversation) drawMessages();
+  drawThreads();
+});
+
+// An email an agent left to be checked, the moment it is written down.
+listen("drafted", async ({ payload }) => {
+  const t = talks.get(payload.conversation) || (await meet(payload.conversation));
+  if (!t) return;
+  t.messages.push({
+    kind: "draft",
+    seq: payload.seq,
+    to: payload.draft.to,
+    subject: payload.draft.subject,
+    body: payload.draft.body,
+    how: "",
+    when: null,
   });
   if (showing === payload.conversation) drawMessages();
   drawThreads();

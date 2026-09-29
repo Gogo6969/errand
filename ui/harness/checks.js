@@ -5293,3 +5293,82 @@ export async function aStepThatPrintedNothing() {
   check("and once the turn is over, nothing in it is still spinning", spinning.length === 0, spinning.join(" | ") || "none");
   return found;
 }
+
+/**
+ * An email an agent left to be checked: changed, then sent or thrown away.
+ *
+ * Nothing leaves until somebody presses Send, and what went stays readable
+ * afterwards as what went, not as a form.
+ */
+export async function aDraftToCheck() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  await openTalk("talk-1");
+  await settle(200);
+  const box = document.getElementById("messages");
+  const cardAt = (seq) => box.querySelector(`li.draft[data-seq="${seq}"]`);
+
+  tell("drafted", {
+    conversation: "talk-1",
+    seq: 9800,
+    draft: { to: "kim@mailbox.example", subject: "The news", body: "Line one\nLine two" },
+  });
+  await settle(200);
+  let card = cardAt(9800);
+  const value = (name) => card?.querySelector(`[name="${name}"]`)?.value;
+  check(
+    "a draft shows who it is to, its subject and its text, ready to change",
+    card && value("to") === "kim@mailbox.example" && value("subject") === "The news" && value("body") === "Line one\nLine two",
+    card ? `${value("to")} / ${value("subject")}` : "no card",
+  );
+  const subject = card.querySelector('[name="subject"]');
+  subject.value = "The news, checked";
+  subject.dispatchEvent(new Event("input"));
+  const before = asked.length;
+  [...card.querySelectorAll("button")].find((b) => b.textContent === "Send email").click();
+  await settle(250);
+  const sent = asked.slice(before).find((a) => a.name === "send_draft");
+  check(
+    "Send sends it as it stands after being changed, and nothing before",
+    sent && sent.args?.subject === "The news, checked" && sent.args?.to === "kim@mailbox.example" && sent.args?.seq === 9800,
+    JSON.stringify(sent?.args || "not sent"),
+  );
+  card = cardAt(9800);
+  check(
+    "and then it is what was sent, not a form",
+    card?.classList.contains("done") && /^Sent/.test(card.textContent) && !card.querySelector("input, textarea"),
+    card?.textContent.slice(0, 80) || "no card",
+  );
+
+  tell("drafted", {
+    conversation: "talk-1",
+    seq: 9801,
+    draft: { to: "kim@mailbox.example", subject: "Second", body: "Not this one" },
+  });
+  await settle(200);
+  const second = cardAt(9801);
+  [...second.querySelectorAll("button")].find((b) => b.textContent === "Discard").click();
+  await settle(200);
+  check(
+    "Discard throws it away unsent",
+    asked.some((a) => a.name === "discard_draft" && a.args?.seq === 9801) && /Discarded, not sent/.test(cardAt(9801)?.textContent || ""),
+    cardAt(9801)?.textContent.slice(0, 60) || "no card",
+  );
+
+  // Read back later: one sent, one still waiting.
+  FIXTURE.lines["talk-drafts"] = [
+    { seq: 1, at: Date.now() - 60000, kind: "mine", text: "Draft me a mail to Kim", call: null, tool: null, outcome: null },
+    { seq: 2, at: Date.now() - 50000, kind: "draft", text: JSON.stringify({ to: "kim@mailbox.example", subject: "Went", body: "Gone" }), call: "draft", tool: null, outcome: `sent|${Date.now() - 40000}` },
+    { seq: 3, at: Date.now() - 30000, kind: "draft", text: JSON.stringify({ to: "kim@mailbox.example", subject: "Waiting", body: "Still here" }), call: "draft", tool: null, outcome: null },
+  ];
+  FIXTURE.conversations["agent-outside"].push({ id: "talk-drafts", agent: "agent-outside", name: "Drafts", opened: true });
+  await openTalk("talk-drafts");
+  await settle(250);
+  check(
+    "read back later, a sent draft is history and one still waiting is still a form",
+    /^Sent/.test(cardAt(2)?.textContent || "") && !cardAt(2)?.querySelector("input") && cardAt(3)?.querySelector('[name="subject"]')?.value === "Waiting",
+    `${cardAt(2)?.textContent.slice(0, 30)} | ${cardAt(3) ? "form" : "no card"}`,
+  );
+  return found;
+}
