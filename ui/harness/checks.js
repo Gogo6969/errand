@@ -4946,6 +4946,73 @@ export async function theOverview() {
   return found;
 }
 
+/**
+ * A teammate made with +: asked who it is before anything else, named by its
+ * person, with a job, and ready for its first task.
+ */
+export async function aNewTeammate() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  const whois = document.getElementById("whois");
+  const hint = document.getElementById("whois-new");
+  const before = asked.length;
+
+  document.getElementById("new").click();
+  await settle(300);
+  check(
+    "+ asks who the new teammate is first, with a word on what to do",
+    !whois.hidden && !hint.hidden && document.activeElement?.id === "whois-name",
+    `whois hidden=${whois.hidden}, hint hidden=${hint.hidden}, focus on ${document.activeElement?.id}`,
+  );
+  const wide = (id) => document.getElementById(id).closest("label").getBoundingClientRect().width;
+  check(
+    "the job has the widest field, and the hint a row of its own",
+    wide("whois-about") > wide("whois-title") && hint.getBoundingClientRect().bottom <= document.getElementById("whois-name").getBoundingClientRect().top,
+    `job ${Math.round(wide("whois-about"))}px, role ${Math.round(wide("whois-title"))}px`,
+  );
+  check(
+    "and asks for its job by that name",
+    /Job/.test(document.getElementById("whois-about").closest("label")?.textContent || ""),
+    document.getElementById("whois-about").closest("label")?.textContent || "no label",
+  );
+  document.getElementById("whois-name").value = "Disk Watch";
+  document.getElementById("whois-title").value = "Storage";
+  const job = document.getElementById("whois-about");
+  job.value = "Keeps an eye on the external SSD";
+  job.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await settle(250);
+  const named = asked.slice(before).find((a) => a.name === "rename");
+  check(
+    "Enter saves it as that teammate, with its role and job",
+    named?.args?.name === "Disk Watch" && named?.args?.title === "Storage" && named?.args?.about === "Keeps an eye on the external SSD" && whois.hidden,
+    JSON.stringify(named?.args || null),
+  );
+  const row = [...document.querySelectorAll("#threads li")].find((li) => li.textContent.includes("Disk Watch"));
+  check(
+    "and it is in the list under its name, ready for its first task",
+    row && document.activeElement?.id === "what",
+    `row=${!!row}, focus on ${document.activeElement?.id}`,
+  );
+  check("with its job under its name at the top", /Storage · Keeps an eye on the external SSD/.test(document.getElementById("purpose").textContent), document.getElementById("purpose").textContent);
+
+  // Named now, so opening who it is is no longer about a new teammate.
+  document.getElementById("thread-name").click();
+  await settle(150);
+  check("a teammate with a name is not called new", !whois.hidden && hint.hidden, `whois hidden=${whois.hidden}, hint hidden=${hint.hidden}`);
+  document.getElementById("thread-name").click();
+  await settle(100);
+
+  row?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 200 }));
+  await settle(120);
+  const menu = document.getElementById("menu");
+  const labels = [...menu.querySelectorAll("button")].map((b) => b.textContent);
+  check("its menu gives it a new task, not a new conversation", labels.includes("New task for this teammate"), labels.join(" | "));
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await settle(80);
+  return found;
+}
+
 export async function aLongConversation() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });

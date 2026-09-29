@@ -32,7 +32,7 @@
           </svg>
           <span class="sr">Overview</span>
         </button>
-        <button id="new" title="Start something new">+</button>
+        <button id="new" title="A new teammate">+</button>
       </header>
       <ol id="threads"></ol>
 
@@ -281,9 +281,18 @@
       -->
       <!-- Who this agent is, and a way to overrule what it decided. -->
       <aside id="whois" hidden>
-        <label>Name <input id="whois-name" type="text" autocomplete="off" /></label>
-        <label>Role <input id="whois-title" type="text" autocomplete="off" /></label>
-        <label>Handles <input id="whois-about" type="text" autocomplete="off" /></label>
+        <!--
+          A teammate is somebody's to name, and its job is what it is for.
+          Asked when it is made, so it starts as who it is meant to be; left
+          empty, it chooses both itself after its first task, as before.
+        -->
+        <p id="whois-new" class="quiet" hidden>
+          A new teammate. Give it a name and a job, or just tell it what to do and it
+          will choose them after its first task.
+        </p>
+        <label>Name <input id="whois-name" type="text" autocomplete="off" placeholder="Disk Watch" /></label>
+        <label>Role <input id="whois-title" type="text" autocomplete="off" placeholder="Storage" /></label>
+        <label>Job <input id="whois-about" type="text" autocomplete="off" placeholder="Keeps an eye on the external SSD" /></label>
         <button id="whois-save" type="button">Save</button>
         <!--
           What it has written down, read into every conversation it has. Here,

@@ -346,6 +346,7 @@ const el = {
   whoisTitle: document.getElementById("whois-title"),
   whoisAbout: document.getElementById("whois-about"),
   whoisSave: document.getElementById("whois-save"),
+  whoisNew: document.getElementById("whois-new"),
   notesSummary: document.getElementById("notes-summary"),
   notesList: document.getElementById("notes-list"),
   noteNew: document.getElementById("note-new"),
@@ -740,16 +741,24 @@ function uuid() {
  * and what the migration did for every agent that predates conversations. One
  * rule rather than two, and the id is the engine's session id either way.
  */
-async function start() {
+async function start({ introduce = false } = {}) {
   const id = uuid();
   agents.set(id, asAgent({ id, name: NOT_YET_NAMED }));
   talks.set(id, asTalk({ id, agent: id, name: "First" }, { loaded: true }));
-  // Not written down and nothing started until something is said to it. An
-  // agent somebody made and then thought better of should not survive as a row
-  // in a list, and it certainly should not have cost a process.
+  // Not written down and nothing started until something is said to it, or it
+  // is given a name. A teammate somebody made and then thought better of should
+  // not survive as a row in a list, and it certainly should not have cost a
+  // process.
   await show(id);
   drawThreads();
-  el.what.focus();
+  // Made with +, it is asked who it is first: a teammate is somebody's to name,
+  // and its job is what it is for. Typing a task instead is fine too.
+  if (introduce) {
+    el.whois.hidden = true;
+    el.name.click();
+  } else {
+    el.what.focus();
+  }
 }
 
 /**
@@ -763,8 +772,8 @@ async function alsoAsk() {
   const a = whose();
   if (!a) return;
   const id = uuid();
-  await invoke("start_conversation", { id, agent: a.id, name: "New conversation" });
-  talks.set(id, asTalk({ id, agent: a.id, name: "New conversation" }, { loaded: true }));
+  await invoke("start_conversation", { id, agent: a.id, name: "New task" });
+  talks.set(id, asTalk({ id, agent: a.id, name: "New task" }, { loaded: true }));
   // `show` opens it. Doing it here as well was harmless and still wrong: the
   // second call is a no-op only because the first one already succeeded.
   await show(id);
@@ -1590,7 +1599,7 @@ function openTheMenu(a, x, y) {
     el.name.click();
   });
 
-  item("New conversation with this agent", async () => {
+  item("New task for this teammate", async () => {
     closeTheMenu();
     if (a.id !== showingAgent) await openAgent(a.id);
     await alsoAsk();
@@ -3601,6 +3610,7 @@ el.name.addEventListener("click", () => {
   el.whoisName.value = t.name === NOT_YET_NAMED ? "" : t.name;
   el.whoisTitle.value = t.title;
   el.whoisAbout.value = t.about;
+  el.whoisNew.hidden = t.name !== NOT_YET_NAMED;
   el.whois.hidden = false;
   el.whoisName.focus();
   drawNotes();
@@ -3934,8 +3944,19 @@ el.whoisSave.addEventListener("click", async () => {
   el.name.textContent = t.name;
   drawPurpose(t);
   drawThreads();
+  // Ready for its first task, or its next one.
+  el.what.focus();
   await invoke("rename", { id: t.id, name: t.name, title: t.title, about: t.about });
 });
+
+// Enter in any of the three saves, the way a form does.
+for (const field of [el.whoisName, el.whoisTitle, el.whoisAbout]) {
+  field.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.isComposing) return;
+    e.preventDefault();
+    el.whoisSave.click();
+  });
+}
 
 el.pin.addEventListener("click", async () => {
   const t = whose();
@@ -4664,7 +4685,7 @@ el.asks.addEventListener("change", async () => {
   await invoke("asks", { id: a.id, how: a.asks });
 });
 
-el.new.addEventListener("click", start);
+el.new.addEventListener("click", () => start({ introduce: true }));
 
 // What was here before, and something to type into if there was nothing.
 catchUp();
@@ -4696,7 +4717,7 @@ function whatCouldBeDone() {
     const onto = await invoke("export_conversation", { id: showing });
     tellHere(`Saved to ${onto}`);
   }, !!showing);
-  add("New conversation with this agent", a?.name || "", () => alsoAsk(), !!a);
+  add("New task for this teammate", a?.name || "", () => alsoAsk(), !!a);
   add("New agent", "", () => start());
   add("Search everything", "", () => el.find.focus());
   add(a?.pinned ? "Unpin this agent" : "Pin this agent", "", () => el.pin.click(), !!a);
@@ -6200,9 +6221,13 @@ function asTask(c) {
   };
 }
 
-/** What a task is called: its name, or what was asked in it when it has none. */
+/**
+ * What a task is called: its name, or what was asked in it when the name is
+ * one the app made up rather than one somebody chose.
+ */
 function titleOf(t) {
-  if (t.name && t.name !== "First") return t.name;
+  const madeUp = !t.name || ["First", "New task", "New conversation"].includes(t.name) || /, again$/.test(t.name);
+  if (!madeUp) return t.name;
   const first = (t.first || "").trim().split("\n")[0];
   if (!first) return "First task";
   return first.length > 70 ? `${first.slice(0, 69)}…` : first;
@@ -6539,7 +6564,7 @@ function aTask(t, [state, line]) {
   who.className = "job-who";
   const title = note("span", titleOf(t), "job-name");
   // All of it, when the tile has room for only some.
-  title.title = t.name && t.name !== "First" ? t.name : (t.first || titleOf(t)).trim();
+  title.title = titleOf(t) === t.name ? t.name : (t.first || titleOf(t)).trim();
   who.append(title);
   who.append(note("span", [a?.name, a?.title].filter(Boolean).join(" \u00b7 "), "job-role"));
   const marks = a ? repeatMarks(a, t.id) : [];

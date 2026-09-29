@@ -1640,7 +1640,11 @@ body.catching #what { border-color: var(--accent); }
   color: var(--ink-soft);
   flex: 1 1 160px;
 }
-#whois label:nth-child(3) { flex: 3 1 320px; }
+/* The job, which is the longest, by what it is rather than where it is:
+   counted by position, the hint for a new teammate made the role the wide one. */
+#whois label:has(#whois-about) { flex: 3 1 320px; }
+#whois-new { flex: 1 1 100%; margin: 0; font-size: 13px; color: var(--ink-soft); }
+#whois-new[hidden] { display: none; }
 #whois input {
   padding: 6px 9px;
   border-radius: 8px;
