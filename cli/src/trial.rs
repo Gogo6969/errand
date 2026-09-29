@@ -2,6 +2,11 @@
 //!
 //!     errand-trial --base-url URL --model NAME [--provider P] [--key-from ID]
 //!                  [--runs N] [--only a,b] [--out FILE] [--context TOKENS]
+//!     errand-trial --rejudge FILE
+//!
+//! `--rejudge` reads results written with `--out` and judges them again by
+//! the rules as they are now, so a rule made fairer does not cost the runs
+//! again.
 //!
 //! The scenarios and the rules are in `errand_core::local::trial`. Nothing a
 //! model asks for is done: every tool answers from the scenario's script.
@@ -21,7 +26,7 @@ use errand_core::local::LlmSettings;
 
 const HOW: &str = "errand-trial --base-url URL --model NAME [--provider openai-compat|llamacpp] \
 [--key-from BACKEND-ID] [--runs 10] [--only phantom-job,the-wall] [--out results.jsonl] \
-[--context 131072]";
+[--context 131072]\n       errand-trial --rejudge results.jsonl";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,6 +37,12 @@ async fn main() -> Result<()> {
             println!("  {:<20} {}", s.id, s.checks);
         }
         return Ok(());
+    }
+    if let Some(at) = args.iter().position(|a| a == "--rejudge") {
+        let file = args
+            .get(at + 1)
+            .with_context(|| format!("say which file: --rejudge FILE\n{HOW}"))?;
+        return rejudge(file);
     }
     let flag = |name: &str| -> Option<String> {
         args.iter()
@@ -49,6 +60,7 @@ async fn main() -> Result<()> {
             "--only",
             "--out",
             "--context",
+            "--rejudge",
         ];
         let is_a_value = at > 0 && known.contains(&args[at - 1].as_str());
         if !is_a_value && !known.contains(&arg.as_str()) {
@@ -153,6 +165,49 @@ async fn main() -> Result<()> {
     }
     if tokens_in + tokens_out > 0 {
         println!("\n{tokens_in} tokens in, {tokens_out} out, where the server said.");
+    }
+    Ok(())
+}
+
+/// Judge results from before by the rules as they are now.
+fn rejudge(file: &str) -> Result<()> {
+    let scenarios = trial::scenarios();
+    let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
+    let mut model = String::new();
+    let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let one: serde_json::Value =
+            serde_json::from_str(line).context("a line that is not JSON")?;
+        let id = one["scenario"].as_str().unwrap_or_default();
+        let Some(scenario) = scenarios.iter().find(|s| s.id == id) else {
+            continue;
+        };
+        model = one["model"].as_str().unwrap_or_default().to_string();
+        let run: trial::Run =
+            serde_json::from_value(one["run"].clone()).context("a run that does not read")?;
+        tallies
+            .entry(id.to_string())
+            .or_default()
+            .add(&scenario.judge(&run));
+    }
+    println!("{model}, judged again from {file}\n");
+    println!(
+        "{:<20} {:>6} {:>6} {:>6} {:>6}",
+        "", "failed", "held", "missed", "broke"
+    );
+    for scenario in &scenarios {
+        let Some(t) = tallies.get(scenario.id) else {
+            continue;
+        };
+        println!(
+            "{:<20} {:>6} {:>6} {:>6} {:>6}   {}",
+            scenario.id,
+            t.failed,
+            t.held,
+            t.missed,
+            t.broke,
+            t.why.first().map(String::as_str).unwrap_or("")
+        );
     }
     Ok(())
 }
