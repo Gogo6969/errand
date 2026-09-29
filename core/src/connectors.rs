@@ -90,11 +90,17 @@ pub struct Connector {
 
 /// Everything Errand knows how to connect to.
 ///
-/// Read-only, all but one. Moving an appointment or messaging somebody are not
+/// Read-only, all but two. Moving an appointment or messaging somebody are not
 /// harder to write; they are a different question, and one nobody should be
 /// answered by a tool call they did not watch.
 ///
-/// Sending mail is the one, and it is a switch of its own rather than part of
+/// Writing notes is one, and the smaller: a new note in the person's own Notes
+/// and nothing else, never reading, changing or deleting one, and never in a
+/// folder somebody else can see. It was wanted for "check the drive every hour
+/// until nine, then write me a note", which an errand could plan and not do:
+/// Notes refuses a walled script the way Mail does.
+///
+/// Sending mail is the other, and it is a switch of its own rather than part of
 /// Mail's: the Mail switch says it never sends anything, and somebody who
 /// turned it on having read that has agreed to nothing more. It was wanted for
 /// the plainest errand there is, "if there is news, mail it to me", which
@@ -111,6 +117,14 @@ pub const KNOWN: &[Connector] = &[
         sees: "Reads your mail: who wrote, when, the subject, and the first part \
                of the message. It never sends anything and never deletes anything.",
         app: "Mail",
+    },
+    Connector {
+        id: "notes",
+        name: "Writing notes",
+        sees: "Writes new notes in your Notes app: a title and the text, where new notes \
+               go or in a folder of yours it names. It never reads, changes, moves or deletes \
+               a note, and it never writes in a folder shared with other people.",
+        app: "Notes",
     },
     Connector {
         id: "sending",
@@ -191,6 +205,7 @@ const JOBS: &[&str] = &[
     "what_is_on",
     "read_web_page",
     "send_mail",
+    "write_note",
 ];
 
 /// Whether a job is worth stopping for, whatever posture an agent is on.
@@ -272,6 +287,10 @@ pub fn switched_off(job: &str) -> String {
     match job {
         "send_mail" => format!(
             "{named} is not switched on, so nothing was sent. Say so: they can turn it on \
+             under Settings, and it takes effect at once."
+        ),
+        "write_note" => format!(
+            "{named} is not switched on, so nothing was written. Say so: they can turn it on \
              under Settings, and it takes effect at once."
         ),
         _ => format!(
@@ -444,6 +463,7 @@ pub fn needs(job: &str) -> &'static str {
         "what_is_on" => "calendar",
         "read_web_page" => "browser",
         "send_mail" => "sending",
+        "write_note" => "notes",
         _ => "mail",
     }
 }
@@ -472,6 +492,10 @@ pub fn in_plain_words(job: &str, args: &Value) -> String {
             ("", _) => "Sending mail".to_string(),
             (to, "") => format!("Sending mail to {to}"),
             (to, subject) => format!("Sending mail to {to}: {subject}"),
+        },
+        "write_note" => match get("title") {
+            "" => "Writing a note".to_string(),
+            title => format!("Writing a note: {title}"),
         },
         _ => match get("when") {
             "" => "Looking at your calendar".to_string(),
@@ -633,6 +657,38 @@ pub fn declarations() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "write_note",
+                "description":
+                    "Write a new note in the person's Notes app: a title, and the text under \
+                     it. Plain text, and each line stays a line. It goes where new notes go \
+                     unless you name a folder, and a folder shared with other people is \
+                     refused. It only ever makes a new note: it cannot read, change, move or \
+                     delete one, including one it wrote before. This is the way to write a \
+                     note from here. A script of your own may not reach Notes at all: commands \
+                     that run walled in get \"A privilege violation occurred\" from it. \
+                     Answers with a sentence saying so if writing notes is not switched on.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "The note's title, one line" },
+                        "text": {
+                            "type": "string",
+                            "description": "What the note says, as plain text"
+                        },
+                        "folder": {
+                            "type": "string",
+                            "description":
+                                "A folder of theirs to put it in, by name. Where new notes go, \
+                                 if you do not say."
+                        }
+                    },
+                    "required": ["title", "text"]
+                }
+            }
+        }),
     ]
 }
 
@@ -659,9 +715,83 @@ pub fn run(job: &str, args: &Value) -> Result<String> {
             args.get("from").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
         ),
         "send_mail" => send_mail(text("to"), text("subject"), text("body")),
+        "write_note" => write_note(text("title"), text("text"), text("folder")),
         _ => bail!("there is no {job} here"),
     }
 }
+
+/// The longest a note may be, in characters.
+const THE_LONGEST_NOTE: usize = 100_000;
+
+/// Write one new note in Notes, as the person.
+///
+/// Where new notes go unless a folder is named, and never in a folder shared
+/// with other people: a note there is not only theirs, and nothing an errand
+/// writes should be seen by somebody they did not choose. Like `send_mail`, the
+/// words reach the script as its arguments and never its text.
+fn write_note(title: &str, text: &str, folder: &str) -> Result<String> {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() {
+        bail!("give it a title");
+    }
+    if title.chars().count() > 200 {
+        bail!("that is longer than a title should be: 200 characters at the most");
+    }
+    if text.chars().count() > THE_LONGEST_NOTE {
+        bail!("that is longer than a note should be: {THE_LONGEST_NOTE} characters at the most");
+    }
+    let words = vec![as_a_note(&title, text), folder.to_string()];
+    let said = ask_the_mac_with("Notes", THE_SCRIPT_FOR_A_NOTE, &words, PATIENCE)?;
+    match said.split_once('|') {
+        Some(("written", into)) if folder.is_empty() || folder.eq_ignore_ascii_case(into) => {
+            Ok(format!("Written: \"{title}\", in {into}."))
+        }
+        Some(("written", into)) => Ok(format!(
+            "Written: \"{title}\", in {into}. There is no folder called {folder}, so it went \
+             where new notes go."
+        )),
+        Some(("shared", into)) => bail!(
+            "{into} is shared with other people, so a note there would not be only theirs. \
+             Nothing was written: say so, or write it without naming that folder."
+        ),
+        _ => bail!("Notes did not say it had written it. It said: {said}"),
+    }
+}
+
+/// A note as the HTML Notes keeps: the title first, as the heading Notes takes
+/// a note's title from, then one line to a `<div>`. Nothing anybody wrote is
+/// read as markup.
+fn as_a_note(title: &str, text: &str) -> String {
+    let plain = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    let mut html = format!("<div><h1>{}</h1></div>", plain(title));
+    for line in text.lines() {
+        match line.trim().is_empty() {
+            true => html.push_str("<div><br></div>"),
+            false => html.push_str(&format!("<div>{}</div>", plain(line))),
+        }
+    }
+    html
+}
+
+/// Write one note: its HTML, and then the folder asked for, or nothing, as the
+/// script's arguments. Answers with what it did and where.
+pub const THE_SCRIPT_FOR_A_NOTE: &str = r#"on run argv
+  set theBody to item 1 of argv
+  set theFolderName to item 2 of argv
+  tell application "Notes"
+    set theFolder to default folder of default account
+    if theFolderName is not "" then
+      if exists folder theFolderName then set theFolder to folder theFolderName
+    end if
+    if shared of theFolder then return "shared|" & (name of theFolder)
+    make new note at theFolder with properties {body:theBody}
+    return "written|" & (name of theFolder)
+  end tell
+end run"#;
 
 /// The most people one mail goes to.
 const AT_MOST_TO: usize = 10;
@@ -2760,6 +2890,55 @@ fn ask_the_mac_with(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn writing_a_note_is_a_switch_of_its_own_and_never_stops_to_ask() {
+        assert_eq!(needs("write_note"), "notes");
+        assert!(KNOWN.iter().any(|c| c.id == "notes"));
+        // A new note in their own Notes goes nowhere, so there is nobody to
+        // ask about: the switch is the whole of the permission.
+        let note = json!({ "title": "External SSD check", "text": "SSD is working" });
+        assert!(!asks_first("write_note", &note, &[]));
+        assert!(switched_off("write_note").contains("nothing was written"));
+        assert_eq!(
+            in_plain_words("write_note", &note),
+            "Writing a note: External SSD check"
+        );
+    }
+
+    #[test]
+    fn a_note_is_written_as_text_whatever_is_in_it() {
+        assert_eq!(
+            as_a_note(
+                "SSD <check> & more",
+                "SSD is working\n\n1,863 GB free <b>not bold</b>"
+            ),
+            "<div><h1>SSD &lt;check&gt; &amp; more</h1></div><div>SSD is working</div>\
+             <div><br></div><div>1,863 GB free &lt;b&gt;not bold&lt;/b&gt;</div>"
+        );
+    }
+
+    #[test]
+    fn the_script_that_writes_a_note_is_one_notes_understands() {
+        // Compiled against Notes' own dictionary and never run.
+        if !std::path::Path::new("/System/Applications/Notes.app").exists() {
+            return;
+        }
+        let out = std::env::temp_dir().join(format!("errand-note-{}.scpt", std::process::id()));
+        let compiled = Command::new("osacompile")
+            .arg("-o")
+            .arg(&out)
+            .arg("-e")
+            .arg(THE_SCRIPT_FOR_A_NOTE)
+            .output()
+            .expect("osacompile runs");
+        let _ = std::fs::remove_file(&out);
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+    }
+
     #[test]
     fn mail_goes_unasked_only_to_an_address_they_wrote_themselves() {
         let they_said =

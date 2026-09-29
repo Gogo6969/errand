@@ -1060,7 +1060,8 @@ mod tests {
                 "search_mail",
                 "what_is_on",
                 "read_web_page",
-                "send_mail"
+                "send_mail",
+                "write_note"
             ]
         );
         for tool in &tools {
