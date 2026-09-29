@@ -4860,6 +4860,9 @@ export async function aLongConversation() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
   const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  // The line under the name, which a long conversation below squeezed until
+  // its words were cut through the middle.
+  check("the line saying what an agent is for never gives up its height", getComputedStyle(document.getElementById("purpose")).flexShrink === "0", getComputedStyle(document.getElementById("purpose")).flexShrink);
   FIXTURE.lines["talk-long"] = Array.from({ length: 450 }, (_, i) => ({
     seq: i + 1,
     at: Date.now() - (450 - i) * 60000,

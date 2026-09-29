@@ -916,6 +916,11 @@ main > aside, main > #title, main > #composer { flex: none; }
 
 /* What it is for, under its name, where no button competes for the room. */
 #purpose {
+  /* Never shrunk. The column is a flex column, a long conversation below asks
+     everything in it to give up a little height, and this line, hiding its
+     overflow, could: its words were cut through the middle by the first
+     bubble underneath. */
+  flex: none;
   margin: 0;
   padding: 0 18px 10px 50px;
   border-bottom: 1px solid var(--rule);
