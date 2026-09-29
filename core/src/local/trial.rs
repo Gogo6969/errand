@@ -1142,7 +1142,7 @@ fn today() -> chrono::NaiveDate {
 /// seconds since 1970. A model checking which weekday a date is must get the
 /// weekday, or it concludes its tools are broken and keeps checking.
 fn a_date(world: &World, rest: &str) -> String {
-    let words: Vec<String> = rest.split_whitespace().map(unquoted).collect();
+    let words = shell_words(rest);
     let minutes = world.clock.rem_euclid(24 * 60);
     let mut day = today() + chrono::Duration::days(world.clock.div_euclid(24 * 60));
     let mut clock =
@@ -1165,19 +1165,29 @@ fn a_date(world: &World, rest: &str) -> String {
         }
     }
     let when = day.and_time(clock);
-    match words.iter().rev().find(|w| w.starts_with('+')) {
-        Some(format) if format == "+%s" => {
-            // EDT is four hours behind.
-            (when + chrono::Duration::hours(4))
-                .and_utc()
-                .timestamp()
-                .to_string()
-        }
-        Some(format) => when.format(&format[1..]).to_string(),
-        None => when
-            .format("%a %b %e %H:%M:%S EDT %Y")
-            .to_string()
-            .replace("  ", " "),
+    let plain = when
+        .format("%a %b %e %H:%M:%S EDT %Y")
+        .to_string()
+        .replace("  ", " ");
+    let Some(format) = words.iter().rev().find(|w| w.starts_with('+')) else {
+        return plain;
+    };
+    // The Mac is on EDT, four hours behind UTC. Asked for the zone (`%Z`,
+    // `%z`), a time without one made chrono fail, and `to_string` panicked
+    // in the middle of the night's run. A conversion it does not know gets
+    // the plain answer, never a crash.
+    let Some(when) = chrono::FixedOffset::west_opt(4 * 3600)
+        .and_then(|edt| when.and_local_timezone(edt).single())
+    else {
+        return plain;
+    };
+    let mut said = String::new();
+    match std::fmt::Write::write_fmt(
+        &mut said,
+        format_args!("{}", when.format(&format[1..].replace("%Z", "EDT"))),
+    ) {
+        Ok(()) => said,
+        Err(_) => plain,
     }
 }
 
@@ -1259,6 +1269,39 @@ fn where_in(world: &World, path: &str) -> String {
 /// Words without the quotes a shell would take off them.
 fn unquoted(said: &str) -> String {
     said.trim().trim_matches(['"', '\'']).to_string()
+}
+
+/// Words the way a shell splits them: a quote keeps its spaces in one word.
+/// `date "+%Y-%m-%d %H:%M"` split on spaces printed the day without the time.
+fn shell_words(said: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    for c in said.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => word.push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                started = true;
+            }
+            None if c.is_whitespace() => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            None => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    words
 }
 
 /// This Mac's own disk, with nothing external attached.
@@ -1769,6 +1812,17 @@ mod tests {
         );
         assert_eq!(a_mac(&mut world, "date -v+3d +%Y-%m-%d"), "2026-10-02");
         assert!(a_mac(&mut world, "echo \"now-$(date +%s)\"").starts_with("now-17"));
+        // The zone, and conversions chrono does not know, answer too.
+        assert_eq!(
+            a_mac(&mut world, "date \"+%Y-%m-%d %H:%M %Z\""),
+            "2026-09-29 09:00 EDT"
+        );
+        assert_eq!(a_mac(&mut world, "date +%z"), "-0400");
+        assert_eq!(a_mac(&mut world, "date +%s"), "1790686800");
+        assert_eq!(
+            a_mac(&mut world, "date +%N"),
+            "Tue Sep 29 09:00:00 EDT 2026"
+        );
         assert!(a_mac(&mut world, "cal 10 2026").contains("October 2026"));
         assert!(a_mac(&mut world, "cal 10 2026").contains(" 1  2  3"));
         assert!(a_mac(&mut world, "python3 -c 'print(1)'").starts_with("exited 1"));
