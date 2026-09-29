@@ -221,6 +221,26 @@
       </div>
 
       <!--
+        Where Errand's notifications are switched, always here. macOS's own
+        search does not always find an app's page, and the setup check only
+        mentions it after something finished unannounced.
+      -->
+      <div class="card" id="notifications-card">
+        <div class="card-head">
+          <div>
+            <h2>Notifications</h2>
+            <p id="notifications-says">
+              Errand says when an errand finishes or needs you, and puts a count on
+              its icon in the Dock.
+            </p>
+          </div>
+          <div class="doing">
+            <button id="notifications-open" type="button">Open Errand's notification settings</button>
+          </div>
+        </div>
+      </div>
+
+      <!--
         Said rather than set: how long a finished task stays in the menu is a
         choice nobody changes, and a knob nobody changes is one more thing to
         read past on the way to the ones that matter.

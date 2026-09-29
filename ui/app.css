@@ -930,6 +930,9 @@ main > aside, main > #title, main > #composer { flex: none; }
 #words-go[data-state="refused"] { color: var(--wrong); }
 #words-go[data-state="refused"]::before { background: var(--wrong); }
 
+/* Off, said in the colour of something that needs doing. */
+#notifications-says[data-state="refused"] { color: var(--wrong); }
+
 /* A switch among the fields of who it is, said in words rather than shouted. */
 #whois .keep-local {
   flex: 0 0 auto;

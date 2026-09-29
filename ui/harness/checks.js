@@ -5097,6 +5097,48 @@ export async function keepingItLocal() {
     words.textContent,
   );
 
+  // Notifications, always in Settings, with the way straight to Errand's page.
+  document.getElementById("setup").click();
+  await settle(300);
+  const says = document.getElementById("notifications-says");
+  check(
+    "Settings says whether macOS lets Errand notify, off in so many words",
+    says.dataset.state === "refused" && /Off in macOS/.test(says.textContent),
+    `${says.dataset.state}: ${says.textContent}`,
+  );
+  document.getElementById("notifications-open").click();
+  await settle(150);
+  check(
+    "and its button opens Errand's own page of Notifications in System Settings",
+    asked.some((a) => a.name === "open_settings" && /Notifications-Settings\.extension\?id=com\.errandai\.errand/.test(a.args?.pane || "")),
+    JSON.stringify(asked.filter((a) => a.name === "open_settings").slice(-1)),
+  );
+  document.getElementById("models-done").click();
+  await settle(150);
+
+  // A note from when they were off, read once they are on.
+  const line = (seq, kind, text) => ({ seq, at: Date.now() - (10 - seq) * 60000, kind, text, call: null, tool: null, outcome: null });
+  FIXTURE.lines["talk-notified"] = [
+    line(1, "mine", "Check the disk"),
+    line(2, "said", "It is 81% full."),
+    line(3, "note", "Notifications are off for Errand in macOS, so nothing says when an errand finishes."),
+  ];
+  FIXTURE.conversations["agent-outside"].push({ id: "talk-notified", agent: "agent-outside", name: "Notified", opened: true });
+  FIXTURE.notifying = "allowed";
+  document.getElementById("setup").click();
+  await settle(250);
+  document.getElementById("models-done").click();
+  await settle(100);
+  await openTalk("talk-notified");
+  await settle(200);
+  const shown = document.getElementById("messages").textContent;
+  check(
+    "an old note that notifications were off says so once they are on",
+    /They are on now/.test(shown) && !/Notifications are off for Errand/.test(shown),
+    shown.slice(-160),
+  );
+  delete FIXTURE.notifying;
+
   // As it was.
   FIXTURE.offered = FIXTURE.offered.filter((o) => o.id !== "o-hosted");
   delete FIXTURE.settings.errand_model;

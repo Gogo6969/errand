@@ -555,6 +555,11 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
                 : { stays: true, model: "", refused: "This teammate keeps its words on your network, and Errand's model sends them elsewhere." },
             );
           }
+          case "notifications":
+            return Promise.resolve({
+              state: fixture.notifying || "refused",
+              settings: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.errandai.errand",
+            });
           case "keep_local": {
             const a = fixture.agents.find((x) => x.id === args.id);
             if (a) a.keep_local = args.on;

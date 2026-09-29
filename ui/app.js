@@ -351,6 +351,8 @@ const el = {
   whoisLocal: document.getElementById("whois-local"),
   wordsGo: document.getElementById("words-go"),
   localModel: document.getElementById("local-model"),
+  notificationsSays: document.getElementById("notifications-says"),
+  notificationsOpen: document.getElementById("notifications-open"),
   localModelSays: document.getElementById("local-model-says"),
   notesSummary: document.getElementById("notes-summary"),
   notesList: document.getElementById("notes-list"),
@@ -794,6 +796,7 @@ async function alsoAsk() {
  */
 async function catchUp() {
   await readTheSettings();
+  notifyingNow = (await invoke("notifications").catch(() => null))?.state || null;
   await readTasks();
   standingNow = (await invoke("standing").catch(() => [])) || [];
   const known = await invoke("agents");
@@ -1420,6 +1423,17 @@ function fromStore(line, live = false) {
   return one && { ...one, at: line.at };
 }
 
+/**
+ * A note as it reads now. One saying notifications are off, written while
+ * they were, stayed in the conversation looking like today's news after they
+ * were switched on: it says what it was once they are.
+ */
+function settledNews(line) {
+  const stale =
+    line.kind === "note" && notifyingNow === "allowed" && line.text.startsWith("Notifications are off for Errand");
+  return stale ? "Notifications were off for Errand when this was written. They are on now." : line.text;
+}
+
 function fromStoreLine(line, live = false) {
   switch (line.kind) {
     case "mine":
@@ -1519,7 +1533,7 @@ function fromStoreLine(line, live = false) {
       return {
         kind: "ended",
         failed: line.kind === "ended",
-        text: line.text,
+        text: settledNews(line),
         seq: line.seq,
         // A turn the app cut off by closing, rather than one that failed. It
         // is the only ending somebody can do anything about, so it is the only
@@ -6010,6 +6024,7 @@ async function showModels() {
   el.models.hidden = false;
   drawEngines();
   drawLocalModel();
+  drawNotifications();
   el.presets.replaceChildren(
     ...KNOWN_PLACES.map((place) => {
       const b = document.createElement("button");
@@ -6209,6 +6224,38 @@ el.whoisLocal.addEventListener("change", async () => {
     complain(String(why));
   }
   drawWordsGo();
+});
+
+/** Whether macOS lets Errand say when an errand finishes, and the way to its switch. */
+let notificationsPane = null;
+/**
+ * Whether macOS lets Errand notify, as last asked: at opening, and each time
+ * Settings is. An old note saying they were off is history once they are on.
+ */
+let notifyingNow = null;
+async function drawNotifications() {
+  let now;
+  try {
+    now = await invoke("notifications");
+  } catch {
+    return;
+  }
+  if (!now) return;
+  notificationsPane = now.settings;
+  notifyingNow = now.state;
+  const says = {
+    allowed: "On. Errand says when an errand finishes or needs you, and puts a count on its icon in the Dock.",
+    refused: "Off in macOS, so errands finish quietly. Open Errand's notification settings and switch on Allow notifications.",
+    "not-answered": "macOS has not asked yet. Open Errand's notification settings to switch them on.",
+    unknown: "macOS did not say whether they are on. Open Errand's notification settings to see.",
+  };
+  el.notificationsSays.textContent = says[now.state] || says.unknown;
+  el.notificationsSays.dataset.state = now.state;
+}
+
+el.notificationsOpen.addEventListener("click", () => {
+  if (!notificationsPane) return;
+  invoke("open_settings", { pane: notificationsPane }).catch((why) => complain(String(why)));
 });
 
 /** The models teammates kept local may run on: only those served here. */

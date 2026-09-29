@@ -6442,6 +6442,35 @@ async fn checkup(app: AppHandle, held: State<'_, Held>) -> Result<Vec<doctor::Fi
     Ok(doctor::everything(&held.store, &here, &here, may).await)
 }
 
+/// Whether macOS lets Errand say when an errand finishes, asked now, and the
+/// pane of System Settings where that is switched, open at Errand's own page.
+///
+/// For a card in Settings that is always there. The setup check says it only
+/// when they are off and only after something finished unannounced, which is
+/// a poor time to find out where the switch lives.
+#[derive(Serialize)]
+struct NotificationsNow {
+    /// `allowed`, `refused`, `not-answered` or `unknown`.
+    state: &'static str,
+    settings: &'static str,
+}
+
+#[tauri::command]
+async fn notifications() -> NotificationsNow {
+    let now = tauri::async_runtime::spawn_blocking(onscreen::may_show)
+        .await
+        .unwrap_or(doctor::Notifying::Unknown);
+    NotificationsNow {
+        state: match now {
+            doctor::Notifying::Allowed => "allowed",
+            doctor::Notifying::Refused => "refused",
+            doctor::Notifying::NotAnswered => "not-answered",
+            doctor::Notifying::Unknown => "unknown",
+        },
+        settings: doctor::NOTIFICATION_SETTINGS,
+    }
+}
+
 /// Open System Settings at the pane a finding says its fix is done in.
 ///
 /// That scheme and nothing else. A command that opens whatever it is handed
@@ -7530,6 +7559,7 @@ pub fn run() {
             finish_task,
             keep_local,
             where_words_go,
+            notifications,
             discard_draft,
             use_engine,
             runs,
