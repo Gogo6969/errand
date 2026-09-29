@@ -1012,7 +1012,12 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // times because nothing in here looked. The answer is left as it
             // is. What the disk says is a line of the app's own underneath it.
             if let Event::Done { said, .. } = &event {
-                for not_so in errand_core::claims::what_is_not_so(&store, &id, said) {
+                // And an answer that says it looked, from a turn that ran
+                // nothing, says so underneath.
+                let findings = errand_core::claims::what_is_not_so(&store, &id, said)
+                    .into_iter()
+                    .chain(errand_core::claims::checked_nothing(&store, &id, said));
+                for not_so in findings {
                     match store.the_app_says(&id, "note", &not_so) {
                         Ok(line) => {
                             let _ = app.emit(

@@ -330,6 +330,12 @@ async fn conversation(
             }
             Turn::Stop => break,
         };
+        // Today, every turn: an engine can stay open for days, and the opening
+        // it was started with would go on saying the day it was started.
+        with_opening(
+            &mut history,
+            opening_instructions(&home, &outside, &knows, &asks),
+        );
         // Where the conversation stood before this. An aside is put back to
         // here when it is done, so nothing the app asked on its own account is
         // left in front of the model when somebody says the next thing.
@@ -1226,7 +1232,39 @@ pub(crate) fn opening_instructions(
     knows: &crate::memory::Knowing,
     asks: &str,
 ) -> String {
-    opening_instructions_as(home, outside, knows, asks, HOW_TO_WORK_WITHIN_LIMITS)
+    opening_instructions_as(
+        home,
+        outside,
+        knows,
+        asks,
+        HOW_TO_WORK_WITHIN_LIMITS,
+        &today_is(chrono::Local::now()),
+    )
+}
+
+/// What day it is, and on which clock, for the opening.
+///
+/// A model knows neither. Asked whether a backup had finished, one put
+/// "today" at 23 February, reported the last backup as four months old and
+/// dated it three weeks ahead. The day and not the minute, so the opening
+/// stays the same all day and what a server has kept of it stays good; for
+/// the minute there is `date`, and the opening says so.
+pub(crate) fn today_is(now: chrono::DateTime<chrono::Local>) -> String {
+    let zone = std::fs::read_link("/etc/localtime").ok().and_then(|p| {
+        p.to_str()
+            .and_then(|s| s.split("zoneinfo/").nth(1).map(str::to_string))
+    });
+    let offset = now.format("%:z");
+    let day = now.format("%A %-d %B %Y");
+    match zone {
+        Some(zone) => format!(
+            "Today is {day}. The clock here is on {zone} time (UTC{offset}); for the time now, \
+             run `date`."
+        ),
+        None => {
+            format!("Today is {day}. The clock here is UTC{offset}; for the time now, run `date`.")
+        }
+    }
 }
 
 /// How to go about a job, as the opening said it until 29 September, kept so
@@ -1298,6 +1336,7 @@ pub(crate) fn opening_instructions_as(
     knows: &crate::memory::Knowing,
     asks: &str,
     how: &str,
+    today: &str,
 ) -> String {
     // Who it is, before anything else. The first "You are" in the prompt is
     // the one a small model takes for its name, and while the identity rode
@@ -1346,7 +1385,7 @@ pub(crate) fn opening_instructions_as(
     };
 
     format!(
-        "{who} {how}\n\n\
+        "{who} {today}\n\n{how}\n\n\
          Your working directory is {}. Paths are relative to it and it is the only \
          place you write.\n\n\
          {wall}\n\n\

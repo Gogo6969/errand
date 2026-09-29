@@ -381,6 +381,73 @@ pub fn what_to_say(wrong: &Wrong) -> String {
     }
 }
 
+/// Whether an answer says it looked: checked, ran, found or confirmed
+/// something, rather than talking about it.
+///
+/// The words a report is made of. "`tmutil destinationinfo` confirms it is set
+/// up" and "the last backup completed successfully" are both claims that
+/// something was looked at. Asking somebody to confirm something is not, and
+/// nor is telling them which command to run, so a command alone does not
+/// count: it has to be said to have shown, reported or returned something.
+pub fn claims_to_have_checked(said: &str) -> bool {
+    let lower = said.to_lowercase();
+    const LOOKED: &[&str] = &[
+        "confirms",
+        "confirmed",
+        "verified",
+        "i checked",
+        "i've checked",
+        "i have checked",
+        "completed successfully",
+        "finished successfully",
+        "backup completed",
+        "is mounted",
+        "the output",
+        "i ran ",
+        "ran `",
+    ];
+    if LOOKED.iter().any(|w| lower.contains(w)) {
+        return true;
+    }
+    let quotes_a_command = [
+        "`tmutil",
+        "`df",
+        "`ls",
+        "`ssh",
+        "`diskutil",
+        "`du ",
+        "`stat",
+        "`ps ",
+        "`ping",
+        "`log ",
+    ]
+    .iter()
+    .any(|c| lower.contains(c));
+    let with_a_result = ["reports", "shows", "returned", "says "]
+        .iter()
+        .any(|w| lower.contains(w));
+    quotes_a_command && with_a_result
+}
+
+/// What is said under an answer that claims to have looked, when nothing ran.
+///
+/// Asked whether a backup had finished, a model answered in eight seconds with
+/// the disk's make and size, two `tmutil` results it quoted, the backup's
+/// times and a date three weeks ahead, having run nothing at all. The answer
+/// is left as it is; this goes under it.
+pub const CHECKED_NOTHING: &str = "Answered without running anything: nothing in this answer \
+    was checked just now, whatever it says it confirmed.";
+
+/// Whether to say that, about the turn of this conversation that just ended.
+pub fn checked_nothing(store: &Store, conversation: &str, said: &str) -> Option<String> {
+    if !claims_to_have_checked(said) {
+        return None;
+    }
+    let began = store.when_the_turn_began(conversation).ok().flatten()?;
+    let steps = store.steps_since(conversation, began).ok()?;
+    (steps == 0).then(|| CHECKED_NOTHING.to_string())
+}
+
 /// Everything wrong with what an answer claims, ready to be written down.
 ///
 /// The agent's own folder and the folders allowed to it come from the store,
@@ -749,6 +816,43 @@ fn tidy(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_answer_that_says_it_looked_is_told_apart_from_one_that_does_not() {
+        let made_up = "Backups are finished.\n- `tmutil destinationinfo` confirms it is the \
+                       destination.\n- The last backup completed successfully.";
+        assert!(claims_to_have_checked(made_up));
+        assert!(claims_to_have_checked("`df -h` shows 81% used."));
+        assert!(claims_to_have_checked("I checked: the disk is 81% full."));
+        // Not a claim of having looked.
+        assert!(!claims_to_have_checked("391."));
+        assert!(!claims_to_have_checked(
+            "Could you confirm which disk you mean?"
+        ));
+        assert!(!claims_to_have_checked(
+            "Run `df -h` in Terminal to see how full it is."
+        ));
+    }
+
+    #[test]
+    fn a_turn_that_ran_nothing_and_claims_it_looked_is_said_to_have_checked_nothing() {
+        let store = Store::in_memory().unwrap();
+        store
+            .begin("a", "Disk Watch", std::path::Path::new("/tmp/disk-watch"))
+            .unwrap();
+        store.begin_conversation("t", "a", "First").unwrap();
+        store.asked("t", "Has the backup finished?").unwrap();
+        let made_up = "The last backup completed successfully.";
+        assert_eq!(
+            checked_nothing(&store, "t", made_up).as_deref(),
+            Some(CHECKED_NOTHING)
+        );
+        // A step taken this turn, and there is nothing to say.
+        store
+            .the_app_says("t", "doing", "Running tmutil status")
+            .unwrap();
+        assert_eq!(checked_nothing(&store, "t", made_up), None);
+    }
 
     fn may<'a>(own: &'a Path, also: &'a [PathBuf]) -> Writable<'a> {
         Writable {

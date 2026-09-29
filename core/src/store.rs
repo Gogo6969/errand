@@ -2579,6 +2579,18 @@ impl Store {
         rows.next().transpose().map_err(Into::into)
     }
 
+    /// How many steps a conversation has taken since a moment: tools run,
+    /// whatever came of them.
+    pub fn steps_since(&self, conversation: &str, since: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let taken: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM lines WHERE conversation = ? AND kind = 'doing' AND at >= ?",
+            params![conversation, since],
+            |r| r.get(0),
+        )?;
+        Ok(usize::try_from(taken).unwrap_or(0))
+    }
+
     /// Say that it has ended, however it ended.
     pub fn a_turn_ended(&self, conversation: &str) -> Result<()> {
         self.conn.lock().unwrap().execute(
