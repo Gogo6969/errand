@@ -4929,20 +4929,13 @@ export async function theOverview() {
     `${done.textContent}`,
   );
 
-  const days = document.getElementById("finished-days");
-  const says = document.getElementById("finished-days-says");
-  days.value = "3";
-  days.dispatchEvent(new Event("change"));
-  await settle(150);
+  // How long a finished task stays in the menu is said in Settings, not set.
+  const said = document.getElementById("finished-tasks");
   check(
-    "how long a finished task stays in the task menu is a setting that is kept",
-    asked.some((a) => a.name === "set_setting" && a.args?.key === "finished_kept_days" && a.args?.value === "3") && /3 days/.test(says.textContent),
-    says.textContent,
+    "Settings says a finished task stays in the menu for a week and nothing is deleted, with nothing to set",
+    said && /for a week/.test(said.textContent) && /Nothing is deleted/.test(said.textContent) && !said.querySelector("input"),
+    said ? said.textContent.trim().slice(0, 120) : "no card",
   );
-  days.value = "999";
-  days.dispatchEvent(new Event("change"));
-  await settle(150);
-  check("and one that makes no sense is refused, saying why", /between 1 and 365/.test(says.textContent) && days.value === "3", `${says.textContent} / ${days.value}`);
   return found;
 }
 

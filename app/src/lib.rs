@@ -6672,7 +6672,7 @@ async fn finish(held: State<'_, Held>, id: String, finished: bool) -> Result<(),
 }
 
 /// The settings the window may read and write, and nothing else.
-const SETTINGS: &[&str] = &["finished_kept_days", "errand_model", "local_model"];
+const SETTINGS: &[&str] = &["errand_model", "local_model"];
 
 /// The model every teammate works on, when one has been chosen in Settings:
 /// the line of the picker it names, as the engine and its settings.
@@ -6881,18 +6881,6 @@ async fn setting(held: State<'_, Held>, key: String) -> Result<Option<String>, S
 #[tauri::command]
 async fn set_setting(held: State<'_, Held>, key: String, value: String) -> Result<(), String> {
     match key.as_str() {
-        "finished_kept_days" => {
-            let days: i64 = value
-                .trim()
-                .parse()
-                .map_err(|_| "say it as a number of days".to_string())?;
-            if !(1..=365).contains(&days) {
-                return Err("somewhere between 1 and 365 days".to_string());
-            }
-            held.store
-                .set_setting(&key, &days.to_string())
-                .map_err(|e| e.to_string())
-        }
         // A line of the picker, by its id: nothing else can be answered with.
         "errand_model" => {
             let known = held

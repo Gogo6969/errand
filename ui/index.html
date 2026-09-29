@@ -220,22 +220,23 @@
         <p id="at-login-says" class="quiet"></p>
       </div>
 
-      <div class="card">
+      <!--
+        Said rather than set: how long a finished task stays in the menu is a
+        choice nobody changes, and a knob nobody changes is one more thing to
+        read past on the way to the ones that matter.
+      -->
+      <div class="card" id="finished-tasks">
         <div class="card-head">
           <div>
             <h2>Finished tasks</h2>
             <p>
               A task you mark as finished stays in its teammate's task menu with a
-              tick. After this many days it leaves the menu, and stays in the
+              tick for a week. After that it leaves the menu and stays in the
               Overview, where it can still be opened or marked as not finished.
-              Teammates themselves are never finished.
+              Nothing is deleted. Teammates themselves are never finished.
             </p>
           </div>
         </div>
-        <label class="days">Keep them in the menu for
-          <input id="finished-days" type="number" min="1" max="365" step="1" value="7" />
-          days</label>
-        <p id="finished-days-says" class="quiet"></p>
       </div>
     </section>
 

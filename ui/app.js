@@ -194,7 +194,8 @@ let showing = null; // the conversation on screen
  * rest of what the page holds, because the list is drawn before the code
  * that reads the setting has run.
  */
-let finishedKeptDays = 7;
+/** How long a finished task stays in its teammate's task menu, in days. */
+const FINISHED_KEPT_DAYS = 7;
 /**
  * Every routine and watch, every agent's, as the app last said. Read when the
  * page opens and whenever one changes, and shown as a mark beside each agent
@@ -235,8 +236,6 @@ const el = {
   overviewShow: document.getElementById("overview-show"),
   taskDone: document.getElementById("task-done"),
   errandModelSays: document.getElementById("errand-model-says"),
-  finishedDays: document.getElementById("finished-days"),
-  finishedDaysSays: document.getElementById("finished-days-says"),
   reachableList: document.getElementById("reachable-list"),
   atLogin: document.getElementById("at-login"),
   atLoginSays: document.getElementById("at-login-says"),
@@ -1021,7 +1020,7 @@ function drawTalks() {
   const theirs = [...talks.values()].filter(
     (t) =>
       t.agent === showingAgent &&
-      (t.id === showing || stillInTheList(t, now, finishedKeptDays)),
+      (t.id === showing || stillInTheList(t, now, FINISHED_KEPT_DAYS)),
   );
   el.talks.replaceChildren(
     ...theirs.map((t) => {
@@ -6158,13 +6157,6 @@ el.setup.addEventListener("click", showModels);
 async function readTheSettings() {
   errandModel = (await invoke("setting", { key: "errand_model" }).catch(() => null)) || null;
   localModel = (await invoke("setting", { key: "local_model" }).catch(() => null)) || null;
-  try {
-    const days = Number(await invoke("setting", { key: "finished_kept_days" }));
-    if (days >= 1) finishedKeptDays = days;
-  } catch {
-    // The default stands, which is what an unset one would say anyway.
-  }
-  el.finishedDays.value = String(finishedKeptDays);
 }
 
 /**
@@ -6250,19 +6242,6 @@ el.localModel.addEventListener("change", async () => {
     drawLocalModel();
   }
   drawWordsGo();
-});
-
-el.finishedDays.addEventListener("change", async () => {
-  const days = Math.round(Number(el.finishedDays.value));
-  try {
-    await invoke("set_setting", { key: "finished_kept_days", value: String(days) });
-    finishedKeptDays = days;
-    el.finishedDaysSays.textContent = `Kept. A finished task stays in its teammate's task menu for ${days} day${days === 1 ? "" : "s"}.`;
-    drawThreads();
-  } catch (why) {
-    el.finishedDaysSays.textContent = String(why);
-    el.finishedDays.value = String(finishedKeptDays);
-  }
 });
 
 /**
