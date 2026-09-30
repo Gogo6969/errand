@@ -153,6 +153,12 @@ fn profile_keeping_out(home: &Path, inside: Inside, errand: Option<&Path>) -> St
 /// Where SSH keeps its keys, relative to the home directory.
 const SSH: &str = ".ssh";
 
+/// Every copy of a key, wherever it is kept: anything inside a folder called
+/// `.ssh`, and any file named the way `ssh-keygen` names a private key. The
+/// public halves end in `.pub` and are not matched.
+const KEYS_ANYWHERE: &str =
+    "(regex #\"/\\.ssh(/|$)\")\n  (regex #\"/id_(rsa|dsa|ecdsa|ed25519)(_sk)?$\")";
+
 /// Reading the person's private keys, kept from every errand, walled or asking.
 ///
 /// Reading was left open because an errand that can read what the person can
@@ -172,9 +178,16 @@ const SSH: &str = ".ssh";
 /// hosts, the public halves. That way round, so a key made after this profile
 /// was written is kept out too. A key kept elsewhere is kept out when the
 /// config names it, or when something in `~/.ssh` is a link to it.
+///
+/// And before any of that, every other copy: any folder called `.ssh`
+/// wherever it is, and any file with a private key's usual name. A teammate
+/// asked about a disk listed the Time Machine backup of the person's home,
+/// `.ssh` and all, and the key in that backup is the same key. Only the live
+/// `~/.ssh` gets anything back, by the rules after these, which win.
 fn keys_kept_out(theirs: &Path) -> String {
+    let every_copy = format!("\n(deny file-read-data\n  {KEYS_ANYWHERE})");
     let Ok(ssh) = theirs.join(SSH).canonicalize() else {
-        return String::new();
+        return every_copy;
     };
     let mut readable = vec![format!("  (literal {})", quoted(&ssh))];
     let mut elsewhere: Vec<PathBuf> = Vec::new();
@@ -210,7 +223,7 @@ fn keys_kept_out(theirs: &Path) -> String {
         }
     }
     let mut kept = format!(
-        "\n(deny file-read-data (subpath {}))\n(allow file-read-data\n{})",
+        "{every_copy}\n(deny file-read-data (subpath {}))\n(allow file-read-data\n{})",
         quoted(&ssh),
         readable.join("\n")
     );
@@ -1012,6 +1025,20 @@ mod tests {
         .unwrap();
         std::fs::write(ssh.join("known_hosts"), "192.0.2.1 ssh-ed25519 AAAA\n").unwrap();
         std::os::unix::fs::symlink(&linked_elsewhere, ssh.join("id_through_a_link")).unwrap();
+        // The copies nobody thinks of: a backup of the whole home folder, the
+        // way Time Machine keeps one, and a key left in Downloads.
+        let backed_up = theirs
+            .join("Backups")
+            .join("2026-09-30-181132.previous")
+            .join("Data")
+            .join("Users")
+            .join("me")
+            .join(".ssh");
+        std::fs::create_dir_all(&backed_up).unwrap();
+        std::fs::copy(&key, backed_up.join("id_test")).unwrap();
+        std::fs::copy(ssh.join("config"), backed_up.join("config")).unwrap();
+        std::fs::create_dir_all(theirs.join("Downloads")).unwrap();
+        std::fs::copy(&key, theirs.join("Downloads").join("id_ed25519")).unwrap();
 
         // An agent of the test's own, holding the key.
         let socket = ssh.join("agent").join("test.sock");
@@ -1059,6 +1086,9 @@ mod tests {
             &later,
             &kept_elsewhere,
             &ssh.join("id_through_a_link"),
+            &backed_up.join("id_test"),
+            &backed_up.join("config"),
+            &theirs.join("Downloads").join("id_ed25519"),
         ] {
             let read = run(&format!("cat {}", quoted(secret)));
             assert!(

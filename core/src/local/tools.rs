@@ -258,6 +258,90 @@ pub fn in_plain_words(name: &str, args: &serde_json::Value) -> String {
     }
 }
 
+/// What a command does to a disk, when it does more than look at one.
+///
+/// Asked whether an SSD was up, a teammate set never to ask went on to mount
+/// a Time Machine snapshot and then unmounted and mounted the backup disk
+/// itself, a minute after a backup had finished. Looking is what it was asked
+/// for. So a command that mounts, unmounts, ejects, erases or partitions a
+/// disk, attaches or detaches an image, or changes Time Machine is asked about
+/// whatever the posture, and the ones that only list and report are not.
+pub fn touches_a_disk(name: &str, args: &serde_json::Value) -> Option<String> {
+    if !matches!(name, "run_command" | "start_command") {
+        return None;
+    }
+    let command = args.get("command")?.as_str()?;
+    for stage in command.split([';', '\n', '|', '&', '(', ')', '`']) {
+        let words: Vec<String> = stage
+            .split_whitespace()
+            .map(|w| w.trim_matches(['"', '\'']).to_string())
+            .collect();
+        // Past what runs a program rather than being one.
+        let Some(at) = words.iter().position(|w| {
+            !w.contains('=')
+                && !["sudo", "nohup", "command", "exec", "time", "$"].contains(&w.as_str())
+        }) else {
+            continue;
+        };
+        let program = words[at].rsplit('/').next().unwrap_or_default().to_string();
+        let rest = &words[at + 1..];
+        let verbs: Vec<String> = rest
+            .iter()
+            .filter(|w| !w.starts_with('-'))
+            .map(|w| w.to_ascii_lowercase())
+            .collect();
+        let verb = verbs.first().map(String::as_str);
+        let changes = match program.as_str() {
+            "diskutil" => match verb {
+                None | Some("list" | "info" | "information" | "activity" | "listfilesystems") => {
+                    false
+                }
+                Some("apfs" | "cs" | "corestorage" | "appleraid" | "ar") => !matches!(
+                    verbs.get(1).map(String::as_str),
+                    None | Some("list" | "listsnapshots" | "listvolumegroups" | "listcryptousers")
+                ),
+                Some(_) => true,
+            },
+            // On its own it lists what is mounted.
+            "mount" => !rest.is_empty(),
+            "umount" | "asr" | "gpt" | "fdisk" | "pdisk" => true,
+            "hdiutil" => !matches!(
+                verb,
+                None | Some("info" | "imageinfo" | "isencrypted" | "plugins" | "help" | "pmap")
+            ),
+            "tmutil" => !matches!(
+                verb,
+                None | Some(
+                    "status"
+                        | "latestbackup"
+                        | "listbackups"
+                        | "destinationinfo"
+                        | "machinedirectory"
+                        | "listlocalsnapshots"
+                        | "listlocalsnapshotdates"
+                        | "compare"
+                        | "calculatedrift"
+                        | "uniquesize"
+                        | "isexcluded"
+                        | "version"
+                        | "help"
+                )
+            ),
+            "dd" => rest.iter().any(|w| w.starts_with("of=/dev/")),
+            p => p.starts_with("mount_") || p.starts_with("newfs"),
+        };
+        if changes {
+            return Some(match verb {
+                Some(verb) if !["mount", "umount", "dd"].contains(&program.as_str()) => {
+                    format!("{program} {verb}")
+                }
+                _ => program,
+            });
+        }
+    }
+    None
+}
+
 /// The thing itself, whole, for a question that has to be judged.
 pub fn the_thing_itself(name: &str, args: &serde_json::Value) -> String {
     let get = |k: &str| {
@@ -941,6 +1025,48 @@ fn one_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_that_changes_a_disk_is_told_from_one_that_only_looks() {
+        let run = |command: &str| touches_a_disk("run_command", &json!({ "command": command }));
+        // What a teammate set never to ask did to the backup disk.
+        assert_eq!(
+            run("diskutil unmount disk7s2 && diskutil mount disk7s2").as_deref(),
+            Some("diskutil unmount")
+        );
+        assert!(run("sudo diskutil eraseDisk APFS Empty disk9").is_some());
+        assert!(run("diskutil apfs deleteSnapshot disk7s2 -name x").is_some());
+        assert!(run("mount -t apfs /dev/disk7s2 /Volumes/x").is_some());
+        assert!(run("umount /Volumes/TimeMachine").is_some());
+        assert!(run("/usr/bin/hdiutil attach clip.dmg").is_some());
+        assert!(run("tmutil stopbackup").is_some());
+        assert!(run("dd if=/dev/zero of=/dev/disk9 bs=1m").is_some());
+        assert!(touches_a_disk(
+            "start_command",
+            &json!({ "command": "tmutil startbackup --block" })
+        )
+        .is_some());
+        // Looking, which is what it was asked for, stays free.
+        for looking in [
+            "diskutil list",
+            "diskutil info /Volumes/TimeMachine",
+            "diskutil apfs listSnapshots disk7s2",
+            "mount",
+            "mount | grep TimeMachine",
+            "tmutil status",
+            "tmutil latestbackup",
+            "hdiutil info",
+            "df -h; ls /Volumes",
+            "echo diskutil unmount is what I would run",
+            "dd if=/dev/disk3 of=/tmp/first-block bs=512 count=1",
+        ] {
+            assert_eq!(run(looking), None, "{looking}");
+        }
+        assert_eq!(
+            touches_a_disk("write_file", &json!({ "path": "mount" })),
+            None
+        );
+    }
 
     #[test]
     fn starting_a_command_says_it_is_not_a_way_to_run_something_on_a_schedule() {

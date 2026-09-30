@@ -170,7 +170,7 @@ impl Scenario {
             &knows,
             "auto",
             opening.how(),
-            THE_DAY,
+            &the_day_and_the_mac(),
         );
         let mut talk = vec![ChatMessage::System { content: opening }];
         talk.extend((self.before)());
@@ -1584,6 +1584,18 @@ const THE_DISKS_HERE: &str = "/dev/disk0 (internal, physical):\n\
 const THE_DAY: &str = "Today is Tuesday 29 September 2026. The clock here is on America/New_York \
      time (UTC-04:00); for the time now, run `date`.";
 
+/// The pretend Mac's own name, as its `scutil` gives it.
+const THE_MAC: &str = "Mac mini";
+
+/// The day, and which Mac the tools run on, the two things a real errand's
+/// opening says about where and when it is.
+fn the_day_and_the_mac() -> String {
+    format!(
+        "{THE_DAY} {}",
+        super::loops::where_commands_run_on(Some(THE_MAC))
+    )
+}
+
 /// The disk on the Mac Studio, as `df` over SSH shows it.
 const THE_DISK_OVER_SSH: &str = "Filesystem      Size   Used  Avail Capacity  Mounted on\n\
      /dev/disk5s1   3.6Ti  2.9Ti  700Gi    81%    /Volumes/Archive";
@@ -1890,7 +1902,11 @@ mod tests {
             &knows,
             "auto",
         );
-        let today = super::super::loops::today_is(chrono::Local::now());
+        let today = format!(
+            "{} {}",
+            super::super::loops::today_is(chrono::Local::now()),
+            super::super::loops::where_commands_run()
+        );
         assert!(live.contains(&today), "{live}");
         assert_eq!(
             live,
@@ -1903,8 +1919,8 @@ mod tests {
                 &today,
             )
         );
-        // And the trial's own day, whenever it is run.
-        assert!(within.contains(THE_DAY));
+        // And the trial's own day and Mac, whenever and wherever it is run.
+        assert!(within.contains(&the_day_and_the_mac()));
     }
 
     #[test]

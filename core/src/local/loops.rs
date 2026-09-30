@@ -917,15 +917,28 @@ async fn errand(
             // Anything they typed while a card for this step was up, said
             // beside the step's result.
             let mut they_also_said = String::new();
+            // A command that changes a disk, asked about whatever the posture:
+            // see `tools::touches_a_disk`.
+            let a_disk = tools::touches_a_disk(&name, &args);
             let must_ask = must_ask(
                 asks,
                 &name,
                 mine,
-                job.is_some_and(|job| crate::connectors::asks_first(job, &args, &they_said)),
+                job.is_some_and(|job| crate::connectors::asks_first(job, &args, &they_said))
+                    || a_disk.is_some(),
             );
             if must_ask && !allowed.contains(&name) {
                 let _ = out.send(Event::NeedsYou(NeedsYou {
-                    asking: say_plainly(outside, &name, &args),
+                    asking: match &a_disk {
+                        // Said, because a teammate set never to ask stopping
+                        // to ask is a surprise, and a surprise wants a reason.
+                        Some(what) => format!(
+                            "{} ({what} changes a disk, so it asks first even when it asks \
+                             about nothing else)",
+                            say_plainly(outside, &name, &args)
+                        ),
+                        None => say_plainly(outside, &name, &args),
+                    },
                     detail: match mine {
                         Some(mine) => team::the_thing_itself(mine, &args),
                         None => tools::the_thing_itself(&name, &args),
@@ -1186,20 +1199,16 @@ async fn last_word(
 }
 
 /// Whether a tool needs a card before it runs, on this agent's posture.
-fn must_ask(
-    asks: &str,
-    name: &str,
-    mine: Option<team::Ours>,
-    an_address_nobody_named: bool,
-) -> bool {
+fn must_ask(asks: &str, name: &str, mine: Option<team::Ours>, worth_stopping_for: bool) -> bool {
     match asks {
         // Ahead of `auto`, and the only thing that is. Reading a page in
         // somebody's own browser sends a request out from this Mac signed in
-        // as them, so it is the one thing here that acts rather than looks,
-        // and an address that came from somewhere other than them is worth
-        // stopping for whatever the posture. `connectors::asks_first` says why
-        // the address decides it rather than the tool.
-        _ if an_address_nobody_named => true,
+        // as them, so it acts rather than looks, and an address that came
+        // from somewhere other than them is worth stopping for whatever the
+        // posture: `connectors::asks_first` says why the address decides it
+        // rather than the tool. So is a command that changes a disk:
+        // `tools::touches_a_disk`.
+        _ if worth_stopping_for => true,
         // `auto` next, or it would not mean never: handing work to another
         // agent had its own default and quietly outranked the posture somebody
         // had chosen for this agent.
@@ -1399,7 +1408,46 @@ pub(crate) fn opening_instructions(
         knows,
         asks,
         HOW_TO_WORK_WITHIN_LIMITS,
-        &today_is(chrono::Local::now()),
+        &format!(
+            "{} {}",
+            today_is(chrono::Local::now()),
+            where_commands_run()
+        ),
+    )
+}
+
+/// Which Mac the tools run on, for the opening.
+///
+/// Asked whether the SSD on another Mac was up, a teammate looked at the disks
+/// of the Mac it runs on, found a backup disk there, and called it that SSD,
+/// "up and healthy". Nothing had told it that its commands run on one Mac and
+/// that the one asked about is another. The name is read once, from the Mac
+/// itself, and never written down anywhere.
+pub(crate) fn where_commands_run() -> String {
+    static NAMED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let named = NAMED.get_or_init(|| {
+        std::process::Command::new("/usr/sbin/scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .filter(|name| !name.is_empty())
+    });
+    where_commands_run_on(named.as_deref())
+}
+
+pub(crate) fn where_commands_run_on(named: Option<&str>) -> String {
+    let this = match named {
+        Some(name) => format!("this Mac, \"{name}\","),
+        None => "this Mac".to_string(),
+    };
+    format!(
+        "Your commands and file tools run on {this} and nowhere else. A request about \
+         another machine is about one you can reach only with a tool that goes there, such \
+         as `ssh`: check which machine you are on before you answer about one, and if you \
+         cannot reach the one asked about, say so plainly. Never describe this Mac's disks, \
+         files or state as another machine's."
     )
 }
 
@@ -1625,6 +1673,31 @@ mod tests {
         assert!(
             !ordinary.contains("PLAN, NOT THE WORK"),
             "an ordinary errand was told it was a plan"
+        );
+    }
+
+    #[test]
+    fn the_opening_says_which_mac_the_tools_run_on() {
+        // Asked about another Mac's SSD, a teammate checked the Mac it runs on
+        // and called that Mac's backup disk the SSD.
+        let said = where_commands_run_on(Some("Studio"));
+        assert!(
+            said.starts_with("Your commands and file tools run on this Mac, \"Studio\","),
+            "{said}"
+        );
+        assert!(said.contains("say so plainly"), "{said}");
+        assert!(said.contains("Never describe this Mac's disks"), "{said}");
+        assert!(where_commands_run_on(None).contains("run on this Mac and nowhere else"));
+        // In the opening every live conversation is given.
+        let opening = opening_instructions(
+            std::path::Path::new("/tmp/errand-where-test"),
+            &mcp::Servers::default(),
+            &crate::memory::Knowing::default(),
+            "auto",
+        );
+        assert!(
+            opening.contains("Your commands and file tools run on this Mac"),
+            "{opening}"
         );
     }
 
@@ -2730,6 +2803,78 @@ mod an_aside_leaves_no_trace {
             shown,
             vec!["Before running it, let me check both places.".to_string()]
         );
+    }
+
+    /// Say something to a teammate that never asks, answer "no" to any card,
+    /// and return what the cards asked.
+    async fn the_cards_a_never_asking_teammate_shows(
+        script: Vec<&'static str>,
+        home: &str,
+    ) -> Vec<String> {
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_says(asked, script).await;
+        let home = std::env::temp_dir().join(home);
+        std::fs::create_dir_all(&home).unwrap();
+        let settings = LlmSettings {
+            provider: "openai-compat".into(),
+            base_url: where_it_is,
+            model: "pretend".into(),
+            ..Default::default()
+        };
+        let (mut engine, events) = Local::open(
+            settings,
+            home,
+            "auto",
+            &crate::memory::Knowing::default(),
+            Vec::new(),
+            None,
+        )
+        .expect("a conversation to talk to");
+        engine.say("check the backup disk", &[]).unwrap();
+        let mut cards = Vec::new();
+        let waited = std::time::Instant::now();
+        loop {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(30),
+                "the turn never finished"
+            );
+            match events.try_recv() {
+                Ok(Event::NeedsYou(card)) => {
+                    cards.push(card.asking.clone());
+                    // Never let it run: whatever the card is for, the answer is no.
+                    engine.answer(&card.call, Answer::No).unwrap();
+                }
+                Ok(Event::Done { .. }) => return cards,
+                Ok(Event::Failed { why }) => panic!("the turn failed: {why}"),
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_teammate_that_never_asks_still_asks_before_it_changes_a_disk() {
+        // Asked whether an SSD was up, one unmounted and mounted the backup
+        // disk itself. It stops at a card now, and this one is told no.
+        let cards = the_cards_a_never_asking_teammate_shows(
+            vec!["run:diskutil unmount disk99s9", "I left it alone."],
+            "errand-disk-card-test",
+        )
+        .await;
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert!(
+            cards[0].contains("diskutil unmount changes a disk"),
+            "{}",
+            cards[0]
+        );
+
+        // Looking at disks is what it was asked for, and asks about nothing.
+        let cards = the_cards_a_never_asking_teammate_shows(
+            vec!["run:diskutil list", "Listed."],
+            "errand-disk-look-test",
+        )
+        .await;
+        assert!(cards.is_empty(), "{cards:?}");
     }
 
     #[tokio::test]
