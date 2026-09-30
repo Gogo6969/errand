@@ -787,6 +787,7 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
               kinds: kinds.map((kind) => ({
                 kind,
                 using: using[kind],
+                a_place: ["folder", "writing", "changing", "reading"].includes(kind),
                 to_type:
                   kind === "commands"
                     ? "a program, like curl, or a whole command"
@@ -808,6 +809,12 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
                   : null,
             });
           }
+          // The Mac's own folder chooser, answered as if somebody chose a
+          // folder, or as if they cancelled when a check says so.
+          case "choose_a_folder":
+            return Promise.resolve(
+              fixture.folderChosen === undefined ? "/Users/me/Projects/Clips" : fixture.folderChosen,
+            );
           // Said before anything is kept, in the words the list will use.
           case "what_allowing_means": {
             const rule = String(args.rule || "").trim();

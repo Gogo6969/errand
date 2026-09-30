@@ -5685,6 +5685,9 @@ struct KindOffered {
     kind: errand_core::allowing::Kind,
     using: &'static str,
     to_type: &'static str,
+    /// A place, chosen with the Mac's own folder chooser when it is not on
+    /// the list, and never typed.
+    a_place: bool,
     choices: Vec<Offered>,
 }
 
@@ -5769,6 +5772,10 @@ async fn allowing_choices(held: State<'_, Held>, agent: String) -> Result<Allowi
                 kind,
                 using: kind.using(),
                 to_type: kind.to_type(),
+                a_place: matches!(
+                    kind,
+                    Kind::Folder | Kind::Writing | Kind::Changing | Kind::Reading
+                ),
                 choices,
             }
         })
@@ -5842,6 +5849,44 @@ fn programs_on_this_mac(home: &std::path::Path) -> Vec<String> {
         .filter(|program| dirs.iter().any(|dir| dir.join(program).is_file()))
         .map(|program| program.to_string())
         .collect()
+}
+
+/// A folder, chosen with the Mac's own folder chooser.
+///
+/// Typed, a folder was a path somebody had to know by heart and could get
+/// wrong by a letter: "Download" was refused for not starting with a slash,
+/// and would have been refused again for not being there. The chooser only
+/// ever gives back a folder that is. Nothing when it is cancelled.
+#[tauri::command]
+async fn choose_a_folder(app: AppHandle, why: Option<String>) -> Result<Option<String>, String> {
+    let (tell, told) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let _ = tell.send(a_folder_chosen(why.as_deref()));
+    })
+    .map_err(|e| e.to_string())?;
+    told.await
+        .map_err(|_| "the folder chooser closed without answering".to_string())
+}
+
+/// The open panel itself, which only the main thread may show.
+fn a_folder_chosen(why: Option<&str>) -> Option<String> {
+    use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
+    use objc2_foundation::NSString;
+    let main = objc2::MainThreadMarker::new()?;
+    let panel = NSOpenPanel::openPanel(main);
+    panel.setCanChooseFiles(false);
+    panel.setCanChooseDirectories(true);
+    panel.setAllowsMultipleSelection(false);
+    panel.setCanCreateDirectories(true);
+    panel.setPrompt(Some(&NSString::from_str("Choose")));
+    if let Some(why) = why {
+        panel.setMessage(Some(&NSString::from_str(why)));
+    }
+    if panel.runModal() != NSModalResponseOK {
+        return None;
+    }
+    let chosen = panel.URL()?.path()?;
+    Some(chosen.to_string())
 }
 
 /// Bring the wall up to date with what this agent may write in.
@@ -7807,6 +7852,7 @@ pub fn run() {
             allow_in_advance,
             what_allowing_means,
             allowing_choices,
+            choose_a_folder,
             also_allowed,
             revoke,
             asks,

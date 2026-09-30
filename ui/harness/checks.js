@@ -5849,17 +5849,42 @@ export async function choosingWhatToAllow() {
     JSON.stringify(sent?.args),
   );
 
-  // A folder typed without its beginning is refused while it can be changed.
-  await pick(letIt, "something-else");
-  typed.value = "Downloads";
-  typed.dispatchEvent(new Event("input"));
-  await new Promise((r) => setTimeout(r, 450));
+  // Any other folder comes from the Mac's own chooser, and is never typed.
+  const last = letIt.options[letIt.options.length - 1];
   check(
-    "a folder typed without its whole path is refused before anything is kept",
-    /whole path/.test(means.textContent),
+    "the last choice for a place opens the folder chooser rather than a box to type in",
+    /choose another folder/.test(last?.textContent || "") && !places.some((p) => /something else/.test(p)),
+    last?.textContent,
+  );
+  const chooserAsked = asked.length;
+  await pick(letIt, last.value);
+  await new Promise((r) => setTimeout(r, 200));
+  check(
+    "choosing another folder asks the Mac's own chooser",
+    asked.slice(chooserAsked).some((a) => a.name === "choose_a_folder"),
+    asked.slice(chooserAsked).map((a) => a.name).join(", "),
+  );
+  check(
+    "and the folder it gives is added to the list, chosen, whole",
+    letIt.selectedOptions[0]?.textContent === "Clips (/Users/me/Projects/Clips)",
+    letIt.selectedOptions[0]?.textContent,
+  );
+  check(
+    "and it says what that would allow before anything is kept",
+    /writing anywhere inside \/Users\/me\/Projects\/Clips/.test(means.textContent),
     means.textContent,
   );
-  typed.value = "";
+  check("and nothing had to be typed", typed.hidden, `hidden=${typed.hidden}`);
+  // Cancelled, it goes back to what was chosen before.
+  FIXTURE.folderChosen = null;
+  await pick(letIt, letIt.options[letIt.options.length - 1].value);
+  await new Promise((r) => setTimeout(r, 200));
+  delete FIXTURE.folderChosen;
+  check(
+    "cancelling the chooser keeps the folder chosen before",
+    letIt.selectedOptions[0]?.textContent === "Clips (/Users/me/Projects/Clips)",
+    letIt.selectedOptions[0]?.textContent,
+  );
 
   asks.value = postureWas;
   asks.dispatchEvent(new Event("change"));

@@ -4571,6 +4571,11 @@ el.allowAhead?.addEventListener("submit", async (e) => {
  */
 let offeredToAllow = null;
 const SOMETHING_ELSE = "something-else";
+// A place is chosen with the Mac's own folder chooser, never typed: a path
+// typed from memory is a path that can be wrong by a letter.
+const ANOTHER_FOLDER = "another-folder";
+const CHOSEN_FOLDER = "chosen-folder";
+let folderChosen = null;
 
 async function drawAllowing(a) {
   try {
@@ -4604,15 +4609,17 @@ function kindShown() {
 function drawLetIt() {
   const kind = kindShown();
   const choices = kind?.choices || [];
+  const place = !!kind?.a_place;
+  folderChosen = null;
   // Nothing chosen to begin with: the list ends with the widest choice, and
   // that should never be the one picked by somebody who did not pick.
   const pick = document.createElement("option");
   pick.value = "";
-  pick.textContent = choices.length ? "choose one" : "type it below";
+  pick.textContent = choices.length || place ? "choose one" : "type it below";
   pick.disabled = true;
-  const typed = document.createElement("option");
-  typed.value = SOMETHING_ELSE;
-  typed.textContent = "something else…";
+  const last = document.createElement("option");
+  last.value = place ? ANOTHER_FOLDER : SOMETHING_ELSE;
+  last.textContent = place ? "choose another folder…" : "something else…";
   el.allowChoice.replaceChildren(
     pick,
     ...choices.map((c, i) => {
@@ -4621,22 +4628,58 @@ function drawLetIt() {
       one.textContent = c.said;
       return one;
     }),
-    typed,
+    last,
   );
-  el.allowChoice.value = choices.length ? "" : SOMETHING_ELSE;
+  el.allowChoice.value = choices.length || place ? "" : SOMETHING_ELSE;
   el.allowWhat.placeholder = kind?.to_type || "a program, like curl";
-  el.allowWhat.hidden = choices.length > 0;
+  el.allowWhat.hidden = place || choices.length > 0;
   el.allowMeans.textContent = "";
 }
 
 /** The rule chosen or typed: "" is a real one, the whole of a kind. */
 function ruleChosen() {
   const picked = el.allowChoice.value;
-  if (picked && picked !== SOMETHING_ELSE) {
+  if (picked === CHOSEN_FOLDER) return folderChosen;
+  if (picked && picked !== SOMETHING_ELSE && picked !== ANOTHER_FOLDER) {
     return kindShown()?.choices?.[Number(picked)]?.rule ?? null;
   }
+  // A place is never typed.
+  if (kindShown()?.a_place) return null;
   const typed = el.allowWhat.value.trim();
   return typed || null;
+}
+
+/** The Mac's own folder chooser, and the folder it gave, added and chosen. */
+async function chooseAnotherFolder() {
+  const kind = kindShown();
+  const who = whose()?.name || "it";
+  const why =
+    kind?.kind === "folder"
+      ? `Choose a folder ${who} may write in.`
+      : `Choose a folder for ${who}: ${kind?.using || "this"}.`;
+  let chosen = null;
+  try {
+    chosen = await invoke("choose_a_folder", { why });
+  } catch (err) {
+    el.allowMeans.textContent = String(err);
+  }
+  if (!chosen) {
+    // Cancelled: back to whatever was chosen before, which may be nothing.
+    el.allowChoice.value = folderChosen ? CHOSEN_FOLDER : "";
+    sayWhatItWouldAllow();
+    return;
+  }
+  folderChosen = chosen;
+  let one = el.allowChoice.querySelector(`option[value="${CHOSEN_FOLDER}"]`);
+  if (!one) {
+    one = document.createElement("option");
+    one.value = CHOSEN_FOLDER;
+    el.allowChoice.insertBefore(one, el.allowChoice.lastElementChild);
+  }
+  const name = chosen.split("/").filter(Boolean).pop() || chosen;
+  one.textContent = `${name} (${chosen})`;
+  el.allowChoice.value = CHOSEN_FOLDER;
+  sayWhatItWouldAllow();
 }
 
 let meaningAsked = 0;
@@ -4662,6 +4705,11 @@ el.allowTool?.addEventListener("change", () => {
 });
 el.allowChoice?.addEventListener("change", () => {
   el.allowSays.textContent = "";
+  if (el.allowChoice.value === ANOTHER_FOLDER) {
+    el.allowWhat.hidden = true;
+    chooseAnotherFolder();
+    return;
+  }
   const typing = el.allowChoice.value === SOMETHING_ELSE;
   el.allowWhat.hidden = !typing;
   if (typing) el.allowWhat.focus();
