@@ -69,6 +69,19 @@ pub fn what_always_means(tool: &str, suggested: Option<&str>) -> Option<Allowing
         });
     }
 
+    // Logging in to another machine is narrowed to that machine, never to
+    // `ssh`: "any ssh command" is every machine the key opens.
+    if let Some(host) = a_single_command(suggested)
+        .filter(|program| program == "ssh")
+        .and_then(|_| logs_in_to(suggested))
+        .map(|(_, host, _)| host)
+    {
+        return Some(Allowing {
+            rule: format!("ssh {host}"),
+            in_words: format!("any ssh command to {host}"),
+        });
+    }
+
     match a_single_command(suggested) {
         Some(program) => Some(Allowing {
             rule: program.clone(),
@@ -123,6 +136,66 @@ fn a_single_command(command: &str) -> Option<String> {
     None
 }
 
+/// The programs that log in to, or copy to, another machine.
+pub const REACHING: &[&str] = &["ssh", "scp", "sftp", "rsync", "ssh-copy-id"];
+
+/// Which machine one command logs in to or copies to, and for `ssh` what it
+/// runs there: `(program, host, command there)`.
+///
+/// The host is the name as written, less any `user@`, so `ssh me@studio df`
+/// is `studio`. Nothing for a command that reaches nothing, including an `rsync`
+/// between two folders on this Mac.
+pub fn logs_in_to(command: &str) -> Option<(String, String, Option<String>)> {
+    // The options of each that take a value, which is not the host.
+    const SSH_TAKES: &str = "BbcDEeFIiJLlmOopQRSWw";
+    const SCP_TAKES: &str = "cDFiJlOoPS";
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let program = words.first()?.rsplit('/').next()?.to_string();
+    if !REACHING.contains(&program.as_str()) {
+        return None;
+    }
+    let bare = |at: &str| {
+        let host = at.trim_start_matches("ssh://");
+        let host = host.rsplit('@').next().unwrap_or(host);
+        host.split(':').next().unwrap_or(host).to_string()
+    };
+    let takes = match program.as_str() {
+        "ssh" | "ssh-copy-id" | "sftp" => SSH_TAKES,
+        _ => SCP_TAKES,
+    };
+    let mut rest = words[1..].iter().enumerate();
+    while let Some((at, word)) = rest.next() {
+        if let Some(flag) = word.strip_prefix('-') {
+            // `-p 22` takes the next word; `-p22` and `--port=22` do not.
+            if flag.len() == 1 && takes.contains(flag) {
+                rest.next();
+            }
+            continue;
+        }
+        let word = word.trim_matches(['"', '\'']);
+        match program.as_str() {
+            "ssh" | "sftp" | "ssh-copy-id" => {
+                let there = words[at + 2..].join(" ");
+                return Some((
+                    program.clone(),
+                    bare(word),
+                    (program == "ssh" && !there.is_empty()).then_some(there),
+                ));
+            }
+            // A copy names its far side as `host:path`, and a local path with
+            // a colon in it has a slash before the colon.
+            _ => {
+                if let Some((host, _)) = word.split_once(':') {
+                    if !host.is_empty() && !host.contains('/') {
+                        return Some((program.clone(), bare(host), None));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// What a rule already granted actually covers, in words.
 ///
 /// For the list somebody reads when deciding what to take back. A rule stored
@@ -142,6 +215,13 @@ pub fn in_words(tool: &str, rule: &str) -> String {
         Some(Kind::Commands) => match a_single_command(rule) {
             // A rule that is exactly a program name covers every use of it.
             Some(program) if program == rule => format!("any {program} command"),
+            // "ssh studio": every command on that one machine.
+            Some(program) if program == "ssh" && rule.split_whitespace().count() == 2 => {
+                format!(
+                    "any ssh command to {}",
+                    rule.split_whitespace().nth(1).unwrap_or_default()
+                )
+            }
             // Anything else is the beginning of one particular command, which
             // in practice means that command and nothing else.
             _ => "only this exact command".to_string(),
@@ -508,6 +588,39 @@ mod tests {
         assert!(why.is_none());
         // Writing without asking leaves writing out.
         assert!(!worth_offering(false, "edits").0.contains(&Kind::Writing));
+    }
+
+    #[test]
+    fn logging_in_to_another_machine_is_found_and_allowed_one_machine_at_a_time() {
+        let host = logs_in_to;
+        assert_eq!(
+            host("ssh studio df -h"),
+            Some(("ssh".into(), "studio".into(), Some("df -h".into())))
+        );
+        assert_eq!(
+            host("ssh -o BatchMode=yes -p 22 me@studio uptime").map(|h| h.1),
+            Some("studio".into())
+        );
+        assert_eq!(host("ssh studio").map(|h| h.2), Some(None));
+        assert_eq!(
+            host("scp notes.txt studio:/tmp/").map(|h| h.1),
+            Some("studio".into())
+        );
+        assert_eq!(
+            host("rsync -a ./a/ me@studio:~/b/").map(|h| h.1),
+            Some("studio".into())
+        );
+        assert_eq!(host("rsync -a ./a/ ./b/"), None);
+        assert_eq!(host("df -h"), None);
+
+        // Always, for a login, is that machine and not every machine.
+        let said = what_always_means("Bash", Some("ssh studio df -h")).unwrap();
+        assert_eq!(said.rule, "ssh studio");
+        assert_eq!(said.in_words, "any ssh command to studio");
+        assert_eq!(in_words("Bash", "ssh studio"), "any ssh command to studio");
+        assert!(covers("ssh studio", "ssh studio df -h"));
+        assert!(!covers("ssh studio", "ssh other df -h"));
+        assert!(!covers("ssh studio", "ssh studiox df -h"));
     }
 
     #[test]

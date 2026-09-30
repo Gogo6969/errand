@@ -917,27 +917,49 @@ async fn errand(
             // Anything they typed while a card for this step was up, said
             // beside the step's result.
             let mut they_also_said = String::new();
-            // A command that changes a disk, asked about whatever the posture:
-            // see `tools::touches_a_disk`.
+            // A command that changes a disk, or logs in to another machine, is
+            // asked about whatever the posture: see `tools::touches_a_disk` and
+            // `tools::reaches_another_machine`. Each time for a disk; for a
+            // machine, until that machine is allowed for this teammate.
             let a_disk = tools::touches_a_disk(&name, &args);
+            let a_machine = tools::reaches_another_machine(&name, &args);
             let must_ask = must_ask(
                 asks,
                 &name,
                 mine,
                 job.is_some_and(|job| crate::connectors::asks_first(job, &args, &they_said))
-                    || a_disk.is_some(),
+                    || a_disk.is_some()
+                    || a_machine.is_some(),
             );
-            if must_ask && !allowed.contains(&name) {
+            // Not waved through by an "always" given to the whole tool earlier
+            // in the conversation: that was never an answer about a disk, or
+            // about this machine.
+            let its_own_question = a_disk.is_some() || a_machine.is_some();
+            if must_ask && (its_own_question || !allowed.contains(&name)) {
+                // Always, for a machine, is that machine and nothing wider.
+                let narrow = a_machine
+                    .as_ref()
+                    .filter(|(program, _)| program == "ssh")
+                    .map(|(_, host)| crate::allowing::Allowing {
+                        rule: format!("ssh {host}"),
+                        in_words: format!("any ssh command to {host}"),
+                    });
                 let _ = out.send(Event::NeedsYou(NeedsYou {
-                    asking: match &a_disk {
+                    asking: match (&a_disk, &a_machine) {
                         // Said, because a teammate set never to ask stopping
                         // to ask is a surprise, and a surprise wants a reason.
-                        Some(what) => format!(
+                        (Some(what), _) => format!(
                             "{} ({what} changes a disk, so it asks first even when it asks \
                              about nothing else)",
                             say_plainly(outside, &name, &args)
                         ),
-                        None => say_plainly(outside, &name, &args),
+                        (None, Some((program, host))) => format!(
+                            "{} ({program} reaches {host}, another machine, where nothing \
+                             walls it in, so it asks first even when it asks about nothing \
+                             else)",
+                            say_plainly(outside, &name, &args)
+                        ),
+                        (None, None) => say_plainly(outside, &name, &args),
                     },
                     detail: match mine {
                         Some(mine) => team::the_thing_itself(mine, &args),
@@ -949,17 +971,25 @@ async fn errand(
                     // with no request of their own in between.
                     call: call.id.clone(),
                     step: call.id.clone(),
-                    can_remember: true,
-                    // The whole tool. A local model's tools are coarse enough
-                    // that anything finer would be guesswork: allowing one
-                    // exact shell command is not a permission anybody wants to
-                    // grant twice, and allowing a prefix of one is a rule this
-                    // side has no basis for inventing.
-                    rule: String::new(),
+                    // Never for a disk: each change to one is its own question.
+                    can_remember: a_disk.is_none() && (a_machine.is_none() || narrow.is_some()),
+                    // The whole tool, otherwise. A local model's tools are
+                    // coarse enough that anything finer would be guesswork:
+                    // allowing one exact shell command is not a permission
+                    // anybody wants to grant twice, and allowing a prefix of
+                    // one is a rule this side has no basis for inventing. A
+                    // machine is the exception, because the machine is the
+                    // thing being agreed to.
+                    rule: narrow
+                        .as_ref()
+                        .map(|narrow| narrow.rule.clone())
+                        .unwrap_or_default(),
                     // The whole tool, and said so: an empty rule allows every
                     // use of it, and that is a bigger thing to agree to than
                     // the button used to admit.
-                    allows: crate::allowing::the_whole_tool(&name).in_words,
+                    allows: narrow
+                        .map(|narrow| narrow.in_words)
+                        .unwrap_or_else(|| crate::allowing::the_whole_tool(&name).in_words),
                 }));
 
                 let (said, meanwhile) = match wait_for_an_answer(asked, &call.id, renamed).await {
@@ -997,6 +1027,9 @@ async fn errand(
                         });
                         continue;
                     }
+                    // The app keeps the rule the card offered; a question of its
+                    // own is answered again by that rule, not by the whole tool.
+                    Answer::Always if its_own_question => {}
                     Answer::Always => {
                         allowed.insert(name.clone());
                     }
@@ -1434,20 +1467,34 @@ pub(crate) fn where_commands_run() -> String {
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
             .filter(|name| !name.is_empty())
     });
-    where_commands_run_on(named.as_deref())
+    // The machines the person's SSH config names, read each time rather than
+    // once, so one added to the config is known from the next conversation on.
+    let machines = std::env::var_os("HOME")
+        .map(|home| crate::wall::machines_in_ssh_config(std::path::Path::new(&home)))
+        .unwrap_or_default();
+    where_commands_run_on(named.as_deref(), &machines)
 }
 
-pub(crate) fn where_commands_run_on(named: Option<&str>) -> String {
+pub(crate) fn where_commands_run_on(named: Option<&str>, machines: &[String]) -> String {
     let this = match named {
         Some(name) => format!("this Mac, \"{name}\","),
         None => "this Mac".to_string(),
+    };
+    let reachable = match machines {
+        [] => String::new(),
+        names => format!(
+            " The machines you can reach with `ssh`, by the names the SSH config gives them: \
+             {}. Logging in to one asks the person first, unless they have allowed that \
+             machine for you.",
+            names.join(", ")
+        ),
     };
     format!(
         "Your commands and file tools run on {this} and nowhere else. A request about \
          another machine is about one you can reach only with a tool that goes there, such \
          as `ssh`: check which machine you are on before you answer about one, and if you \
          cannot reach the one asked about, say so plainly. Never describe this Mac's disks, \
-         files or state as another machine's."
+         files or state as another machine's.{reachable}"
     )
 }
 
@@ -1680,14 +1727,19 @@ mod tests {
     fn the_opening_says_which_mac_the_tools_run_on() {
         // Asked about another Mac's SSD, a teammate checked the Mac it runs on
         // and called that Mac's backup disk the SSD.
-        let said = where_commands_run_on(Some("Studio"));
+        let said = where_commands_run_on(Some("Studio"), &["studio-ssh".to_string()]);
         assert!(
             said.starts_with("Your commands and file tools run on this Mac, \"Studio\","),
             "{said}"
         );
         assert!(said.contains("say so plainly"), "{said}");
         assert!(said.contains("Never describe this Mac's disks"), "{said}");
-        assert!(where_commands_run_on(None).contains("run on this Mac and nowhere else"));
+        assert!(
+            said.contains("reach with `ssh`, by the names the SSH config gives them: studio-ssh."),
+            "{said}"
+        );
+        assert!(where_commands_run_on(None, &[]).contains("run on this Mac and nowhere else"));
+        assert!(!where_commands_run_on(None, &[]).contains("reach with `ssh`"));
         // In the opening every live conversation is given.
         let opening = opening_instructions(
             std::path::Path::new("/tmp/errand-where-test"),
@@ -2811,6 +2863,18 @@ mod an_aside_leaves_no_trace {
         script: Vec<&'static str>,
         home: &str,
     ) -> Vec<String> {
+        the_whole_cards_a_never_asking_teammate_shows(script, home)
+            .await
+            .into_iter()
+            .map(|card| card.asking)
+            .collect()
+    }
+
+    /// The same, with every card whole.
+    async fn the_whole_cards_a_never_asking_teammate_shows(
+        script: Vec<&'static str>,
+        home: &str,
+    ) -> Vec<NeedsYou> {
         let asked: Arc<Mutex<Vec<String>>> = Arc::default();
         let where_it_is = a_server_that_says(asked, script).await;
         let home = std::env::temp_dir().join(home);
@@ -2840,9 +2904,9 @@ mod an_aside_leaves_no_trace {
             );
             match events.try_recv() {
                 Ok(Event::NeedsYou(card)) => {
-                    cards.push(card.asking.clone());
                     // Never let it run: whatever the card is for, the answer is no.
                     engine.answer(&card.call, Answer::No).unwrap();
+                    cards.push(card);
                 }
                 Ok(Event::Done { .. }) => return cards,
                 Ok(Event::Failed { why }) => panic!("the turn failed: {why}"),
@@ -2875,6 +2939,52 @@ mod an_aside_leaves_no_trace {
         )
         .await;
         assert!(cards.is_empty(), "{cards:?}");
+    }
+
+    #[tokio::test]
+    async fn logging_in_to_another_machine_is_asked_about_and_always_means_that_machine() {
+        // Inside the wall a teammate cannot read the key, but ssh-agent signs
+        // for it, and the far side has no wall. Every card here is told no.
+        let cards = the_whole_cards_a_never_asking_teammate_shows(
+            vec!["run:ssh studio df -h", "I did not log in."],
+            "errand-ssh-card-test",
+        )
+        .await;
+        assert_eq!(
+            cards.len(),
+            1,
+            "{:?}",
+            cards.iter().map(|c| &c.asking).collect::<Vec<_>>()
+        );
+        assert!(
+            cards[0]
+                .asking
+                .contains("ssh reaches studio, another machine"),
+            "{}",
+            cards[0].asking
+        );
+        assert!(cards[0].can_remember);
+        assert_eq!(cards[0].rule, "ssh studio");
+        assert_eq!(cards[0].allows, "any ssh command to studio");
+
+        // A disk changed over there is a disk changed, and never for always.
+        let cards = the_whole_cards_a_never_asking_teammate_shows(
+            vec![
+                "run:ssh studio diskutil unmount disk99s9",
+                "I left it alone.",
+            ],
+            "errand-ssh-disk-card-test",
+        )
+        .await;
+        assert_eq!(cards.len(), 1);
+        assert!(
+            cards[0]
+                .asking
+                .contains("diskutil unmount on studio changes a disk"),
+            "{}",
+            cards[0].asking
+        );
+        assert!(!cards[0].can_remember);
     }
 
     #[tokio::test]

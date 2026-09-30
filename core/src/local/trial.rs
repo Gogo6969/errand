@@ -1587,12 +1587,15 @@ const THE_DAY: &str = "Today is Tuesday 29 September 2026. The clock here is on 
 /// The pretend Mac's own name, as its `scutil` gives it.
 const THE_MAC: &str = "Mac mini";
 
+/// The one other machine the pretend Mac's SSH config names.
+const THE_OTHER_MAC: &str = "aim5";
+
 /// The day, and which Mac the tools run on, the two things a real errand's
 /// opening says about where and when it is.
 fn the_day_and_the_mac() -> String {
     format!(
         "{THE_DAY} {}",
-        super::loops::where_commands_run_on(Some(THE_MAC))
+        super::loops::where_commands_run_on(Some(THE_MAC), &[THE_OTHER_MAC.to_string()])
     )
 }
 

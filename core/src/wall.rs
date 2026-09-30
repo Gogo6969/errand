@@ -260,6 +260,36 @@ fn a_private_key(path: &Path) -> bool {
     start.contains("PRIVATE KEY") || start.starts_with("PuTTY-User-Key-File")
 }
 
+/// The machines the person's SSH config names, by the names it gives them.
+///
+/// Only the names: never an address, a user or a key. Patterns (`*`, `?`,
+/// `!`) name no one machine and are left out.
+pub fn machines_in_ssh_config(theirs: &Path) -> Vec<String> {
+    let Ok(config) = std::fs::read_to_string(theirs.join(SSH).join("config")) else {
+        return Vec::new();
+    };
+    let mut named: Vec<String> = Vec::new();
+    for line in config.lines() {
+        let line = line.trim();
+        let Some((key, value)) = line.split_once(|c: char| c.is_whitespace() || c == '=') else {
+            continue;
+        };
+        if !key.eq_ignore_ascii_case("Host") {
+            continue;
+        }
+        for name in value.trim_start_matches('=').split_whitespace() {
+            let name = name.trim_matches('"');
+            if !name.is_empty()
+                && !name.contains(['*', '?', '!'])
+                && !named.iter().any(|n| n == name)
+            {
+                named.push(name.to_string());
+            }
+        }
+    }
+    named
+}
+
 /// The keys the SSH config says to use, wherever they are kept.
 fn keys_the_config_names(ssh: &Path, theirs: &Path) -> Vec<PathBuf> {
     let Ok(config) = std::fs::read_to_string(ssh.join("config")) else {
@@ -978,6 +1008,24 @@ mod tests {
             "EPERM: operation not permitted, open '/x'"
         ));
         assert!(!looks_like_the_wall("No such file or directory"));
+    }
+
+    #[test]
+    fn the_machines_the_ssh_config_names_are_known_by_name_and_nothing_else() {
+        let theirs = std::env::temp_dir().join(format!("errand-machines-{}", std::process::id()));
+        std::fs::create_dir_all(theirs.join(".ssh")).unwrap();
+        std::fs::write(
+            theirs.join(".ssh").join("config"),
+            "Host studio archive\n  HostName 192.0.2.7\n  User me\n  IdentityFile ~/.ssh/id_test\n\
+             Host *.internal !secret\n  User nobody\nhost=pi\nHost *\n  ServerAliveInterval 30\n",
+        )
+        .unwrap();
+        assert_eq!(
+            machines_in_ssh_config(&theirs),
+            vec!["studio", "archive", "pi"]
+        );
+        assert!(machines_in_ssh_config(&theirs.join("nowhere")).is_empty());
+        std::fs::remove_dir_all(&theirs).ok();
     }
 
     #[tokio::test(flavor = "multi_thread")]

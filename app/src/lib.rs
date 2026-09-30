@@ -5699,10 +5699,11 @@ struct Offered {
 
 /// Programs worth offering by name, when they are on this Mac. A short list on
 /// purpose: `osascript` and `open` reach every other app, and are typed by
-/// somebody who means them rather than picked out of a list.
+/// somebody who means them rather than picked out of a list. `ssh`, `scp` and
+/// `rsync` are offered one machine at a time instead, by the names the SSH
+/// config gives them, because "any ssh command" is every machine the key opens.
 const PROGRAMS_WORTH_OFFERING: &[&str] = &[
-    "curl", "git", "python3", "yt-dlp", "ffmpeg", "node", "npm", "rsync", "ssh", "gh", "jq",
-    "sqlite3", "brew",
+    "curl", "git", "python3", "yt-dlp", "ffmpeg", "node", "npm", "gh", "jq", "sqlite3", "brew",
 ];
 
 #[tauri::command]
@@ -5738,17 +5739,22 @@ async fn allowing_choices(held: State<'_, Held>, agent: String) -> Result<Allowi
     let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let places = places_on_this_mac(&home);
     let programs = programs_on_this_mac(&home);
+    let machines = errand_core::wall::machines_in_ssh_config(&home);
 
     let kinds = kinds
         .into_iter()
         .map(|kind| {
             let mut choices: Vec<Offered> = match kind {
-                Kind::Commands => programs
+                Kind::Commands => machines
                     .iter()
-                    .map(|program| Offered {
+                    .map(|machine| Offered {
+                        rule: format!("ssh {machine}"),
+                        said: format!("any ssh command to {machine}"),
+                    })
+                    .chain(programs.iter().map(|program| Offered {
                         rule: program.clone(),
                         said: format!("any {program} command"),
-                    })
+                    }))
                     .collect(),
                 Kind::Fetching => Vec::new(),
                 Kind::Folder | Kind::Writing | Kind::Changing | Kind::Reading => places
@@ -8223,6 +8229,10 @@ mod tests {
         assert!(what_allowing_is("folder", &format!("{there}/not-here")).is_err());
         assert!(what_allowing_is("fetching", "github.com").is_err());
         assert!(what_allowing_is("nonsense", "curl").is_err());
+        // One machine at a time, never every machine the key opens.
+        let (_, one) = what_allowing_is("commands", "ssh studio").unwrap();
+        assert_eq!(one.rule, "ssh studio");
+        assert_eq!(one.in_words, "any ssh command to studio");
 
         // The usual places are offered whole, and only when they are there.
         let places = places_on_this_mac(&home);

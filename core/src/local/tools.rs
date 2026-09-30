@@ -271,6 +271,45 @@ pub fn touches_a_disk(name: &str, args: &serde_json::Value) -> Option<String> {
         return None;
     }
     let command = args.get("command")?.as_str()?;
+    if let Some(here) = a_disk_change(command) {
+        return Some(here);
+    }
+    // And on another machine, in what `ssh` runs there, where no wall is.
+    command.split([';', '\n', '|', '&']).find_map(|stage| {
+        let (program, host, there) = crate::allowing::logs_in_to(stage.trim())?;
+        if program != "ssh" {
+            return None;
+        }
+        let what = a_disk_change(there?.trim_matches(['"', '\'']))?;
+        Some(format!("{what} on {host}"))
+    })
+}
+
+/// Which other machine a command logs in to or copies to, and with what.
+///
+/// Inside the wall a teammate cannot read the key, but ssh-agent signs for it,
+/// and on the far side there is no wall at all: that machine's files, its own
+/// keys, its disks and its services are all the person's account can reach.
+pub fn reaches_another_machine(name: &str, args: &serde_json::Value) -> Option<(String, String)> {
+    if !matches!(name, "run_command" | "start_command") {
+        return None;
+    }
+    let command = args.get("command")?.as_str()?;
+    command
+        .split([';', '\n', '|', '&', '(', ')', '`'])
+        .find_map(|stage| {
+            let words: Vec<&str> = stage.split_whitespace().collect();
+            // Past what runs a program rather than being one.
+            let at = words.iter().position(|w| {
+                !w.contains('=') && !["sudo", "nohup", "command", "exec", "time", "$"].contains(w)
+            })?;
+            let (program, host, _) = crate::allowing::logs_in_to(&words[at..].join(" "))?;
+            Some((program, host))
+        })
+}
+
+/// What one command line does to a disk on this Mac, when it does more than look.
+pub fn a_disk_change(command: &str) -> Option<String> {
     for stage in command.split([';', '\n', '|', '&', '(', ')', '`']) {
         let words: Vec<String> = stage
             .split_whitespace()
@@ -1064,6 +1103,41 @@ mod tests {
         }
         assert_eq!(
             touches_a_disk("write_file", &json!({ "path": "mount" })),
+            None
+        );
+    }
+
+    #[test]
+    fn a_command_that_reaches_another_machine_is_told_apart_and_what_it_does_there_counts() {
+        let run = |command: &str| json!({ "command": command });
+        assert_eq!(
+            reaches_another_machine("run_command", &run("ssh studio df -h")),
+            Some(("ssh".into(), "studio".into()))
+        );
+        assert_eq!(
+            reaches_another_machine("start_command", &run("sleep 1; scp a.txt studio:/tmp/")),
+            Some(("scp".into(), "studio".into()))
+        );
+        assert_eq!(
+            reaches_another_machine("run_command", &run("echo $(ssh studio hostname)")),
+            Some(("ssh".into(), "studio".into()))
+        );
+        assert_eq!(reaches_another_machine("run_command", &run("df -h")), None);
+        assert_eq!(
+            reaches_another_machine("write_file", &run("ssh studio")),
+            None
+        );
+        // A disk changed over ssh is a disk changed, on that machine.
+        assert_eq!(
+            touches_a_disk("run_command", &run("ssh studio diskutil unmount disk7s2")).as_deref(),
+            Some("diskutil unmount on studio")
+        );
+        assert_eq!(
+            touches_a_disk("run_command", &run("ssh studio 'tmutil stopbackup'")).as_deref(),
+            Some("tmutil stopbackup on studio")
+        );
+        assert_eq!(
+            touches_a_disk("run_command", &run("ssh studio df -h")),
             None
         );
     }
