@@ -62,10 +62,10 @@ pub fn what_always_means(tool: &str, suggested: Option<&str>) -> Option<Allowing
     // Only shell commands are narrowed. Everything else the engine suggests is
     // already the useful shape: a path glob for a file tool covers a directory,
     // an address prefix covers a site.
-    if !tool.eq_ignore_ascii_case("bash") {
+    if Kind::of(tool) != Some(Kind::Commands) {
         return Some(Allowing {
             rule: suggested.to_string(),
-            in_words: format!("anything starting {suggested}"),
+            in_words: in_words(tool, suggested),
         });
     }
 
@@ -90,7 +90,10 @@ pub fn what_always_means(tool: &str, suggested: Option<&str>) -> Option<Allowing
 pub fn the_whole_tool(tool: &str) -> Allowing {
     Allowing {
         rule: String::new(),
-        in_words: format!("anything this agent does with {tool}"),
+        in_words: match Kind::of(tool) {
+            Some(kind) if kind != Kind::Folder => kind.everything().to_string(),
+            _ => format!("anything this agent does with {tool}"),
+        },
     }
 }
 
@@ -130,18 +133,24 @@ pub fn in_words(tool: &str, rule: &str) -> String {
     if rule.is_empty() {
         return the_whole_tool(tool).in_words;
     }
-    if is_a_folder(tool) {
-        return format!("writing anywhere inside {rule}");
-    }
-    if !tool.eq_ignore_ascii_case("bash") {
-        return format!("anything starting {rule}");
-    }
-    match a_single_command(rule) {
-        // A rule that is exactly a program name covers every use of it.
-        Some(program) if program == rule => format!("any {program} command"),
-        // Anything else is the beginning of one particular command, which in
-        // practice means that command and nothing else.
-        _ => "only this exact command".to_string(),
+    // A plain path is a place, and said as one. A glob the engine suggested
+    // is said as the pattern it is, because "inside //Users/me/**" is not a
+    // sentence anybody can check.
+    let a_place = rule.starts_with('/') && !rule.starts_with("//") && !rule.contains('*');
+    match Kind::of(tool) {
+        Some(Kind::Folder) => format!("writing anywhere inside {rule}"),
+        Some(Kind::Commands) => match a_single_command(rule) {
+            // A rule that is exactly a program name covers every use of it.
+            Some(program) if program == rule => format!("any {program} command"),
+            // Anything else is the beginning of one particular command, which
+            // in practice means that command and nothing else.
+            _ => "only this exact command".to_string(),
+        },
+        Some(Kind::Reading) if a_place => format!("reading anything inside {rule}"),
+        Some(Kind::Changing) if a_place => format!("changing anything inside {rule}"),
+        Some(Kind::Writing) if a_place => format!("writing anything inside {rule}"),
+        Some(Kind::Fetching) if rule.contains("://") => format!("fetching anything from {rule}"),
+        _ => format!("anything starting {rule}"),
     }
 }
 
@@ -151,6 +160,157 @@ pub const A_FOLDER: &str = "folder";
 /// Whether an allowance is for a folder the agent may write in.
 pub fn is_a_folder(tool: &str) -> bool {
     tool.eq_ignore_ascii_case(A_FOLDER)
+}
+
+/// What can be allowed ahead, by what it is for rather than by which engine's
+/// tool asks for it.
+///
+/// Each engine asks under names of its own: Claude's `Bash` is a local model's
+/// `run_command` and `start_command`. A rule written ahead was kept under the
+/// name the window sent, which was always Claude's, so for a teammate on a
+/// local model it never answered a single thing it asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    Commands,
+    Writing,
+    Changing,
+    Reading,
+    Fetching,
+    Folder,
+}
+
+impl Kind {
+    /// Every kind, in the order the window offers them.
+    pub const ALL: [Kind; 6] = [
+        Kind::Commands,
+        Kind::Writing,
+        Kind::Changing,
+        Kind::Reading,
+        Kind::Fetching,
+        Kind::Folder,
+    ];
+
+    /// Which kind a tool is, whichever engine's name it goes by.
+    pub fn of(tool: &str) -> Option<Kind> {
+        match tool.to_ascii_lowercase().as_str() {
+            "bash" | "run_command" | "start_command" => Some(Kind::Commands),
+            "read" | "read_file" => Some(Kind::Reading),
+            "edit" | "notebookedit" | "change_file" => Some(Kind::Changing),
+            "write" | "write_file" => Some(Kind::Writing),
+            "webfetch" | "fetch_url" => Some(Kind::Fetching),
+            A_FOLDER => Some(Kind::Folder),
+            _ => None,
+        }
+    }
+
+    /// A kind by the name the window sends, or by any tool's name.
+    pub fn called(name: &str) -> Option<Kind> {
+        match name {
+            "commands" => Some(Kind::Commands),
+            "writing" => Some(Kind::Writing),
+            "changing" => Some(Kind::Changing),
+            "reading" => Some(Kind::Reading),
+            "fetching" => Some(Kind::Fetching),
+            _ => Kind::of(name),
+        }
+    }
+
+    /// The name a rule of this kind is kept under: the one it always had, so a
+    /// rule kept before there were kinds reads the same as one kept after.
+    pub fn kept_as(self) -> &'static str {
+        match self {
+            Kind::Commands => "Bash",
+            Kind::Writing => "Write",
+            Kind::Changing => "Edit",
+            Kind::Reading => "Read",
+            Kind::Fetching => "WebFetch",
+            Kind::Folder => A_FOLDER,
+        }
+    }
+
+    /// What it is called in the window, after "Using".
+    pub fn using(self) -> &'static str {
+        match self {
+            Kind::Commands => "running commands",
+            Kind::Writing => "writing files",
+            Kind::Changing => "changing files",
+            Kind::Reading => "reading files",
+            Kind::Fetching => "fetching web pages",
+            Kind::Folder => "a folder it may write in",
+        }
+    }
+
+    /// What to type after "Let it", when none of the choices is the one.
+    pub fn to_type(self) -> &'static str {
+        match self {
+            Kind::Commands => "a program, like curl, or a whole command",
+            Kind::Fetching => "the start of a web address, like https://github.com",
+            Kind::Writing | Kind::Changing | Kind::Reading | Kind::Folder => {
+                "a folder's whole path, starting with /"
+            }
+        }
+    }
+
+    /// Everything of this kind, in words: what a rule with nothing in it
+    /// allows.
+    pub fn everything(self) -> &'static str {
+        match self {
+            Kind::Commands => "running any command at all",
+            Kind::Writing => "writing any file",
+            Kind::Changing => "changing any file",
+            Kind::Reading => "reading any file",
+            Kind::Fetching => "fetching any web page",
+            Kind::Folder => "writing anywhere",
+        }
+    }
+
+    /// Whether it can be allowed whole, with nothing in the rule. A folder
+    /// cannot: the wall with no edge is not a wall.
+    pub fn can_be_whole(self) -> bool {
+        self != Kind::Folder
+    }
+}
+
+/// Whether a rule kept for one tool answers a question asked by another: the
+/// same tool, or the same kind of thing asked by the other engine.
+pub fn same_thing(kept: &str, asked: &str) -> bool {
+    kept == asked || matches!((Kind::of(kept), Kind::of(asked)), (Some(a), Some(b)) if a == b)
+}
+
+/// What is worth offering a teammate, and why some things are not.
+///
+/// Only what it would ever ask about, or be walled from. One that never asks
+/// has nothing to allow but somewhere else to write; a local model reads files
+/// and fetches pages without asking; and a teammate on Claude that asks is not
+/// walled, so a folder would change nothing for it.
+pub fn worth_offering(local: bool, asks: &str) -> (Vec<Kind>, Option<&'static str>) {
+    use Kind::*;
+    match (asks, local) {
+        ("auto", _) => (
+            vec![Folder],
+            Some(
+                "It never asks before doing anything, so the one thing to allow is somewhere \
+                 else to write.",
+            ),
+        ),
+        ("edits", true) => (
+            vec![Commands, Folder],
+            Some(
+                "It writes and changes files without asking, and on a local model it reads \
+                 files and fetches pages without asking too.",
+            ),
+        ),
+        ("edits", false) => (
+            vec![Commands, Reading, Fetching],
+            Some("It writes and changes files without asking."),
+        ),
+        (_, true) => (
+            vec![Commands, Writing, Changing, Folder],
+            Some("On a local model it reads files and fetches pages without asking."),
+        ),
+        (_, false) => (vec![Commands, Writing, Changing, Reading, Fetching], None),
+    }
 }
 
 /// Whether something already allowed covers what is being asked.
@@ -275,6 +435,79 @@ mod tests {
             in_words("Edit", "//Users/me/**"),
             "anything starting //Users/me/**"
         );
+    }
+
+    #[test]
+    fn a_rule_written_for_one_engine_answers_the_other() {
+        // Written ahead in the window, a rule was kept as `Bash`, and a
+        // teammate on a local model asks as `run_command`: nothing it asked
+        // was ever answered by it.
+        assert!(same_thing("Bash", "run_command"));
+        assert!(same_thing("Bash", "start_command"));
+        assert!(same_thing("run_command", "Bash"));
+        assert!(same_thing("Write", "write_file"));
+        assert!(same_thing("Edit", "change_file"));
+        assert!(same_thing("WebFetch", "fetch_url"));
+        // Different kinds stay different, and a tool that is none of these
+        // answers only itself.
+        assert!(!same_thing("Bash", "write_file"));
+        assert!(!same_thing("Read", "Write"));
+        assert!(same_thing("ask", "ask"));
+        assert!(!same_thing("ask", "mcp__errand__ask"));
+    }
+
+    #[test]
+    fn a_kind_is_found_by_the_windows_name_or_by_any_tools() {
+        assert_eq!(Kind::called("commands"), Some(Kind::Commands));
+        assert_eq!(Kind::called("folder"), Some(Kind::Folder));
+        assert_eq!(Kind::called("Bash"), Some(Kind::Commands));
+        assert_eq!(Kind::called("change_file"), Some(Kind::Changing));
+        assert_eq!(Kind::called("ask"), None);
+        // Kept under the names rules always had, so the old ones still read.
+        for kind in Kind::ALL {
+            assert_eq!(Kind::of(kind.kept_as()), Some(kind), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn what_a_kind_allows_is_said_as_what_it_is() {
+        assert_eq!(in_words("Bash", ""), "running any command at all");
+        assert_eq!(in_words("run_command", ""), "running any command at all");
+        assert_eq!(in_words("run_command", "curl"), "any curl command");
+        assert_eq!(
+            in_words("Write", "/Users/me/Downloads"),
+            "writing anything inside /Users/me/Downloads"
+        );
+        assert_eq!(
+            in_words("Read", "/Volumes/Disk"),
+            "reading anything inside /Volumes/Disk"
+        );
+        assert_eq!(
+            in_words("WebFetch", "https://github.com"),
+            "fetching anything from https://github.com"
+        );
+        assert_eq!(in_words("WebFetch", ""), "fetching any web page");
+        assert!(!Kind::Folder.can_be_whole());
+    }
+
+    #[test]
+    fn a_teammate_is_offered_only_what_it_would_ever_ask_about() {
+        // Never asks: nothing to allow but somewhere else to write.
+        let (kinds, why) = worth_offering(true, "auto");
+        assert_eq!(kinds, vec![Kind::Folder]);
+        assert!(why.is_some());
+        assert_eq!(worth_offering(false, "auto").0, vec![Kind::Folder]);
+        // A local model reads and fetches without asking, and is walled.
+        let (kinds, _) = worth_offering(true, "ask");
+        assert!(kinds.contains(&Kind::Commands) && kinds.contains(&Kind::Folder));
+        assert!(!kinds.contains(&Kind::Reading) && !kinds.contains(&Kind::Fetching));
+        // Claude asking is not walled, so a folder would change nothing.
+        let (kinds, why) = worth_offering(false, "ask");
+        assert!(!kinds.contains(&Kind::Folder));
+        assert!(kinds.contains(&Kind::Fetching));
+        assert!(why.is_none());
+        // Writing without asking leaves writing out.
+        assert!(!worth_offering(false, "edits").0.contains(&Kind::Writing));
     }
 
     #[test]

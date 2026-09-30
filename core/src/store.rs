@@ -2511,16 +2511,17 @@ impl Store {
 
     /// Has this exact thing already been allowed?
     ///
-    /// A rule matches when the tool is the same and the thing being done starts
-    /// with the rule. Prefix rather than equality, because the rule an engine
-    /// suggests is the shape of the command and not the command: allowing
-    /// `curl -s https://example.com` should cover fetching a second page of it
-    /// and must not cover `curl` on its own.
+    /// A rule matches when it is for the same thing and the thing being done
+    /// starts with the rule. Prefix rather than equality, because the rule an
+    /// engine suggests is the shape of the command and not the command:
+    /// allowing `curl -s https://example.com` should cover fetching a second
+    /// page of it and must not cover `curl` on its own. The same thing rather
+    /// than the same tool name, because the engines name it differently: a
+    /// rule for `Bash` answers a local model's `run_command`.
     pub fn already_allowed(&self, agent: &str, tool: &str, doing: &str) -> Result<bool> {
-        Ok(self
-            .allowances(agent)?
-            .into_iter()
-            .any(|a| a.tool == tool && crate::allowing::covers(&a.rule, doing)))
+        Ok(self.allowances(agent)?.into_iter().any(|a| {
+            crate::allowing::same_thing(&a.tool, tool) && crate::allowing::covers(&a.rule, doing)
+        }))
     }
 
     /// Give a conversation a schedule, or take one away.
@@ -5679,6 +5680,32 @@ mod tests {
                 .unwrap(),
             "the prefixed name reached the table, so there are now two of everything"
         );
+    }
+
+    #[test]
+    fn a_rule_written_ahead_answers_a_local_model_as_well() {
+        // The window keeps a rule under Claude's name for the tool, and a
+        // teammate on a local model asks under its own: a rule for `curl`
+        // written ahead never answered its `run_command curl ...`.
+        let s = Store::in_memory().unwrap();
+        one(&s, "a1", "/tmp/one");
+        s.allow("a1", "Bash", "curl").unwrap();
+        s.allow("a1", "Write", "/Users/me/Downloads").unwrap();
+
+        assert!(s
+            .already_allowed("a1", "run_command", "curl -s https://example.com")
+            .unwrap());
+        assert!(s
+            .already_allowed("a1", "start_command", "curl -O https://example.com/big")
+            .unwrap());
+        assert!(s
+            .already_allowed("a1", "write_file", "/Users/me/Downloads/clip.mp4")
+            .unwrap());
+        // Still only what was allowed.
+        assert!(!s.already_allowed("a1", "run_command", "rm -rf ~").unwrap());
+        assert!(!s
+            .already_allowed("a1", "change_file", "/Users/me/Downloads/clip.mp4")
+            .unwrap());
     }
 
     #[test]

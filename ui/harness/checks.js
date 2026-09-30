@@ -5732,3 +5732,139 @@ export async function listeningToAnAnswer() {
   check("after which it can be listened to again", button("Listen") && !button("Stop"), "still stopping");
   return found;
 }
+
+/**
+ * Choosing what to allow, rather than guessing how to type it.
+ *
+ * "Let it" was an empty box with `curl` in it whatever "Using" said, so
+ * somebody letting a teammate write into Downloads had nothing to tell them it
+ * wanted the whole path. Now each kind comes with its choices filled in, says
+ * what it would allow before anything is kept, and offers only what this
+ * teammate would ever ask about.
+ */
+export async function choosingWhatToAllow() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wasOn = document.getElementById("talks").value;
+  await openTalk("talk-2");
+  const panel = document.getElementById("granting");
+  if (!panel.hidden) document.getElementById("granted").click();
+  document.getElementById("granted").click();
+  await new Promise((r) => setTimeout(r, 300));
+
+  const using = document.getElementById("allow-tool");
+  const letIt = document.getElementById("allow-choice");
+  const typed = document.getElementById("allow-what");
+  const means = document.getElementById("allow-means");
+  const pick = async (select, value) => {
+    select.value = value;
+    select.dispatchEvent(new Event("change"));
+    await new Promise((r) => setTimeout(r, 250));
+  };
+  const said = (select) => [...select.options].map((o) => o.textContent);
+
+  check(
+    "what it is comes first, in words",
+    said(using).includes("running commands") && said(using).includes("writing files"),
+    said(using).join(" | "),
+  );
+  check(
+    "a teammate that asks and is not walled is not offered a folder, which would change nothing for it",
+    !said(using).includes("a folder it may write in"),
+    said(using).join(" | "),
+  );
+
+  await pick(using, "commands");
+  const commands = said(letIt);
+  check(
+    "running commands comes with programs to choose",
+    commands.includes("any curl command") && commands.includes("any git command"),
+    commands.join(" | "),
+  );
+  check(
+    "nothing is chosen until somebody chooses",
+    letIt.value === "" && letIt.options[0]?.disabled,
+    `value=${letIt.value}`,
+  );
+  check(
+    "the whole of it is there, last, and said as the whole of it",
+    commands[commands.length - 2] === "running any command at all",
+    commands.join(" | "),
+  );
+  check("the box to type in waits until something else is wanted", typed.hidden, `hidden=${typed.hidden}`);
+
+  await pick(letIt, "0");
+  check(
+    "choosing says what it would allow before anything is kept",
+    /This would allow any curl command/.test(means.textContent),
+    means.textContent,
+  );
+
+  await pick(letIt, "something-else");
+  check(
+    "something else opens a box that says what to type",
+    !typed.hidden && /a program/.test(typed.placeholder),
+    `hidden=${typed.hidden} "${typed.placeholder}"`,
+  );
+
+  // Never asking: nothing to allow but somewhere else to write.
+  const asks = document.getElementById("asks");
+  const postureWas = asks.value;
+  asks.value = "auto";
+  asks.dispatchEvent(new Event("change"));
+  await new Promise((r) => setTimeout(r, 350));
+  check(
+    "a teammate that never asks is offered only somewhere else to write",
+    said(using).length === 1 && using.value === "folder",
+    said(using).join(" | "),
+  );
+  const fewer = document.getElementById("allow-fewer");
+  check("and is told why the rest are gone", !fewer.hidden && /never asks/.test(fewer.textContent), fewer.textContent);
+  const places = said(letIt);
+  check(
+    "the folders are there to choose, whole",
+    places.some((p) => p.includes("/Users/me/Downloads")) && places.some((p) => p.includes("/Volumes/Archive")),
+    places.join(" | "),
+  );
+  check(
+    "and a folder is never offered as all of them at once",
+    !places.some((p) => /anywhere$|any file/.test(p)),
+    places.join(" | "),
+  );
+
+  const downloads = [...letIt.options].find((o) => o.textContent.includes("/Users/me/Downloads"));
+  await pick(letIt, downloads?.value ?? "");
+  check(
+    "choosing Downloads says it may then write anywhere inside it",
+    /writing anywhere inside \/Users\/me\/Downloads/.test(means.textContent),
+    means.textContent,
+  );
+  const before = asked.length;
+  document.getElementById("allow-ahead").dispatchEvent(new Event("submit"));
+  await new Promise((r) => setTimeout(r, 350));
+  const sent = asked.slice(before).find((a) => a.name === "allow_in_advance");
+  check(
+    "allowing it sends the folder, whole, as a folder",
+    sent?.args?.tool === "folder" && sent?.args?.rule === "/Users/me/Downloads",
+    JSON.stringify(sent?.args),
+  );
+
+  // A folder typed without its beginning is refused while it can be changed.
+  await pick(letIt, "something-else");
+  typed.value = "Downloads";
+  typed.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 450));
+  check(
+    "a folder typed without its whole path is refused before anything is kept",
+    /whole path/.test(means.textContent),
+    means.textContent,
+  );
+  typed.value = "";
+
+  asks.value = postureWas;
+  asks.dispatchEvent(new Event("change"));
+  await new Promise((r) => setTimeout(r, 300));
+  document.getElementById("granted").click();
+  await openTalk(wasOn);
+  return found;
+}

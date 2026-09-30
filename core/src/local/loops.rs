@@ -228,6 +228,12 @@ impl Engine for Local {
         Ok(true)
     }
 
+    /// Every command here is walled as it starts, reading the folders allowed
+    /// at that moment: see `wall::shell`.
+    fn walls_each_command(&self) -> bool {
+        true
+    }
+
     fn answer(&mut self, call: &str, said: Answer) -> Result<()> {
         self.turns
             .send(Turn::Answer {

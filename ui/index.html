@@ -532,18 +532,21 @@
           knew their research agent should be free to run curl had no way to
           say so until it had interrupted them twice.
         -->
+        <!--
+          What it is first, then which one, chosen rather than guessed. "Let it"
+          was an empty box with curl in it whatever "Using" said, so somebody
+          letting a teammate write into Downloads had nothing to tell them it
+          wanted the whole path. Filled in from what this teammate would ever
+          ask about, and from what is on this Mac.
+        -->
         <form id="allow-ahead">
-          <label>Let it
-            <input id="allow-what" type="text" placeholder="curl" autocomplete="off"
-                   autocorrect="off" autocapitalize="off" spellcheck="false" />
-          </label>
           <label>Using
             <select id="allow-tool">
-              <option value="Bash">the terminal</option>
-              <option value="Read">reading files</option>
-              <option value="Edit">changing files</option>
-              <option value="Write">writing files</option>
-              <option value="WebFetch">fetching a page</option>
+              <option value="commands">running commands</option>
+              <option value="writing">writing files</option>
+              <option value="changing">changing files</option>
+              <option value="reading">reading files</option>
+              <option value="fetching">fetching web pages</option>
               <!--
                 A place rather than a tool. An agent set never to ask is walled
                 into its own folder, and until this option there was no way to
@@ -554,9 +557,16 @@
               <option value="folder">a folder it may write in</option>
             </select>
           </label>
+          <label>Let it
+            <select id="allow-choice"></select>
+          </label>
+          <input id="allow-what" type="text" hidden aria-label="What to allow" autocomplete="off"
+                 autocorrect="off" autocapitalize="off" spellcheck="false" />
           <button id="allow-save" type="submit">Allow it</button>
+          <p id="allow-means"></p>
           <p id="allow-says"></p>
         </form>
+        <p id="allow-fewer" hidden></p>
         <ul id="allowed"></ul>
         <!--
           And what the engine allows on its own, which this app can show and

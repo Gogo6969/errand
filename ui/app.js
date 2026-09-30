@@ -318,6 +318,9 @@ const el = {
   handModels: document.getElementById("hand-models"),
   allowWhat: document.getElementById("allow-what"),
   allowTool: document.getElementById("allow-tool"),
+  allowChoice: document.getElementById("allow-choice"),
+  allowMeans: document.getElementById("allow-means"),
+  allowFewer: document.getElementById("allow-fewer"),
   allowSays: document.getElementById("allow-says"),
   alsoAllowed: document.getElementById("also-allowed"),
   asksMeans: document.getElementById("asks-means"),
@@ -4535,16 +4538,18 @@ el.granted.addEventListener("click", async () => {
 el.allowAhead?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const a = whose();
-  const what = el.allowWhat.value.trim();
-  if (!a || !what) {
-    el.allowSays.textContent = "Say what it may do, like `curl` or `git status`.";
+  const rule = ruleChosen();
+  if (!a || rule === null) {
+    el.allowSays.textContent = el.allowWhat.hidden
+      ? "Choose what it may do."
+      : "Say what it may do, like `curl` or `git status`.";
     return;
   }
   try {
     const covers = await invoke("allow_in_advance", {
       agent: a.id,
       tool: el.allowTool.value,
-      rule: what,
+      rule,
     });
     // What it actually allows, not what was typed. `git status` becomes any
     // git command, and somebody has to be told that rather than find out.
@@ -4554,6 +4559,118 @@ el.allowAhead?.addEventListener("submit", async (e) => {
   } catch (why) {
     el.allowSays.textContent = String(why);
   }
+});
+
+/**
+ * What can be allowed for this teammate, with the choices filled in.
+ *
+ * "Let it" was an empty box with `curl` in it whatever "Using" said, so
+ * somebody letting a teammate write into Downloads had nothing to tell them it
+ * wanted `/Users/them/Downloads`, whole. The app knows what each kind wants,
+ * which folders and disks are on this Mac, and which programs are, so it says.
+ */
+let offeredToAllow = null;
+const SOMETHING_ELSE = "something-else";
+
+async function drawAllowing(a) {
+  try {
+    offeredToAllow = await invoke("allowing_choices", { agent: a.id });
+  } catch {
+    // Without the choices the form still works as it did: typed.
+    offeredToAllow = null;
+  }
+  const kinds = offeredToAllow?.kinds || [];
+  if (kinds.length) {
+    const was = el.allowTool.value;
+    el.allowTool.replaceChildren(
+      ...kinds.map((k) => {
+        const one = document.createElement("option");
+        one.value = k.kind;
+        one.textContent = k.using;
+        return one;
+      }),
+    );
+    if (kinds.some((k) => k.kind === was)) el.allowTool.value = was;
+  }
+  el.allowFewer.textContent = offeredToAllow?.fewer || "";
+  el.allowFewer.hidden = !offeredToAllow?.fewer;
+  drawLetIt();
+}
+
+function kindShown() {
+  return (offeredToAllow?.kinds || []).find((k) => k.kind === el.allowTool.value);
+}
+
+function drawLetIt() {
+  const kind = kindShown();
+  const choices = kind?.choices || [];
+  // Nothing chosen to begin with: the list ends with the widest choice, and
+  // that should never be the one picked by somebody who did not pick.
+  const pick = document.createElement("option");
+  pick.value = "";
+  pick.textContent = choices.length ? "choose one" : "type it below";
+  pick.disabled = true;
+  const typed = document.createElement("option");
+  typed.value = SOMETHING_ELSE;
+  typed.textContent = "something else…";
+  el.allowChoice.replaceChildren(
+    pick,
+    ...choices.map((c, i) => {
+      const one = document.createElement("option");
+      one.value = String(i);
+      one.textContent = c.said;
+      return one;
+    }),
+    typed,
+  );
+  el.allowChoice.value = choices.length ? "" : SOMETHING_ELSE;
+  el.allowWhat.placeholder = kind?.to_type || "a program, like curl";
+  el.allowWhat.hidden = choices.length > 0;
+  el.allowMeans.textContent = "";
+}
+
+/** The rule chosen or typed: "" is a real one, the whole of a kind. */
+function ruleChosen() {
+  const picked = el.allowChoice.value;
+  if (picked && picked !== SOMETHING_ELSE) {
+    return kindShown()?.choices?.[Number(picked)]?.rule ?? null;
+  }
+  const typed = el.allowWhat.value.trim();
+  return typed || null;
+}
+
+let meaningAsked = 0;
+async function sayWhatItWouldAllow() {
+  const rule = ruleChosen();
+  const asked = ++meaningAsked;
+  if (rule === null) {
+    el.allowMeans.textContent = "";
+    return;
+  }
+  let said;
+  try {
+    said = `This would allow ${await invoke("what_allowing_means", { tool: el.allowTool.value, rule })}.`;
+  } catch (why) {
+    said = String(why);
+  }
+  if (asked === meaningAsked) el.allowMeans.textContent = said;
+}
+
+el.allowTool?.addEventListener("change", () => {
+  el.allowSays.textContent = "";
+  drawLetIt();
+});
+el.allowChoice?.addEventListener("change", () => {
+  el.allowSays.textContent = "";
+  const typing = el.allowChoice.value === SOMETHING_ELSE;
+  el.allowWhat.hidden = !typing;
+  if (typing) el.allowWhat.focus();
+  sayWhatItWouldAllow();
+});
+let meaningSoon = null;
+el.allowWhat?.addEventListener("input", () => {
+  clearTimeout(meaningSoon);
+  meaningSoon = setTimeout(sayWhatItWouldAllow, 200);
 });
 
 async function drawGranted() {
@@ -4571,9 +4688,10 @@ async function drawGranted() {
           // What it covers, in words, rather than the rule it is stored as. A
           // rule that is a whole command line covers that line and nothing
           // else, which reads like a permission and behaves like a one-off, and
-          // nothing about the line says which of the two it is.
-          what.textContent = `${one.tool} · ${one.covers}`;
-          if (one.rule) what.title = one.rule;
+          // nothing about the line says which of the two it is. The words say
+          // what it is for, so the tool's own name is only in the tooltip.
+          what.textContent = one.covers;
+          what.title = one.rule ? `${one.tool}: ${one.rule}` : one.tool;
           const take = document.createElement("button");
           take.type = "button";
           take.textContent = "Take back";
@@ -4592,6 +4710,7 @@ async function drawGranted() {
           ),
         ]),
   );
+  await drawAllowing(a);
   await drawAlsoAllowed();
 }
 
@@ -4707,6 +4826,9 @@ el.asks.addEventListener("change", async () => {
   a.asks = el.asks.value;
   sayWhatAsksMeans();
   await invoke("asks", { id: a.id, how: a.asks });
+  // What is worth allowing depends on how much it asks: one that never asks
+  // has nothing to allow but somewhere else to write.
+  await drawAllowing(a);
 });
 
 el.new.addEventListener("click", () => start({ introduce: true }));

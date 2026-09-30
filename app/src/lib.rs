@@ -5598,28 +5598,7 @@ async fn allow_in_advance(
     tool: String,
     rule: String,
 ) -> Result<String, String> {
-    let tool = tool.trim();
-    let rule = rule.trim();
-    if tool.is_empty() {
-        return Err("say which tool this is about".into());
-    }
-    // Narrowed the same way pressing Always narrows it, so that writing
-    // `curl -s https://x` here means what pressing Always on that command
-    // would have meant, and not something quietly different.
-    let allowing = errand_core::allowing::what_always_means(tool, Some(rule))
-        .ok_or_else(|| "there is nothing to remember in that".to_string())?;
-    // A folder has to be one. A path that is not absolute is a guess about
-    // the working directory, and a folder that is not there is a typo, and
-    // both would sit in the list looking like a permission that never works.
-    if errand_core::allowing::is_a_folder(tool) {
-        let folder = std::path::Path::new(&allowing.rule);
-        if !folder.is_absolute() {
-            return Err("give the folder's whole path, starting with /".into());
-        }
-        if !folder.is_dir() {
-            return Err(format!("{} is not a folder on this Mac", folder.display()));
-        }
-    }
+    let (tool, allowing) = what_allowing_is(&tool, &rule)?;
     held.store
         .allow(&agent, tool, &allowing.rule)
         .map_err(|e| e.to_string())?;
@@ -5627,19 +5606,259 @@ async fn allow_in_advance(
     Ok(allowing.in_words)
 }
 
+/// What allowing this would allow, said before anything is kept.
+///
+/// So the words under the form are the words the list will show, before the
+/// button is pressed rather than after, and a folder that is not there says so
+/// while it can still be changed.
+#[tauri::command]
+fn what_allowing_means(tool: String, rule: String) -> Result<String, String> {
+    what_allowing_is(&tool, &rule).map(|(_, allowing)| allowing.in_words)
+}
+
+/// The tool a rule is kept under, and what it allows, or why it cannot be.
+///
+/// `tool` is a kind as the window names it (`commands`, `folder`) or any
+/// engine's name for a tool. A kind is kept under the name it always had, and
+/// answers whichever engine asks: see `allowing::same_thing`.
+fn what_allowing_is(
+    tool: &str,
+    rule: &str,
+) -> Result<(&'static str, errand_core::allowing::Allowing), String> {
+    use errand_core::allowing::Kind;
+    let rule = rule.trim();
+    let Some(kind) = Kind::called(tool.trim()) else {
+        return Err("say which of these it is about".into());
+    };
+    if rule.is_empty() && !kind.can_be_whole() {
+        return Err("choose a folder".into());
+    }
+    // Narrowed the same way pressing Always narrows it, so that writing
+    // `curl -s https://x` here means what pressing Always on that command
+    // would have meant, and not something quietly different.
+    let allowing = errand_core::allowing::what_always_means(kind.kept_as(), Some(rule))
+        .ok_or_else(|| "there is nothing to remember in that".to_string())?;
+    // A place has to be one. A path that is not absolute is a guess about the
+    // working directory, and a place that is not there is a typo, and both
+    // would sit in the list looking like a permission that never works.
+    let a_place = matches!(
+        kind,
+        Kind::Folder | Kind::Writing | Kind::Changing | Kind::Reading
+    );
+    if a_place && !rule.is_empty() {
+        let place = std::path::Path::new(rule);
+        if !place.is_absolute() {
+            return Err("give the folder's whole path, starting with /".into());
+        }
+        if kind == Kind::Folder && !place.is_dir() {
+            return Err(format!("{} is not a folder on this Mac", place.display()));
+        }
+        if !place.exists() {
+            return Err(format!("{} is not on this Mac", place.display()));
+        }
+    }
+    if kind == Kind::Fetching
+        && !rule.is_empty()
+        && !(rule.starts_with("https://") || rule.starts_with("http://"))
+    {
+        return Err("give the start of a web address, like https://github.com".into());
+    }
+    Ok((kind.kept_as(), allowing))
+}
+
+/// What can be allowed for one teammate, with the choices already filled in.
+///
+/// "Let it" was an empty box with `curl` in it as an example whatever was
+/// chosen under "Using", so somebody wanting a teammate to write into
+/// Downloads had nothing to tell them it wanted `/Users/them/Downloads`, whole.
+/// Every kind now comes with the things it is usually wanted for, said the
+/// way they will be allowed.
+#[derive(serde::Serialize)]
+struct AllowingChoices {
+    kinds: Vec<KindOffered>,
+    /// Why some kinds are not offered, when some are not.
+    fewer: Option<&'static str>,
+}
+
+#[derive(serde::Serialize)]
+struct KindOffered {
+    kind: errand_core::allowing::Kind,
+    using: &'static str,
+    to_type: &'static str,
+    choices: Vec<Offered>,
+}
+
+#[derive(serde::Serialize)]
+struct Offered {
+    rule: String,
+    said: String,
+}
+
+/// Programs worth offering by name, when they are on this Mac. A short list on
+/// purpose: `osascript` and `open` reach every other app, and are typed by
+/// somebody who means them rather than picked out of a list.
+const PROGRAMS_WORTH_OFFERING: &[&str] = &[
+    "curl", "git", "python3", "yt-dlp", "ffmpeg", "node", "npm", "rsync", "ssh", "gh", "jq",
+    "sqlite3", "brew",
+];
+
+#[tauri::command]
+async fn allowing_choices(held: State<'_, Held>, agent: String) -> Result<AllowingChoices, String> {
+    use errand_core::allowing::Kind;
+    let a = held
+        .store
+        .agent(&agent)
+        .map_err(|e| e.to_string())?
+        .ok_or("there is no such teammate")?;
+    // The engine it would actually run on, which the setting for every
+    // teammate may have chosen rather than the agent itself.
+    let engine = the_model_for(
+        &held,
+        Some(&a),
+        (a.engine.clone(), a.engine_settings.clone()),
+    )
+    .map(|(engine, _)| engine)
+    .unwrap_or_else(|_| a.engine.clone());
+    let (kinds, fewer) = errand_core::allowing::worth_offering(engine == "local", &a.asks);
+    let already: Vec<(String, String)> = held
+        .store
+        .allowances(&agent)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|one| (one.tool, one.rule))
+        .collect();
+    let has = |kind: Kind, rule: &str| {
+        already
+            .iter()
+            .any(|(tool, kept)| Kind::of(tool) == Some(kind) && kept == rule)
+    };
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let places = places_on_this_mac(&home);
+    let programs = programs_on_this_mac(&home);
+
+    let kinds = kinds
+        .into_iter()
+        .map(|kind| {
+            let mut choices: Vec<Offered> = match kind {
+                Kind::Commands => programs
+                    .iter()
+                    .map(|program| Offered {
+                        rule: program.clone(),
+                        said: format!("any {program} command"),
+                    })
+                    .collect(),
+                Kind::Fetching => Vec::new(),
+                Kind::Folder | Kind::Writing | Kind::Changing | Kind::Reading => places
+                    .iter()
+                    .map(|(rule, said)| Offered {
+                        rule: rule.clone(),
+                        said: said.clone(),
+                    })
+                    .collect(),
+            };
+            // The whole of it last, and said as the whole of it: the widest
+            // choice on the list should never be the one picked by default.
+            if kind.can_be_whole() {
+                choices.push(Offered {
+                    rule: String::new(),
+                    said: kind.everything().to_string(),
+                });
+            }
+            choices.retain(|one| !has(kind, &one.rule));
+            KindOffered {
+                kind,
+                using: kind.using(),
+                to_type: kind.to_type(),
+                choices,
+            }
+        })
+        .collect();
+    Ok(AllowingChoices { kinds, fewer })
+}
+
+/// The folders somebody usually means, whole, and the disks plugged in.
+///
+/// Only what is there. The startup disk is left out: under /Volumes it is a
+/// link back to /, and allowing all of it is not a choice to offer in a list.
+fn places_on_this_mac(home: &std::path::Path) -> Vec<(String, String)> {
+    let mut places = Vec::new();
+    for name in [
+        "Downloads",
+        "Desktop",
+        "Documents",
+        "Movies",
+        "Music",
+        "Pictures",
+    ] {
+        let place = home.join(name);
+        if place.is_dir() {
+            places.push((
+                place.display().to_string(),
+                format!("{name} ({})", place.display()),
+            ));
+        }
+    }
+    let mut disks: Vec<std::path::PathBuf> = std::fs::read_dir("/Volumes")
+        .map(|all| {
+            all.flatten()
+                .filter(|one| {
+                    one.file_type()
+                        .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+                })
+                .map(|one| one.path())
+                .filter(|disk| {
+                    disk.file_name()
+                        .is_some_and(|name| !name.to_string_lossy().starts_with('.'))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    disks.sort();
+    for disk in disks {
+        let name = disk
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        places.push((
+            disk.display().to_string(),
+            format!("the disk {name} ({})", disk.display()),
+        ));
+    }
+    places
+}
+
+/// Which of the programs worth offering are on this Mac, where a teammate's
+/// shell would find them.
+fn programs_on_this_mac(home: &std::path::Path) -> Vec<String> {
+    let dirs = [
+        std::path::PathBuf::from("/opt/homebrew/bin"),
+        std::path::PathBuf::from("/usr/local/bin"),
+        home.join(".local/bin"),
+        std::path::PathBuf::from("/usr/bin"),
+        std::path::PathBuf::from("/bin"),
+    ];
+    PROGRAMS_WORTH_OFFERING
+        .iter()
+        .filter(|program| dirs.iter().any(|dir| dir.join(program).is_file()))
+        .map(|program| program.to_string())
+        .collect()
+}
+
 /// Bring the wall up to date with what this agent may write in.
 ///
 /// An engine already running behind the old wall keeps it until it is next
 /// started: the profile is fixed when the process is. One sitting idle is
 /// closed here, so the next message opens it behind the new wall; one in the
-/// middle of a turn is left alone and gets the new wall after that turn.
+/// middle of a turn is left alone and gets the new wall after that turn. One
+/// that walls each command as it runs is left open, since its next command
+/// is walled with the new folders anyway.
 fn let_the_wall_know(held: &Held, agent: &str) {
     let Ok(Some(a)) = held.store.agent(agent) else {
         return;
     };
     let folders = held.store.folders_allowed(agent).unwrap_or_default();
     errand_core::wall::also_allow(std::path::Path::new(&a.cwd), folders);
-    close_what_is_idle(held, agent);
+    close_what_is_idle_behind(held, agent, |thread| !thread.walls_each_command());
 }
 
 /// Put a conversation's engine away once the errand it was opened for is over.
@@ -5706,11 +5925,26 @@ fn tell_them_who_it_is(held: &Held, agent: &str) {
 /// engine in the middle of a person's errand, or parked on a handover while
 /// they granted a permission, was closed under them.
 fn close_what_is_idle(held: &Held, agent: &str) {
+    close_what_is_idle_behind(held, agent, |_| true);
+}
+
+/// The same, for only the engines `behind` says the change has not reached.
+fn close_what_is_idle_behind(
+    held: &Held,
+    agent: &str,
+    behind: impl Fn(&(dyn Engine + Send)) -> bool,
+) {
     let open: Vec<String> = held.live.lock().unwrap().keys().cloned().collect();
     for id in open {
         let theirs = matches!(held.store.conversation(&id), Ok(Some(c)) if c.agent == agent);
         if theirs && !mid_turn(held, &id) {
-            let was = held.live.lock().unwrap().remove(&id);
+            let was = {
+                let mut live = held.live.lock().unwrap();
+                match live.get(&id).is_some_and(|thread| behind(thread.as_ref())) {
+                    true => live.remove(&id),
+                    false => None,
+                }
+            };
             if let Some(mut thread) = was {
                 let _ = thread.stop();
             }
@@ -7571,6 +7805,8 @@ pub fn run() {
             routines,
             allowances,
             allow_in_advance,
+            what_allowing_means,
+            allowing_choices,
             also_allowed,
             revoke,
             asks,
@@ -7906,6 +8142,53 @@ fn everything_that_waits_for_the_app(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allowing_ahead_takes_a_kind_and_says_what_it_allows_before_keeping_it() {
+        let home = std::env::temp_dir().join(format!("errand-allowing-{}", std::process::id()));
+        let downloads = home.join("Downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let there = downloads.display().to_string();
+
+        // A folder, whole, as it will be allowed.
+        let (tool, said) = what_allowing_is("folder", &there).unwrap();
+        assert_eq!(tool, "folder");
+        assert_eq!(said.in_words, format!("writing anywhere inside {there}"));
+        // Kept under the name the kind always had, whichever engine asks.
+        assert_eq!(
+            what_allowing_is("commands", "git status").unwrap().0,
+            "Bash"
+        );
+        assert_eq!(
+            what_allowing_is("commands", "git status")
+                .unwrap()
+                .1
+                .in_words,
+            "any git command"
+        );
+        // The whole of a kind, said as the whole of it; never a whole folder.
+        assert_eq!(
+            what_allowing_is("commands", "").unwrap().1.in_words,
+            "running any command at all"
+        );
+        assert!(what_allowing_is("folder", "").is_err());
+        // What would sit in the list looking like a permission and never work.
+        assert!(what_allowing_is("folder", "Downloads").is_err());
+        assert!(what_allowing_is("folder", &format!("{there}/not-here")).is_err());
+        assert!(what_allowing_is("fetching", "github.com").is_err());
+        assert!(what_allowing_is("nonsense", "curl").is_err());
+
+        // The usual places are offered whole, and only when they are there.
+        let places = places_on_this_mac(&home);
+        assert!(places
+            .iter()
+            .any(|(rule, said)| rule == &there && said.starts_with("Downloads (")));
+        assert!(!places
+            .iter()
+            .any(|(rule, _)| rule.ends_with("/Desktop")
+                && rule.starts_with(&home.display().to_string())));
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn a_teammate_kept_local_runs_here_or_not_at_all() {

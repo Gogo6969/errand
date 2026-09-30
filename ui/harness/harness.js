@@ -433,6 +433,9 @@ export const FIXTURE = {
 /** Everything the window asked for, so a check can say what was never called. */
 export const asked = [];
 
+/** How much each teammate asks, as the window last set it. */
+const postureNow = {};
+
 /** Whether a line of the picker is served on this Mac or this network. */
 function servedHere(o) {
   return o.engine === "local" && /\/\/(127\.|192\.168\.|10\.|localhost)/.test(o.settings || "");
@@ -651,8 +654,11 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           case "allow_in_advance": {
             const first = String(args.rule || "").trim().split(/\s+/)[0];
             if (!first) return Promise.reject("there is nothing to remember in that");
+            if (args.tool === "folder") return Promise.resolve(`writing anywhere inside ${args.rule}`);
             return Promise.resolve(
-              args.tool === "Bash" ? `any ${first} command` : `anything starting ${args.rule}`,
+              args.tool === "Bash" || args.tool === "commands"
+                ? `any ${first} command`
+                : `anything starting ${args.rule}`,
             );
           }
           // A real picture, small enough to sit in a fixture: one grey pixel.
@@ -740,6 +746,80 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.goal_of);
           case "allowances":
             return Promise.resolve(fixture.allowances);
+          // How much a teammate asks, kept so what is worth allowing can
+          // follow it the way the app's does.
+          case "asks":
+            postureNow[args.id] = args.how;
+            return Promise.resolve(null);
+          // What can be allowed, filled in the way the app fills it: only what
+          // this teammate would ever ask about, places whole, programs by name,
+          // and the whole of a kind last.
+          case "allowing_choices": {
+            const agent = (fixture.agents || []).find((x) => x.id === args.agent) || {};
+            const asks = postureNow[args.agent] || agent.asks || "ask";
+            const local = agent.engine === "local";
+            const kinds =
+              asks === "auto"
+                ? ["folder"]
+                : local
+                  ? ["commands", "writing", "changing", "folder"]
+                  : ["commands", "writing", "changing", "reading", "fetching"];
+            const places = [
+              { rule: "/Users/me/Downloads", said: "Downloads (/Users/me/Downloads)" },
+              { rule: "/Volumes/Archive", said: "the disk Archive (/Volumes/Archive)" },
+            ];
+            const using = {
+              commands: "running commands",
+              writing: "writing files",
+              changing: "changing files",
+              reading: "reading files",
+              fetching: "fetching web pages",
+              folder: "a folder it may write in",
+            };
+            const whole = {
+              commands: "running any command at all",
+              writing: "writing any file",
+              changing: "changing any file",
+              reading: "reading any file",
+              fetching: "fetching any web page",
+            };
+            return Promise.resolve({
+              kinds: kinds.map((kind) => ({
+                kind,
+                using: using[kind],
+                to_type:
+                  kind === "commands"
+                    ? "a program, like curl, or a whole command"
+                    : kind === "fetching"
+                      ? "the start of a web address, like https://github.com"
+                      : "a folder's whole path, starting with /",
+                choices: [
+                  ...(kind === "commands"
+                    ? ["curl", "git"].map((p) => ({ rule: p, said: `any ${p} command` }))
+                    : kind === "fetching"
+                      ? []
+                      : places),
+                  ...(kind === "folder" ? [] : [{ rule: "", said: whole[kind] }]),
+                ],
+              })),
+              fewer:
+                asks === "auto"
+                  ? "It never asks before doing anything, so the one thing to allow is somewhere else to write."
+                  : null,
+            });
+          }
+          // Said before anything is kept, in the words the list will use.
+          case "what_allowing_means": {
+            const rule = String(args.rule || "").trim();
+            if (["folder", "writing", "changing", "reading"].includes(args.tool) && rule && !rule.startsWith("/")) {
+              return Promise.reject("give the folder's whole path, starting with /");
+            }
+            if (args.tool === "folder") return Promise.resolve(`writing anywhere inside ${rule}`);
+            if (args.tool === "commands") {
+              return Promise.resolve(rule ? `any ${rule.split(/\s+/)[0]} command` : "running any command at all");
+            }
+            return Promise.resolve(rule ? `anything starting ${rule}` : `${args.tool} of anything`);
+          }
           // What an agent remembers, and the same refusal the app gives a note
           // that holds a key.
           case "notes":

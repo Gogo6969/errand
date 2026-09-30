@@ -2657,10 +2657,25 @@ a.on-disk {
   font-size: 12px;
   color: var(--ink-soft);
 }
-#allow-ahead input { min-width: 190px; }
+#allow-ahead input { min-width: 260px; }
+#allow-ahead select { max-width: 380px; }
 #allow-says {
   flex-basis: 100%;
   margin: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+/* What it would allow, said before the button rather than after it. */
+#allow-means {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink);
+}
+#allow-means:empty, #allow-says:empty { display: none; }
+#allow-fewer[hidden] { display: none; }
+#allow-fewer {
+  margin: -6px 0 0;
   font-size: 12px;
   color: var(--ink-soft);
 }

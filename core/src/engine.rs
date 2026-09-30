@@ -296,6 +296,18 @@ pub trait Engine {
     fn now_called(&mut self, _identity: &str) -> anyhow::Result<bool> {
         Ok(false)
     }
+    /// Whether a folder allowed from now on reaches it without starting again.
+    ///
+    /// An engine whose wall is fixed when its process starts cannot, and is
+    /// closed once it is idle instead, so the next thing said opens it behind
+    /// the new wall. One that walls each command as it runs needs no such
+    /// thing, and closing it anyway cost something: a local model opened again
+    /// from the store gets back the words of the conversation and none of its
+    /// steps, and told "Done, move it" once a folder had been allowed, it
+    /// answered "Move it." and did nothing.
+    fn walls_each_command(&self) -> bool {
+        false
+    }
     /// Stop it, whatever it is doing.
     fn stop(&mut self) -> anyhow::Result<()>;
     /// What it turned up with, once it has said.
