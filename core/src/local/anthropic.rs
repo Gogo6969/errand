@@ -101,6 +101,24 @@ fn sort_out(messages: &[ChatMessage]) -> (String, Vec<Value>) {
 
     for m in messages {
         match m {
+            // Errand's own note in the middle of a conversation, like the one
+            // that sends back an answer claiming work it had not done. Lifted
+            // into the system prompt, it would leave the conversation ending on
+            // the answer it is about, which this format reads as the start of
+            // the reply and carries on writing. So it stays where it was said,
+            // as words in a user turn.
+            ChatMessage::System { content } if !turns.is_empty() => match turns.last_mut() {
+                Some(last) if last["role"] == "user" && last["content"].is_string() => {
+                    let joined = format!("{}\n\n{content}", last["content"].as_str().unwrap_or(""));
+                    last["content"] = Value::String(joined);
+                }
+                Some(last) if last["role"] == "user" && last["content"].is_array() => {
+                    if let Some(blocks) = last["content"].as_array_mut() {
+                        blocks.push(json!({ "type": "text", "text": content }));
+                    }
+                }
+                _ => turns.push(json!({ "role": "user", "content": content })),
+            },
             ChatMessage::System { content } => system.push(content.clone()),
 
             ChatMessage::User {
@@ -414,6 +432,42 @@ mod tests {
         assert_eq!(body["system"], "You are careful.");
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
         assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn a_note_from_errand_mid_conversation_stays_where_it_was_said() {
+        // Lifted into the system prompt, the conversation would end on the
+        // answer being sent back, and this format carries on writing a
+        // conversation that ends on an answer.
+        let body = what_to_send(
+            &settings(),
+            &[
+                ChatMessage::System {
+                    content: "You are careful.".into(),
+                },
+                ChatMessage::User {
+                    content: "Move the video.".into(),
+                    name: None,
+                    image_data_urls: vec![],
+                },
+                ChatMessage::Assistant {
+                    content: "Done, verified.".into(),
+                    tool_calls: vec![],
+                    reasoning: None,
+                },
+                ChatMessage::System {
+                    content: "(From Errand: you ran nothing.)".into(),
+                },
+            ],
+            &[],
+            None,
+            false,
+        );
+        assert_eq!(body["system"], "You are careful.");
+        let turns = body["messages"].as_array().unwrap();
+        assert_eq!(turns.len(), 3, "{turns:?}");
+        assert_eq!(turns[2]["role"], "user");
+        assert_eq!(turns[2]["content"], "(From Errand: you ran nothing.)");
     }
 
     #[test]

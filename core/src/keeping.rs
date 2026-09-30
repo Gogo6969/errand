@@ -131,38 +131,124 @@ pub fn as_filename(agent: &str, talk: &str) -> String {
 /// conversation, and a model answers a follow-up to them the way it would have
 /// answered at the time.
 ///
-/// Steps are deliberately left out. A tool call and its result are a matched
+/// Steps never come back as calls. A tool call and its result are a matched
 /// pair with an id, and several providers refuse a request outright when a
 /// result does not follow a call they recognise -- so inventing ids for calls
-/// made by a process that no longer exists trades a silent gap for a 400. What
-/// a step actually established is almost always in the answer that followed it,
-/// which is kept.
+/// made by a process that no longer exists trades a silent gap for a 400.
+///
+/// They come back as a record in front of the answer that followed them,
+/// which is where they used to be left out altogether, and that cost more than
+/// it saved. A model handed a past in which it only ever talked went on only
+/// talking: told "Done, move it" it answered "Move it."; asked again, it said
+/// it had moved the file and checked it byte for byte, having run nothing;
+/// asked a third time it said "let me check" and stopped. And the note Errand
+/// put under an answer that checked nothing comes back under it too, so a
+/// report made up once is not believed the next time.
 pub fn as_turns(lines: &[Line]) -> Vec<ChatMessage> {
-    lines
-        .iter()
-        .filter_map(|line| match line.kind.as_str() {
-            "mine" => Some(ChatMessage::User {
-                content: line.text.trim().to_string(),
-                name: None,
-                // The picture itself is not carried back. It is on disk and the
-                // window shows it, but re-sending megabytes of base64 on every
-                // reopen is how a conversation stops fitting.
-                image_data_urls: Vec::new(),
-            }),
+    let mut turns: Vec<ChatMessage> = Vec::new();
+    let mut steps: Vec<String> = Vec::new();
+    for line in lines {
+        match line.kind.as_str() {
+            "mine" => {
+                // Steps a turn took after the last thing it said, taken before
+                // the next thing asked.
+                if let Some(record) = what_it_did(&mut steps) {
+                    turns.push(assistant(record));
+                }
+                turns.push(ChatMessage::User {
+                    content: line.text.trim().to_string(),
+                    name: None,
+                    // The picture itself is not carried back. It is on disk and
+                    // the window shows it, but re-sending megabytes of base64 on
+                    // every reopen is how a conversation stops fitting.
+                    image_data_urls: Vec::new(),
+                });
+            }
+            "doing" => steps.push(a_step(line)),
             // Claude Code saying a request failed, kept as said before that was
             // recognised as its own words: see `claude::written_by_claude_code`.
             // Handed to a model as its own reply, it is the one line in a
             // conversation it can only misread.
-            "said" if an_engine_error(&line.text) => None,
-            "said" => Some(ChatMessage::Assistant {
-                content: line.text.trim().to_string(),
-                tool_calls: Vec::new(),
-                reasoning: None,
-            }),
-            _ => None,
-        })
-        .filter(|one| !said_nothing(one))
-        .collect()
+            "said" if an_engine_error(&line.text) => {}
+            "said" => {
+                let said = line.text.trim();
+                if said.is_empty() {
+                    continue;
+                }
+                turns.push(assistant(match what_it_did(&mut steps) {
+                    Some(record) => format!("{record}\n\n{said}"),
+                    None => said.to_string(),
+                }));
+            }
+            // Errand's note under the answer just before it.
+            "note" => {
+                if let Some(ChatMessage::Assistant { content, .. }) = turns.last_mut() {
+                    content.push_str(&format!(
+                        "\n\n[Errand's note under this answer: {}]",
+                        line.text.trim()
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(record) = what_it_did(&mut steps) {
+        turns.push(assistant(record));
+    }
+    turns.into_iter().filter(|one| !said_nothing(one)).collect()
+}
+
+fn assistant(content: String) -> ChatMessage {
+    ChatMessage::Assistant {
+        content,
+        tool_calls: Vec::new(),
+        reasoning: None,
+    }
+}
+
+/// How many of a turn's steps come back by name. The rest are counted: a
+/// long errand's every step, every time the app opens, is how a conversation
+/// stops fitting.
+const STEPS_KEPT: usize = 8;
+
+/// A step as a line of the record: the tool, what it was doing, and the first
+/// line of what came back.
+fn a_step(line: &Line) -> String {
+    let tool = line.tool.as_deref().unwrap_or("a step");
+    let what = line.text.trim();
+    match line
+        .outcome
+        .as_deref()
+        .map(str::trim)
+        .filter(|o| !o.is_empty())
+    {
+        Some(came) => {
+            let came: String = came.chars().take(160).collect();
+            format!("- {tool}: {what} -> {came}")
+        }
+        None => format!("- {tool}: {what}"),
+    }
+}
+
+/// The steps since the last thing said, as the record put in front of the
+/// next. Nothing when there were none.
+fn what_it_did(steps: &mut Vec<String>) -> Option<String> {
+    if steps.is_empty() {
+        return None;
+    }
+    let all = std::mem::take(steps);
+    let earlier = all.len().saturating_sub(STEPS_KEPT);
+    let mut record =
+        String::from("[Errand's record of the steps taken, with the first line each gave back:");
+    if earlier > 0 {
+        record.push_str(&format!("\n- ({earlier} earlier steps)"));
+    }
+    for step in &all[earlier..] {
+        record.push('\n');
+        record.push_str(step);
+    }
+    record.push(']');
+    Some(record)
 }
 
 /// Whether something kept as said is Claude Code reporting a failed request.
@@ -417,14 +503,16 @@ mod tests {
     }
 
     #[test]
-    fn a_step_is_left_out_rather_than_given_an_invented_id() {
+    fn a_step_comes_back_as_a_record_and_never_as_a_call_with_an_invented_id() {
         // A tool call and its result are a matched pair with an id, and several
         // providers refuse a request outright when a result does not follow a
         // call they recognise. Inventing ids for calls made by a process that
         // no longer exists trades a silent gap for a 400.
+        let mut fetching = line(2, "doing", "Fetching the page", Some("200 OK"));
+        fetching.tool = Some("fetch_url".into());
         let lines = vec![
             line(1, "mine", "Check the price", None),
-            line(2, "doing", "Fetching the page", Some("200 OK")),
+            fetching,
             line(3, "asking", "Run curl", Some("yes")),
             line(4, "ended", "The agent stopped without saying why", None),
             line(5, "said", "It is 391.", None),
@@ -432,10 +520,76 @@ mod tests {
         let back = as_turns(&lines);
         assert_eq!(back.len(), 2, "{back:?}");
         assert!(matches!(&back[0], ChatMessage::User { .. }));
-        // What a step established is almost always in the answer that followed
-        // it, and that is kept.
+        // But not left out: a model handed a past in which it only talked went
+        // on only talking. The record goes in front of the answer it led to.
+        let ChatMessage::Assistant {
+            content,
+            tool_calls,
+            ..
+        } = &back[1]
+        else {
+            panic!("{back:?}")
+        };
+        assert!(tool_calls.is_empty());
         assert!(
-            matches!(&back[1], ChatMessage::Assistant { content, .. } if content == "It is 391.")
+            content.starts_with("[Errand's record of the steps taken"),
+            "{content}"
+        );
+        assert!(
+            content.contains("- fetch_url: Fetching the page -> 200 OK"),
+            "{content}"
+        );
+        assert!(content.ends_with("It is 391."), "{content}");
+    }
+
+    #[test]
+    fn a_note_under_an_answer_comes_back_under_it() {
+        // Asked to move a file, a model said it had, and checked it byte for
+        // byte, having run nothing; Errand said so under the answer. Opened
+        // again, it said "last report said it was already in Downloads",
+        // believing its own report, because the note did not come back.
+        let lines = vec![
+            line(1, "mine", "Move the video to Downloads", None),
+            line(2, "said", "Done. It is in Downloads, verified.", None),
+            line(3, "note", "Answered without running anything.", None),
+            line(4, "mine", "Move it, then list Downloads.", None),
+        ];
+        let back = as_turns(&lines);
+        assert_eq!(back.len(), 3, "{back:?}");
+        assert!(matches!(&back[1], ChatMessage::Assistant { content, .. }
+            if content.ends_with("[Errand's note under this answer: Answered without running anything.]")));
+    }
+
+    #[test]
+    fn steps_a_turn_took_after_its_last_words_come_back_before_the_next_question() {
+        let lines = vec![
+            line(1, "mine", "Download it", None),
+            line(2, "said", "Starting.", None),
+            line(3, "doing", "Download the video", Some("Started, as job-9.")),
+            line(4, "mine", "Is it done?", None),
+        ];
+        let back = as_turns(&lines);
+        assert_eq!(back.len(), 4, "{back:?}");
+        assert!(matches!(&back[2], ChatMessage::Assistant { content, .. }
+            if content.contains("Download the video -> Started, as job-9.")));
+        assert!(matches!(&back[3], ChatMessage::User { .. }));
+    }
+
+    #[test]
+    fn a_long_errand_comes_back_as_its_last_steps_and_a_count_of_the_rest() {
+        let mut lines = vec![line(1, "mine", "Transcribe it", None)];
+        for n in 0..20 {
+            lines.push(line(2 + n, "doing", &format!("step {n}"), Some("ok")));
+        }
+        lines.push(line(30, "said", "Here it is.", None));
+        let back = as_turns(&lines);
+        let ChatMessage::Assistant { content, .. } = &back[1] else {
+            panic!("{back:?}")
+        };
+        assert!(content.contains("(12 earlier steps)"), "{content}");
+        assert!(
+            content.contains("step 19") && !content.contains("step 11 "),
+            "{content}"
         );
     }
 

@@ -1521,6 +1521,36 @@ export async function writingItOut() {
     live() ? "still writing" : "cleared",
   );
 
+  // An answer sent back before it was shown, for claiming work nothing did:
+  // its words give way to the step that says so, and are not left on screen
+  // to be read as said.
+  tell("happened", {
+    conversation: where,
+    seq: 7101,
+    kind: "said",
+    text: "Done. It is in your Downloads, verified.",
+    settled: false,
+  });
+  await new Promise((r) => setTimeout(r, 100));
+  tell("happened", {
+    conversation: where,
+    seq: 7102,
+    kind: "doing",
+    what: "It said it had done this without running anything, so it was sent back to do it",
+    tool: "errand",
+    call: "sent-back-1",
+  });
+  await new Promise((r) => setTimeout(r, 150));
+  const after = document.getElementById("messages").textContent;
+  check(
+    "an answer sent back before it was shown leaves none of its words behind",
+    !live() && !after.includes("It is in your Downloads, verified."),
+    live() ? "still writing" : "cleared",
+  );
+  check("and the step saying it was sent back is there", after.includes("sent back to do it"), after.slice(-120));
+  tell("happened", { conversation: where, seq: 7103, kind: "done" });
+  await new Promise((r) => setTimeout(r, 100));
+
   // And the ending nothing sends. Pressing Stop kills the engine, and a killed
   // engine says nothing about having stopped, so the window has to finish the
   // turn itself -- all of it. It used to set "not working" and leave the half

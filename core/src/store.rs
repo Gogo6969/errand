@@ -2581,11 +2581,14 @@ impl Store {
     }
 
     /// How many steps a conversation has taken since a moment: tools run,
-    /// whatever came of them.
+    /// whatever came of them. Errand's own lines among the steps are not the
+    /// agent's work and do not count: making room, waiting to ask again, and
+    /// sending an answer back.
     pub fn steps_since(&self, conversation: &str, since: i64) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         let taken: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM lines WHERE conversation = ? AND kind = 'doing' AND at >= ?",
+            "SELECT COUNT(*) FROM lines WHERE conversation = ? AND kind = 'doing' AND at >= ? \
+             AND coalesce(tool, '') NOT IN ('errand', 'context', 'waiting')",
             params![conversation, since],
             |r| r.get(0),
         )?;

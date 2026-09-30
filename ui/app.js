@@ -2797,6 +2797,11 @@ listen("happened", async ({ payload }) => {
 
     case "doing":
       t.working = true;
+      // Words still unsettled when a step begins were not kept: an engine
+      // settles what it says before it acts, so these are an answer taken
+      // back, like one sent back for claiming work nothing did. Left on
+      // screen, they were read as said.
+      t.writing = "";
       t.messages.push({
         kind: "doing",
         text: payload.what,

@@ -429,6 +429,111 @@ pub fn claims_to_have_checked(said: &str) -> bool {
     quotes_a_command && with_a_result
 }
 
+/// What an answer says about work that did not happen, in a turn that ran
+/// nothing at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unrun {
+    /// It says it did or checked something.
+    Claimed,
+    /// It says it is about to, and stops there.
+    Promised,
+}
+
+/// Whether an answer claims work, or promises it, which is only worth asking
+/// of an answer given in a turn that ran nothing.
+///
+/// Three answers from one teammate, one after another, having run nothing:
+/// "Move it." to "Done, move it"; "Done. The video is now in your Downloads
+/// folder, verified as a full copy"; and "Before running it, let me check
+/// what's actually in both places", after which the turn ended.
+pub fn said_but_not_done(said: &str) -> Option<Unrun> {
+    if claims_to_have_checked(said) || claims_to_have_done(said) {
+        return Some(Unrun::Claimed);
+    }
+    promises_to_act(said).then_some(Unrun::Promised)
+}
+
+/// Whether an answer says it did something: moved, saved, sent, made.
+pub fn claims_to_have_done(said: &str) -> bool {
+    let lower = said.trim().to_lowercase();
+    if lower.starts_with("done") {
+        return true;
+    }
+    const DID: &[&str] = &[
+        "i've moved",
+        "i have moved",
+        "has been moved",
+        "have been moved",
+        "is now in your",
+        "are now in your",
+        "now sits in your",
+        "i've saved",
+        "i have saved",
+        "has been saved",
+        "i've copied",
+        "i have copied",
+        "has been copied",
+        "i've sent",
+        "i have sent",
+        "has been sent",
+        "i've created",
+        "i have created",
+        "has been created",
+        "i've deleted",
+        "i have deleted",
+        "has been deleted",
+        "i've downloaded",
+        "i have downloaded",
+        "has been downloaded",
+        "i've renamed",
+        "has been renamed",
+    ];
+    DID.iter().any(|w| lower.contains(w))
+}
+
+/// Whether an answer ends by saying it is about to do something, which is
+/// where a turn that stops is left hanging.
+///
+/// The last sentence only, so an answer that explains ("let me explain: ...")
+/// is not taken for one that stopped, and "let me know" is never a promise.
+/// A long answer that ends on a plan is still an answer.
+fn promises_to_act(said: &str) -> bool {
+    let trimmed = said.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 600 {
+        return false;
+    }
+    if trimmed.ends_with(':') {
+        return true;
+    }
+    let lower = trimmed.to_lowercase();
+    let last = lower
+        .trim_end_matches(['.', '!', ' ', '\u{2026}'])
+        .rsplit(['.', '!', '?', '\n'])
+        .next()
+        .unwrap_or_default()
+        .replace("let me know", "");
+    const ABOUT_TO: &[&str] = &[
+        "let me ",
+        "i'll ",
+        "i will ",
+        "i'm going to ",
+        "i am going to ",
+    ];
+    const DOING: &[&str] = &[
+        "check", "run", "look", "move", "verify", "confirm", "see", "try", "copy", "fetch",
+        "download", "search", "find", "list", "open", "start", "test", "read", "write", "create",
+        "delete", "send", "get", "do ", "fix",
+    ];
+    ABOUT_TO.iter().any(|about| {
+        last.match_indices(about).any(|(at, _)| {
+            DOING
+                .iter()
+                .any(|verb| last[at + about.len()..].starts_with(verb))
+        })
+    }) || last.contains("checking now")
+        || last.contains("running it now")
+}
+
 /// What is said under an answer that claims to have looked, when nothing ran.
 ///
 /// Asked whether a backup had finished, a model answered in eight seconds with
@@ -440,7 +545,7 @@ pub const CHECKED_NOTHING: &str = "Answered without running anything: nothing in
 
 /// Whether to say that, about the turn of this conversation that just ended.
 pub fn checked_nothing(store: &Store, conversation: &str, said: &str) -> Option<String> {
-    if !claims_to_have_checked(said) {
+    if !claims_to_have_checked(said) && !claims_to_have_done(said) {
         return None;
     }
     let began = store.when_the_turn_began(conversation).ok().flatten()?;
@@ -1526,5 +1631,49 @@ mod tests {
         for at in [own, disk] {
             let _ = std::fs::remove_dir_all(at);
         }
+    }
+
+    #[test]
+    fn an_answer_that_claims_or_promises_work_is_told_from_one_that_just_answers() {
+        // The three answers one teammate gave in a row, having run nothing.
+        assert_eq!(
+            said_but_not_done(
+                "Done. The video is now in your **Downloads** folder, verified as a full copy"
+            ),
+            Some(Unrun::Claimed)
+        );
+        assert_eq!(
+            said_but_not_done(
+                "Before running it, let me check what's actually in both places \u{2014} last \
+                 report said it was already in Downloads."
+            ),
+            Some(Unrun::Promised)
+        );
+        assert_eq!(
+            said_but_not_done("I've moved it to ~/Downloads."),
+            Some(Unrun::Claimed)
+        );
+        assert_eq!(
+            said_but_not_done("Fixing the timestamps:"),
+            Some(Unrun::Promised)
+        );
+        assert_eq!(
+            said_but_not_done("Got it, I'll check its progress."),
+            Some(Unrun::Promised)
+        );
+        // Answers, which are not either.
+        assert_eq!(said_but_not_done("391."), None);
+        assert_eq!(
+            said_but_not_done("Let me know if you want it as an mp4."),
+            None
+        );
+        assert_eq!(
+            said_but_not_done("Let me explain: a webm plays in VLC and in the browser."),
+            None
+        );
+        assert_eq!(
+            said_but_not_done("I can't send texts from here: there is no messaging tool."),
+            None
+        );
     }
 }

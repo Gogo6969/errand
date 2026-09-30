@@ -496,6 +496,12 @@ async fn errand(
     // words, so an address in them counts as one they named; kept apart
     // because they go into the conversation beside a step's result.
     let mut typed_while_asked: Vec<String> = Vec::new();
+    // Whether this turn has run anything yet, and whether an answer that
+    // claimed or promised work without running any has been sent back: once,
+    // never twice, so a model that insists is shown with Errand's note under
+    // it rather than argued with.
+    let mut ran_anything = false;
+    let mut sent_back = false;
     // Ours always, and theirs only once somebody has asked for them.
     //
     // Sending every tool every time was correct and unaffordable: twenty-six
@@ -710,6 +716,53 @@ async fn errand(
         // Nothing more to do: this is the answer.
         if wants.is_empty() {
             let said = wrote.trim().to_string();
+            // Unless it claims work, or promises it, in a turn that ran
+            // nothing. Shown, it was believed: "Done. The video is now in your
+            // Downloads folder, verified as a full copy", with the video never
+            // moved; and "let me check", with nothing after it. So it goes
+            // back once, with a step on screen saying so, and the answer shown
+            // is the one that comes after.
+            let unrun = match ran_anything || sent_back {
+                true => None,
+                false => crate::claims::said_but_not_done(&said),
+            };
+            if let Some(unrun) = unrun {
+                sent_back = true;
+                let call = format!("sent-back-{}", uuid::Uuid::new_v4().simple());
+                let _ = out.send(Event::Doing(Step {
+                    what: match unrun {
+                        crate::claims::Unrun::Claimed => {
+                            "It said it had done this without running anything, so it was \
+                             sent back to do it"
+                        }
+                        crate::claims::Unrun::Promised => {
+                            "It said it was about to do this and stopped, so it was sent \
+                             back to do it"
+                        }
+                    }
+                    .to_string(),
+                    tool: "errand".into(),
+                    call: call.clone(),
+                }));
+                let _ = out.send(Event::Did {
+                    call,
+                    outcome: "Sent back once. What it says now is below.".into(),
+                });
+                history.push(ChatMessage::Assistant {
+                    content: said,
+                    tool_calls: Vec::new(),
+                    reasoning: match thought.trim().is_empty() {
+                        true => None,
+                        false => Some(thought.clone()),
+                    },
+                });
+                // Errand's, and never the person's: a system note, which is
+                // not what they typed and is not read as if it were.
+                history.push(ChatMessage::System {
+                    content: SENT_BACK.into(),
+                });
+                continue;
+            }
             if !said.is_empty() {
                 let _ = out.send(Event::Said {
                     text: said.clone(),
@@ -793,6 +846,7 @@ async fn errand(
                 false => Some(thought.clone()),
             },
         });
+        ran_anything = true;
 
         for (which, call) in calls.into_iter().enumerate() {
             let name = call.function.name.clone();
@@ -1049,6 +1103,13 @@ async fn errand(
     });
     Ok(Done::Finished(said))
 }
+
+/// Said to a model whose answer claimed or promised work in a turn that ran
+/// nothing, before it is shown.
+const SENT_BACK: &str = "(From Errand, not from them: you ran nothing this turn, so \
+     nothing in your last answer happened or was checked just now. If it needs doing, do \
+     it now with your tools and answer from what they show. If it cannot be done here, say \
+     so plainly. If nothing needed doing, give your answer again.)";
 
 /// Said to a model whose turn has run out of rounds, beside its last step's
 /// result. Beside it, where Errand's other notes to a model go, and never as a
@@ -2456,6 +2517,235 @@ mod an_aside_leaves_no_trace {
             }
         });
         where_it_is
+    }
+
+    /// A server that answers from a script, one line per request and the last
+    /// line for ever after: `run:<command>` asks for that command, anything
+    /// else is said.
+    async fn a_server_that_says(
+        asked: Arc<Mutex<Vec<String>>>,
+        script: Vec<&'static str>,
+    ) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let where_it_is = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let asked = asked.clone();
+                let script = script.clone();
+                tokio::spawn(async move {
+                    let mut got = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    let request = loop {
+                        let Ok(n) = stream.read(&mut buf).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        got.extend_from_slice(&buf[..n]);
+                        let text = String::from_utf8_lossy(&got).to_string();
+                        let Some(at) = text.find("\r\n\r\n") else {
+                            continue;
+                        };
+                        let want: usize = text
+                            .to_ascii_lowercase()
+                            .split("content-length:")
+                            .nth(1)
+                            .and_then(|rest| rest.split("\r\n").next())
+                            .and_then(|n| n.trim().parse().ok())
+                            .unwrap_or(0);
+                        if text.len() - (at + 4) >= want {
+                            break text[at + 4..].to_string();
+                        }
+                    };
+                    let which = {
+                        let mut all = asked.lock().unwrap();
+                        all.push(request);
+                        all.len() - 1
+                    };
+                    let line = script[which.min(script.len() - 1)];
+                    let body = match line.strip_prefix("run:") {
+                        Some(command) => {
+                            let arguments = serde_json::json!({ "command": command }).to_string();
+                            let call = serde_json::json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [{
+                                "index": 0, "id": format!("call-{which}"), "type": "function",
+                                "function": { "name": "run_command", "arguments": arguments }
+                            }]}}]});
+                            format!(
+                                "data: {call}\n\n\
+                                 data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
+                                 data: [DONE]\n\n"
+                            )
+                        }
+                        None => {
+                            let said = serde_json::json!({ "choices": [{ "index": 0, "delta": { "content": line } }] });
+                            format!(
+                                "data: {said}\n\n\
+                                 data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
+                                 data: [DONE]\n\n"
+                            )
+                        }
+                    };
+                    let _ = stream
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                                 Content-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        where_it_is
+    }
+
+    /// Say something to a conversation on `where_it_is` and collect what the
+    /// window would see: the answers shown, the steps, and the final word.
+    async fn what_the_window_sees(
+        where_it_is: String,
+        home: &str,
+        asking: &str,
+    ) -> (Vec<String>, Vec<Step>, String) {
+        let home = std::env::temp_dir().join(home);
+        std::fs::create_dir_all(&home).unwrap();
+        let settings = LlmSettings {
+            provider: "openai-compat".into(),
+            base_url: where_it_is,
+            model: "pretend".into(),
+            ..Default::default()
+        };
+        let (mut engine, events) = Local::open(
+            settings,
+            home,
+            "auto",
+            &crate::memory::Knowing::default(),
+            Vec::new(),
+            None,
+        )
+        .expect("a conversation to talk to");
+        engine.say(asking, &[]).unwrap();
+        let mut shown = Vec::new();
+        let mut steps = Vec::new();
+        let waited = std::time::Instant::now();
+        loop {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(30),
+                "the turn never finished"
+            );
+            match events.try_recv() {
+                Ok(Event::Said {
+                    text,
+                    settled: true,
+                }) => shown.push(text),
+                Ok(Event::Doing(step)) => steps.push(step),
+                Ok(Event::Done { said, .. }) => return (shown, steps, said),
+                Ok(Event::Failed { why }) => panic!("the turn failed: {why}"),
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_claims_work_nothing_did_is_sent_back_before_it_is_shown() {
+        // "Done. The video is now in your Downloads folder, verified as a full
+        // copy", having run nothing, and the video never moved.
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_says(
+            asked.clone(),
+            vec![
+                "Done. The video is now in your Downloads folder, verified as a full copy.",
+                "run:true",
+                "Moved. The listing shows it in Downloads.",
+            ],
+        )
+        .await;
+        let (shown, steps, said) = what_the_window_sees(
+            where_it_is,
+            "errand-sent-back-test",
+            "Move the video to Downloads",
+        )
+        .await;
+
+        assert!(
+            !shown.iter().any(|s| s.contains("verified as a full copy")),
+            "the made-up answer was shown: {shown:?}"
+        );
+        assert_eq!(said, "Moved. The listing shows it in Downloads.");
+        assert!(
+            steps
+                .iter()
+                .any(|s| s.tool == "errand" && s.what.contains("without running anything")),
+            "nothing on screen said it was sent back: {steps:?}"
+        );
+        // Told why, in the conversation, as Errand and not as the person.
+        let seen = asked.lock().unwrap().clone();
+        let second: serde_json::Value = serde_json::from_str(&seen[1]).unwrap();
+        let last = second["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert!(
+            last["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("From Errand, not from them"),
+            "{last}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_says_it_is_about_to_and_stops_is_sent_back_once_and_only_once() {
+        // "Before running it, let me check what's actually in both places",
+        // and the turn ended. Sent back once; a model that insists is shown.
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_says(
+            asked.clone(),
+            vec!["Before running it, let me check both places."],
+        )
+        .await;
+        let (shown, steps, _) =
+            what_the_window_sees(where_it_is, "errand-sent-back-once-test", "Move it").await;
+        assert_eq!(
+            asked.lock().unwrap().len(),
+            2,
+            "sent back more than once, or not at all"
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|s| s.tool == "errand" && s.what.contains("about to")),
+            "{steps:?}"
+        );
+        assert_eq!(
+            shown,
+            vec!["Before running it, let me check both places.".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_to_a_question_is_never_sent_back() {
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_says(asked.clone(), vec!["391."]).await;
+        let (shown, steps, said) = what_the_window_sees(
+            where_it_is,
+            "errand-not-sent-back-test",
+            "What is 17 times 23?",
+        )
+        .await;
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        assert!(steps.is_empty(), "{steps:?}");
+        assert_eq!(said, "391.");
+        assert_eq!(shown, vec!["391.".to_string()]);
     }
 
     #[tokio::test]
