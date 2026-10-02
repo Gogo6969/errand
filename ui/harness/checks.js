@@ -3342,6 +3342,10 @@ export async function pausingARoutineAndSeeingHowItWent() {
     document.getElementById("routine-says").textContent,
   );
 
+  // Started again, it counts from now, so the next run is a new time and the
+  // app is the one that knows it. Kept from when the panel opened, the line
+  // said the next run was at 12:34 at a quarter past five.
+  FIXTURE.routineDue = Date.now() + 5 * 3600000;
   document.getElementById("routine-pause").click();
   await new Promise((r) => setTimeout(r, 250));
   check(
@@ -3349,6 +3353,14 @@ export async function pausingARoutineAndSeeingHowItWent() {
     asked.some((a) => a.name === "routine_off" && a.args?.off === false),
     JSON.stringify(asked.filter((a) => a.name === "routine_off").slice(-1)),
   );
+  const fresh = new Date(FIXTURE.routineDue).toLocaleString();
+  check(
+    "and the line gives the next run the app has now, not the one from before it was paused",
+    document.getElementById("routine-says").textContent.includes(fresh) &&
+      document.getElementById("routine-pause").textContent === "Pause",
+    `${document.getElementById("routine-says").textContent} (wanted ${fresh})`,
+  );
+  delete FIXTURE.routineDue;
   document.getElementById("repeat").click();
 
   // More than a page of runs: the ones before the newest twenty can be seen.

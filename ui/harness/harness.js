@@ -920,7 +920,9 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
                 name: "First",
                 at: "daily 07:00",
                 what: "What moved overnight",
-                due: Date.now() + 3600000,
+                // A check can say when the app now puts the next run, as
+                // it does once a paused routine is started again.
+                due: fixture.routineDue ?? Date.now() + 3600000,
                 ran: Date.now() - 82800000,
                 off: routineOff,
               },

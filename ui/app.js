@@ -4554,12 +4554,17 @@ el.routinePause.addEventListener("click", async () => {
     el.routineSays.textContent = String(why);
     return;
   }
-  theRoutineShown = { ...theRoutineShown, off };
-  el.routinePause.textContent = off ? "Start again" : "Pause";
+  // Read back from the app rather than worked out here. Started again, it
+  // counts from now, and the run it would have had before it was paused is
+  // long gone: kept from when the panel opened, the line said the next run
+  // was at 12:34 at a quarter past five.
+  const now = (await invoke("routines").catch(() => [])).find((r) => r.conversation === t.id);
+  theRoutineShown = now || { ...theRoutineShown, off };
+  el.routinePause.textContent = theRoutineShown.off ? "Start again" : "Pause";
   el.routineSays.textContent = sayWhen(theRoutineShown);
   // The clock on the conversation goes with it: a paused routine is not one
   // the picker should still be advertising as scheduled.
-  t.repeats = !off;
+  t.repeats = !theRoutineShown.off;
   drawTalks();
 });
 
