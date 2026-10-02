@@ -147,9 +147,13 @@ pub fn as_filename(agent: &str, talk: &str) -> String {
 pub fn as_turns(lines: &[Line]) -> Vec<ChatMessage> {
     let mut turns: Vec<ChatMessage> = Vec::new();
     let mut steps: Vec<String> = Vec::new();
+    // Whether the answer just before was a copy left out, so that Errand's
+    // note under it is left out with it rather than put under the one before.
+    let mut left_out = false;
     for line in lines {
         match line.kind.as_str() {
             "mine" => {
+                left_out = false;
                 // Steps a turn took after the last thing it said, taken before
                 // the next thing asked.
                 if let Some(record) = what_it_did(&mut steps) {
@@ -164,13 +168,21 @@ pub fn as_turns(lines: &[Line]) -> Vec<ChatMessage> {
                     image_data_urls: Vec::new(),
                 });
             }
+            // Errand's own housekeeping, which was never the teammate's doing.
+            // A record made of nothing else stood in for the answer of a turn
+            // that failed, and a model handed several came to answer that way.
+            "doing" if line.tool.as_deref().is_some_and(errands_own) => {}
             "doing" => steps.push(a_step(line)),
             // Claude Code saying a request failed, kept as said before that was
             // recognised as its own words: see `claude::written_by_claude_code`.
             // Handed to a model as its own reply, it is the one line in a
             // conversation it can only misread.
             "said" if an_engine_error(&line.text) => {}
+            // A copy of Errand's own record is not an answer, and handed back as
+            // one it is the example the next copy is made from.
+            "said" if copies_errands_record(&line.text) => left_out = true,
             "said" => {
+                left_out = false;
                 let said = line.text.trim();
                 if said.is_empty() {
                     continue;
@@ -181,6 +193,7 @@ pub fn as_turns(lines: &[Line]) -> Vec<ChatMessage> {
                 }));
             }
             // Errand's note under the answer just before it.
+            "note" if left_out => {}
             "note" => {
                 if let Some(ChatMessage::Assistant { content, .. }) = turns.last_mut() {
                     content.push_str(&format!(
@@ -196,6 +209,30 @@ pub fn as_turns(lines: &[Line]) -> Vec<ChatMessage> {
         turns.push(assistant(record));
     }
     turns.into_iter().filter(|one| !said_nothing(one)).collect()
+}
+
+/// The steps that are Errand's own housekeeping rather than anything a
+/// teammate did: waiting for a model server that is not answering, sending an
+/// answer back, making room. The store leaves the same three out when it
+/// counts what a turn ran.
+const ERRANDS_OWN_STEPS: &[&str] = &["errand", "context", "waiting"];
+
+fn errands_own(tool: &str) -> bool {
+    ERRANDS_OWN_STEPS.contains(&tool)
+}
+
+/// Whether an answer is a copy of Errand's own bookkeeping rather than an
+/// answer.
+///
+/// A model handed earlier turns made of nothing but Errand's record of their
+/// steps took that to be what an answer looks like. Bell Ahead, woken to say
+/// which calendar event was next, answered four times in a day with "[Errand's
+/// record of the steps taken ... waiting: The model server is not answering]"
+/// and nothing else, and once changed "first line" to "last line" doing it.
+pub fn copies_errands_record(said: &str) -> bool {
+    let said = said.trim_start();
+    said.starts_with("[Errand's record of the steps taken")
+        || said.starts_with("[Errand's note under this answer")
 }
 
 fn assistant(content: String) -> ChatMessage {
@@ -540,6 +577,62 @@ mod tests {
             "{content}"
         );
         assert!(content.ends_with("It is 391."), "{content}");
+    }
+
+    #[test]
+    fn errands_own_steps_and_copies_of_its_record_do_not_come_back() {
+        // Bell Ahead's history after the model server was down: turns whose
+        // only steps were Errand waiting for it, handed back as answers made
+        // of nothing but the record, and then answers that copied the record.
+        // The model took that to be what an answer looks like.
+        let waiting = |seq: i64| {
+            let mut one = line(
+                seq,
+                "doing",
+                "The model server cannot be reached. Trying once more in 3s.",
+                Some("Still not answering."),
+            );
+            one.tool = Some("waiting".into());
+            one
+        };
+        let lines = vec![
+            line(1, "mine", "Which event starts next?", None),
+            waiting(2),
+            line(3, "failed", "The model server is not answering.", None),
+            line(4, "mine", "Which event starts next?", None),
+            line(
+                5,
+                "said",
+                "[Errand's record of the steps taken, with the first line each gave back:\n\
+                 - waiting: The model server is not answering. Working out what I can say…]",
+                None,
+            ),
+            line(6, "note", "Answered without running anything.", None),
+            line(7, "mine", "Which event starts next?", None),
+            line(8, "said", "Garbage pick-up starts at 17:00.", None),
+        ];
+        let back = as_turns(&lines);
+        for turn in &back {
+            if let ChatMessage::Assistant { content, .. } | ChatMessage::User { content, .. } = turn
+            {
+                assert!(!content.contains("model server"), "{back:?}");
+                assert!(!content.contains("Errand's note"), "{back:?}");
+            }
+        }
+        assert_eq!(back.len(), 4, "{back:?}");
+        assert!(matches!(&back[3], ChatMessage::Assistant { content, .. }
+            if content == "Garbage pick-up starts at 17:00."));
+
+        // A real step in a turn that said nothing still comes back.
+        let mut fetching = line(2, "doing", "Fetching the page", Some("200 OK"));
+        fetching.tool = Some("fetch_url".into());
+        let back = as_turns(&[
+            line(1, "mine", "Check the price", None),
+            fetching,
+            line(3, "mine", "And now?", None),
+        ]);
+        assert!(matches!(&back[1], ChatMessage::Assistant { content, .. }
+            if content.contains("- fetch_url: Fetching the page -> 200 OK")));
     }
 
     #[test]

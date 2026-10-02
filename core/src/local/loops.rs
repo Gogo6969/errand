@@ -716,6 +716,37 @@ async fn errand(
         // Nothing more to do: this is the answer.
         if wants.is_empty() {
             let said = wrote.trim().to_string();
+            // Unless it is a copy of Errand's own record of earlier steps,
+            // which is never an answer and is what Bell Ahead gave four times
+            // in a day instead of saying which calendar event was next. Sent
+            // back once; a second copy ends the turn rather than being shown.
+            if crate::keeping::copies_errands_record(&said) {
+                if sent_back {
+                    return Err(anyhow::anyhow!(COPIED_TWICE));
+                }
+                sent_back = true;
+                let call = format!("sent-back-{}", uuid::Uuid::new_v4().simple());
+                let _ = out.send(Event::Doing(Step {
+                    what: "It answered with a copy of Errand's record of earlier steps \
+                           instead of an answer, so it was sent back"
+                        .to_string(),
+                    tool: "errand".into(),
+                    call: call.clone(),
+                }));
+                let _ = out.send(Event::Did {
+                    call,
+                    outcome: "Sent back once. What it says now is below.".into(),
+                });
+                history.push(ChatMessage::Assistant {
+                    content: said,
+                    tool_calls: Vec::new(),
+                    reasoning: None,
+                });
+                history.push(ChatMessage::System {
+                    content: COPIED_THE_RECORD.into(),
+                });
+                continue;
+            }
             // Unless it claims work, or promises it, in a turn that ran
             // nothing. Shown, it was believed: "Done. The video is now in your
             // Downloads folder, verified as a full copy", with the video never
@@ -1156,6 +1187,17 @@ const SENT_BACK: &str = "(From Errand, not from them: you ran nothing this turn,
      nothing in your last answer happened or was checked just now. If it needs doing, do \
      it now with your tools and answer from what they show. If it cannot be done here, say \
      so plainly. If nothing needed doing, give your answer again.)";
+
+/// Said to a model whose answer was a copy of Errand's own record of earlier
+/// steps, before anybody sees it.
+const COPIED_THE_RECORD: &str = "(From Errand, not from them: that was a copy of Errand's own \
+     record of earlier steps. Errand writes those records; they are never an answer. Answer \
+     what was asked, in your own words.)";
+
+/// Why a turn ended with nothing to show, when the copy came back again.
+const COPIED_TWICE: &str = "The model answered twice with a copy of Errand's record of \
+     earlier steps instead of an answer, so there is nothing to show. Asking again usually \
+     works.";
 
 /// Said to a model whose turn has run out of rounds, beside its last step's
 /// result. Beside it, where Errand's other notes to a model go, and never as a
@@ -2826,6 +2868,108 @@ mod an_aside_leaves_no_trace {
                 .contains("From Errand, not from them"),
             "{last}"
         );
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_only_copies_errands_record_is_sent_back_before_it_is_shown() {
+        // Bell Ahead, woken to say which calendar event was next, answered
+        // with nothing but a copy of Errand's record of earlier steps.
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_says(
+            asked.clone(),
+            vec![
+                "[Errand's record of the steps taken, with the first line each gave back:\n\
+                 - waiting: The model server is not answering. Working out what I can say…]",
+                "Garbage pick-up starts at 17:00.",
+            ],
+        )
+        .await;
+        let (shown, steps, said) = what_the_window_sees(
+            where_it_is,
+            "errand-copied-record-test",
+            "Which calendar event starts next?",
+        )
+        .await;
+        assert!(
+            !shown.iter().any(|s| s.contains("Errand's record")),
+            "the copy was shown: {shown:?}"
+        );
+        assert_eq!(said, "Garbage pick-up starts at 17:00.");
+        assert!(
+            steps
+                .iter()
+                .any(|s| s.tool == "errand" && s.what.contains("copy of Errand's record")),
+            "nothing on screen said it was sent back: {steps:?}"
+        );
+        let seen = asked.lock().unwrap().clone();
+        let second: serde_json::Value = serde_json::from_str(&seen[1]).unwrap();
+        let last = second["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert!(
+            last["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("never an answer"),
+            "{last}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_copy_of_errands_record_ends_the_turn_rather_than_being_shown() {
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let copy = "[Errand's record of the steps taken, with the first line each gave back:\n\
+                    - waiting: The model server is not answering.]";
+        let where_it_is = a_server_that_says(asked.clone(), vec![copy, copy]).await;
+        let home = std::env::temp_dir().join("errand-copied-twice-test");
+        std::fs::create_dir_all(&home).unwrap();
+        let settings = LlmSettings {
+            provider: "openai-compat".into(),
+            base_url: where_it_is,
+            model: "pretend".into(),
+            ..Default::default()
+        };
+        let (mut engine, events) = Local::open(
+            settings,
+            home,
+            "auto",
+            &crate::memory::Knowing::default(),
+            Vec::new(),
+            None,
+        )
+        .expect("a conversation to talk to");
+        engine
+            .say("Which calendar event starts next?", &[])
+            .unwrap();
+        let waited = std::time::Instant::now();
+        let why = loop {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(30),
+                "the turn never finished"
+            );
+            match events.try_recv() {
+                // Settled, as the window keeps it: what streams in is replaced
+                // by whatever is said after it, the same as any answer sent back.
+                Ok(Event::Said {
+                    text,
+                    settled: true,
+                }) => {
+                    assert!(
+                        !text.contains("Errand's record"),
+                        "the copy was shown: {text}"
+                    )
+                }
+                Ok(Event::Done { said, .. }) => panic!("a copy was taken as the answer: {said}"),
+                Ok(Event::Failed { why }) => break why,
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        };
+        assert!(why.contains("copy of Errand's record"), "{why}");
+        assert_eq!(asked.lock().unwrap().len(), 2, "it was asked a third time");
     }
 
     #[tokio::test]
