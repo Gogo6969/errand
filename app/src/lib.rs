@@ -7305,11 +7305,85 @@ async fn set_task_priority(held: State<'_, Held>, id: String, priority: i64) -> 
         .map_err(|e| e.to_string())
 }
 
-/// Say a task is finished, or that it is not after all.
+/// Say a task is finished, or that it is not after all, and with it whether
+/// what it runs on its own goes on running.
+///
+/// Finished was a tick in a menu and nothing else, and a task marked finished
+/// went on running its weekly routine. Finishing switches the routine off and
+/// stops the watch; reopening switches back on what finishing switched off.
+/// Said in the task as well, so the record shows when and why it stopped.
 #[tauri::command]
-async fn finish_task(held: State<'_, Held>, id: String, finished: bool) -> Result<(), String> {
+async fn finish_task(
+    app: AppHandle,
+    held: State<'_, Held>,
+    id: String,
+    finished: bool,
+) -> Result<(), String> {
     let at = finished.then(|| chrono::Local::now().timestamp_millis());
-    held.store.finish_task(&id, at).map_err(|e| e.to_string())
+    let switched = held
+        .store
+        .finish_task_and_what_it_runs(&id, at)
+        .map_err(|e| e.to_string())?;
+    if switched.routine {
+        let _ = app.emit(
+            "repeats",
+            Repeats {
+                conversation: id.clone(),
+                repeats: !finished,
+            },
+        );
+    }
+    let task = held.store.conversation(&id).ok().flatten();
+    if let Some(said) = what_finishing_switched(
+        finished,
+        switched,
+        task.as_ref().and_then(|t| t.runs_at.as_deref()),
+    ) {
+        if let Ok(line) = held.store.the_app_says(&id, "note", &said) {
+            let _ = app.emit(
+                "noted",
+                Noted {
+                    conversation: id.clone(),
+                    seq: line.seq,
+                    kind: "note".to_string(),
+                    text: line.text,
+                    said_by: None,
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+/// What a task says when finishing it, or reopening it, changed what it runs
+/// on its own. Nothing when it changed nothing: a tick is not news.
+fn what_finishing_switched(
+    finished: bool,
+    switched: errand_core::store::Switched,
+    runs_at: Option<&str>,
+) -> Option<String> {
+    let routine = match runs_at {
+        Some(at) => format!("its routine ({at})"),
+        None => "its routine".to_string(),
+    };
+    let what = match (switched.routine, switched.watch, finished) {
+        (false, false, _) => return None,
+        (true, false, true) => format!("{routine} is switched off"),
+        (false, true, true) => "its watch is stopped".to_string(),
+        (true, true, true) => format!("{routine} is switched off and its watch is stopped"),
+        (true, false, false) => format!("{routine} is switched back on"),
+        (false, true, false) => "its watch is looking again".to_string(),
+        (true, true, false) => {
+            format!("{routine} is switched back on and its watch is looking again")
+        }
+    };
+    Some(match finished {
+        true => format!(
+            "Marked finished, so {what}. Reopening the task, or saying something new in it, \
+             switches it back on."
+        ),
+        false => format!("Reopened, so {what}."),
+    })
 }
 
 /// One of the app's own settings, or nothing if it was never set.
@@ -8574,6 +8648,40 @@ mod tests {
         assert_eq!(
             model_for(None, claude, true, Some(this_mac.clone())),
             Ok(this_mac)
+        );
+    }
+
+    #[test]
+    fn finishing_says_what_it_switched_off_and_reopening_what_it_switched_on() {
+        use errand_core::store::Switched;
+        let both = Switched {
+            routine: true,
+            watch: true,
+        };
+        let finished = what_finishing_switched(true, both, Some("weekly fri 15:00")).unwrap();
+        assert!(
+            finished.contains("its routine (weekly fri 15:00) is switched off")
+                && finished.contains("its watch is stopped")
+                && finished.contains("switches it back on"),
+            "{finished}"
+        );
+        let reopened = what_finishing_switched(
+            false,
+            Switched {
+                routine: true,
+                watch: false,
+            },
+            Some("weekly fri 15:00"),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened,
+            "Reopened, so its routine (weekly fri 15:00) is switched back on."
+        );
+        // A tick that changed nothing is not news.
+        assert_eq!(
+            what_finishing_switched(true, Switched::default(), None),
+            None
         );
     }
 

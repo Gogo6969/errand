@@ -1098,7 +1098,28 @@ const CHANGES: &[&str] = &[
     // served here, whatever Errand's model is. Last, as every change is:
     // they are applied by position, and a store is as far along as its count.
     "ALTER TABLE agents ADD COLUMN keep_local INTEGER NOT NULL DEFAULT 0;",
+    // What finishing a task switched off, so that reopening it switches back
+    // on exactly that and nothing that was already off: 1 its routine, 2 its
+    // watch. Last, as every change is.
+    "ALTER TABLE conversations ADD COLUMN off_when_finished INTEGER NOT NULL DEFAULT 0;",
 ];
+
+/// What finishing a task switched off, or reopening it switched back on.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Switched {
+    pub routine: bool,
+    pub watch: bool,
+}
+
+impl Switched {
+    fn bits(self) -> i64 {
+        i64::from(self.routine) | (i64::from(self.watch) << 1)
+    }
+}
+
+/// Why a watch is stopped when its task was marked finished. Read back, so
+/// that reopening the task starts only a watch that finishing stopped.
+pub const STOPPED_WHEN_FINISHED: &str = "Stopped because its task was marked finished.";
 
 /// What makes two lines in the picker the same line.
 ///
@@ -2812,6 +2833,90 @@ impl Store {
         Self::only_if_it_is_there(changed, "conversation")
     }
 
+    /// Mark a task finished, or not, and with it what it runs on its own.
+    ///
+    /// Finished was a tick in a menu and nothing else: a task marked finished
+    /// went on running its weekly routine, and would have written its next
+    /// answer into a task marked done. Finishing switches its routine off and
+    /// stops its watch. Reopening switches back on what finishing switched
+    /// off, and nothing that was already off before it.
+    pub fn finish_task_and_what_it_runs(
+        &self,
+        conversation: &str,
+        at: Option<i64>,
+    ) -> Result<Switched> {
+        let conn = self.conn.lock().unwrap();
+        let found = conn
+            .query_row(
+                "SELECT runs_at IS NOT NULL AND runs_what IS NOT NULL AND routine_off = 0,
+                        watches IS NOT NULL AND paused IS NULL,
+                        paused, off_when_finished
+                   FROM conversations WHERE id = ?",
+                [conversation],
+                |r| {
+                    Ok((
+                        r.get::<_, bool>(0)?,
+                        r.get::<_, bool>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((routine_on, watch_on, paused, before)) = found else {
+            anyhow::bail!("there is no such conversation");
+        };
+        match at {
+            Some(at) => {
+                let switched = Switched {
+                    routine: routine_on,
+                    watch: watch_on,
+                };
+                // Finished twice keeps what the first time switched off.
+                let off = before | switched.bits();
+                conn.execute(
+                    "UPDATE conversations
+                        SET finished_at = ?1,
+                            routine_off = CASE WHEN ?2 THEN 1 ELSE routine_off END,
+                            paused = CASE WHEN ?3 THEN ?4 ELSE paused END,
+                            off_when_finished = ?5
+                      WHERE id = ?6",
+                    params![
+                        at,
+                        switched.routine,
+                        switched.watch,
+                        STOPPED_WHEN_FINISHED,
+                        off,
+                        conversation
+                    ],
+                )?;
+                Ok(switched)
+            }
+            None => {
+                let switched = Switched {
+                    routine: before & 1 != 0,
+                    // Only a watch still stopped for this reason: one stopped
+                    // since for another, it could not be reached, stays stopped.
+                    watch: before & 2 != 0 && paused.as_deref() == Some(STOPPED_WHEN_FINISHED),
+                };
+                conn.execute(
+                    "UPDATE conversations
+                        SET finished_at = NULL,
+                            routine_off = CASE WHEN ?1 THEN 0 ELSE routine_off END,
+                            routine_set_at = CASE WHEN ?1 THEN ?2 ELSE routine_set_at END,
+                            paused = CASE WHEN ?3 THEN NULL ELSE paused END,
+                            unsettled = CASE WHEN ?3 THEN 0 ELSE unsettled END,
+                            misses = CASE WHEN ?3 THEN 0 ELSE misses END,
+                            seeing = CASE WHEN ?3 THEN NULL ELSE seeing END,
+                            off_when_finished = 0
+                      WHERE id = ?4",
+                    params![switched.routine, now(), switched.watch, conversation],
+                )?;
+                Ok(switched)
+            }
+        }
+    }
+
     /// Every task there is, whoever's it is.
     pub fn tasks(&self) -> Result<Vec<Conversation>> {
         self.every_conversation()
@@ -3917,6 +4022,84 @@ mod tests {
         .unwrap();
         assert!(!old.keep_local);
         assert!(s.keep_local("nobody", true).is_err());
+    }
+
+    #[test]
+    fn finishing_a_task_switches_off_what_it_runs_and_reopening_switches_it_back_on() {
+        // A task marked finished went on running its weekly routine, and would
+        // have answered into a task marked done.
+        let s = Store::in_memory().unwrap();
+        one(&s, "tally", "/tmp/tally");
+        let id = s.conversations("tally").unwrap()[0].id.clone();
+        s.runs(&id, Some("weekly fri 15:00"), Some("The weekly tally"))
+            .unwrap();
+        s.watch(&id, Some("~/Reports every 1h"), Some("Say what changed"))
+            .unwrap();
+        assert_eq!(s.routines().unwrap().len(), 1);
+
+        let off = s.finish_task_and_what_it_runs(&id, Some(1234)).unwrap();
+        assert_eq!(
+            off,
+            Switched {
+                routine: true,
+                watch: true
+            }
+        );
+        let task = s.conversation(&id).unwrap().unwrap();
+        assert_eq!(task.finished_at, Some(1234));
+        assert!(task.routine_off, "a finished task's routine still runs");
+        assert_eq!(task.paused.as_deref(), Some(STOPPED_WHEN_FINISHED));
+        assert!(s.routines().unwrap().is_empty());
+        // Off, not gone: what it would run is all still there.
+        assert_eq!(task.runs_at.as_deref(), Some("weekly fri 15:00"));
+        assert_eq!(task.watches.as_deref(), Some("~/Reports every 1h"));
+
+        // Finished again keeps what the first time switched off.
+        s.finish_task_and_what_it_runs(&id, Some(5678)).unwrap();
+        let back = s.finish_task_and_what_it_runs(&id, None).unwrap();
+        assert_eq!(
+            back,
+            Switched {
+                routine: true,
+                watch: true
+            }
+        );
+        let task = s.conversation(&id).unwrap().unwrap();
+        assert!(task.finished_at.is_none());
+        assert!(!task.routine_off);
+        assert!(task.paused.is_none());
+        assert_eq!(s.routines().unwrap().len(), 1);
+
+        // What was already off before it was finished stays off when it is
+        // reopened; and so does a watch stopped since for some other reason.
+        s.routine_off(&id, true).unwrap();
+        let off = s.finish_task_and_what_it_runs(&id, Some(9)).unwrap();
+        assert_eq!(
+            off,
+            Switched {
+                routine: false,
+                watch: true
+            }
+        );
+        s.pause_watch(&id, "It could not be reached 5 times running.")
+            .unwrap();
+        let back = s.finish_task_and_what_it_runs(&id, None).unwrap();
+        assert_eq!(back, Switched::default());
+        let task = s.conversation(&id).unwrap().unwrap();
+        assert!(task.routine_off);
+        assert_eq!(
+            task.paused.as_deref(),
+            Some("It could not be reached 5 times running.")
+        );
+
+        // A task with nothing of its own to run is only finished.
+        one(&s, "plain", "/tmp/plain");
+        let plain = s.conversations("plain").unwrap()[0].id.clone();
+        assert_eq!(
+            s.finish_task_and_what_it_runs(&plain, Some(1)).unwrap(),
+            Switched::default()
+        );
+        assert!(s.finish_task_and_what_it_runs("nobody", Some(1)).is_err());
     }
 
     #[test]

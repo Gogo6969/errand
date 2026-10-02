@@ -840,8 +840,29 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           // that holds a key.
           case "notes":
             return Promise.resolve(fixture.notes?.[args.agent] || []);
+          // A fresh copy each time, as the app's answer is: the window keeps
+          // the last one to tell whether anything changed, and handed the same
+          // object it would compare it with itself.
           case "standing":
-            return Promise.resolve(fixture.standing || []);
+            return Promise.resolve(JSON.parse(JSON.stringify(fixture.standing || [])));
+          // Finishing a task switches off what it runs on its own, and
+          // reopening it switches back on what finishing switched off, as the
+          // app does.
+          case "finish_task":
+            for (const s of fixture.standing || []) {
+              if (s.conversation !== args.id) continue;
+              const on = s.kind === "routine" ? !s.off : !s.stopped;
+              if (args.finished && on) {
+                s.offWhenFinished = true;
+                if (s.kind === "routine") s.off = true;
+                else s.stopped = "Stopped because its task was marked finished.";
+              } else if (!args.finished && s.offWhenFinished) {
+                delete s.offWhenFinished;
+                if (s.kind === "routine") s.off = false;
+                else s.stopped = null;
+              }
+            }
+            return Promise.resolve(null);
           case "limits":
             return Promise.resolve(
               fixture.limits?.[args.agent] || { tokens: null, dollars: null, used_tokens: 0, spent_dollars: 0 },

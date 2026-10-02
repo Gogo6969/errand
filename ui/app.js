@@ -33,6 +33,9 @@ const { invoke: invokeTheApp } = window.__TAURI__.core;
 const CHANGES_WHAT_REPEATS = new Set([
   "runs",
   "routine_off",
+  // Finishing a task switches off what it runs, and reopening it switches
+  // that back on.
+  "finish_task",
   "watch_it",
   "look_again",
   "pause",

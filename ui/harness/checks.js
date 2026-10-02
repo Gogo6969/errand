@@ -6336,5 +6336,28 @@ export async function whatRunsOnItsOwnStandsOut() {
     after && !after.classList.contains("now") && after.dataset.shows === "repeat",
     after ? `${after.className} ${after.dataset.shows}` : "no badge",
   );
+
+  // Finished means nothing more runs: the task whose routine was the only live
+  // one is finished, and the badge goes quiet; reopened, it is live again.
+  await openTalk("talk-2");
+  const done = document.getElementById("task-done");
+  done.click();
+  await wait(300);
+  const finished = badgeOf("agent-bitcoin");
+  check(
+    "finishing the task that runs on its own switches it off, and the badge goes quiet",
+    asked.some((a) => a.name === "finish_task" && a.args?.id === "talk-2" && a.args?.finished === true) &&
+      finished?.classList.contains("idle"),
+    finished ? `${finished.className} "${finished.title.split("\n")[0]}"` : "no badge",
+  );
+  done.click();
+  await wait(300);
+  const reopened = badgeOf("agent-bitcoin");
+  check(
+    "and reopening it switches it back on",
+    asked.some((a) => a.name === "finish_task" && a.args?.id === "talk-2" && a.args?.finished === false) &&
+      reopened && !reopened.classList.contains("idle") && reopened.dataset.shows === "repeat",
+    reopened ? `${reopened.className} ${reopened.dataset.shows}` : "no badge",
+  );
   return found;
 }
