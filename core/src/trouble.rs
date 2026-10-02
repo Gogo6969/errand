@@ -141,11 +141,11 @@ mod tests {
 
     #[test]
     fn a_server_that_cannot_be_reached_is_named() {
-        let raw = "error sending request for url (http://192.168.1.143:8095/v1/chat/completions)";
+        let raw = "error sending request for url (http://192.168.50.10:8095/v1/chat/completions)";
         let said = what_it_means(raw, "local").expect("this one is recognised");
         assert_eq!(
             said.said,
-            "The model server at 192.168.1.143:8095 cannot be reached."
+            "The model server at 192.168.50.10:8095 cannot be reached."
         );
         // And one that names no address still reads as a sentence.
         let said = what_it_means("connection refused", "local").expect("recognised");

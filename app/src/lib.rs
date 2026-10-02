@@ -8257,7 +8257,7 @@ mod tests {
             )
         };
         let hosted = at("https://api.deepseek.com/v1");
-        let m5 = at("http://192.168.1.143:8095");
+        let m5 = at("http://192.168.50.10:8095");
         let this_mac = at("http://127.0.0.1:11434");
         let claude = ("claude".to_string(), Some("opus".to_string()));
 
@@ -8342,7 +8342,7 @@ mod tests {
         for here in [
             "localhost",
             "127.0.0.1",
-            "192.168.1.25",
+            "192.168.50.25",
             "10.0.0.7",
             "172.20.1.2",
             "mac-studio.local",
@@ -8618,8 +8618,8 @@ mod tests {
         assert_eq!(elsewhere("http://localhost:1234"), None);
         assert_eq!(elsewhere("http://[::1]:8080"), None);
         assert_eq!(
-            elsewhere("http://192.168.1.42:11434"),
-            Some("192.168.1.42".to_string())
+            elsewhere("http://192.168.50.42:11434"),
+            Some("192.168.50.42".to_string())
         );
         assert_eq!(
             elsewhere("https://box.local:8080/v1"),

@@ -2179,7 +2179,7 @@ mod an_aside_leaves_no_trace {
         let so_far = vec![
             user("Could you reach the Mac Studio over SSH?"),
             ChatMessage::Assistant {
-                content: "It answers on 192.168.1.143.".into(),
+                content: "It answers on 192.168.50.10.".into(),
                 tool_calls: Vec::new(),
                 reasoning: None,
             },

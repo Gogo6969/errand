@@ -335,7 +335,7 @@ mod tests {
                 None,
             ),
             line(5, "mine", "continue", None),
-            line(7, "said", "The Mac Studio answers on 192.168.1.143.", None),
+            line(7, "said", "The Mac Studio answers on 192.168.50.10.", None),
         ];
         let turns = as_turns(&lines);
         assert_eq!(turns.len(), 3, "{turns:?}");
