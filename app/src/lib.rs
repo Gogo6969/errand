@@ -5857,6 +5857,118 @@ fn programs_on_this_mac(home: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+/// What the model is told when it is asked for the person's next message.
+const SUGGESTING: &str = "You suggest the next message a person will send to their \
+     teammate, an assistant that does errands on their Mac. Write only that message, the way \
+     they would type it: at most twelve words, plain, no quotes, no greeting, nothing about \
+     yourself. If the teammate asked them something, answer it the way they most likely \
+     would. If there is no obvious next message, write nothing at all.";
+
+/// What the person will most likely say next, for the box to offer under Tab.
+///
+/// Claude's box offers the next thing to say in grey, and Tab takes it. Here
+/// the box only repeated the teammate's question, so there was nothing to
+/// take. Asked of the teammate's own model and only that one, so a teammate
+/// kept local is asked locally; nothing for a teammate on Claude Code, where
+/// there is no model to ask apart from the conversation itself.
+#[tauri::command]
+async fn suggest_next(held: State<'_, Held>, id: String) -> Result<Option<String>, String> {
+    let Some(settings) = local_settings_for(&held, &id)? else {
+        return Ok(None);
+    };
+    let lines = held.store.lines(&id).map_err(|e| e.to_string())?;
+    let said = lines
+        .iter()
+        .rev()
+        .find(|line| line.kind == "said" && !line.text.trim().is_empty())
+        .map(|line| line.text.trim().to_string());
+    let Some(said) = said else {
+        return Ok(None);
+    };
+    let asked = lines
+        .iter()
+        .rev()
+        .find(|line| line.kind == "mine")
+        .map(|line| line.text.trim().to_string())
+        .unwrap_or_default();
+    // The end of a long answer is where its question is, and all of it would
+    // be a long prompt for a dozen words.
+    let said: String = {
+        let all: Vec<char> = said.chars().collect();
+        all[all.len().saturating_sub(1500)..].iter().collect()
+    };
+    let messages = vec![
+        errand_core::local::ChatMessage::System {
+            content: SUGGESTING.into(),
+        },
+        errand_core::local::ChatMessage::User {
+            content: format!(
+                "What they last asked: {asked}\n\nWhat their teammate answered: {said}\n\n\
+                 Their next message:"
+            ),
+            name: None,
+            image_data_urls: Vec::new(),
+        },
+    ];
+    let client = errand_core::local::talk::LlmClient::new(settings);
+    let answer = client
+        .complete(&messages, &[], Some(60))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(a_suggestion(&answer.content))
+}
+
+/// A model's suggestion, as one line somebody could send, or nothing.
+fn a_suggestion(said: &str) -> Option<String> {
+    let line = said
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?
+        .trim_matches(['"', '\u{201c}', '\u{201d}', '\''])
+        .trim();
+    let line = line
+        .strip_prefix("Their next message:")
+        .unwrap_or(line)
+        .trim();
+    (!line.is_empty() && line.chars().count() <= 160).then(|| line.to_string())
+}
+
+/// The model a conversation's teammate runs on, when it is one this app talks
+/// to itself: the same choice, the same rules and the same key as opening the
+/// conversation makes. Nothing for Claude Code.
+fn local_settings_for(held: &Held, id: &str) -> Result<Option<LlmSettings>, String> {
+    let Some(conversation) = held.store.conversation(id).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let Some(agent) = held
+        .store
+        .agent(&conversation.agent)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let (engine, settings) = the_model_for(
+        held,
+        Some(&agent),
+        (agent.engine.clone(), agent.engine_settings.clone()),
+    )?;
+    if engine != "local" {
+        return Ok(None);
+    }
+    let Some(settings) = settings else {
+        return Ok(None);
+    };
+    let mut settings: LlmSettings = serde_json::from_str(&settings).map_err(|e| e.to_string())?;
+    if settings.api_key.is_none() {
+        settings.api_key = held.store.backends().ok().and_then(|kept| {
+            kept.into_iter()
+                .find(|b| errand_core::local::find::the_same_place(&settings.base_url, &b.base_url))
+                .and_then(|b| keys::look_up(&b.id))
+        });
+    }
+    Ok(Some(settings))
+}
+
 /// A folder, chosen with the Mac's own folder chooser.
 ///
 /// Typed, a folder was a path somebody had to know by heart and could get
@@ -7859,6 +7971,7 @@ pub fn run() {
             what_allowing_means,
             allowing_choices,
             choose_a_folder,
+            suggest_next,
             also_allowed,
             revoke,
             asks,
@@ -8244,6 +8357,25 @@ mod tests {
             .any(|(rule, _)| rule.ends_with("/Desktop")
                 && rule.starts_with(&home.display().to_string())));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_suggestion_is_one_line_somebody_could_send_or_nothing() {
+        assert_eq!(
+            a_suggestion("\"Yes, go ahead with the bigger disk.\"\n").as_deref(),
+            Some("Yes, go ahead with the bigger disk.")
+        );
+        assert_eq!(
+            a_suggestion("\n\nTheir next message: Stop the hourly check.").as_deref(),
+            Some("Stop the hourly check.")
+        );
+        assert_eq!(a_suggestion(""), None);
+        assert_eq!(a_suggestion("   \n  "), None);
+        assert_eq!(
+            a_suggestion(&"word ".repeat(60)),
+            None,
+            "too long to be a suggestion"
+        );
     }
 
     #[test]

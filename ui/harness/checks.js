@@ -5923,3 +5923,66 @@ export async function choosingWhatToAllow() {
   await openTalk(wasOn);
   return found;
 }
+
+/**
+ * The next thing to say, greyed in the box, which Tab takes, as in Claude.
+ *
+ * The box only repeated the teammate's question, so there was nothing to take.
+ */
+export async function takingTheSuggestion() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const where = document.getElementById("talks").value;
+  const box = document.getElementById("what");
+  const hint = document.getElementById("tab-hint");
+  const tab = () => {
+    const e = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    box.dispatchEvent(e);
+    return e.defaultPrevented;
+  };
+  box.value = "";
+
+  tell("happened", { conversation: where, seq: 7201, kind: "done" });
+  await new Promise((r) => setTimeout(r, 250));
+  check(
+    "when a turn ends, the next thing to say is greyed in the empty box",
+    box.placeholder === "Yes, go ahead with the bigger disk.",
+    box.placeholder,
+  );
+  check("with the key that takes it beside the box", !hint.hidden, `hidden=${hint.hidden}`);
+
+  const took = tab();
+  check(
+    "Tab puts it in the box, ready to change or send",
+    took && box.value === "Yes, go ahead with the bigger disk.",
+    `${took} "${box.value}"`,
+  );
+  check("and the key goes once it is taken", hint.hidden, `hidden=${hint.hidden}`);
+  check("so Tab is left alone after that", !tab(), "Tab was taken again");
+
+  // Typing is saying something else, and the suggestion makes way.
+  box.value = "";
+  tell("happened", { conversation: where, seq: 7202, kind: "done" });
+  await new Promise((r) => setTimeout(r, 250));
+  box.value = "Actually, wait";
+  box.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 50));
+  check(
+    "typing makes it go",
+    hint.hidden && box.placeholder !== "Yes, go ahead with the bigger disk.",
+    `hidden=${hint.hidden} "${box.placeholder}"`,
+  );
+  check("and Tab no longer takes anything", !tab(), "Tab was taken");
+
+  // A teammate with no suggestion, like one on Claude Code, offers nothing.
+  box.value = "";
+  box.dispatchEvent(new Event("input"));
+  FIXTURE.suggestion = null;
+  tell("happened", { conversation: where, seq: 7203, kind: "done" });
+  await new Promise((r) => setTimeout(r, 250));
+  delete FIXTURE.suggestion;
+  check("with nothing to suggest, nothing is shown", hint.hidden, `hidden=${hint.hidden}`);
+  check("and Tab is left to do what it always did", !tab(), "Tab was taken");
+  box.value = "";
+  return found;
+}

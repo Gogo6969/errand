@@ -188,6 +188,7 @@ const talks = new Map(); // conversation id → { id, agent, name, messages, wor
 const NOT_YET_NAMED = "New errand";
 let showingAgent = null;
 let showing = null; // the conversation on screen
+let suggested = null; // the next thing to say, greyed, for Tab: { for, text }
 /**
  * How many days a job marked finished stays in the list before it lives only
  * in the overview. A setting, because a week is a guess. Up here, with the
@@ -295,6 +296,7 @@ const el = {
   paletteWhat: document.getElementById("palette-what"),
   paletteList: document.getElementById("palette-list"),
   what: document.getElementById("what"),
+  tabHint: document.getElementById("tab-hint"),
   send: document.getElementById("send"),
   form: document.getElementById("composer"),
   new: document.getElementById("new"),
@@ -930,6 +932,7 @@ async function show(id) {
   // goes with it, and a voice nobody can find the off switch for is worse
   // than one cut short.
   if (showing !== id) stopReadingAloud();
+  if (showing !== id) dropTheSuggestion();
   showing = id;
   showingAgent = t.agent;
 
@@ -1089,7 +1092,11 @@ function drawRoom(t) {
 function askedForAnAnswer(t) {
   const question = theQuestionLeftOpen(t);
   const aRoom = (t?.members || []).length > 1;
-  if (!document.body.classList.contains("in-a-call")) {
+  const offered = suggested && suggested.for === t?.id && !el.what.value;
+  el.tabHint.hidden = !offered;
+  if (offered) {
+    el.what.placeholder = suggested.text;
+  } else if (!document.body.classList.contains("in-a-call")) {
     el.what.placeholder = question
       ? `Answer: ${question.length > 90 ? `${question.slice(0, 89)}…` : question}`
       : aRoom
@@ -1098,6 +1105,35 @@ function askedForAnAnswer(t) {
   }
   // Out of the way once somebody is answering in words of their own.
   el.replies.hidden = !question || !yesOrNo(question) || !!el.what.value.trim();
+}
+
+/**
+ * The next thing to say, greyed in the box, which Tab takes, as in Claude.
+ *
+ * The box only repeated the teammate's question, so there was nothing to
+ * take. Asked of the teammate's own model when a turn ends, for the
+ * conversation on screen and only while the box is empty; gone the moment
+ * somebody types, sends, or looks at another conversation, or a new turn
+ * starts. Nothing at all for a teammate on Claude Code.
+ */
+
+async function offerTheNextThing(id) {
+  if (inACall || el.what.value.trim()) return;
+  let text = null;
+  try {
+    text = await invoke("suggest_next", { id });
+  } catch {
+    return;
+  }
+  if (!text || showing !== id || el.what.value.trim()) return;
+  suggested = { for: id, text };
+  askedForAnAnswer(talking());
+}
+
+function dropTheSuggestion() {
+  if (!suggested) return;
+  suggested = null;
+  askedForAnAnswer(talking());
 }
 
 /**
@@ -2797,6 +2833,7 @@ listen("happened", async ({ payload }) => {
 
     case "doing":
       t.working = true;
+      if (payload.conversation === showing) dropTheSuggestion();
       // Words still unsettled when a step begins were not kept: an engine
       // settles what it says before it acts, so these are an answer taken
       // back, like one sent back for claiming work nothing did. Left on
@@ -2864,6 +2901,7 @@ listen("happened", async ({ payload }) => {
       // Half a sentence must not outlive the turn writing it. Normally the
       // settled line has already cleared it; a turn stopped mid-word has not.
       itHasStopped(t);
+      if (payload.conversation === showing) offerTheNextThing(showing);
       // Either end of the turn can finish last: a short answer is read out
       // before the turn ends and a long one is still being read after it.
       if (inACall && payload.conversation === showing) listenAgain();
@@ -3093,6 +3131,7 @@ const ROOM_STILL_ANSWERING =
 
 el.form.addEventListener("submit", async (e) => {
   e.preventDefault();
+  dropTheSuggestion();
   const text = el.what.value.trim();
   // A picture on its own is a question: "what is this". So something has to be
   // said, but it does not have to be typed.
@@ -3286,6 +3325,18 @@ async function sayIt(text, going = []) {
 // walking, so it never steals the arrow keys from somebody editing a sentence.
 // Where the walk has got to is kept with the box, beside `halfTyped`.
 el.what.addEventListener("keydown", (e) => {
+  // Tab takes the suggestion, and only into an empty box, so it never stands
+  // in for anything else Tab does.
+  if (e.key === "Tab" && !e.shiftKey && suggested && suggested.for === showing && !el.what.value) {
+    e.preventDefault();
+    el.what.value = suggested.text;
+    suggested = null;
+    askedForAnAnswer(talking());
+    el.what.style.height = "auto";
+    el.what.style.height = Math.min(el.what.scrollHeight, window.innerHeight * 0.4) + "px";
+    el.what.setSelectionRange(el.what.value.length, el.what.value.length);
+    return;
+  }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     walkedBack = null;
@@ -3320,6 +3371,7 @@ el.what.addEventListener("keydown", (e) => {
   el.what.setSelectionRange(el.what.value.length, el.what.value.length);
 });
 el.what.addEventListener("input", () => {
+  if (el.what.value) dropTheSuggestion();
   el.what.style.height = "auto";
   el.what.style.height = Math.min(el.what.scrollHeight, window.innerHeight * 0.4) + "px";
 });

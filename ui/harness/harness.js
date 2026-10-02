@@ -809,6 +809,11 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
                   : null,
             });
           }
+          // The next thing to say, as the teammate's model would suggest it.
+          case "suggest_next":
+            return Promise.resolve(
+              fixture.suggestion === undefined ? "Yes, go ahead with the bigger disk." : fixture.suggestion,
+            );
           // The Mac's own folder chooser, answered as if somebody chose a
           // folder, or as if they cancelled when a check says so.
           case "choose_a_folder":

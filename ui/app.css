@@ -1164,6 +1164,18 @@ main > aside, main > #title, main > #composer { flex: none; }
   font: inherit;
 }
 #what:focus { outline: none; border-color: var(--edge); }
+/* Beside the box while a suggestion is greyed in it: the key that takes it. */
+#tab-hint[hidden] { display: none; }
+#tab-hint {
+  align-self: center;
+  padding: 3px 7px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink-soft);
+  font: 11px/1.2 inherit;
+  letter-spacing: .02em;
+}
 
 #send {
   width: 36px;
