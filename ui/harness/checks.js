@@ -6246,3 +6246,95 @@ export async function whenEachThingWasSaid() {
   await wait(100);
   return found;
 }
+
+/**
+ * What a teammate does on its own, seen from the list.
+ *
+ * It was a grey mark the size of a letter beside the name, and a routine
+ * switched off by mistake went four hours without anybody seeing it.
+ */
+export async function whatRunsOnItsOwnStandsOut() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const list = document.getElementById("threads");
+  const rowOf = (agent) => list.querySelector(`li[data-agent="${agent}"]`);
+  const badgeOf = (agent) => rowOf(agent)?.querySelector(".on-its-own");
+  // From nothing working, whatever earlier checks left going: a badge that
+  // says "running" is right while anything of its teammate's is.
+  ["talk-1", "talk-2", "talk-3", "talk-4", "talk-overnight", "talk-cut-off"].forEach((id, n) =>
+    tell("happened", { conversation: id, seq: 9940 + n, kind: "done" }),
+  );
+  await wait(200);
+  const accent = (() => {
+    const probe = document.createElement("span");
+    probe.style.color = "var(--accent)";
+    document.body.append(probe);
+    const seen = getComputedStyle(probe).color;
+    probe.remove();
+    return seen;
+  })();
+
+  const desk = badgeOf("agent-bitcoin");
+  check(
+    "a teammate with something due has a badge on its mark",
+    desk && desk.dataset.shows === "repeat" && !desk.classList.contains("idle") && !desk.classList.contains("now"),
+    desk ? `${desk.className} ${desk.dataset.shows}` : "no badge",
+  );
+  check(
+    "filled in the accent, so it can be seen across the list",
+    desk && getComputedStyle(desk).backgroundColor === accent,
+    desk ? `${getComputedStyle(desk).backgroundColor}, accent ${accent}` : "no badge",
+  );
+  check(
+    "saying in its tooltip when it next runs, and what",
+    /Runs on its own, next /.test(desk?.title || "") && /Repeats daily 07:00/.test(desk?.title || "") && /What moved overnight/.test(desk?.title || ""),
+    desk?.title,
+  );
+  const mark = rowOf("agent-bitcoin")?.querySelector(".tile")?.getBoundingClientRect();
+  const badge = desk?.getBoundingClientRect();
+  const row = rowOf("agent-bitcoin")?.getBoundingClientRect();
+  check(
+    "in the corner of the mark, and inside the row",
+    mark && badge && row &&
+      badge.right > mark.right && badge.bottom > mark.bottom &&
+      badge.left > mark.left + mark.width / 2 && badge.top > mark.top + mark.height / 2 &&
+      badge.bottom <= row.bottom && badge.right <= row.right,
+    mark && badge && row ? `mark ${Math.round(mark.right)},${Math.round(mark.bottom)}; badge ${Math.round(badge.left)}-${Math.round(badge.right)},${Math.round(badge.top)}-${Math.round(badge.bottom)}; row bottom ${Math.round(row.bottom)}` : "missing",
+  );
+  check(
+    "and the name beside it keeps its room",
+    !rowOf("agent-bitcoin")?.querySelector(".name .on-its-own"),
+    "badge on the mark, not in the name",
+  );
+
+  const pulse = badgeOf("agent-unnamed");
+  check(
+    "a teammate whose routine is paused has a quiet outlined badge saying so",
+    pulse?.classList.contains("idle") && /^Paused/.test(pulse.title) && getComputedStyle(pulse).backgroundColor !== accent,
+    pulse ? `${pulse.className} "${pulse.title.split("\n")[0]}"` : "no badge",
+  );
+  const none = [...list.querySelectorAll("li[data-agent]")].find(
+    (li) => !FIXTURE.standing.some((s) => s.agent === li.dataset.agent) && !/Working/.test(li.textContent),
+  );
+  check("a teammate with nothing running and nothing of its own to run has no badge", none && !none.querySelector(".on-its-own"), none?.dataset.agent);
+
+  // Running, while it works, and back to what is scheduled after.
+  tell("happened", { conversation: "talk-2", kind: "said", settled: false, text: "Looking at the overnight moves" });
+  await wait(150);
+  const going = badgeOf("agent-bitcoin");
+  check(
+    "while it works, the badge says it is running",
+    going?.classList.contains("now") && going.dataset.shows === "running" && /^Working now/.test(going.title) && getComputedStyle(going).backgroundColor === accent,
+    going ? `${going.className} ${going.dataset.shows} "${going.title.split("\n")[0]}"` : "no badge",
+  );
+  tell("happened", { conversation: "talk-2", seq: 9950, kind: "done" });
+  await wait(150);
+  const after = badgeOf("agent-bitcoin");
+  check(
+    "and when it is done, it shows what is scheduled again",
+    after && !after.classList.contains("now") && after.dataset.shows === "repeat",
+    after ? `${after.className} ${after.dataset.shows}` : "no badge",
+  );
+  return found;
+}

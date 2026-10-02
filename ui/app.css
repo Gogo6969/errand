@@ -445,6 +445,38 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* What sits under a badge on a row, so the badge's ring is cut from the
+   row's own colour however the row is lit. */
+#threads li { --row: var(--side); }
+#threads li:hover { --row: var(--hover); }
+#threads li[aria-current="true"] { --row: var(--card); }
+
+/* Something an agent runs on its own, or is running now, in the corner of its
+   mark: filled in the accent while it is live, and only outlined when what it
+   has is switched off, paused or stopped. Loud on purpose. It was a grey mark
+   the size of a letter, and a routine switched off by mistake went four hours
+   without anybody seeing it. */
+.on-its-own {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: 0 0 0 2px var(--row);
+  cursor: help;
+}
+.on-its-own svg { width: 9px; height: 9px; display: block; }
+.on-its-own[data-shows="running"] svg { width: 8px; height: 8px; margin-left: 1px; }
+.on-its-own.idle {
+  background: var(--row);
+  color: var(--ink-soft);
+  box-shadow: 0 0 0 2px var(--row), inset 0 0 0 1.5px var(--ink-soft);
+}
 #threads .last {
   display: block;
   color: var(--ink-soft);

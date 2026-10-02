@@ -1842,7 +1842,9 @@ function drawThreads() {
         // they were reading.
         openTheMenu(a, e.clientX, e.clientY);
       };
-      li.append(tile(kindFor(a), busy(a.id), a.hue));
+      const mark = tile(kindFor(a), busy(a.id), a.hue);
+      mark.append(...onItsOwn(a));
+      li.append(mark);
       if (a.pinned) li.classList.add("pinned");
       if (a.paused) li.classList.add("paused");
 
@@ -6796,6 +6798,69 @@ function titleOf(t) {
 }
 
 /** Read what repeats again, and redraw what shows it if any of it changed. */
+/**
+ * Whether an agent has anything that runs by itself, or is running now, said
+ * on its mark where a list of forty is skimmed: a badge in the corner, the way
+ * an app says it has something. Filled in the accent while a routine or a
+ * watch is live, with a play sign while the agent works, and only outlined
+ * when everything it has is switched off, paused or stopped. When and what
+ * are in its tooltip.
+ *
+ * Before this, the only sign was a grey mark the size of a letter beside the
+ * name, and the difference between a teammate that would check a disk every
+ * hour and one that never would again was the opacity of that mark. A routine
+ * switched off by mistake went four hours without anybody seeing it.
+ *
+ * On the mark rather than at the end of the name, because a sidebar is narrow
+ * and a pill there cut "Bitcoin Desk" down to "Bitcoin".
+ */
+function onItsOwn(a) {
+  const theirs = standingNow.filter((s) => s.agent === a.id);
+  const working = busy(a.id);
+  if (!theirs.length && !working) return [];
+  const live = theirs.filter((s) => !s.paused && (s.kind === "routine" ? !s.off : !s.stopped));
+  const badge = document.createElement("span");
+  badge.className = "on-its-own";
+  let shows;
+  let said;
+  if (working) {
+    badge.classList.add("now");
+    shows = "running";
+    said = "Working now";
+  } else if (live.length) {
+    shows = live.some((s) => s.kind === "routine") ? "repeat" : "watch";
+    const next = live.filter((s) => s.due).sort((x, y) => x.due - y.due)[0];
+    said = next ? `Runs on its own, next ${whenNext(next.due)}` : "Watching on its own";
+  } else {
+    badge.classList.add("idle");
+    shows = theirs.some((s) => s.kind === "routine") ? "repeat" : "watch";
+    // Why nothing will run, by the reason that covers all of it: the teammate
+    // paused, then a watch stopped, then a routine switched off.
+    said =
+      a.paused || theirs.every((s) => s.paused)
+        ? "Paused: nothing runs on its own"
+        : theirs.every((s) => s.kind === "watch")
+          ? "Stopped: nothing runs on its own"
+          : "Switched off: nothing runs on its own";
+  }
+  badge.dataset.shows = shows;
+  const details = repeatMarks(a).map((m) => m.title);
+  badge.title = [said, ...details].join("\n");
+  badge.setAttribute("role", "img");
+  badge.setAttribute("aria-label", said);
+  badge.innerHTML = BADGE_ICONS[shows];
+  return [badge];
+}
+
+/** What the badge shows, drawn at the size of the badge. */
+const BADGE_ICONS = {
+  repeat:
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.6 5.4A5 5 0 0 0 3.3 6.5M3.4 10.6a5 5 0 0 0 9.3-1.1" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M12.9 2.6v3h-3M3.1 13.4v-3h3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  watch:
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8Z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="8" cy="8" r="2.2" fill="currentColor"/></svg>',
+  running: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.2v9.6L13 8z" fill="currentColor"/></svg>',
+};
+
 async function readStanding() {
   let now;
   try {
