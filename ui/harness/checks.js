@@ -3277,6 +3277,27 @@ export async function pausingARoutineAndSeeingHowItWent() {
 
   check("a conversation with a routine offers to pause it", !pause.hidden, String(pause.hidden));
   check("and the button says pause while it is running", pause.textContent === "Pause", pause.textContent);
+
+  // Drawn like the buttons beside it, whatever it says. It was left out of
+  // the rules that size and outline them, so it came out as the system's own
+  // small button, lower than the rest of the row: "Start again" looked like a
+  // label that had slipped, on the one routine somebody needed to start.
+  const besideIt = (when) => {
+    const tryIt = document.getElementById("routine-try");
+    const [a, b] = [pause, tryIt].map((e) => e.getBoundingClientRect());
+    const [p, t] = [pause, tryIt].map((e) => getComputedStyle(e));
+    check(
+      `${when}, it is the height of Try it now and sits on the same line`,
+      Math.round(a.height) === Math.round(b.height) && Math.round(a.bottom) === Math.round(b.bottom),
+      `height ${Math.round(a.height)}/${Math.round(b.height)}, bottom ${Math.round(a.bottom)}/${Math.round(b.bottom)}`,
+    );
+    check(
+      `${when}, it is outlined in the same type as Try it now`,
+      p.fontSize === t.fontSize && p.borderTopWidth === t.borderTopWidth && p.backgroundColor === t.backgroundColor && p.borderRadius === t.borderRadius,
+      `font ${p.fontSize}/${t.fontSize}, border ${p.borderTopWidth}/${t.borderTopWidth}, background ${p.backgroundColor}/${t.backgroundColor}, radius ${p.borderRadius}/${t.borderRadius}`,
+    );
+  };
+  if (beingDrawn()) besideIt("Pause");
   check("the line says when it is next", /Next /.test(says.textContent), says.textContent);
 
   // What it actually did, told apart three ways.
@@ -3309,6 +3330,7 @@ export async function pausingARoutineAndSeeingHowItWent() {
   );
   check("and what it would run is still there", /daily 07:00/.test(says.textContent), says.textContent);
   check("the button now offers to start it again", pause.textContent === "Start again", pause.textContent);
+  if (beingDrawn()) besideIt("Start again");
 
   // And reopening reads it back from the app rather than from the page.
   document.getElementById("repeat").click();

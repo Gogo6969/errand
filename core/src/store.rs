@@ -2539,6 +2539,24 @@ impl Store {
         Self::only_if_it_is_there(changed, "conversation")
     }
 
+    /// Give a conversation a schedule because it was asked to, and have it run.
+    ///
+    /// `runs` leaves a routine that was switched off switched off, which is
+    /// right for Repeat, where Save edits what a paused routine will do once it
+    /// is started again. It was wrong for a teammate asked to set one: told to
+    /// stop the hourly check and start a new one, it switched the old one off,
+    /// set the new one in the same conversation, and was told "Set ... next at
+    /// 12:34" about a schedule the clock then walked past for four hours.
+    pub fn runs_from_now(&self, conversation: &str, at: &str, what: &str) -> Result<()> {
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE conversations
+                SET runs_at = ?, runs_what = ?, ran_at = NULL, routine_set_at = ?, routine_off = 0
+              WHERE id = ?",
+            params![at, what, now(), conversation],
+        )?;
+        Self::only_if_it_is_there(changed, "conversation")
+    }
+
     /// Say that a turn has started in this conversation.
     pub fn a_turn_began(&self, conversation: &str) -> Result<()> {
         self.conn.lock().unwrap().execute(
@@ -4557,6 +4575,47 @@ mod tests {
 
         s.routine_off(&id, false).unwrap();
         assert_eq!(s.routines().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_schedule_a_teammate_sets_after_one_was_switched_off_runs() {
+        // Told to stop the hourly check and start a new one, a teammate
+        // switched the old schedule off and set the new one in the same
+        // conversation. The new one stayed switched off, and the clock walked
+        // past it for four hours while it had been told the next run was due.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("disk", NOT_YET_NAMED, Path::new("/tmp/disk"))
+            .unwrap();
+        let id = s.conversations("disk").unwrap()[0].id.clone();
+        s.runs(&id, Some("every 1h"), Some("Check this Mac's disk"))
+            .unwrap();
+        s.routine_off(&id, true).unwrap();
+        assert!(s.routines().unwrap().is_empty());
+
+        s.runs_from_now(&id, "every 1h", "Check the studio's disk over ssh")
+            .unwrap();
+        let running = s.routines().unwrap();
+        assert_eq!(
+            running.len(),
+            1,
+            "a schedule set by being asked was left switched off"
+        );
+        assert_eq!(
+            running[0].runs_what.as_deref(),
+            Some("Check the studio's disk over ssh")
+        );
+        assert!(!running[0].routine_off);
+        assert_eq!(running[0].ran_at, None);
+
+        // Save under Repeat still edits a paused routine without starting it.
+        s.routine_off(&id, true).unwrap();
+        s.runs(
+            &id,
+            Some("every 2h"),
+            Some("Check the studio's disk over ssh"),
+        )
+        .unwrap();
+        assert!(s.routines().unwrap().is_empty());
     }
 
     #[test]

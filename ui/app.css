@@ -1815,7 +1815,7 @@ body.catching #what { border-color: var(--accent); }
    beside them. Two pixels is enough to read as sloppy, and it was. */
 #routine input, #watching input, #watching select, #aiming input,
 #routine-save, #watch-save, #goal-save,
-#routine-try, #watch-try,
+#routine-try, #watch-try, #routine-pause,
 #routine-stop, #watch-stop, #watch-again, #goal-stop {
   height: 34px;
   border-radius: 8px;
@@ -1831,7 +1831,7 @@ body.catching #what { border-color: var(--accent); }
   font-weight: 500;
   cursor: pointer;
 }
-#routine-try, #watch-try,
+#routine-try, #watch-try, #routine-pause,
 #routine-stop, #watch-stop, #watch-again, #goal-stop {
   padding: 0 14px;
   border: 1px solid var(--rule);
@@ -1839,7 +1839,7 @@ body.catching #what { border-color: var(--accent); }
   color: var(--ink-soft);
   cursor: pointer;
 }
-#routine-try:hover, #watch-try:hover,
+#routine-try:hover, #watch-try:hover, #routine-pause:hover,
 #routine-stop:hover, #watch-stop:hover, #watch-again:hover, #goal-stop:hover { color: var(--ink); border-color: var(--edge); }
 /* What it says back: when it next runs, or why what was typed is not a time. */
 /* What was actually asked in this conversation, to take rather than retype.

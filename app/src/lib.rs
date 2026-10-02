@@ -3509,10 +3509,12 @@ fn set_it_running(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
     // happening.
     let read = When::read(when)?;
 
-    // Stored the way it was read, so what Repeat shows is what runs.
+    // Stored the way it was read, so what Repeat shows is what runs. And
+    // switched on: a schedule an agent was asked to set is one that runs,
+    // even in a conversation whose last one it switched off a moment ago.
     let held: State<Held> = app.state();
     held.store
-        .runs(&asked.from, Some(&read.written()), Some(what))?;
+        .runs_from_now(&asked.from, &read.written(), what)?;
     let _ = app.emit(
         "repeats",
         Repeats {
