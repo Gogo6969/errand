@@ -242,7 +242,7 @@ fn keys_kept_out(theirs: &Path) -> String {
 /// Anything that cannot be read to find out is counted as one, because the
 /// cost of that mistake is a file an errand cannot read, and the cost of the
 /// other is a key it can.
-fn a_private_key(path: &Path) -> bool {
+pub(crate) fn a_private_key(path: &Path) -> bool {
     use std::io::Read;
     let named = path.file_name().map(|n| n.to_string_lossy().to_string());
     let named = named.as_deref().unwrap_or_default();
@@ -291,7 +291,7 @@ pub fn machines_in_ssh_config(theirs: &Path) -> Vec<String> {
 }
 
 /// The keys the SSH config says to use, wherever they are kept.
-fn keys_the_config_names(ssh: &Path, theirs: &Path) -> Vec<PathBuf> {
+pub(crate) fn keys_the_config_names(ssh: &Path, theirs: &Path) -> Vec<PathBuf> {
     let Ok(config) = std::fs::read_to_string(ssh.join("config")) else {
         return Vec::new();
     };
@@ -458,6 +458,57 @@ pub fn looks_like_the_wall(said: &str) -> bool {
         .contains("operation not permitted")
 }
 
+/// Whether what a command printed is SSH refused one of the person's private
+/// keys, which the wall keeps from every errand on purpose.
+///
+/// `ssh` asks the key agent first and reads a key file only for a key the
+/// agent does not hold, so a refusal to read one means exactly that: the key
+/// it needed is not loaded. It says so as `Load key "<path>": Operation not
+/// permitted`, and `ssh-add` handed a key says `<path>: Operation not
+/// permitted`. Kept apart from every other refusal, because the advice for
+/// those, allowing a folder under Allowed, can never fix this one, and was
+/// exactly what a teammate refused its key was given.
+pub fn a_key_was_kept_out(said: &str) -> bool {
+    said.contains(A_KEY_NOT_LOADED)
+        || said.lines().any(|line| {
+            let line = line.to_ascii_lowercase();
+            line.contains("operation not permitted")
+                && (line.contains("load key")
+                    || line.contains("loading key")
+                    || line.contains("/id_")
+                    || (line.contains("/.ssh/")
+                        && !line.contains("known_hosts")
+                        && !line.contains("/config")))
+        })
+}
+
+/// The line a step is shown with when SSH was refused a key, in place of
+/// the first line of what it printed, which says only how it exited: "exited
+/// 255" under a step is where somebody looks first, and the app puts up the
+/// button that loads the key from this line.
+pub const A_KEY_NOT_LOADED: &str = "SSH was refused your key: it isn't loaded in the key agent";
+
+/// The line a step is shown with: the first line of what it printed, made
+/// short by `shorten`, unless what it printed is SSH refused a key.
+pub fn the_line_for_a_step(said: &str, shorten: impl Fn(&str) -> String) -> String {
+    match a_key_was_kept_out(said) {
+        true => A_KEY_NOT_LOADED.to_string(),
+        false => shorten(said),
+    }
+}
+
+/// What to say instead, when it was a key.
+pub fn the_key_is_not_loaded() -> String {
+    "That \"Operation not permitted\" is SSH being refused the person's private key, and \
+     that is on purpose: no errand can read a private key, and nothing under Allowed changes \
+     that. SSH works without reading it, through the key agent, which uses the key for you \
+     and never hands it over; the key this needed is not loaded in the agent. Tell the person \
+     exactly that, and that Errand loads it for them: Errand is showing them a Load my SSH key \
+     button, and the same button is under Settings, SSH key. Once it is loaded, the same \
+     command works. Never copy a key or look for another way to read one."
+        .to_string()
+}
+
 /// What a model has to be told about the wall before it runs into it.
 ///
 /// Told as well as enforced, because a wall that is only enforced produces a
@@ -488,11 +539,14 @@ pub fn what_the_wall_means(home: &Path) -> String {
          person can allow that folder for you under Allowed, choosing \"a folder\", and \
          then it works. Until then, do the work inside your own folder.\n\n\
          Private keys are not readable here: the SSH keys in ~/.ssh are kept from you, \
-         and SSH works only with a key the person has added to their ssh-agent. If ssh \
-         fails because a key cannot be read, or because a host is not yet in known_hosts, \
-         stop and say so plainly. Never copy a key, an SSH config or known_hosts somewhere \
-         else, and never look for another way round the wall: the wall is the person's \
-         decision, and working round it is the one thing that is never the errand.",
+         and SSH works only with a key that is loaded in the person's key agent. If ssh \
+         says it cannot load a key (Load key ...: Operation not permitted), the key is not \
+         loaded: stop and tell the person so, and that Errand loads it for them with Load \
+         my SSH key, under Settings, SSH key. Allowed has nothing to do with keys, so never \
+         send them there for it. If a host is not yet in known_hosts, stop and say that \
+         plainly too. Never copy a key, an SSH config or known_hosts somewhere else, and \
+         never look for another way round the wall: the wall is the person's decision, \
+         and working round it is the one thing that is never the errand.",
         home.display()
     )
 }
@@ -1202,6 +1256,53 @@ mod tests {
         assert!(said.contains("Full Disk Access"), "{said}");
         // And never to go round it, which is what an errand did with a key.
         assert!(said.contains("Never copy a key"), "{said}");
+        // A key refused is a key not loaded, and Allowed is not where that is
+        // fixed. It was where a teammate refused its key sent somebody.
+        assert!(said.contains("Load my SSH key"), "{said}");
+        assert!(
+            said.contains("Allowed has nothing to do with keys"),
+            "{said}"
+        );
         also_allow(home, vec![]);
+    }
+
+    #[test]
+    fn a_key_refused_is_told_from_a_folder_refused() {
+        // What ssh printed for a teammate asked to check another Mac's disk,
+        // with the agent empty, and what ssh-add says handed a key.
+        for refused in [
+            "Load key \"/Users/me/.ssh/id_ed25519\": Operation not permitted\n\
+             me@192.0.2.10: Permission denied (publickey).",
+            "Load key \"/Users/me/.ssh/studio_key\": Operation not permitted",
+            "/Users/me/.ssh/id_rsa: Operation not permitted",
+        ] {
+            assert!(a_key_was_kept_out(refused), "{refused}");
+            assert!(looks_like_the_wall(refused), "{refused}");
+        }
+        // Every other refusal is the wall's ordinary kind, a folder, and is
+        // answered the ordinary way.
+        for not_a_key in [
+            "cp: /Volumes/Disk/clip.mp4: Operation not permitted",
+            "touch: /Users/me/.ssh/known_hosts: Operation not permitted",
+            "me@192.0.2.10: Permission denied (publickey).",
+            "Load key \"/Users/me/.ssh/id_ed25519\": incorrect passphrase",
+        ] {
+            assert!(!a_key_was_kept_out(not_a_key), "{not_a_key}");
+        }
+        // Under the step, and to the app, it is said as what it is rather
+        // than as how ssh exited, which is all a first line would say.
+        let printed = "exited 255\nLoad key \"/Users/me/.ssh/id_ed25519\": Operation not permitted";
+        let first = |s: &str| s.lines().next().unwrap_or("").to_string();
+        assert_eq!(the_line_for_a_step(printed, first), A_KEY_NOT_LOADED);
+        assert!(a_key_was_kept_out(&the_line_for_a_step(printed, first)));
+        assert_eq!(
+            the_line_for_a_step("exited 1\nno such file", first),
+            "exited 1"
+        );
+        let said = the_key_is_not_loaded();
+        assert!(said.contains("not loaded"), "{said}");
+        assert!(said.contains("Load my SSH key"), "{said}");
+        assert!(said.contains("nothing under Allowed"), "{said}");
+        assert!(!said.contains("choosing \"a folder\""), "{said}");
     }
 }

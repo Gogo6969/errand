@@ -358,6 +358,14 @@ const el = {
   localModel: document.getElementById("local-model"),
   notificationsSays: document.getElementById("notifications-says"),
   notificationsOpen: document.getElementById("notifications-open"),
+  sshKeySays: document.getElementById("ssh-key-says"),
+  sshKeyLoad: document.getElementById("ssh-key-load"),
+  sshKeyAtStart: document.getElementById("ssh-key-at-start"),
+  sshKeyAtStartSays: document.getElementById("ssh-key-at-start-says"),
+  keyNote: document.getElementById("key-note"),
+  keyNoteSays: document.getElementById("key-note-says"),
+  keyNoteLoad: document.getElementById("key-note-load"),
+  keyNoteClose: document.getElementById("key-note-close"),
   localModelSays: document.getElementById("local-model-says"),
   notesSummary: document.getElementById("notes-summary"),
   notesList: document.getElementById("notes-list"),
@@ -6252,6 +6260,10 @@ async function showModels() {
   drawEngines();
   drawLocalModel();
   drawNotifications();
+  // What the switch last said is about a change made then, and the switch is
+  // read again now; left up, it could say the opposite of what it shows.
+  el.sshKeyAtStartSays.textContent = "";
+  drawSshKey();
   el.presets.replaceChildren(
     ...KNOWN_PLACES.map((place) => {
       const b = document.createElement("button");
@@ -6483,6 +6495,155 @@ async function drawNotifications() {
 el.notificationsOpen.addEventListener("click", () => {
   if (!notificationsPane) return;
   invoke("open_settings", { pane: notificationsPane }).catch((why) => complain(String(why)));
+});
+
+/* ------------------------------------------------------------- SSH key -- */
+
+/** Names, the way a sentence lists them. */
+function inASentence(names) {
+  if (names.length < 2) return names.join("");
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/**
+ * Whether teammates can use SSH, as the key agent has it now: asked of the app
+ * every time Settings opens, because the agent forgets at every restart and
+ * anything in a terminal can change it in between.
+ */
+async function drawSshKey() {
+  let now;
+  try {
+    now = await invoke("ssh_key");
+  } catch (why) {
+    sayAboutTheKey(String(why), true);
+    return null;
+  }
+  el.sshKeyAtStart.checked = !!now.at_start;
+  el.sshKeyLoad.disabled = !now.agent || !now.keys.length;
+  if (!now.agent) {
+    sayAboutTheKey(
+      "The key agent cannot be reached from Errand. Quitting Errand and opening it again usually puts that right.",
+      true,
+    );
+  } else if (now.holds > 0) {
+    sayAboutTheKey(
+      `Loaded. The key agent holds ${now.holds === 1 ? "a key" : `${now.holds} keys`}, so teammates can use SSH.`,
+      false,
+    );
+  } else if (!now.keys.length) {
+    sayAboutTheKey(
+      "There is no SSH key in ~/.ssh to load. If yours is kept somewhere else, name it with IdentityFile in ~/.ssh/config.",
+      true,
+    );
+  } else {
+    sayAboutTheKey(
+      `Not loaded. The key agent is empty, so a teammate's SSH is refused until ${inASentence(now.keys)} ${now.keys.length === 1 ? "is" : "are"} loaded.`,
+      true,
+    );
+  }
+  return now;
+}
+
+function sayAboutTheKey(words, wrong) {
+  el.sshKeySays.textContent = words;
+  el.sshKeySays.dataset.wrong = String(!!wrong);
+}
+
+/**
+ * Load it, from whichever button was pressed, and say what came of it there.
+ * The passphrase, where there is one, is asked for by macOS in a window of its
+ * own and goes to ssh-add; nothing here ever has it.
+ */
+async function loadTheKey(button, say) {
+  const was = button.textContent;
+  button.disabled = true;
+  button.textContent = "Loading…";
+  say("If your key has a passphrase, macOS asks for it in a window of its own.", false);
+  let loaded;
+  try {
+    loaded = await invoke("load_ssh_key");
+  } catch (why) {
+    say(String(why), true);
+    return null;
+  } finally {
+    button.disabled = false;
+    button.textContent = was;
+  }
+  if (loaded.why_not) {
+    say(loaded.why_not, true);
+    return null;
+  }
+  say(`Loaded ${inASentence(loaded.added)}. Teammates can use SSH with it now.`, false);
+  return loaded;
+}
+
+el.sshKeyLoad.addEventListener("click", () => loadTheKey(el.sshKeyLoad, sayAboutTheKey));
+
+el.sshKeyAtStart.addEventListener("change", async () => {
+  const wanted = el.sshKeyAtStart.checked;
+  const say = (words, wrong) => {
+    el.sshKeyAtStartSays.textContent = words;
+    el.sshKeyAtStartSays.dataset.wrong = String(!!wrong);
+  };
+  try {
+    await invoke("set_setting", { key: "ssh_keys_at_start", value: wanted ? "on" : "off" });
+  } catch (why) {
+    el.sshKeyAtStart.checked = !wanted;
+    say(String(why), true);
+    return;
+  }
+  if (!wanted) {
+    say("Errand loads your key only when you press Load my SSH key, and the agent keeps it until the Mac restarts.", false);
+    return;
+  }
+  say(
+    "Errand loads your key into the key agent whenever it starts. A key with a passphrase is loaded from your Keychain once you have loaded it here.",
+    false,
+  );
+  // Teammates may use it, so they can now rather than after a restart.
+  const now = await drawSshKey();
+  if (now && now.agent && now.holds === 0 && now.keys.length) {
+    await loadTheKey(el.sshKeyLoad, sayAboutTheKey);
+  }
+});
+
+/** What the note above the box says before anything is pressed. */
+const KEY_NOTE_SAYS =
+  "Teammates use your key through the agent and never read it, so nothing under Allowed fixes this. Load it, then ask again.";
+
+/** When "Not now" was last pressed: a teammate trying again is not asked about twice in ten minutes. */
+let keyNoteDismissed = 0;
+
+listen("ssh_key_needed", () => {
+  if (Date.now() - keyNoteDismissed < 10 * 60 * 1000) return;
+  if (!el.keyNote.hidden && el.keyNoteLoad.hidden) return;
+  el.keyNoteSays.textContent = KEY_NOTE_SAYS;
+  el.keyNoteSays.dataset.wrong = "false";
+  el.keyNoteLoad.hidden = false;
+  el.keyNoteClose.textContent = "Not now";
+  el.keyNote.hidden = false;
+});
+
+el.keyNoteLoad.addEventListener("click", async () => {
+  const say = (words, wrong) => {
+    el.keyNoteSays.textContent = words;
+    el.keyNoteSays.dataset.wrong = String(!!wrong);
+  };
+  const loaded = await loadTheKey(el.keyNoteLoad, say);
+  if (!loaded) return;
+  el.keyNoteLoad.hidden = true;
+  el.keyNoteClose.textContent = "Done";
+  const atStart = (await invoke("setting", { key: "ssh_keys_at_start" }).catch(() => null)) === "on";
+  say(
+    `Loaded ${inASentence(loaded.added)}. Ask again and SSH will work.` +
+      (atStart ? "" : " To have Errand load it whenever it starts, turn that on under Settings, SSH key."),
+    false,
+  );
+});
+
+el.keyNoteClose.addEventListener("click", () => {
+  if (!el.keyNoteLoad.hidden) keyNoteDismissed = Date.now();
+  el.keyNote.hidden = true;
 });
 
 /** The models teammates kept local may run on: only those served here. */

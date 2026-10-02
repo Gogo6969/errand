@@ -194,6 +194,37 @@
         <ul id="reachable-list"></ul>
       </div>
 
+      <!--
+        The person's SSH key, loaded into the key agent by Errand rather than
+        read by a teammate. Here because the agent forgets it at every restart,
+        and the first anybody heard of that was a teammate refused the key and
+        sent to Allowed, which can never fix it.
+      -->
+      <div class="card" id="ssh-key-card">
+        <div class="card-head">
+          <div>
+            <h2>SSH key</h2>
+            <p>
+              Teammates sign in to your other machines with SSH through the key
+              agent, which uses your key for them and never hands it over. No
+              teammate can read the key itself. The agent forgets it whenever the
+              Mac restarts, and until it has it again SSH from a teammate is
+              refused. If the key has a passphrase, macOS asks for it in a window
+              of its own and keeps it in your Keychain; Errand never sees it.
+            </p>
+            <p id="ssh-key-says" class="quiet"></p>
+          </div>
+          <div class="doing">
+            <button id="ssh-key-load" type="button">Load my SSH key</button>
+          </div>
+        </div>
+        <label class="switch">
+          <input id="ssh-key-at-start" type="checkbox" />
+          <span>Teammates may use my SSH keys (through the key agent, never by reading them)</span>
+        </label>
+        <p id="ssh-key-at-start-says" class="quiet"></p>
+      </div>
+
       <div class="card">
         <div class="card-head">
           <div>
@@ -627,6 +658,23 @@
         confirmation and a request for a daily routine.
       -->
       <div id="trouble" hidden></div>
+
+      <!--
+        A teammate's SSH was refused your key because the key agent does not
+        have it. Said here with the one thing that fixes it, rather than left
+        to the teammate, which can only tell you to do something.
+      -->
+      <div id="key-note" role="status" hidden>
+        <p class="what">A teammate's SSH was refused your key: it isn't loaded in the key agent.</p>
+        <p class="fix" id="key-note-says">
+          Teammates use your key through the agent and never read it, so nothing under
+          Allowed fixes this. Load it, then ask again.
+        </p>
+        <div class="buttons">
+          <button id="key-note-load" type="button" class="load">Load my SSH key</button>
+          <button id="key-note-close" type="button">Not now</button>
+        </div>
+      </div>
 
       <div id="attached" hidden></div>
 

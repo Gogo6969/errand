@@ -1110,7 +1110,7 @@ async fn errand(
             };
             let _ = out.send(Event::Did {
                 call: call.id.clone(),
-                outcome: first_line(&outcome),
+                outcome: crate::wall::the_line_for_a_step(&outcome, first_line),
             });
             history.push(ChatMessage::Tool {
                 content: format!("{outcome}{they_also_said}"),

@@ -1227,7 +1227,10 @@ pub fn read(line: &str) -> Vec<Event> {
                             .and_then(|t| t.as_str())
                             .unwrap_or("")
                             .to_string(),
-                        outcome: one_line(&b.get("content").map(said).unwrap_or_default()),
+                        outcome: crate::wall::the_line_for_a_step(
+                            &b.get("content").map(said).unwrap_or_default(),
+                            one_line,
+                        ),
                     })
                     .collect()
             })

@@ -2749,6 +2749,36 @@ a.on-disk {
 #trouble .what { margin: 0; color: var(--ink); font-weight: 500; font-size: 13px; }
 #trouble .fix { margin: 4px 0 0; color: var(--ink-soft); font-size: 13px; }
 
+/* A teammate refused your SSH key, with the button that loads it. In the
+   accent rather than the colour of a failure: nothing is broken, a key is
+   waiting to be loaded. */
+#key-note[hidden] { display: none; }
+#key-note {
+  margin: 8px 18px 0;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--rule));
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+#key-note .what { margin: 0; color: var(--ink); font-weight: 500; font-size: 13px; }
+#key-note .fix { margin: 4px 0 0; color: var(--ink-soft); font-size: 13px; max-width: 74ch; }
+#key-note .fix[data-wrong="true"] { color: var(--wrong); }
+#key-note .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+#key-note button {
+  border: 1px solid var(--rule);
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 11px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+#key-note button.load { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 500; }
+#key-note button:disabled { opacity: .6; cursor: default; }
+#key-note button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 /* ------------------------------------------------------------- a room -- */
 
 /* Who is in the room, in the header. It gives way before anything else does:

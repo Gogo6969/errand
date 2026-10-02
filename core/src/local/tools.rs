@@ -925,9 +925,17 @@ pub async fn run(
                     // not permitted", and a model that reads that on an external
                     // disk sends somebody to grant Full Disk Access the app
                     // already had. What actually happened, for a whole evening.
-                    match crate::wall::looks_like_the_wall(&said) {
-                        true => format!("\n\n{}", crate::wall::the_wall_refused(home)),
-                        false => String::new(),
+                    //
+                    // A key refused first, because it is the one refusal the
+                    // ordinary advice cannot fix: a teammate refused its SSH key
+                    // was told to allow a folder under Allowed, and no folder
+                    // was ever the problem. The key was not loaded.
+                    if crate::wall::a_key_was_kept_out(&said) {
+                        format!("\n\n{}", crate::wall::the_key_is_not_loaded())
+                    } else if crate::wall::looks_like_the_wall(&said) {
+                        format!("\n\n{}", crate::wall::the_wall_refused(home))
+                    } else {
+                        String::new()
                     }
                 ),
             })
@@ -1701,6 +1709,31 @@ mod tests {
                 "a listing reached {out}"
             );
         }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_key_ssh_was_refused_is_said_as_a_key_not_loaded() {
+        // A teammate asked to check another Mac's disk was refused the SSH key
+        // the wall keeps from every errand, with the key agent empty, and was
+        // told to allow a folder under Allowed. No folder was ever the problem.
+        let home = std::env::temp_dir().join("errand-key-words");
+        std::fs::create_dir_all(&home).unwrap();
+        let said = run(
+            "run_command",
+            &json!({ "command": "echo 'Load key \"/Users/me/.ssh/id_ed25519\": Operation not permitted' >&2; \
+                                 echo 'me@192.0.2.10: Permission denied (publickey).' >&2; exit 255" }),
+            &home,
+            "c",
+        )
+        .await
+        .expect("a refusal is still a result");
+        assert!(said.starts_with("exited 255"), "{said}");
+        assert!(
+            said.contains(&crate::wall::the_key_is_not_loaded()),
+            "{said}"
+        );
+        assert!(!said.contains("choosing \"a folder\""), "{said}");
         std::fs::remove_dir_all(&home).ok();
     }
 

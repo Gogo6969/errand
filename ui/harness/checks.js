@@ -5986,3 +5986,138 @@ export async function takingTheSuggestion() {
   box.value = "";
   return found;
 }
+
+export async function aKeyTheAgentForgot() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const loads = () => asked.filter((a) => a.name === "load_ssh_key").length;
+
+  // Settings: what the key agent holds, the button, and the switch.
+  document.getElementById("setup").click();
+  await wait(250);
+  const card = document.getElementById("ssh-key-card");
+  const says = document.getElementById("ssh-key-says");
+  const load = document.getElementById("ssh-key-load");
+  const atStart = document.getElementById("ssh-key-at-start");
+  check(
+    "Settings says teammates use the key through the agent and never read it",
+    /never hands it over/.test(card?.textContent || "") && /Keychain/.test(card?.textContent || ""),
+    (card?.textContent || "missing").slice(0, 160),
+  );
+  check(
+    "an empty agent is said, with the key there is to load",
+    /Not loaded/.test(says.textContent) && /id_ed25519/.test(says.textContent) && says.dataset.wrong === "true",
+    says.textContent,
+  );
+  check("the switch starts off, because nobody asked for it yet", !atStart.checked, `checked=${atStart.checked}`);
+  check(
+    "its words are the ones agreed",
+    /Teammates may use my SSH keys \(through the key agent, never by reading them\)/.test(atStart.closest("label")?.textContent || ""),
+    atStart.closest("label")?.textContent,
+  );
+
+  const before = loads();
+  load.click();
+  await wait(200);
+  check("Load my SSH key asks the app to load it", loads() === before + 1, `${loads() - before} loads`);
+  check("and says what was loaded", /Loaded id_ed25519/.test(says.textContent), says.textContent);
+
+  document.getElementById("models-done").click();
+  document.getElementById("setup").click();
+  await wait(250);
+  check(
+    "opened again, it reads the agent rather than remembering",
+    /Loaded\. The key agent holds a key/.test(says.textContent) && says.dataset.wrong === "false",
+    says.textContent,
+  );
+
+  atStart.checked = true;
+  atStart.dispatchEvent(new Event("change"));
+  await wait(250);
+  check(
+    "turning the switch on keeps it",
+    asked.some((a) => a.name === "set_setting" && a.args?.key === "ssh_keys_at_start" && a.args?.value === "on"),
+    JSON.stringify(asked.filter((a) => a.name === "set_setting").slice(-1)),
+  );
+  check(
+    "and says it loads the key whenever Errand starts",
+    /whenever it starts/.test(document.getElementById("ssh-key-at-start-says").textContent),
+    document.getElementById("ssh-key-at-start-says").textContent,
+  );
+  check("with the key already loaded, nothing is loaded twice", loads() === before + 1, `${loads() - before} loads`);
+
+  atStart.checked = false;
+  atStart.dispatchEvent(new Event("change"));
+  await wait(200);
+  check(
+    "and off again",
+    asked.some((a) => a.name === "set_setting" && a.args?.key === "ssh_keys_at_start" && a.args?.value === "off"),
+    JSON.stringify(asked.filter((a) => a.name === "set_setting").slice(-1)),
+  );
+
+  // On, with the agent empty: teammates may use it, so it is loaded now.
+  FIXTURE.sshKey = { ...FIXTURE.sshKey, holds: 0 };
+  atStart.checked = true;
+  atStart.dispatchEvent(new Event("change"));
+  await wait(300);
+  check("turned on with the agent empty, it is loaded straight away", loads() === before + 2, `${loads() - before} loads`);
+  FIXTURE.settings.ssh_keys_at_start = "off";
+  document.getElementById("models-done").click();
+  document.getElementById("setup").click();
+  await wait(250);
+  check(
+    "opened again, the switch says nothing left over from the last change",
+    !atStart.checked && document.getElementById("ssh-key-at-start-says").textContent === "",
+    `checked=${atStart.checked} "${document.getElementById("ssh-key-at-start-says").textContent}"`,
+  );
+  document.getElementById("models-done").click();
+
+  // Above the box: a teammate's SSH refused the key.
+  const note = document.getElementById("key-note");
+  const noteSays = document.getElementById("key-note-says");
+  const noteLoad = document.getElementById("key-note-load");
+  const noteClose = document.getElementById("key-note-close");
+  check("nothing is said about a key until one is refused", note.hidden, `hidden=${note.hidden}`);
+  tell("ssh_key_needed", "talk-1");
+  await wait(50);
+  check("a refused key is said above the box", !note.hidden, `hidden=${note.hidden}`);
+  check(
+    "as a key not loaded, and not as something Allowed fixes",
+    /isn't loaded/.test(note.textContent) && /nothing under\s+Allowed fixes this/.test(note.textContent),
+    note.textContent.replace(/\s+/g, " ").trim(),
+  );
+  noteLoad.click();
+  await wait(250);
+  check("its button loads the key", loads() === before + 3, `${loads() - before} loads`);
+  check(
+    "and then says to ask again, and how to keep it loaded",
+    /Loaded id_ed25519\. Ask again/.test(noteSays.textContent) && /whenever it starts/.test(noteSays.textContent),
+    noteSays.textContent,
+  );
+  check("with nothing left to press but Done", noteLoad.hidden && noteClose.textContent === "Done", `${noteLoad.hidden} ${noteClose.textContent}`);
+  noteClose.click();
+  check("which puts it away", note.hidden, `hidden=${note.hidden}`);
+
+  // A passphrase window closed: said, and the button stays.
+  FIXTURE.sshLoad = { added: [], holds: 0, why_not: "No key was loaded: the passphrase window was closed, or left for five minutes without an answer." };
+  tell("ssh_key_needed", "talk-1");
+  await wait(50);
+  noteLoad.click();
+  await wait(250);
+  check(
+    "a key that was not loaded says why, in the colour of something wrong",
+    /passphrase window was closed/.test(noteSays.textContent) && noteSays.dataset.wrong === "true",
+    noteSays.textContent,
+  );
+  check("and the button is still there to try again", !noteLoad.hidden, `hidden=${noteLoad.hidden}`);
+  noteClose.click();
+  tell("ssh_key_needed", "talk-1");
+  await wait(50);
+  check("Not now is not asked again the next time a teammate tries", note.hidden, `hidden=${note.hidden}`);
+
+  FIXTURE.sshLoad = { added: ["id_ed25519"], holds: 1, why_not: null };
+  FIXTURE.sshKey = { agent: true, holds: 0, keys: ["id_ed25519"] };
+  delete FIXTURE.settings.ssh_keys_at_start;
+  return found;
+}

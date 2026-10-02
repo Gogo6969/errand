@@ -240,6 +240,10 @@ export const FIXTURE = {
       why: "watch", outcome: null, failed: false, said: "" },
   ],
   settings: {},
+  // The key agent, as the SSH key card asks after it: empty, with one key to
+  // load, and what loading it does.
+  sshKey: { agent: true, holds: 0, keys: ["id_ed25519"] },
+  sshLoad: { added: ["id_ed25519"], holds: 1, why_not: null },
   whats_running: [
     { conversation: "talk-3", agent: "agent-bitcoin", who: "Bitcoin Desk", talk: "Asked by Day Check",
       what: "Waiting on you: Running a command", waiting: true },
@@ -927,9 +931,23 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.happened);
           case "setting":
             return Promise.resolve(fixture.settings[args?.key] ?? null);
+          // What the key agent holds, and loading a key into it, which the
+          // app does with ssh-add and the passphrase window macOS puts up.
+          case "ssh_key":
+            return Promise.resolve({ ...fixture.sshKey, at_start: fixture.settings.ssh_keys_at_start === "on" });
+          case "load_ssh_key": {
+            const loaded = fixture.sshLoad;
+            if (!loaded.why_not) fixture.sshKey = { ...fixture.sshKey, holds: loaded.holds };
+            return Promise.resolve(loaded);
+          }
           // Refused the way the app refuses it, so the window's handling of a
           // refusal is what gets checked.
           case "set_setting":
+            if (args?.key === "ssh_keys_at_start") {
+              if (!["on", "off"].includes(args.value)) return Promise.reject("That is on or off.");
+              fixture.settings[args.key] = args.value;
+              return Promise.resolve(null);
+            }
             if (args?.key === "local_model") {
               if (!fixture.offered.some((o) => o.id === args.value && servedHere(o))) {
                 return Promise.reject("That model is not served on this Mac or your network, so it cannot be the local one.");

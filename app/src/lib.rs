@@ -897,6 +897,17 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 }
             }
 
+            // A teammate's ssh refused the key the wall keeps from it, which
+            // only loading the key into the agent fixes. Put on screen with
+            // the button that does that, rather than left to the teammate,
+            // which can only say so, and was once told to send somebody to
+            // Allowed for it.
+            if let Event::Did { outcome, .. } = &event {
+                if errand_core::wall::a_key_was_kept_out(outcome) {
+                    let _ = app.emit("ssh_key_needed", id.clone());
+                }
+            }
+
             // An agent asked to do something every morning reaches for the
             // engine's scheduler, because that is the tool in front of it and
             // it has no idea this app has one. The job is real and Errand knows
@@ -7103,7 +7114,7 @@ async fn finish(held: State<'_, Held>, id: String, finished: bool) -> Result<(),
 }
 
 /// The settings the window may read and write, and nothing else.
-const SETTINGS: &[&str] = &["errand_model", "local_model"];
+const SETTINGS: &[&str] = &["errand_model", "local_model", "ssh_keys_at_start"];
 
 /// The model every teammate works on, when one has been chosen in Settings:
 /// the line of the picker it names, as the engine and its settings.
@@ -7347,8 +7358,104 @@ async fn set_setting(held: State<'_, Held>, key: String, value: String) -> Resul
                 .set_setting(&key, &value)
                 .map_err(|e| e.to_string())
         }
+        // Whether Errand loads the person's SSH keys into the key agent as it
+        // starts: on or off, and nothing else.
+        "ssh_keys_at_start" => match value.as_str() {
+            "on" | "off" => held
+                .store
+                .set_setting(&key, &value)
+                .map_err(|e| e.to_string()),
+            _ => Err("That is on or off.".to_string()),
+        },
         _ => Err(format!("there is no setting called {key}")),
     }
+}
+
+/// The person's SSH key as Settings shows it: whether the key agent can be
+/// reached, how many keys it holds, which keys there are to load, and whether
+/// Errand loads them as it starts. Names of files only, never a key.
+#[derive(Serialize)]
+struct SshKey {
+    agent: bool,
+    holds: usize,
+    keys: Vec<String>,
+    at_start: bool,
+}
+
+#[tauri::command]
+async fn ssh_key(held: State<'_, Held>) -> Result<SshKey, String> {
+    let at_start = held
+        .store
+        .setting("ssh_keys_at_start")
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("on");
+    tauri::async_runtime::spawn_blocking(move || {
+        let theirs = std::env::var("HOME").map(std::path::PathBuf::from).ok();
+        let holds = errand_core::ssh_agent::what_the_agent_holds();
+        SshKey {
+            agent: holds != errand_core::ssh_agent::Holds::NoAgent,
+            holds: match holds {
+                errand_core::ssh_agent::Holds::Keys(n) => n,
+                _ => 0,
+            },
+            keys: theirs
+                .map(|theirs| {
+                    errand_core::ssh_agent::keys_to_load(&theirs)
+                        .iter()
+                        .filter_map(|key| key.file_name())
+                        .map(|name| name.to_string_lossy().to_string())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            at_start,
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// What came of loading it, for the window.
+#[derive(Serialize)]
+struct SshKeyLoaded {
+    added: Vec<String>,
+    holds: usize,
+    why_not: Option<String>,
+}
+
+impl From<errand_core::ssh_agent::Loaded> for SshKeyLoaded {
+    fn from(loaded: errand_core::ssh_agent::Loaded) -> Self {
+        SshKeyLoaded {
+            added: loaded.added,
+            holds: match loaded.holds {
+                errand_core::ssh_agent::Holds::Keys(n) => n,
+                _ => 0,
+            },
+            why_not: loaded.why_not,
+        }
+    }
+}
+
+/// Load the person's SSH keys into the key agent, from outside the wall, so
+/// teammates can use them without reading them. A passphrase is asked for in
+/// a macOS window that hands it to `ssh-add`, which keeps it in the Keychain;
+/// it never reaches this process.
+#[tauri::command]
+async fn load_ssh_key() -> Result<SshKeyLoaded, String> {
+    let theirs = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .map_err(|_| "there is no home folder to find a key in".to_string())?;
+    let errand = errand_core::where_errand_lives().ok_or("there is no folder for Errand")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        errand_core::ssh_agent::load(
+            &theirs,
+            errand_core::ssh_agent::Asking::InAWindow { errand: &errand },
+        )
+        .into()
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// One run that happened on its own, as the overview says it.
@@ -7917,6 +8024,8 @@ pub fn run() {
             finish,
             setting,
             set_setting,
+            ssh_key,
+            load_ssh_key,
             happened_since,
             matching,
             lines,
@@ -8231,6 +8340,30 @@ fn nothing_here_is_worth_the_whole_app(doing: impl FnOnce()) -> Option<String> {
         })
 }
 
+/// The person's SSH keys, loaded into the key agent as Errand starts when
+/// they asked for that under Settings. The agent forgets them at every
+/// restart, and the first anybody heard of it was a teammate refused one.
+///
+/// Never with a window: one nobody asked for, at login, is the wrong thing
+/// to put on screen. A key with a passphrase is loaded when the Keychain has
+/// it, which it does once the key has been loaded with the button.
+fn load_ssh_keys_if_wanted(app: &AppHandle) {
+    let wanted = app.state::<Held>().store.setting("ssh_keys_at_start");
+    if wanted.ok().flatten().as_deref() != Some("on") {
+        return;
+    }
+    let Some(theirs) = std::env::var("HOME").ok().map(std::path::PathBuf::from) else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let loaded = errand_core::ssh_agent::load(&theirs, errand_core::ssh_agent::Asking::Never);
+        match loaded.why_not {
+            None => eprintln!("loaded {} into the key agent", loaded.added.join(", ")),
+            Some(why) => eprintln!("no SSH key loaded as Errand started: {why}"),
+        }
+    });
+}
+
 /// Everything that has to wait until the app is actually up.
 ///
 /// Its own function so that the whole of it sits inside one `catch_unwind` up
@@ -8251,6 +8384,7 @@ fn everything_that_waits_for_the_app(app: &AppHandle) {
     // store before it is in place, and neither is spawned into an
     // app that is still being built.
     watch_the_clock(app.clone());
+    load_ssh_keys_if_wanted(app);
     let waiting = {
         let parked: State<Waiting> = app.state();
         let taken = parked.0.lock().unwrap().take();

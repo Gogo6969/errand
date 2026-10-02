@@ -31,6 +31,7 @@ pub mod jobs;
 pub mod keeping;
 pub mod keys;
 pub mod only_one;
+pub mod ssh_agent;
 pub mod store;
 pub mod trouble;
 pub mod wall;
