@@ -1964,6 +1964,46 @@ function whichDay(at) {
  * one place it is worth an entire row of the window is the seam between a
  * conversation you had and one your agent had while you were asleep.
  */
+/**
+ * When a line was said, for under it.
+ *
+ * Without one there was no telling when anything happened: Bell Ahead's
+ * calendar answers read as one undated column, so which of them had failed,
+ * and when, could only be worked out from the store. Today's lines say the
+ * time alone. Anything older says its day as well, because the divider
+ * between days is only drawn where the day changes and never above the first
+ * line drawn, so a stamp has to make sense read on its own. The whole date is
+ * on hover.
+ *
+ * A line that has only just arrived has not been written down yet and has no
+ * time of its own, so it is stamped with the moment it is first drawn, which
+ * is the moment it arrived. Kept beside `at` rather than in it: the dividers
+ * between days read `at`, and treat a line without one as today's on purpose.
+ */
+function stamped(m) {
+  if (!m.at && !m.arrived) m.arrived = Date.now();
+  const ms = m.at || m.arrived;
+  const at = new Date(ms);
+  const stamp = document.createElement("time");
+  stamp.className = "at";
+  stamp.dateTime = at.toISOString();
+  stamp.title = at.toLocaleString(undefined, { dateStyle: "full", timeStyle: "medium" });
+  const time = at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  const day = whichDay(ms);
+  if (day === "Today") stamp.textContent = time;
+  else if (day === "Yesterday") stamp.textContent = `Yesterday, ${time}`;
+  else {
+    const sameYear = at.getFullYear() === new Date().getFullYear();
+    const date = at.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: sameYear ? undefined : "numeric",
+    });
+    stamp.textContent = `${date}, ${time}`;
+  }
+  return stamp;
+}
+
 function theDayChanged(day) {
   const li = document.createElement("li");
   li.className = "day";
@@ -2136,7 +2176,7 @@ function draw(m) {
       return aDraft(m);
     case "ended": {
       node.className = m.failed ? "ended failed" : "ended";
-      node.append(note("span", m.text, "why"));
+      node.append(note("span", m.text, "why"), stamped(m));
       // A turn cut off by the app closing is the one ending worth offering to
       // do again: nothing went wrong with it, it was simply never finished.
       // And there is no answer to hang the ordinary "Ask again" on, because
@@ -2958,6 +2998,10 @@ listen("happened", async ({ payload }) => {
 function doneWith(m) {
   const row = document.createElement("span");
   row.className = "did-with";
+  // When it was said, on the outer edge of the bubble: left under an answer,
+  // right under your own words, where the row is pushed to. Always in view;
+  // the buttons beside it come on hover.
+  if (m.kind !== "mine") row.append(stamped(m));
 
   const copy = document.createElement("button");
   copy.type = "button";
@@ -3013,6 +3057,7 @@ function doneWith(m) {
     again.onclick = () => sayIt(asked.text);
     row.append(again);
   }
+  if (m.kind === "mine") row.append(stamped(m));
   return row;
 }
 

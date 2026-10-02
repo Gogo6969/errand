@@ -6155,3 +6155,94 @@ export async function aKeyTheAgentForgot() {
   delete FIXTURE.settings.ssh_keys_at_start;
   return found;
 }
+
+/**
+ * When each thing was said, under it.
+ *
+ * Bell Ahead's calendar answers read as one undated column, so which of them
+ * had failed, and when, could only be worked out from the store. A divider is
+ * drawn only where the day changes and never above the first line, so each
+ * stamp has to make sense read on its own.
+ */
+export async function whenEachThingWasSaid() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const midnight = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const daysAgo = (iso) => Math.round((midnight(new Date()) - midnight(new Date(iso))) / 86400000);
+
+  // Three days of lines.
+  await openTalk("talk-overnight");
+  const lines = [...document.querySelectorAll("#messages li.said, #messages li.mine")];
+  const stamps = lines.map((li) => li.querySelector("time.at"));
+  check(
+    "every message says when it was said",
+    lines.length >= 3 && stamps.every(Boolean),
+    `${stamps.filter(Boolean).length} of ${lines.length}`,
+  );
+  const read = stamps.filter(Boolean).map((t) => ({ text: t.textContent, ago: daysAgo(t.dateTime), title: t.title }));
+  const on = (pick) => read.filter(pick);
+  check(
+    "today's say the time alone",
+    on((r) => r.ago === 0).length > 0 && on((r) => r.ago === 0).every((r) => /\d:\d\d/.test(r.text) && !/Yesterday|,/.test(r.text)),
+    JSON.stringify(read),
+  );
+  check(
+    "yesterday's say so",
+    on((r) => r.ago === 1).length > 0 && on((r) => r.ago === 1).every((r) => r.text.startsWith("Yesterday, ")),
+    JSON.stringify(read),
+  );
+  check(
+    "older ones say their date as well, so a stamp is never ambiguous on its own",
+    on((r) => r.ago >= 2).length > 0 && on((r) => r.ago >= 2).every((r) => r.text.includes(",") && !/Yesterday/.test(r.text)),
+    JSON.stringify(read),
+  );
+  check(
+    "and the whole date is there on hover",
+    read.every((r) => /\d{4}/.test(r.title)),
+    JSON.stringify(read.map((r) => r.title)),
+  );
+
+  // In view without hovering, unlike the buttons beside it.
+  const first = stamps.find(Boolean);
+  const row = first?.closest(".did-with");
+  const button = row?.querySelector("button");
+  check(
+    "the time is in view without hovering",
+    first && getComputedStyle(first).opacity === "1" && getComputedStyle(row).opacity === "1",
+    first ? `${getComputedStyle(first).opacity}/${getComputedStyle(row).opacity}` : "no stamp",
+  );
+  check(
+    "while the buttons beside it still wait for a hover",
+    button && getComputedStyle(button).opacity === "0",
+    button ? getComputedStyle(button).opacity : "no button",
+  );
+  // On the bubble's outer edge: first under an answer, last under your words.
+  const saidRow = document.querySelector("#messages li.said .did-with");
+  const mineRow = document.querySelector("#messages li.mine .did-with");
+  check(
+    "it sits on the outer edge: first under an answer, last under your own words",
+    saidRow?.firstElementChild?.matches("time.at") && mineRow?.lastElementChild?.matches("time.at"),
+    `${saidRow?.firstElementChild?.tagName} / ${mineRow?.lastElementChild?.tagName}`,
+  );
+
+  // A turn that ended part way says when.
+  await openTalk("talk-cut-off");
+  const ended = document.querySelector("#messages li.ended time.at");
+  check("a turn that ended part way says when", !!ended && /\d:\d\d/.test(ended.textContent), ended?.textContent);
+
+  // And something that has only just arrived, before it is written down.
+  const where = document.getElementById("talks").value;
+  tell("happened", { conversation: where, seq: 9901, kind: "said", text: "Recycling goes out at 17:30.", settled: true });
+  await wait(150);
+  const live = [...document.querySelectorAll("#messages li.said")].pop();
+  const liveStamp = live?.querySelector("time.at")?.textContent || "";
+  check(
+    "an answer that has only just arrived says when too",
+    live?.textContent.includes("Recycling goes out") && /\d:\d\d/.test(liveStamp) && !/,/.test(liveStamp),
+    liveStamp,
+  );
+  tell("happened", { conversation: where, seq: 9902, kind: "done" });
+  await wait(100);
+  return found;
+}

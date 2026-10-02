@@ -1549,14 +1549,17 @@ main > aside, main > #title, main > #composer { flex: none; }
 
 .did-with {
   display: flex;
+  align-items: center;
   gap: 4px;
   margin-top: 8px;
-  opacity: 0;
-  transition: opacity .12s ease;
 }
-/* Kept reachable by keyboard even while invisible to the eye. */
-.said:hover .did-with,
-.did-with:focus-within { opacity: 1; }
+/* The buttons come on hover, over your own words as much as an answer, since
+   your own words are where a rewind is pointed at. Kept reachable by keyboard
+   even while invisible to the eye. The time beside them is always there. */
+.did-with button { opacity: 0; transition: opacity .12s ease; }
+.said:hover .did-with button,
+.mine:hover .did-with button,
+.did-with:focus-within button { opacity: 1; }
 
 .did-with button {
   border: 1px solid var(--rule);
@@ -1568,14 +1571,27 @@ main > aside, main > #title, main > #composer { flex: none; }
   border-radius: 6px;
   cursor: pointer;
 }
+
+/* When it was said: as quiet as the buttons beside it, in figures that line
+   up, and never broken across two lines. A little apart from the buttons, so
+   it reads as a fact about the line rather than as one more thing to press. */
+time.at {
+  color: var(--ink-soft);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.said time.at { margin-right: 6px; }
+.mine time.at { margin-left: 6px; }
+.ended time.at { margin-left: 8px; }
 .did-with button:hover { color: var(--ink); border-color: var(--edge); }
 .did-with button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* An answer being read aloud: in view for as long as it lasts, so Stop is
    always there to press. */
-.did-with.listening { opacity: 1; }
+.did-with.listening button { opacity: 1; }
 .did-with button.on { color: var(--accent); border-color: var(--accent); }
 
-@media (prefers-reduced-motion: reduce) { .did-with { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .did-with button { transition: none; } }
 
 /* A file on its way in, so the window says it is ready to take it. */
 body.catching #composer { border-top-color: var(--accent); }
