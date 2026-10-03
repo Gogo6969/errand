@@ -233,3 +233,27 @@ export function headline(request, room = 52) {
   const atAWord = space > room / 2 ? cut.slice(0, space) : cut;
   return `${atAWord.replace(/[\s,;:.]+$/, "")}…`;
 }
+
+/**
+ * Whether what was first asked in a task was about setting a standing job up
+ * rather than the job itself: "Set yourself a standing job: produce the Friday
+ * report" names the setting up. A task like that is called by what its job
+ * does each time, which is what it is.
+ */
+export function setsUpAJob(asked) {
+  const first = String(asked || "").trim().split("\n")[0];
+  // About the setting up, not about how often: "the weekly tally for Friday"
+  // is a task, and "every morning, tell me what moved" says what it is too.
+  return /\b(standing job|routine|on a schedule|schedule (it|this)|repeat (it|this))\b/i.test(first);
+}
+
+/**
+ * What a task is called, when the app named it: what was asked in it, or for
+ * a standing job set up in words about setting it up, what the job does.
+ *
+ * @param {string} first the first thing asked in it
+ * @param {string} job what its routine or watch asks each time, if it has one
+ */
+export function aNameFrom(first, job) {
+  return headline(job && setsUpAJob(first) ? job : first);
+}

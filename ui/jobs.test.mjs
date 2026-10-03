@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { STATES, SHOWING, shown, stateOf, chipOf, byState, stillInTheList, inOrder, byTeammate, headline, aMadeUpName, askedBy } from "./jobs.js";
+import { STATES, SHOWING, shown, stateOf, chipOf, byState, stillInTheList, inOrder, byTeammate, headline, aMadeUpName, askedBy, setsUpAJob, aNameFrom } from "./jobs.js";
 
 const day = 86_400_000;
 const job = (id, more = {}) => ({ id, name: id, title: "", priority: 2, spoke: 0, finished: null, paused: false, ...more });
@@ -182,4 +182,21 @@ test("the names the app makes up are told apart from real ones, and say who aske
   assert.equal(askedBy("Asked from the terminal"), "the terminal");
   assert.equal(askedBy("Asked by something outside"), "something outside");
   assert.equal(askedBy("Weekly tally"), null);
+});
+
+test("a standing job set up in words about setting it up is named by what it does", () => {
+  assert.equal(setsUpAJob("Set yourself a standing job: produce the Friday report"), true);
+  assert.equal(setsUpAJob("Make this a routine: check the drive"), true);
+  // How often is not the setting up: these say what the task is.
+  assert.equal(setsUpAJob("Every morning, tell me what moved"), false);
+  assert.equal(setsUpAJob("The weekly tally for Friday"), false);
+  assert.equal(setsUpAJob("What moved overnight in Bitcoin?"), false);
+  assert.equal(
+    aNameFrom("Set yourself a standing job.", "Produce the Friday pulse-file report and reply with it. Count from the files."),
+    "Produce the Friday pulse-file report",
+  );
+  // Anything else keeps the name of what was asked.
+  assert.equal(aNameFrom("What moved overnight in Bitcoin?", "What moved overnight"), "What moved overnight in Bitcoin?");
+  // Nothing asked, nothing to name it from: the name it has stands.
+  assert.equal(aNameFrom("", "Check the backup drive"), "");
 });

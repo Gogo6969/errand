@@ -18,7 +18,7 @@ window.addEventListener("error", (e) => complain(e.message));
 window.addEventListener("unhandledrejection", (e) => complain(String(e.reason)));
 
 import { tile, forTool, kindOf } from "./icons.js";
-import { STATES, SHOWING, shown, stateOf, chipOf, byState as inStateOrder, stillInTheList, inOrder, byTeammate, headline, aMadeUpName, askedBy } from "./jobs.js";
+import { STATES, SHOWING, shown, stateOf, chipOf, byState as inStateOrder, stillInTheList, inOrder, byTeammate, aMadeUpName, askedBy, aNameFrom } from "./jobs.js";
 import { render, reachTheAppWith } from "./markdown.js";
 import { toSay, worthSaying } from "./speech.js";
 
@@ -1271,21 +1271,122 @@ function drawTaskCard() {
     renaming.finish(true);
     return;
   }
-  const state = taskState(t);
+  // The task the conversation below is, first, and every other task of its
+  // teammate that is doing something: needing you, running, stopped, or due.
+  // Only the one on screen was here, so a second job set up from this very
+  // conversation went on running with nothing above the chat to say so.
+  const going = goingNow();
+  const others = [...talks.values()].filter(
+    (x) => x.agent === t.agent && x.id !== t.id && TASKS_SHOWN.has(taskState(x, going).kind),
+  );
+  const states = new Map(others.map((x) => [x.id, whereItStands(x.id, x.agent, going)]));
+  const ordered = inStateOrder(
+    others.map((x) => ({ ...x, spoke: tasksNow.find((y) => y.id === x.id)?.spoke || 0 })),
+    (x) => states.get(x.id),
+  );
+  const alone = !ordered.length;
+  el.taskCard.replaceChildren(
+    taskRow(t, { here: true, going, alone }),
+    ...ordered.map((x) => taskRow(talks.get(x.id), { going, alone })),
+  );
+  el.taskCard.dataset.state = taskState(t, going).kind;
+  el.taskCard.dataset.tasks = String(ordered.length + 1);
+  el.taskCard.hidden = false;
+}
+
+/** The states a teammate's other tasks are shown above the chat in. */
+const TASKS_SHOWN = new Set(["needs-you", "running", "stopped", "scheduled"]);
+
+/**
+ * Which tasks are folded to one line, by what somebody chose. A task nobody
+ * chose for is open when it is the only one, and one line when there are
+ * several, so the conversation keeps its room.
+ */
+const taskRowsOpen = (() => {
+  try {
+    return new Map(JSON.parse(localStorage.getItem("errand-task-rows") || "[]"));
+  } catch {
+    return new Map();
+  }
+})();
+
+function rowIsOpen(id, alone) {
+  return taskRowsOpen.has(id) ? taskRowsOpen.get(id) : alone;
+}
+
+function keepRowOpen(id, open) {
+  taskRowsOpen.set(id, open);
+  try {
+    localStorage.setItem("errand-task-rows", JSON.stringify([...taskRowsOpen].slice(-200)));
+  } catch {
+    // Kept for as long as the window is open.
+  }
+}
+
+/**
+ * One task above the chat: a line that says where it stands, what it is and
+ * how it runs, and, opened, what it does, how it runs, who asked and what came
+ * of it last. The one the conversation below is has its controls on its line;
+ * any other has Open, which brings its conversation up.
+ *
+ * @param {object} t the task, as the window holds it
+ * @param {{here?: boolean, going: object[], alone: boolean}} how
+ */
+function taskRow(t, { here = false, going, alone }) {
+  const state = taskState(t, going);
   const { routine, watch } = state;
   const task = tasksNow.find((x) => x.id === t.id) || { name: t.name, first: "" };
-  const called = titleOf({ ...task, name: t.name });
+  const called = titleOf({ ...task, id: t.id, name: t.name });
+  const open = rowIsOpen(t.id, alone);
+  const row = document.createElement("article");
+  row.className = here ? "task-row here" : "task-row";
+  if (open) row.classList.add("open");
+  row.dataset.task = t.id;
+  row.dataset.kind = state.kind;
 
   const head = document.createElement("div");
   head.className = "head";
-  // The name is a control: what a task is called is somebody's to change, and
-  // the only way to was a right-click on the conversation and a dialog.
-  const name = document.createElement("button");
-  name.type = "button";
+  const factsId = `task-facts-${t.id}`;
+  const fold = document.createElement("button");
+  fold.type = "button";
+  fold.className = "fold";
+  fold.setAttribute("aria-expanded", String(open));
+  fold.setAttribute("aria-controls", factsId);
+  fold.title = open ? "Fold it to one line" : "Show what it does, how it runs and what came of it last";
+  fold.setAttribute("aria-label", `${open ? "Fold" : "Unfold"} ${called}`);
+  fold.innerHTML =
+    '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  fold.onclick = () => {
+    keepRowOpen(t.id, !open);
+    drawTaskCard();
+  };
+
+  // Its name. On the task the conversation is, a control: what a task is
+  // called is somebody's to change, and the only way to was a right-click and
+  // a dialog.
+  let name;
+  if (here) {
+    name = document.createElement("button");
+    name.type = "button";
+    name.title = `${called}\nClick to rename this task`;
+    name.onclick = () => renameTheTask(t);
+  } else {
+    name = document.createElement("span");
+    name.title = called;
+  }
   name.className = "name";
   name.textContent = called;
-  name.title = `${called}\nClick to rename this task`;
-  name.onclick = () => renameTheTask(t);
+
+  const runs = routine
+    ? `${routine.at}${routine.off ? ", switched off" : routine.paused ? ", its teammate is paused" : routine.due ? `, next ${whenNext(routine.due)}` : ""}`
+    : watch
+      ? `Watches ${watch.at}${watch.stopped ? ", stopped" : ""}`
+      : t.aim
+        ? `Toward a goal: ${t.aim.goal}, ${t.aim.tries} of ${t.aim.at_most} turns used`
+        : "Only when you ask";
+  // How it runs, on its line while it is folded: the line is all there is then.
+  const summary = note("span", routine ? routine.at : watch ? `Watches ${watch.at}` : t.aim ? "Toward a goal" : "", "summary");
+
   const actions = document.createElement("span");
   actions.className = "actions";
   const button = (label, does, title) => {
@@ -1299,32 +1400,36 @@ function drawTaskCard() {
   if (state.kind === "running") {
     actions.append(button("Stop", () => stopTheRun(t.id), "Stop what it is doing now"));
   }
-  // Its own schedule's switch. Not while its teammate is paused: that is the
-  // teammate's Pause, in the header, and this switch would only turn the
-  // routine off underneath it.
-  if (routine && (routine.off || !routine.paused)) {
-    actions.append(
-      button(
-        routine.off ? "Resume" : "Pause",
-        async () => {
-          await invoke("routine_off", { id: t.id, off: !routine.off });
-          t.repeats = routine.off;
-          drawTalks();
-        },
-        routine.off ? "Start its schedule again, counting from now" : "Hold its schedule without losing it",
-      ),
-    );
+  if (here) {
+    // Its own schedule's switch. Not while its teammate is paused: that is the
+    // teammate's Pause, in the header, and this switch would only turn the
+    // routine off underneath it.
+    if (routine && (routine.off || !routine.paused)) {
+      actions.append(
+        button(
+          routine.off ? "Resume" : "Pause",
+          async () => {
+            await invoke("routine_off", { id: t.id, off: !routine.off });
+            t.repeats = routine.off;
+            drawTalks();
+          },
+          routine.off ? "Start its schedule again, counting from now" : "Hold its schedule without losing it",
+        ),
+      );
+    }
+    if ((routine || watch) && state.kind !== "running") {
+      actions.append(
+        button("Run now", () => sayIt((routine || watch).what), "Do it now, without changing when it next runs"),
+      );
+    }
+    // Finished is the task's, so it is on the task: it was in the header, among
+    // the teammate's buttons, where it read as finishing the teammate.
+    drawTaskDone();
+    actions.append(el.taskDone);
+  } else {
+    actions.append(button("Open", () => show(t.id), "Bring up its conversation"));
   }
-  if ((routine || watch) && state.kind !== "running") {
-    actions.append(
-      button("Run now", () => sayIt((routine || watch).what), "Do it now, without changing when it next runs"),
-    );
-  }
-  // Finished is the task's, so it is on the task: it was in the header, among
-  // the teammate's buttons, where it read as finishing the teammate.
-  drawTaskDone();
-  actions.append(el.taskDone);
-  head.append(stateChip(state), name, actions);
+  head.append(fold, stateChip(state), name, summary, actions);
 
   const said = (label, words, full) => {
     const dt = note("dt", label);
@@ -1335,17 +1440,8 @@ function drawTaskCard() {
     return [dt, dd];
   };
   const does = (routine?.what || watch?.what || withoutWhoAsked(task.first || "")).trim().split("\n")[0] || "Nothing asked yet";
-  const aim = t.aim;
-  const runs = routine
-    ? `${routine.at}${routine.off ? ", switched off" : routine.paused ? ", its teammate is paused" : routine.due ? `, next ${whenNext(routine.due)}` : ""}`
-    : watch
-      ? `Watches ${watch.at}${watch.stopped ? ", stopped" : ""}`
-      : aim
-        ? `Toward a goal: ${aim.goal}, ${aim.tries} of ${aim.at_most} turns used`
-        : "Only when you ask";
-  const last = [...t.messages].reverse().find((m) => m.kind === "said" || (m.kind === "ended" && m.failed));
-  const lastWords = last ? `${stamped(last).textContent}: ${last.text.trim().split("\n")[0]}` : "Nothing yet";
   const facts = document.createElement("dl");
+  facts.id = factsId;
   facts.append(...said("Does", does, routine?.what || watch?.what || task.first));
   // How it runs, and the one way to change that: on a schedule, when
   // something changes, or until a goal is met. Those were Repeat, Watch and
@@ -1353,22 +1449,35 @@ function drawTaskCard() {
   const [runsLabel, runsWords] = said("Runs", runs);
   const change = document.createElement("button");
   change.type = "button";
-  change.id = "runs-change";
   change.className = "change";
   change.textContent = "Change\u2026";
   change.title = "Change how this task runs: on a schedule, when something changes, or until a goal is met";
-  change.setAttribute("aria-controls", "schedule");
-  change.setAttribute("aria-expanded", String(!el.schedule.hidden));
-  change.onclick = () => changeHowItRuns(routine, watch, aim);
+  if (here) {
+    change.id = "runs-change";
+    change.setAttribute("aria-controls", "schedule");
+    change.setAttribute("aria-expanded", String(!el.schedule.hidden));
+    change.onclick = () => changeHowItRuns(routine, watch, t.aim);
+  } else {
+    // Changed where its conversation is, which is where the three ways are.
+    change.onclick = async () => {
+      await show(t.id);
+      changeHowItRuns(routine, watch, t.aim);
+    };
+  }
   runsWords.append(change);
   facts.append(runsLabel, runsWords);
   // Who asked for it, when that is all its stored name said.
   const from = askedBy(t.name);
   if (from) facts.append(...said("From", from));
-  facts.append(...said("Last", lastWords, last?.text));
-  el.taskCard.replaceChildren(head, facts);
-  el.taskCard.dataset.state = state.kind;
-  el.taskCard.hidden = false;
+  // What came of it last, when its lines have been read: a task never opened
+  // in this window has none to say it from.
+  if (here || t.loaded) {
+    const last = [...t.messages].reverse().find((m) => m.kind === "said" || (m.kind === "ended" && m.failed));
+    const lastWords = last ? `${stamped(last).textContent}: ${last.text.trim().split("\n")[0]}` : "Nothing yet";
+    facts.append(...said("Last", lastWords, last?.text));
+  }
+  row.append(head, facts);
+  return row;
 }
 
 
@@ -2394,56 +2503,28 @@ let nowDrawnAt = "";
  * that menu and reading every name in it.
  */
 function tasksUnder(a) {
-  const now = Date.now();
-  const theirs = [...talks.values()].filter(
-    (t) => t.agent === a.id && (t.id === showing || stillInTheList(t, now, FINISHED_KEPT_DAYS)),
-  );
+  const theirs = [...talks.values()].filter((t) => t.agent === a.id);
   const going = goingNow();
   const states = new Map(theirs.map((t) => [t.id, taskState(t, going)]));
   const ordered = inStateOrder(
-    theirs.map((t) => ({ ...t, spoke: tasksNow.find((x) => x.id === t.id)?.spoke || 0 })),
+    theirs
+      .filter((t) => states.get(t.id).kind !== "finished")
+      .map((t) => ({ ...t, spoke: tasksNow.find((x) => x.id === t.id)?.spoke || 0 })),
     (t) => states.get(t.id),
   );
+  // Finished ones apart, newest first, folded away until somebody asks for
+  // them: they were the end of the list for a week and then gone from it.
+  const done = theirs
+    .filter((t) => states.get(t.id).kind === "finished")
+    .sort((x, y) => (y.finished || 0) - (x.finished || 0));
   // Inside the teammate's own row rather than rows of their own, so the list
   // down the side is still one row per teammate to everything that counts it.
   const list = document.createElement("div");
   list.className = "tasks-of";
   list.setAttribute("role", "list");
   list.setAttribute("aria-label", `Tasks of ${a.name}`);
-  for (const t of ordered) {
-    const state = states.get(t.id);
-    const task = tasksNow.find((x) => x.id === t.id) || { first: "" };
-    const name = titleOf({ ...task, name: t.name });
-    const row = document.createElement("div");
-    row.setAttribute("role", "listitem");
-    row.className = "task";
-    row.dataset.task = t.id;
-    row.dataset.kind = state.kind;
-    row.setAttribute("aria-current", String(t.id === showing));
-    const go = document.createElement("button");
-    go.type = "button";
-    go.title = `${name}: ${state.says}`;
-    const mark = document.createElement("span");
-    mark.className = "task-mark";
-    mark.innerHTML = STATE_MARKS[state.kind];
-    // When it next runs, and a dot while something in it has not been read.
-    const end = document.createElement("span");
-    end.className = "task-end";
-    end.append(note("span", sideways(state), "task-when"));
-    const news = freshTasks.get(t.id);
-    if (news) {
-      end.append(unreadDot(news.lines));
-      row.dataset.unread = "true";
-      go.title += `\n${news.lines} new, not read yet`;
-    }
-    go.append(mark, note("span", name, "task-name"), end);
-    go.onclick = (e) => {
-      e.stopPropagation();
-      show(t.id);
-    };
-    row.append(go);
-    list.append(row);
-  }
+  for (const t of ordered) list.append(aTaskRow(t, states.get(t.id)));
+  if (done.length) list.append(theFinished(a, done, states));
   const more = document.createElement("div");
   more.className = "task-new";
   const add = document.createElement("button");
@@ -2467,6 +2548,131 @@ function tasksUnder(a) {
   more.append(add, room);
   list.append(more);
   return list;
+}
+
+/** Which teammates' finished tasks are unfolded, by teammate. Folded to start. */
+const finishedOpen = new Set();
+
+/**
+ * A teammate's finished tasks, behind one row that says how many: unfolded
+ * only when somebody presses it, and each one there can be opened again or
+ * deleted for good.
+ */
+function theFinished(a, done, states) {
+  const open = finishedOpen.has(a.id);
+  const group = document.createElement("div");
+  group.className = "task-finished";
+  group.setAttribute("role", "listitem");
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "finished-head";
+  head.setAttribute("aria-expanded", String(open));
+  head.title = open ? "Fold the finished tasks away" : "Show the finished tasks, to open one again or delete it";
+  // The one on screen is in here: said on the row while it is folded.
+  if (!open && done.some((t) => t.id === showing)) head.dataset.holdsCurrent = "true";
+  head.innerHTML =
+    '<svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  head.append(note("span", "Finished", "label"), note("span", String(done.length), "count"));
+  head.onclick = (e) => {
+    e.stopPropagation();
+    if (open) finishedOpen.delete(a.id);
+    else finishedOpen.add(a.id);
+    drawThreads();
+  };
+  group.append(head);
+  if (open) {
+    const rows = document.createElement("div");
+    rows.className = "finished-rows";
+    rows.setAttribute("role", "list");
+    rows.setAttribute("aria-label", `Finished tasks of ${a.name}`);
+    for (const t of done) {
+      const row = aTaskRow(t, states.get(t.id));
+      // Deleted for good, asked once on the button itself, the way a teammate
+      // or a conversation is deleted: the second press answers the question
+      // the first one asked.
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "forget";
+      remove.dataset.sure = "false";
+      remove.title = "Delete this task and everything said in it";
+      remove.setAttribute("aria-label", `Delete ${inAFewWords(row.querySelector(".task-name").textContent)}`);
+      remove.textContent = "\u00d7";
+      remove.onclick = async (e) => {
+        e.stopPropagation();
+        if (remove.dataset.sure !== "true") {
+          remove.dataset.sure = "true";
+          remove.textContent = "Delete?";
+          remove.title = "Press again to delete it and everything said in it";
+          return;
+        }
+        await forgetTheTask(t);
+      };
+      row.append(remove);
+      rows.append(row);
+    }
+    group.append(rows);
+  }
+  return group;
+}
+
+/**
+ * Delete a task and everything said in it, and leave the window on another of
+ * its teammate's, or on the teammate.
+ */
+async function forgetTheTask(t) {
+  try {
+    await invoke("forget_conversation", { id: t.id });
+  } catch (why) {
+    // The store refuses to delete the only conversation an agent has, and
+    // says what to do instead. Worth showing rather than swallowing.
+    complain(String(why));
+    return;
+  }
+  const agent = t.agent;
+  talks.delete(t.id);
+  tasksNow = tasksNow.filter((x) => x.id !== t.id);
+  if (showing === t.id) {
+    const left = [...talks.values()].find((other) => other.agent === agent);
+    if (left) await show(left.id);
+    else await openAgent(agent);
+  }
+  drawTalks();
+  drawThreads();
+}
+
+/** One task down the side: where it stands, its name, when it next runs. */
+function aTaskRow(t, state) {
+  const task = tasksNow.find((x) => x.id === t.id) || { first: "" };
+  const name = titleOf({ ...task, name: t.name });
+  const row = document.createElement("div");
+  row.setAttribute("role", "listitem");
+  row.className = "task";
+  row.dataset.task = t.id;
+  row.dataset.kind = state.kind;
+  row.setAttribute("aria-current", String(t.id === showing));
+  const go = document.createElement("button");
+  go.type = "button";
+  go.title = `${name}: ${state.says}`;
+  const mark = document.createElement("span");
+  mark.className = "task-mark";
+  mark.innerHTML = STATE_MARKS[state.kind];
+  // When it next runs, and a dot while something in it has not been read.
+  const end = document.createElement("span");
+  end.className = "task-end";
+  end.append(note("span", sideways(state), "task-when"));
+  const news = freshTasks.get(t.id);
+  if (news) {
+    end.append(unreadDot(news.lines));
+    row.dataset.unread = "true";
+    go.title += `\n${news.lines} new, not read yet`;
+  }
+  go.append(mark, note("span", name, "task-name"), end);
+  go.onclick = (e) => {
+    e.stopPropagation();
+    show(t.id);
+  };
+  row.append(go);
+  return row;
 }
 
 /**
@@ -4821,20 +5027,7 @@ function openTheTalkMenu(t, x, y) {
         return;
       }
       closeTheMenu();
-      try {
-        await invoke("forget_conversation", { id: t.id });
-      } catch (why) {
-        // The store refuses to delete the only conversation an agent has, and
-        // says what to do instead. Worth showing rather than swallowing.
-        complain(String(why));
-        return;
-      }
-      const agent = t.agent;
-      talks.delete(t.id);
-      const left = [...talks.values()].find((other) => other.agent === agent);
-      if (left) await show(left.id);
-      else await openAgent(agent);
-      drawTalks();
+      await forgetTheTask(t);
     },
     "danger",
   );
@@ -7377,8 +7570,10 @@ function asTask(c) {
 function titleOf(t) {
   if (!aMadeUpName(t.name)) return t.name;
   // What was asked in it, said as a name: three tasks another teammate started
-  // were all "Asked by" it, and every first task was "First".
-  const asked = headline(t.first);
+  // were all "Asked by" it, and every first task was "First". A standing job
+  // set up as "Set yourself a standing job: ..." is called by what it does.
+  const job = t.id ? standingNow.find((s) => s.conversation === t.id && s.what)?.what : "";
+  const asked = aNameFrom(t.first, job);
   if (asked) return asked;
   // Nothing asked yet: its own name, unless that is "First", which says
   // nothing on its own. A new task called "First task" was the fifth.

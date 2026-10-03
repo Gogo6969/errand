@@ -5055,8 +5055,8 @@ export async function theOverview() {
   // How long a finished task stays in the menu is said in Settings, not set.
   const said = document.getElementById("finished-tasks");
   check(
-    "Settings says a finished task stays in the menu for a week and nothing is deleted, with nothing to set",
-    said && /for a week/.test(said.textContent) && /Nothing is deleted/.test(said.textContent) && !said.querySelector("input"),
+    "Settings says a finished task folds away under Finished and nothing is deleted unless you delete it, with nothing to set",
+    said && /folds away under Finished/.test(said.textContent) && /Nothing is deleted\s+unless you delete it/.test(said.textContent) && !said.querySelector("input"),
     said ? said.textContent.trim().slice(0, 120) : "no card",
   );
   tell("happened", { conversation: "talk-2", seq: 9803, kind: "done" });
@@ -6451,7 +6451,9 @@ export async function aTaskSaysWhatItIs() {
   await wait(150);
   const card = document.getElementById("task-card");
   const chip = () => card.querySelector(".state");
-  const buttons = () => [...card.querySelectorAll(".actions button")];
+  // The task the conversation is: its row is first, and the only one with
+  // these controls.
+  const buttons = () => [...card.querySelectorAll(".here .actions button")];
   const button = (label) => buttons().find((b) => b.textContent === label);
   const fact = (label) => {
     const at = [...card.querySelectorAll("dt")].findIndex((d) => d.textContent === label);
@@ -6605,8 +6607,10 @@ export async function tasksDownTheSideAndNow() {
   const menu = [...document.getElementById("talks").options].filter((o) => !["+", "room"].includes(o.value));
   check(
     "the teammate on screen has its tasks listed under it, one row each, as the menu had them",
-    block() && rows().length === menu.length && rows().length > 1,
-    `${rows().length} rows, ${menu.length} in the menu`,
+    block() &&
+      rows().length + Number(block()?.querySelector(".finished-head .count")?.textContent || 0) === menu.length &&
+      rows().length > 1,
+    `${rows().length} rows and ${block()?.querySelector(".finished-head .count")?.textContent || 0} finished, ${menu.length} in the menu`,
   );
   check(
     "inside its own row, so the list is still one row per teammate",
@@ -6774,8 +6778,9 @@ export async function theHeaderAndTheCard() {
       sizes.size === 1 && ways.size === 1,
       `${[...sizes].join(", ")}; ${[...ways].join(" | ")}`,
     );
-    const tops = [...card.querySelectorAll(".actions button")].filter(shown).map((b) => Math.round(b.getBoundingClientRect().top));
-    check("the card's are on one line, with Mark finished last", new Set(tops).size === 1 && [...card.querySelectorAll(".actions button")].filter(shown).pop()?.id === "task-done", tops.join(", "));
+    const here = [...card.querySelectorAll(".here .actions button")].filter(shown);
+    const tops = here.map((b) => Math.round(b.getBoundingClientRect().top));
+    check("the card's are on one line, with Mark finished last", new Set(tops).size === 1 && here.pop()?.id === "task-done", tops.join(", "));
   }
 
   // The menu behind the last button: Pin and Hide, with the rest done to a
@@ -7024,5 +7029,164 @@ export async function anOrangeDotUntilItIsRead() {
   await openTalk("talk-waiting");
   await wait(150);
   check("until it is read", !dotOn(rowOf("agent-unnamed")), rowOf("agent-unnamed")?.className);
+  return found;
+}
+
+/**
+ * Every task of a teammate that is doing something, above the chat, each one a
+ * line that opens.
+ *
+ * Only the task the conversation is was there, so a second job set up from
+ * that very conversation, a task of its own, ran on with nothing above the
+ * chat to say it existed.
+ */
+export async function theTasksAboveTheChat() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const card = document.getElementById("task-card");
+  const rowFor = (id) => card.querySelector(`.task-row[data-task="${id}"]`);
+  // A second job beside Bitcoin Desk's morning one, the way the app sets one
+  // up as a task of its own.
+  await window.__TAURI__.core.invoke("routine_off", { id: "talk-2", off: false });
+  FIXTURE.standing.push({
+    conversation: "talk-cut-off", agent: "agent-bitcoin", who: "Bitcoin Desk", name: "Cut off",
+    kind: "routine", at: "daily 09:00", what: "Check the backup drive", due: Date.now() + 5400000, off: false, stopped: null, paused: false,
+  });
+  tell("repeats", { conversation: "talk-cut-off", repeats: true });
+  ["talk-2", "talk-cut-off"].forEach((id, n) => tell("happened", { conversation: id, seq: 9920 + n, kind: "done" }));
+  await wait(150);
+  await openTalk("talk-2");
+
+  const rows = () => [...card.querySelectorAll(".task-row")];
+  check(
+    "the task the conversation is comes first, and its teammate's other running tasks after it",
+    rows()[0]?.dataset.task === "talk-2" && rows()[0]?.classList.contains("here") && rowFor("talk-cut-off"),
+    rows().map((r) => `${r.classList.contains("here") ? "*" : ""}${r.dataset.task}:${r.dataset.kind}`).join(", "),
+  );
+  check(
+    "only ones that are doing something: nothing answered, paused or finished",
+    rows().every((r) => r.classList.contains("here") || ["needs-you", "running", "stopped", "scheduled"].includes(r.dataset.kind)),
+    rows().map((r) => r.dataset.kind).join(", "),
+  );
+  const other = rowFor("talk-cut-off");
+  check(
+    "each says where it stands and what it is, on one line",
+    other?.querySelector(".state")?.dataset.kind === "scheduled" && other?.querySelector(".name")?.textContent && /daily 09:00/.test(other?.querySelector(".summary")?.textContent || ""),
+    `${other?.querySelector(".state")?.textContent} | ${other?.querySelector(".name")?.textContent} | ${other?.querySelector(".summary")?.textContent}`,
+  );
+  if (beingDrawn()) {
+    const folded = rows().filter((r) => !r.classList.contains("open"));
+    check(
+      "with several, each is folded to one line, so the conversation keeps its room",
+      folded.length === rows().length && folded.every((r) => getComputedStyle(r.querySelector("dl")).display === "none"),
+      rows().map((r) => `${r.dataset.task}:${r.classList.contains("open") ? "open" : "folded"}`).join(", "),
+    );
+    const line = other.querySelector(".head").getBoundingClientRect();
+    check("a folded one is one line high", line.height <= 30, `${Math.round(line.height)}px`);
+    const room = card.getBoundingClientRect().height;
+    check("and all of them together leave the conversation most of the window", room <= innerHeight * 0.47, `${Math.round(room)}px of ${innerHeight}`);
+  }
+
+  // Opened and folded again, and remembered.
+  const fold = () => rowFor("talk-cut-off")?.querySelector(".fold");
+  fold().click();
+  await wait(100);
+  check(
+    "its fold opens it to what it does and how it runs",
+    rowFor("talk-cut-off")?.classList.contains("open") &&
+      fold().getAttribute("aria-expanded") === "true" &&
+      /Check the backup drive/.test(rowFor("talk-cut-off")?.querySelector("dl")?.textContent || ""),
+    rowFor("talk-cut-off")?.querySelector("dl")?.textContent.slice(0, 80),
+  );
+  await openTalk("talk-overnight");
+  await openTalk("talk-2");
+  check("and it stays open, coming back", rowFor("talk-cut-off")?.classList.contains("open"), rowFor("talk-cut-off")?.className);
+  fold().click();
+  await wait(100);
+  check("and folds again", !rowFor("talk-cut-off")?.classList.contains("open"), rowFor("talk-cut-off")?.className);
+
+  // Open brings up its conversation, and it becomes the first row.
+  [...rowFor("talk-cut-off").querySelectorAll(".actions button")].find((b) => b.textContent === "Open")?.click();
+  await wait(500);
+  check(
+    "Open on another task brings up its conversation, and it is the one on top",
+    document.getElementById("talks").value === "talk-cut-off" && rows()[0]?.dataset.task === "talk-cut-off" && rowFor("talk-2"),
+    `${document.getElementById("talks").value}: ${rows().map((r) => r.dataset.task).join(", ")}`,
+  );
+
+  // A standing job set up in words about setting it up is called by its job,
+  // not by "Set yourself a standing job"; one somebody named keeps its name.
+  const was = FIXTURE.tasks["talk-2"];
+  FIXTURE.tasks["talk-2"] = { ...(was || {}), first: "Set yourself a standing job: tell me each morning what moved." };
+  tell("task_made", { conversation: "talk-2", agent: "agent-bitcoin", name: "First" });
+  await wait(250);
+  check(
+    "a standing job set up in words about setting it up is called by what it does",
+    rowFor("talk-2")?.querySelector(".name")?.textContent === "What moved overnight" && rows()[0]?.querySelector(".name")?.textContent === "Cut off",
+    `${rowFor("talk-2")?.querySelector(".name")?.textContent} / ${rows()[0]?.querySelector(".name")?.textContent}`,
+  );
+  FIXTURE.tasks["talk-2"] = was;
+  tell("task_made", { conversation: "talk-2", agent: "agent-bitcoin", name: "First" });
+  await wait(200);
+
+  FIXTURE.standing = FIXTURE.standing.filter((s) => !(s.conversation === "talk-cut-off" && s.at === "daily 09:00"));
+  tell("repeats", { conversation: "talk-cut-off", repeats: false });
+  await wait(150);
+  return found;
+}
+
+/**
+ * Finished tasks fold away under Finished, down the side, shown only when
+ * somebody presses it; from there each opens again, or goes for good.
+ */
+export async function finishedTasksFoldAway() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const block = () => document.querySelector('#threads li[data-agent="agent-bitcoin"] .tasks-of');
+  const head = () => block()?.querySelector(".finished-head");
+  const listed = () => [...(block()?.querySelectorAll(":scope > .task") || [])].map((r) => r.dataset.task);
+  const folded = () => [...(block()?.querySelectorAll(".finished-rows .task") || [])].map((r) => r.dataset.task);
+
+  // One task finished, from its card.
+  await openTalk("talk-cut-off");
+  const done = document.getElementById("task-done");
+  if (done.dataset.finished !== "true") done.click();
+  await wait(300);
+  await openTalk("talk-2");
+  check("a finished task leaves the list of the others", !listed().includes("talk-cut-off"), listed().join(", "));
+  check(
+    "for one row that says how many are finished, folded",
+    head() && /Finished/.test(head().textContent) && Number(head().querySelector(".count")?.textContent) >= 1 && head().getAttribute("aria-expanded") === "false" && !folded().length,
+    head() ? `${head().textContent} expanded=${head().getAttribute("aria-expanded")}` : "no Finished row",
+  );
+  head().click();
+  await wait(150);
+  check("pressing it shows them", head().getAttribute("aria-expanded") === "true" && folded().includes("talk-cut-off"), folded().join(", "));
+  // It opens again from there.
+  block().querySelector('.finished-rows .task[data-task="talk-cut-off"] button')?.click();
+  await wait(500);
+  check(
+    "a finished one opens from there, still finished",
+    document.getElementById("talks").value === "talk-cut-off" && document.querySelector("#task-card .here .state")?.dataset.kind === "finished",
+    `${document.getElementById("talks").value} ${document.querySelector("#task-card .here .state")?.dataset.kind}`,
+  );
+  // And goes for good, asked once on the button.
+  const forget = () => block()?.querySelector('.finished-rows .task[data-task="talk-cut-off"] .forget');
+  const deletes = () => asked.filter((a) => a.name === "forget_conversation" && a.args?.id === "talk-cut-off").length;
+  const before = deletes();
+  forget()?.click();
+  await wait(100);
+  check("deleting one asks first, on the button", forget()?.textContent === "Delete?" && deletes() === before, forget()?.textContent || "no button");
+  forget()?.click();
+  await wait(500);
+  check(
+    "and the second press deletes it, and the window moves to another task",
+    deletes() === before + 1 && !folded().includes("talk-cut-off") && document.getElementById("talks").value !== "talk-cut-off",
+    `${deletes() - before} deleted; on ${document.getElementById("talks").value}`,
+  );
+  head()?.click();
+  await wait(100);
   return found;
 }
