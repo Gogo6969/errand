@@ -273,6 +273,8 @@ export const FIXTURE = {
     misses: 0,
     paused: null,
   },
+  // The one task with a goal.
+  goalIn: "talk-cut-off",
   goal_of: {
     goal: "Get the tests passing",
     means:
@@ -751,8 +753,14 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(fixture.models_at);
           case "remember_backend":
             return Promise.resolve(fixture.models_at);
+          // A goal is one task's, and most have none: the fixture's is aimed
+          // at in one task, and every other answers with nothing to aim at.
           case "goal_of":
-            return Promise.resolve(fixture.goal_of);
+            return Promise.resolve(
+              args?.id === fixture.goalIn
+                ? fixture.goal_of
+                : { goal: null, means: "", tries: 0, at_most: 8, left: null, over: null },
+            );
           case "allowances":
             return Promise.resolve(fixture.allowances);
           // How much a teammate asks, kept so what is worth allowing can

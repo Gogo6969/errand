@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { STATES, SHOWING, shown, stateOf, chipOf, byState, stillInTheList, inOrder, byTeammate } from "./jobs.js";
+import { STATES, SHOWING, shown, stateOf, chipOf, byState, stillInTheList, inOrder, byTeammate, headline, aMadeUpName, askedBy } from "./jobs.js";
 
 const day = 86_400_000;
 const job = (id, more = {}) => ({ id, name: id, title: "", priority: 2, spoke: 0, finished: null, paused: false, ...more });
@@ -146,4 +146,40 @@ test("showing repeating keeps every job that repeats, whatever it is doing now",
   assert.equal(shown("all", "paused", false), true);
   // Every choice offered is one this can answer.
   for (const [show] of SHOWING) assert.equal(typeof shown(show, "idle", false), "boolean");
+});
+
+test("a task is named by what was asked, without the asking around it", () => {
+  assert.equal(headline("What moved overnight in Bitcoin?"), "What moved overnight in Bitcoin?");
+  assert.equal(headline("please check the logs. Then tell me"), "Check the logs");
+  assert.equal(headline("Can you please, tell me what the weather will be tomorrow? Thanks"), "Tell me what the weather will be tomorrow?");
+  // Who asked is said on the card, not in the name.
+  assert.equal(headline("Day Check asks: the weekly tally for Friday."), "The weekly tally for Friday");
+  assert.equal(headline("something outside asks: list the overdue invoices"), "List the overdue invoices");
+  // Only the first line of something long.
+  assert.equal(headline("Sort the downloads\nby type, then by date"), "Sort the downloads");
+  // An address is left as it was written.
+  assert.equal(headline("https://example.com is it down?"), "https://example.com is it down?");
+  assert.equal(headline(""), "");
+});
+
+test("a long request is cut where its first part ends, or at a word", () => {
+  assert.equal(
+    headline("Please check the backup drive every morning at 07:30 and tell me if it is nearly full"),
+    "Check the backup drive every morning at 07:30",
+  );
+  const long = headline("Read every message that came in overnight from the three suppliers we use for packaging");
+  assert.ok(long.length <= 53, long);
+  assert.ok(long.endsWith("\u2026"), long);
+  assert.ok(!/\s\u2026$/.test(long), long);
+});
+
+test("the names the app makes up are told apart from real ones, and say who asked", () => {
+  for (const made of ["First", "New task", "Asked by Day Check", "Asked from the terminal", "Asked by something outside", "Morning brief, again", ""]) {
+    assert.equal(aMadeUpName(made), true, made);
+  }
+  assert.equal(aMadeUpName("Weekly tally"), false);
+  assert.equal(askedBy("Asked by Day Check"), "Day Check");
+  assert.equal(askedBy("Asked from the terminal"), "the terminal");
+  assert.equal(askedBy("Asked by something outside"), "something outside");
+  assert.equal(askedBy("Weekly tally"), null);
 });

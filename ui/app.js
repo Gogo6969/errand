@@ -18,7 +18,7 @@ window.addEventListener("error", (e) => complain(e.message));
 window.addEventListener("unhandledrejection", (e) => complain(String(e.reason)));
 
 import { tile, forTool, kindOf } from "./icons.js";
-import { STATES, SHOWING, shown, stateOf, chipOf, byState as inStateOrder, stillInTheList, inOrder, byTeammate } from "./jobs.js";
+import { STATES, SHOWING, shown, stateOf, chipOf, byState as inStateOrder, stillInTheList, inOrder, byTeammate, headline, aMadeUpName, askedBy } from "./jobs.js";
 import { render, reachTheAppWith } from "./markdown.js";
 import { toSay, worthSaying } from "./speech.js";
 
@@ -240,7 +240,6 @@ const el = {
   overviewFind: document.getElementById("overview-find"),
   overviewShow: document.getElementById("overview-show"),
   taskDone: document.getElementById("task-done"),
-  newTask: document.getElementById("new-task"),
   taskCard: document.getElementById("task-card"),
   runningNote: document.getElementById("running-note"),
   runningStop: document.getElementById("running-stop"),
@@ -352,9 +351,9 @@ const el = {
   routineWentList: document.getElementById("routine-went-list"),
   routineWentMore: document.getElementById("routine-went-more"),
   routineSays: document.getElementById("routine-says"),
-  pin: document.getElementById("pin"),
-  hide: document.getElementById("hide"),
   pause: document.getElementById("pause"),
+  more: document.getElementById("more"),
+  schedule: document.getElementById("schedule"),
   whois: document.getElementById("whois"),
   whoisName: document.getElementById("whois-name"),
   whoisTitle: document.getElementById("whois-title"),
@@ -1002,7 +1001,7 @@ async function show(id) {
   el.rooming.hidden = true;
   if (a) {
     drawMark(a);
-    drawPinned(a);
+    drawPaused(a);
     el.name.textContent = a.name;
     drawPurpose(a);
     drawWordsGo();
@@ -1010,6 +1009,14 @@ async function show(id) {
   }
   drawTalks();
   drawRoom(t);
+  // What it is aiming at, for Runs on its card. Asked here rather than with
+  // every task, since it is one question about the one on screen.
+  invoke("goal_of", { id })
+    .then((now) => {
+      t.aim = now?.goal && !now.over ? now : null;
+      if (showing === id) drawTaskCard();
+    })
+    .catch(() => {});
   drawThreads();
   t.earlier = 0;
   drawMessages({ follow: true });
@@ -1074,7 +1081,6 @@ function drawTalks() {
   room.textContent = "New room…";
   el.talks.append(room);
   el.talks.hidden = !a;
-  el.newTask.hidden = !a;
   drawTaskDone();
   drawTaskCard();
   drawRunningNote();
@@ -1193,21 +1199,46 @@ function stateChip(state) {
  * on it. Finding that out meant reading back through the conversation, or
  * opening Repeat, which only knew half of it.
  */
+/**
+ * A rename going on on the task's card: which task, the box being typed in,
+ * and how it ends.
+ */
+let renaming = null;
+
 function drawTaskCard() {
   const t = talking();
   if (!t || !whose()) {
     el.taskCard.hidden = true;
-    el.taskCard.replaceChildren();
+    // Kept in the card with nothing to say, so it has somewhere to come back to.
+    el.taskDone.hidden = true;
+    el.taskCard.replaceChildren(el.taskDone);
+    return;
+  }
+  if (renaming) {
+    // Mid-rename, the card waits: drawn again, it would take the box away
+    // under somebody's typing. What changed meanwhile is drawn when they finish.
+    if (renaming.id === t.id && renaming.box.isConnected) return;
+    // Left without Enter, Escape or a click away: another task came on screen,
+    // or the box went with the one it was in. Kept, the way a click away keeps
+    // it; left going, it held this card still for good.
+    renaming.finish(true);
     return;
   }
   const state = taskState(t);
   const { routine, watch } = state;
   const task = tasksNow.find((x) => x.id === t.id) || { name: t.name, first: "" };
+  const called = titleOf({ ...task, name: t.name });
 
   const head = document.createElement("div");
   head.className = "head";
-  const name = note("span", titleOf(task), "name");
-  name.title = titleOf(task);
+  // The name is a control: what a task is called is somebody's to change, and
+  // the only way to was a right-click on the conversation and a dialog.
+  const name = document.createElement("button");
+  name.type = "button";
+  name.className = "name";
+  name.textContent = called;
+  name.title = `${called}\nClick to rename this task`;
+  name.onclick = () => renameTheTask(t);
   const actions = document.createElement("span");
   actions.className = "actions";
   const button = (label, does, title) => {
@@ -1242,31 +1273,162 @@ function drawTaskCard() {
       button("Run now", () => sayIt((routine || watch).what), "Do it now, without changing when it next runs"),
     );
   }
+  // Finished is the task's, so it is on the task: it was in the header, among
+  // the teammate's buttons, where it read as finishing the teammate.
+  drawTaskDone();
+  actions.append(el.taskDone);
   head.append(stateChip(state), name, actions);
 
   const said = (label, words, full) => {
     const dt = note("dt", label);
-    const dd = note("dd", words);
-    dd.title = full || words;
+    const dd = document.createElement("dd");
+    const text = note("span", words, "words");
+    text.title = full || words;
+    dd.append(text);
     return [dt, dd];
   };
-  const does = (routine?.what || watch?.what || task.first || "").trim().split("\n")[0] || "Nothing asked yet";
-  const repeats = routine
+  const does = (routine?.what || watch?.what || withoutWhoAsked(task.first || "")).trim().split("\n")[0] || "Nothing asked yet";
+  const aim = t.aim;
+  const runs = routine
     ? `${routine.at}${routine.off ? ", switched off" : routine.paused ? ", its teammate is paused" : routine.due ? `, next ${whenNext(routine.due)}` : ""}`
     : watch
       ? `Watches ${watch.at}${watch.stopped ? ", stopped" : ""}`
-      : "Only when you ask";
+      : aim
+        ? `Toward a goal: ${aim.goal}, ${aim.tries} of ${aim.at_most} turns used`
+        : "Only when you ask";
   const last = [...t.messages].reverse().find((m) => m.kind === "said" || (m.kind === "ended" && m.failed));
   const lastWords = last ? `${stamped(last).textContent}: ${last.text.trim().split("\n")[0]}` : "Nothing yet";
   const facts = document.createElement("dl");
-  facts.append(
-    ...said("Does", does, routine?.what || watch?.what || task.first),
-    ...said("Repeats", repeats),
-    ...said("Last", lastWords, last?.text),
-  );
+  facts.append(...said("Does", does, routine?.what || watch?.what || task.first));
+  // How it runs, and the one way to change that: on a schedule, when
+  // something changes, or until a goal is met. Those were Repeat, Watch and
+  // Goal in the header, three buttons nothing said were one question.
+  const [runsLabel, runsWords] = said("Runs", runs);
+  const change = document.createElement("button");
+  change.type = "button";
+  change.id = "runs-change";
+  change.className = "change";
+  change.textContent = "Change\u2026";
+  change.title = "Change how this task runs: on a schedule, when something changes, or until a goal is met";
+  change.setAttribute("aria-controls", "schedule");
+  change.setAttribute("aria-expanded", String(!el.schedule.hidden));
+  change.onclick = () => changeHowItRuns(routine, watch, aim);
+  runsWords.append(change);
+  facts.append(runsLabel, runsWords);
+  // Who asked for it, when that is all its stored name said.
+  const from = askedBy(t.name);
+  if (from) facts.append(...said("From", from));
+  facts.append(...said("Last", lastWords, last?.text));
   el.taskCard.replaceChildren(head, facts);
   el.taskCard.dataset.state = state.kind;
   el.taskCard.hidden = false;
+}
+
+
+/**
+ * Rename the task on screen, on its card, where its name is.
+ *
+ * Enter or leaving the box keeps it, Escape puts the old name back. It was a
+ * right-click on the conversation and a dialog, which nobody found.
+ */
+function renameTheTask(t) {
+  const name = el.taskCard.querySelector(".head .name");
+  if (!t || !name || renaming) return;
+  const task = tasksNow.find((x) => x.id === t.id) || { name: t.name, first: "" };
+  const box = document.createElement("input");
+  box.type = "text";
+  box.className = "name-edit";
+  box.value = titleOf({ ...task, name: t.name });
+  box.setAttribute("aria-label", "Name of this task");
+  box.autocomplete = "off";
+  box.spellcheck = false;
+  let done = false;
+  const finish = async (keep) => {
+    if (done) return;
+    done = true;
+    renaming = null;
+    const called = box.value.trim();
+    // An empty name is not a name: what it was called stays.
+    if (keep && called && called !== titleOf({ ...task, name: t.name })) {
+      const was = t.name;
+      t.name = called;
+      for (const one of tasksNow) if (one.id === t.id) one.name = called;
+      drawTalks();
+      drawThreads();
+      try {
+        await invoke("call_it", { id: t.id, name: called });
+      } catch (why) {
+        t.name = was;
+        for (const one of tasksNow) if (one.id === t.id) one.name = was;
+        drawTalks();
+        drawThreads();
+        complain(String(why));
+      }
+    } else {
+      drawTaskCard();
+    }
+  };
+  box.addEventListener("keydown", (e) => {
+    if (e.isComposing) return;
+    if (e.key === "Enter") {
+      e.preventDefault();
+      finish(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      finish(false);
+    }
+  });
+  box.addEventListener("blur", () => finish(true));
+  renaming = { id: t.id, box, finish };
+  name.replaceWith(box);
+  box.focus();
+  box.select();
+}
+
+/**
+ * Open how the task on screen runs at the one it runs by, or put it away.
+ *
+ * At whichever it runs by, a schedule before a watch before a goal, and at a
+ * schedule when it has none of them: the first answer most people want.
+ */
+function changeHowItRuns(routine, watch, aim) {
+  const open = [el.routine, el.watching, el.aiming].find((panel) => !panel.hidden);
+  if (open) {
+    ({ routine: el.repeat, watching: el.watch, aiming: el.goal })[open.id].click();
+    return;
+  }
+  (routine ? el.repeat : watch ? el.watch : aim ? el.goal : el.repeat).click();
+}
+
+/**
+ * The one way a task runs that is open, marked among the three, and the row of
+ * three shown only while one is: it is a heading for what is open under it,
+ * not a fourth thing on screen. Kept true by watching the panels themselves,
+ * since everything from Save to opening another task closes them.
+ */
+function drawHowItRuns() {
+  const open = [el.routine, el.watching, el.aiming].find((panel) => !panel.hidden);
+  el.schedule.hidden = !open;
+  for (const [tab, panel] of [
+    [el.repeat, el.routine],
+    [el.watch, el.watching],
+    [el.goal, el.aiming],
+  ]) {
+    tab.setAttribute("aria-selected", String(panel === open));
+  }
+  document.getElementById("runs-change")?.setAttribute("aria-expanded", String(!!open));
+}
+const panelsWatched = new MutationObserver(drawHowItRuns);
+for (const panel of [el.routine, el.watching, el.aiming]) {
+  panelsWatched.observe(panel, { attributes: true, attributeFilter: ["hidden"] });
+}
+
+/** One of the three open, and the other two put away: they answer one question. */
+function onlyThisOneOpen(panel) {
+  for (const other of [el.routine, el.watching, el.aiming]) {
+    if (other !== panel) other.hidden = true;
+  }
 }
 
 /** Said above the box while the task on screen is working, with a way to stop it. */
@@ -1275,7 +1437,6 @@ function drawRunningNote() {
   el.runningNote.hidden = !(t && t.working && whose());
 }
 
-el.newTask.addEventListener("click", () => alsoAsk());
 el.runningStop.addEventListener("click", () => stopTheRun(showing));
 
 // A task made by the app rather than in this window: a second schedule set
@@ -1288,16 +1449,22 @@ listen("task_made", async ({ payload }) => {
   drawTalks();
 });
 
-/** The Finished button beside the task menu, for the task on screen. */
+/**
+ * Mark finished, on the task's card, for the task on screen.
+ *
+ * Saying what pressing it does rather than what it is: the chip beside it
+ * already says Finished, and "Finished ✓" on the button read as a second
+ * label for the same thing rather than the way to open it again.
+ */
 function drawTaskDone() {
   const t = talking();
   el.taskDone.hidden = !t || !whose();
   const done = Boolean(t?.finished);
-  el.taskDone.textContent = done ? "Finished ✓" : "Mark finished";
-  el.taskDone.setAttribute("aria-pressed", String(done));
+  el.taskDone.textContent = done ? "Reopen" : "Mark finished";
+  el.taskDone.dataset.finished = String(done);
   el.taskDone.title = done
-    ? "It is not done after all: press to open it again"
-    : "Mark this task done. It stays in the task menu for a while, then only in the overview";
+    ? "It is not done after all: open it again, and what it ran starts again"
+    : "Mark this task done. Whatever it runs on its own stops; it stays in the list for a while, then only in Now";
 }
 
 /**
@@ -1831,6 +1998,7 @@ let menuIsFor = null;
 function closeTheMenu() {
   el.menu.hidden = true;
   menuIsFor = null;
+  el.more.setAttribute("aria-expanded", "false");
 }
 
 /**
@@ -1870,11 +2038,8 @@ function openTheMenu(a, x, y) {
   };
 
   item(a.pinned ? "Unpin" : "Pin to the top", async () => {
-    a.pinned = !a.pinned;
     closeTheMenu();
-    drawThreads();
-    if (a.id === showingAgent) drawPinned(a);
-    await invoke("pin", { id: a.id, pinned: a.pinned });
+    await setPinned(a, !a.pinned);
   });
 
   item(a.paused ? "Start again" : "Pause", async () => {
@@ -1932,10 +2097,8 @@ function openTheMenu(a, x, y) {
   });
 
   item(a.hidden ? "Show in the list" : "Hide from the list", async () => {
-    a.hidden = !a.hidden;
     closeTheMenu();
-    drawThreads();
-    await invoke("hide", { id: a.id, hidden: a.hidden });
+    await setHidden(a, !a.hidden);
   });
 
   // Last, apart, and asked about twice. Everything it ever said goes with it.
@@ -3107,7 +3270,7 @@ listen("paused", ({ payload }) => {
   const a = agents.get(payload.agent);
   if (!a || a.paused === payload.paused) return;
   a.paused = payload.paused;
-  if (a.id === showingAgent) drawPinned(a);
+  if (a.id === showingAgent) drawPaused(a);
   drawThreads();
 });
 
@@ -4448,22 +4611,35 @@ for (const field of [el.whoisName, el.whoisTitle, el.whoisAbout]) {
   });
 }
 
-el.pin.addEventListener("click", async () => {
-  const t = whose();
-  if (!t) return;
-  t.pinned = !t.pinned;
-  drawPinned(t);
+/** Keep a teammate at the top of the list, or let it take its place again. */
+async function setPinned(a, pinned) {
+  a.pinned = pinned;
   drawThreads();
-  await invoke("pin", { id: t.id, pinned: t.pinned });
-});
+  await invoke("pin", { id: a.id, pinned });
+}
 
-el.hide.addEventListener("click", async () => {
-  const t = whose();
-  if (!t) return;
-  t.hidden = !t.hidden;
-  drawPinned(t);
+/** Put a teammate under Hidden at the bottom of the list, or bring it back. */
+async function setHidden(a, hidden) {
+  a.hidden = hidden;
   drawThreads();
-  await invoke("hide", { id: t.id, hidden: t.hidden });
+  await invoke("hide", { id: a.id, hidden });
+}
+
+// Everything done to a teammate once in a while, behind the last button in the
+// header: the same menu as a right-click on it in the list, so there is one
+// place for it rather than two that drift.
+el.more.addEventListener("click", (e) => {
+  // The document closes the menu on any click, this one included.
+  e.stopPropagation();
+  const a = whose();
+  if (!a) return;
+  if (!el.menu.hidden && menuIsFor === a.id) {
+    closeTheMenu();
+    return;
+  }
+  const box = el.more.getBoundingClientRect();
+  openTheMenu(a, box.right, box.bottom + 6);
+  el.more.setAttribute("aria-expanded", "true");
 });
 
 el.pause.addEventListener("click", async () => {
@@ -4492,7 +4668,7 @@ async function setPaused(a, paused) {
     for (const t of talks.values()) if (t.agent === a.id && t.working) itHasStopped(t);
   }
   if (a.id === showingAgent) {
-    drawPinned(a);
+    drawPaused(a);
     drawMark(a);
     drawMessages();
   }
@@ -4501,22 +4677,14 @@ async function setPaused(a, paused) {
     await invoke("pause", { id: a.id, paused });
   } catch (why) {
     a.paused = was;
-    if (a.id === showingAgent) drawPinned(a);
+    if (a.id === showingAgent) drawPaused(a);
     drawThreads();
     complain(String(why));
   }
 }
 
-/** The three toggles, saying which way they are. */
-function drawPinned(t) {
-  el.pin.textContent = t.pinned ? "Pinned" : "Pin";
-  el.pin.setAttribute("aria-pressed", String(t.pinned));
-  el.hide.textContent = t.hidden ? "Hidden" : "Hide";
-  el.hide.setAttribute("aria-pressed", String(t.hidden));
-  // Where it went, said where it was sent from.
-  el.hide.title = t.hidden
-    ? "Hidden: find it under Hidden at the bottom of the list, or by searching. Press to show it again"
-    : "Out of the way, still running. It stays under Hidden at the bottom of the list";
+/** Pause, saying which way it is. */
+function drawPaused(t) {
   el.pause.textContent = t.paused ? "Paused" : "Pause";
   el.pause.setAttribute("aria-pressed", String(t.paused));
   el.pause.title = t.paused
@@ -4560,19 +4728,12 @@ function openTheTalkMenu(t, x, y) {
     return b;
   };
 
-  item("Rename this conversation…", async () => {
+  // On its card, where its name is. This was a dialog, which a window on a Mac
+  // does not always show.
+  item("Rename this task…", async () => {
     closeTheMenu();
-    const called = prompt("What is this conversation about?", t.name);
-    // Cancelled is not "call it nothing". An empty name would leave a blank
-    // row in the picker, which is worse than the name it already had.
-    if (called === null || !called.trim()) return;
-    t.name = called.trim();
-    drawTalks();
-    try {
-      await invoke("call_it", { id: t.id, name: t.name });
-    } catch (why) {
-      complain(String(why));
-    }
+    if (showing !== t.id) await show(t.id);
+    renameTheTask(t);
   });
 
   const remove = item(
@@ -4637,6 +4798,7 @@ el.repeat.addEventListener("click", async () => {
   }
   const t = talking();
   if (!t) return;
+  onlyThisOneOpen(el.routine);
   const mine = (await invoke("routines")).find((r) => r.conversation === t.id);
   theRoutineShown = mine || null;
   el.routineAt.value = mine?.at || "";
@@ -5382,8 +5544,8 @@ function whatCouldBeDone() {
   add("New task for this teammate", a?.name || "", () => alsoAsk(), !!a);
   add("New agent", "", () => start());
   add("Search everything", "", () => el.find.focus());
-  add(a?.pinned ? "Unpin this agent" : "Pin this agent", "", () => el.pin.click(), !!a);
-  add(a?.hidden ? "Show this agent" : "Hide this agent", "", () => el.hide.click(), !!a);
+  add(a?.pinned ? "Unpin this agent" : "Pin this agent", "", () => setPinned(a, !a.pinned), !!a);
+  add(a?.hidden ? "Show this agent" : "Hide this agent", "", () => setHidden(a, !a.hidden), !!a);
   add("What it may do without asking", "", () => el.granted.click(), !!a);
   add("What this thread can reach", "MCP servers", () => el.reach.click(), !!showing);
   add("Make this run on a schedule", "", () => el.repeat.click(), !!showing);
@@ -5778,7 +5940,8 @@ async function whatsRunning() {
       who.textContent = one.who;
       const where = document.createElement("span");
       where.className = "where";
-      where.textContent = one.talk;
+      const task = tasksNow.find((x) => x.id === one.conversation);
+      where.textContent = task ? titleOf(task) : one.talk;
       const what = document.createElement("p");
       what.className = "what";
       what.textContent = one.what;
@@ -6252,6 +6415,7 @@ el.watch.addEventListener("click", async () => {
     return;
   }
   if (!showing) return;
+  onlyThisOneOpen(el.watching);
   el.watching.hidden = false;
   await drawWatch();
   // The same offer as Repeat, for the same reason: what a watch should say when
@@ -6447,6 +6611,7 @@ el.goal.addEventListener("click", async () => {
     return;
   }
   if (!showing) return;
+  onlyThisOneOpen(el.aiming);
   el.aiming.hidden = false;
   await drawGoal();
   keepGoalHonest();
@@ -6470,14 +6635,22 @@ function keepGoalHonest() {
 
 async function drawGoal({ leaveTheField = false } = {}) {
   if (!showing) return;
+  const asked = showing;
   let now;
   try {
-    now = await invoke("goal_of", { id: showing });
+    now = await invoke("goal_of", { id: asked });
   } catch (why) {
     el.goalSays.textContent = String(why);
     return;
   }
   if (!leaveTheField) el.goalWhat.value = now.goal || "";
+  // The task it was asked about, which is not always the one on screen by the
+  // time the answer comes.
+  const here = talks.get(asked);
+  if (here) {
+    here.aim = now.goal && !now.over ? now : null;
+    if (showing === asked) drawTaskCard();
+  }
   el.goalStop.hidden = !now.goal;
   el.goalSave.textContent = now.goal ? "Change it" : "Start";
   el.goalSays.dataset.over = String(!!now.over);
@@ -7130,16 +7303,14 @@ function asTask(c) {
  * one the app made up rather than one somebody chose.
  */
 function titleOf(t) {
-  const madeUp =
-    !t.name ||
-    ["First", "New task", "New conversation", "Asked by something outside"].includes(t.name) ||
-    /, again$/.test(t.name);
-  if (!madeUp) return t.name;
-  const first = (t.first || "").trim().split("\n")[0];
+  if (!aMadeUpName(t.name)) return t.name;
+  // What was asked in it, said as a name: three tasks another teammate started
+  // were all "Asked by" it, and every first task was "First".
+  const asked = headline(t.first);
+  if (asked) return asked;
   // Nothing asked yet: its own name, unless that is "First", which says
   // nothing on its own. A new task called "First task" was the fifth.
-  if (!first) return t.name && t.name !== "First" ? t.name : "First task";
-  return first.length > 70 ? `${first.slice(0, 69)}…` : first;
+  return t.name && t.name !== "First" ? t.name : "First task";
 }
 
 /**

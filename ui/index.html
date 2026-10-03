@@ -326,24 +326,24 @@
       <header id="title">
         <span id="mark"></span>
         <button id="thread-name" type="button" title="Who this is">Nothing open</button>
-        <button id="pin" type="button" title="Keep at the top">Pin</button>
-        <button id="hide" type="button" title="Out of the way, still running">Hide</button>
-        <button id="pause" type="button" title="Nothing runs on its own until you start it again">Pause</button>
-        <select id="talks" title="Which task"></select>
         <!--
-          Another task for this teammate, in plain sight. It was an item in the
-          right-click menu, in Cmd-K and at the bottom of the task menu, and
-          somebody using the app every day could not find it.
+          Which task is on screen. Never shown: the list down the side is where
+          tasks are picked now, and this only holds the answer for the code.
         -->
-        <button id="new-task" type="button" title="Start another task for this teammate, beside the ones it has" hidden>+ New task</button>
-        <button id="task-done" type="button" aria-pressed="false" hidden>Mark finished</button>
+        <select id="talks" title="Which task" aria-hidden="true" tabindex="-1"></select>
         <!-- Who is in the room, when this is one. Empty and hidden otherwise. -->
         <button id="members" type="button" hidden title="Change who is in this room"></button>
-        <button id="repeat" type="button" title="Make this run on a schedule">Repeat</button>
-        <button id="watch" type="button" title="Wake this when something changes">Watch</button>
-        <button id="goal" type="button" title="Something to get to, rather than something to do">Goal</button>
+        <!--
+          The teammate's, and only the teammate's. This row had eleven things in
+          it, the task's mixed in with the teammate's: Mark finished, Repeat,
+          Watch and Goal are the task's and are on its card now, and Pin and
+          Hide are in the menu behind the last button, with everything else
+          that is done to a teammate once in a while.
+        -->
+        <button id="pause" type="button" title="Nothing runs on its own until you start it again">Pause</button>
         <button id="granted" type="button" title="What it may do without asking">Allowed</button>
         <button id="reach" type="button" title="What this thread can reach">Tools</button>
+        <button id="more" type="button" aria-haspopup="menu" aria-expanded="false" title="More for this teammate: pin, hide, duplicate, save, delete">⋯</button>
       </header>
       <!--
         What this agent is for, in its own words, under its name. The row above
@@ -364,7 +364,10 @@
         what came of it last, with what can be done to it. Finding that out
         meant reading back through the whole conversation, or opening Repeat.
       -->
-      <section id="task-card" aria-label="This task" hidden></section>
+      <section id="task-card" aria-label="This task" hidden>
+        <!-- Drawn into the card's actions; here so it always has a place. -->
+        <button id="task-done" type="button" hidden>Mark finished</button>
+      </section>
 
       <!--
         What the thread can reach, opened rather than always on screen: finding
@@ -460,6 +463,19 @@
         <button id="finding-next" type="button" title="Next (Enter)">↓</button>
         <button id="finding-done" type="button" title="Close (Escape)">Done</button>
       </div>
+
+      <!--
+        How the task on screen runs, chosen in one place: on a schedule, when
+        something changes, or until a goal is met. They were three buttons in
+        the header called Repeat, Watch and Goal, among the teammate's own, and
+        nothing said they were three answers to one question. Opened from Runs
+        on the task's card; shown while one of the three is open.
+      -->
+      <nav id="schedule" role="tablist" aria-label="How this task runs" hidden>
+        <button id="repeat" type="button" role="tab" aria-selected="false" aria-controls="routine" title="Run it at set times">On a schedule</button>
+        <button id="watch" type="button" role="tab" aria-selected="false" aria-controls="watching" title="Wake it when something changes">When something changes</button>
+        <button id="goal" type="button" role="tab" aria-selected="false" aria-controls="aiming" title="Something to get to, rather than something to do">Until a goal is met</button>
+      </nav>
 
       <!-- A conversation that runs itself. -->
       <aside id="routine" hidden>

@@ -167,3 +167,69 @@ export function byTeammate(list) {
   }
   return [...teams.entries()].sort(([x], [y]) => x.localeCompare(y));
 }
+
+/**
+ * The names the app gives a task before anybody has. They say nothing about
+ * what it is for: "First" was every teammate's first task, and every task
+ * another teammate started was "Asked by" whoever started it, so three of
+ * them read the same down the side.
+ */
+const MADE_UP = [
+  "First",
+  "New task",
+  "New conversation",
+  "Asked by something outside",
+  "Asked from the terminal",
+];
+
+/** Whether a task's name is one the app made up rather than a name. */
+export function aMadeUpName(name) {
+  return !name || MADE_UP.includes(name) || /^Asked by /.test(name) || /, again$/.test(name);
+}
+
+/**
+ * Who asked for a task, when its name only says that: "Asked by Day Check"
+ * came from Day Check. Nothing, for a task called anything else.
+ */
+export function askedBy(name) {
+  if (name === "Asked from the terminal") return "the terminal";
+  if (name === "Asked by something outside") return "something outside";
+  const by = /^Asked by (.+)$/.exec(name || "");
+  return by ? by[1] : null;
+}
+
+/**
+ * A request, said as the name of a task: its first sentence, without the
+ * words around it that only ask, short enough for the list down the side.
+ *
+ * "Please check the disk on the build server every day and tell me if it is low" is a
+ * request; "Check the disk on the build server every day and tell me…" is what the task
+ * is. Who asked comes off too: it is said on the task's card.
+ *
+ * @param {string} request the first thing asked in the task
+ * @param {number} room how many characters a name may have
+ */
+export function headline(request, room = 52) {
+  let said = String(request || "").trim().split("\n")[0].trim();
+  said = said.replace(/^[^:]{1,40} asks: /, "");
+  said = said.replace(
+    /^(?:(?:hey|hi|hello|ok|okay|so)[,!.]?\s+)?(?:(?:please|can you|could you|would you|will you|i want you to|i'd like you to|i would like you to|i need you to)[,]?\s+)+/i,
+    "",
+  );
+  const sentence = /^(.+?[.!?])(?:\s|$)/.exec(said);
+  if (sentence) said = sentence[1];
+  // A question keeps its mark; anything else ends where its words do.
+  said = said.replace(/[.!,;:\s]+$/, "");
+  if (!said) return "";
+  // An address stays as it is written.
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(said)) said = said[0].toUpperCase() + said.slice(1);
+  if (said.length <= room) return said;
+  // Where its first part ends, when that part is a name on its own: "and tell
+  // me if it is low" is how to report, not what the task is.
+  const part = said.split(/,\s|;\s|\s(?:and|then|but)\s/i)[0];
+  if (part.length >= room / 2 && part.length <= room) return part;
+  const cut = said.slice(0, room);
+  const space = cut.lastIndexOf(" ");
+  const atAWord = space > room / 2 ? cut.slice(0, space) : cut;
+  return `${atAWord.replace(/[\s,;:.]+$/, "")}…`;
+}

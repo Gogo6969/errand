@@ -555,6 +555,8 @@ export async function aiming() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
   const panel = document.getElementById("aiming");
+  // The task that has one.
+  await openTalk(FIXTURE.goalIn);
 
   check("it starts closed", panel.hidden, `hidden=${panel.hidden}`);
   document.getElementById("goal").click();
@@ -3171,12 +3173,22 @@ export async function namingAndDeletingAConversation() {
   check("renaming is one of them", labels.some((l) => /Rename/.test(l)), JSON.stringify(labels));
   check("and deleting just this conversation is another", labels.some((l) => /^Delete this/.test(l)), JSON.stringify(labels));
 
-  // Naming it puts the name in the picker, so the entries can be told apart.
-  const was = window.prompt;
-  window.prompt = () => "Rent receipts";
+  // Naming it happens on its card, where its name is: Rename in this menu
+  // opens the name there for typing. It was a dialog, which a window on a Mac
+  // does not always show.
   await menu.querySelector("button").click();
+  await new Promise((r) => setTimeout(r, 150));
+  const box = document.querySelector("#task-card .name-edit");
+  check(
+    "Rename opens the task's name for typing, on its card",
+    box && document.activeElement === box,
+    box ? `focused=${document.activeElement === box}` : "no box",
+  );
+  if (box) {
+    box.value = "Rent receipts";
+    box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  }
   await new Promise((r) => setTimeout(r, 300));
-  window.prompt = was;
   check(
     "the name it was given is the one in the picker",
     [...picker.options].some((o) => o.textContent.includes("Rent receipts")),
@@ -3186,6 +3198,30 @@ export async function namingAndDeletingAConversation() {
     "and the app was told, rather than only the window",
     asked.some((a) => a.name === "call_it" && a.args?.name === "Rent receipts"),
     JSON.stringify(asked.filter((a) => a.name === "call_it").slice(-1)),
+  );
+  const sideNames = () => [...document.querySelectorAll("#threads .task-name")].map((n) => n.textContent);
+  check(
+    "and the list down the side and the card say it too",
+    sideNames().includes("Rent receipts") && document.querySelector("#task-card .name")?.textContent === "Rent receipts",
+    `${sideNames().join(" | ")}; card: ${document.querySelector("#task-card .name")?.textContent}`,
+  );
+  // The name on the card is itself the way to rename it, and Escape changes
+  // nothing.
+  const calls = asked.filter((a) => a.name === "call_it").length;
+  document.querySelector("#task-card .name")?.click();
+  await new Promise((r) => setTimeout(r, 100));
+  const again = document.querySelector("#task-card .name-edit");
+  if (again) {
+    again.value = "Something else";
+    again.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  }
+  await new Promise((r) => setTimeout(r, 200));
+  check(
+    "clicking a task's name on its card renames it, and Escape leaves it as it was",
+    again &&
+      asked.filter((a) => a.name === "call_it").length === calls &&
+      document.querySelector("#task-card .name")?.textContent === "Rent receipts",
+    `${again ? "box" : "no box"}; ${document.querySelector("#task-card .name")?.textContent}`,
   );
 
   // Deleting asks once, on the button, the same way deleting an agent does.
@@ -4730,7 +4766,13 @@ export async function whatItIsForAndWhereItWent() {
   // By which agent the row is, not by what it says: another agent in the list
   // is called "Bitcoin Desk copy".
   const rowOf = () => list.querySelector(`li[data-agent="${owner}"]`);
-  document.getElementById("hide").click();
+  // From the menu behind the last button in the header, where Hide is now.
+  const fromTheMenu = async (label) => {
+    document.getElementById("more").click();
+    await settle(80);
+    [...document.querySelectorAll("#menu button")].find((b) => b.textContent === label)?.click();
+  };
+  await fromTheMenu("Hide from the list");
   await settle(150);
   const hiddenRow = list.querySelector("li.the-hidden button");
   check("hiding it says how many are hidden, at the bottom of the list", /Hidden \(\d+\)/.test(hiddenRow?.textContent || ""), hiddenRow?.textContent || "no row");
@@ -4741,7 +4783,7 @@ export async function whatItIsForAndWhereItWent() {
   list.querySelector("li.the-hidden button")?.click();
   await settle(120);
   check("and pressing it again puts it away", !rowOf(), rowOf() ? "still shown" : "put away");
-  document.getElementById("hide").click();
+  await fromTheMenu("Show in the list");
   await settle(150);
   check("showing it in the list again takes the row away when nothing else is hidden", !list.querySelector("li.the-hidden") || /Hidden/.test(list.textContent), list.querySelector("li.the-hidden")?.textContent || "gone");
   return found;
@@ -4973,16 +5015,21 @@ export async function theOverview() {
     [...talks.options].map((o) => o.textContent).join(" | "),
   );
 
-  // Finished, from the header: the task on screen, not the teammate.
+  // Finished, on the task's card: the task on screen, not the teammate.
   const done = document.getElementById("task-done");
-  check("beside the task menu there is a way to say the task is done", done && !done.hidden && done.getAttribute("aria-pressed") === "false", done ? `hidden=${done.hidden} ${done.textContent}` : "no button");
+  check(
+    "on the task's card there is a way to say the task is done",
+    done && !done.hidden && done.closest("#task-card") && done.textContent === "Mark finished",
+    done ? `hidden=${done.hidden} ${done.textContent} in ${done.closest("#task-card") ? "the card" : "the header"}` : "no button",
+  );
   done.click();
   await settle(200);
   const option = [...talks.options].find((o) => o.value === "talk-overnight");
   check(
-    "pressing it marks that task finished, ticked in the menu",
+    "pressing it marks that task finished, ticked in the menu, and it offers to reopen it",
     asked.some((a) => a.name === "finish_task" && a.args?.id === "talk-overnight" && a.args?.finished === true) &&
-      done.getAttribute("aria-pressed") === "true" &&
+      done.dataset.finished === "true" &&
+      done.textContent === "Reopen" &&
       /✓$/.test(option?.textContent || ""),
     `${done.textContent}; ${option?.textContent}`,
   );
@@ -5000,7 +5047,8 @@ export async function theOverview() {
   check(
     "asking something new in a finished task opens it again",
     asked.some((a) => a.name === "finish_task" && a.args?.id === "talk-overnight" && a.args?.finished === false) &&
-      done.getAttribute("aria-pressed") === "false",
+      done.dataset.finished === "false" &&
+      done.textContent === "Mark finished",
     `${done.textContent}`,
   );
 
@@ -6364,7 +6412,9 @@ export async function whatRunsOnItsOwnStandsOut() {
   await openTalk("talk-2");
   const done = document.getElementById("task-done");
   done.click();
-  await wait(300);
+  // What runs is read again on a timer of nothing, which a page the browser is
+  // not drawing can hold back for most of a second.
+  await wait(700);
   const finished = badgeOf("agent-bitcoin");
   check(
     "finishing the task that runs on its own switches it off, and the badge goes quiet",
@@ -6373,7 +6423,7 @@ export async function whatRunsOnItsOwnStandsOut() {
     finished ? `${finished.className} "${finished.title.split("\n")[0]}"` : "no badge",
   );
   done.click();
-  await wait(300);
+  await wait(700);
   const reopened = badgeOf("agent-bitcoin");
   check(
     "and reopening it switches it back on",
@@ -6405,7 +6455,8 @@ export async function aTaskSaysWhatItIs() {
   const button = (label) => buttons().find((b) => b.textContent === label);
   const fact = (label) => {
     const at = [...card.querySelectorAll("dt")].findIndex((d) => d.textContent === label);
-    return at < 0 ? "" : card.querySelectorAll("dd")[at].textContent;
+    const dd = card.querySelectorAll("dd")[at];
+    return at < 0 ? "" : (dd.querySelector(".words") || dd).textContent;
   };
   ["talk-1", "talk-2", "talk-3", "talk-4", "talk-overnight", "talk-cut-off"].forEach((id, n) =>
     tell("happened", { conversation: id, seq: 9960 + n, kind: "done" }),
@@ -6419,7 +6470,7 @@ export async function aTaskSaysWhatItIs() {
     `${card.hidden ? "hidden" : ""} ${chip()?.dataset.kind} "${chip()?.textContent}"`,
   );
   check("what it does", fact("Does") === "What moved overnight", fact("Does"));
-  check("when it repeats, and next", /daily 07:00/.test(fact("Repeats")) && /next /.test(fact("Repeats")), fact("Repeats"));
+  check("when it repeats, and next", /daily 07:00/.test(fact("Runs")) && /next /.test(fact("Runs")), fact("Runs"));
   check("what came of it last, with when", /\d:\d\d/.test(fact("Last")) || fact("Last") === "Nothing yet", fact("Last"));
   check("with Pause and Run now on it", button("Pause") && button("Run now"), buttons().map((b) => b.textContent).join(", "));
 
@@ -6473,7 +6524,7 @@ export async function aTaskSaysWhatItIs() {
 
   // Answered, finished, and needing you.
   await openTalk("talk-overnight");
-  check("a task with nothing of its own to run, not done, is idle until asked", chip()?.dataset.kind === "idle" && fact("Repeats") === "Only when you ask", `${chip()?.dataset.kind} / ${fact("Repeats")}`);
+  check("a task with nothing of its own to run, not done, is idle until asked", chip()?.dataset.kind === "idle" && fact("Runs") === "Only when you ask", `${chip()?.dataset.kind} / ${fact("Runs")}`);
   document.getElementById("task-done").click();
   await wait(250);
   check("marked finished, it says finished", chip()?.dataset.kind === "finished" && /Finished/.test(chip()?.textContent || ""), `${chip()?.dataset.kind} "${chip()?.textContent}"`);
@@ -6579,9 +6630,8 @@ export async function tasksDownTheSideAndNow() {
   );
   check(
     "the header no longer has a task menu or New task of its own",
-    getComputedStyle(document.getElementById("talks")).display === "none" &&
-      getComputedStyle(document.getElementById("new-task")).display === "none",
-    `${getComputedStyle(document.getElementById("talks")).display} ${getComputedStyle(document.getElementById("new-task")).display}`,
+    getComputedStyle(document.getElementById("talks")).display === "none" && !document.getElementById("new-task"),
+    `${getComputedStyle(document.getElementById("talks")).display} ${document.getElementById("new-task") ? "New task is still there" : "no New task"}`,
   );
 
   const other = rows().find((r) => r.dataset.task === "talk-overnight");
@@ -6661,5 +6711,206 @@ export async function tasksDownTheSideAndNow() {
     `hidden=${overview.hidden} ${document.getElementById("talks").value}`,
   );
   FIXTURE.standing = FIXTURE.standing.filter((s) => !["daily 21:00", "daily 23:00"].includes(s.at));
+  return found;
+}
+
+/**
+ * The header is the teammate's, and the card is the task's.
+ *
+ * The row under a teammate's name had eleven things in it, the task's mixed in
+ * with the teammate's: Mark finished, Repeat, Watch and Goal were the task's,
+ * and Pin and Hide are done to a teammate once in a while. Now the row has the
+ * teammate's few, Pin and Hide are in the menu behind its last button, and the
+ * task's are on its card, every control one size and none of them filled.
+ */
+export async function theHeaderAndTheCard() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  await window.__TAURI__.core.invoke("routine_off", { id: "talk-2", off: false });
+  tell("repeats", { conversation: "talk-2", repeats: true });
+  ["talk-2", "talk-3", FIXTURE.goalIn].forEach((id, n) => tell("happened", { conversation: id, seq: 9940 + n, kind: "done" }));
+  await wait(150);
+  await openTalk("talk-2");
+  const title = document.getElementById("title");
+  const card = document.getElementById("task-card");
+  const shown = (e) => e && e.getBoundingClientRect().width > 0;
+  const fact = (label) => {
+    const at = [...card.querySelectorAll("dt")].findIndex((d) => d.textContent === label);
+    const dd = card.querySelectorAll("dd")[at];
+    return at < 0 ? "" : (dd.querySelector(".words") || dd).textContent;
+  };
+
+  // The header: the teammate's own few, and nothing of the task's.
+  const inHeader = [...title.querySelectorAll("button")].filter(shown).map((b) => b.id);
+  check(
+    "the header has the teammate's name and its own few controls, and nothing of the task's",
+    ["thread-name", "pause", "granted", "reach", "more"].every((id) => inHeader.includes(id)) &&
+      !["pin", "hide", "task-done", "repeat", "watch", "goal"].some((id) => title.querySelector(`#${id}`)),
+    inHeader.join(", "),
+  );
+  if (beingDrawn()) {
+    const controls = [
+      ...title.querySelectorAll("#pause, #granted, #reach, #more"),
+      ...card.querySelectorAll(".actions button"),
+    ].filter(shown);
+    const heights = controls.map((b) => Math.round(b.getBoundingClientRect().height));
+    check(
+      "every control in the header and on the card is one height",
+      heights.length >= 6 && new Set(heights).size === 1,
+      heights.join(", "),
+    );
+    // The type size of the words, not of the menu's dots, which are drawn a
+    // touch larger so three of them read as a button.
+    const sizes = new Set(controls.filter((b) => b.id !== "more").map((b) => getComputedStyle(b).fontSize));
+    const ways = new Set(
+      controls.map((b) => {
+        const c = getComputedStyle(b);
+        return `${c.borderTopWidth} ${c.borderRadius} ${c.backgroundColor}`;
+      }),
+    );
+    check(
+      "and drawn the same way, outlined, none of them filled",
+      sizes.size === 1 && ways.size === 1,
+      `${[...sizes].join(", ")}; ${[...ways].join(" | ")}`,
+    );
+    const tops = [...card.querySelectorAll(".actions button")].filter(shown).map((b) => Math.round(b.getBoundingClientRect().top));
+    check("the card's are on one line, with Mark finished last", new Set(tops).size === 1 && [...card.querySelectorAll(".actions button")].filter(shown).pop()?.id === "task-done", tops.join(", "));
+  }
+
+  // The menu behind the last button: Pin and Hide, with the rest done to a
+  // teammate once in a while.
+  const more = document.getElementById("more");
+  const menu = document.getElementById("menu");
+  const pin = () => [...menu.querySelectorAll("button")].find((b) => /^(Pin|Unpin)/.test(b.textContent));
+  more.click();
+  await wait(120);
+  const items = [...menu.querySelectorAll("button")].map((b) => b.textContent);
+  check(
+    "the last button in the header opens the teammate's menu, with Pin and Hide in it",
+    !menu.hidden && pin() && items.some((l) => /^(Hide from|Show in)/.test(l)) && more.getAttribute("aria-expanded") === "true",
+    `${menu.hidden ? "closed" : "open"}: ${items.join(", ")}`,
+  );
+  if (beingDrawn()) {
+    const box = menu.getBoundingClientRect();
+    const under = more.getBoundingClientRect();
+    check(
+      "under the button, and inside the window",
+      box.top >= under.bottom && box.right <= innerWidth,
+      `menu top ${Math.round(box.top)}, right ${Math.round(box.right)}; button bottom ${Math.round(under.bottom)}`,
+    );
+  }
+  const pins = () => asked.filter((a) => a.name === "pin").length;
+  const pinsBefore = pins();
+  pin()?.click();
+  await wait(150);
+  check(
+    "Pin in it pins the teammate, and the menu closes",
+    pins() === pinsBefore + 1 && menu.hidden && more.getAttribute("aria-expanded") === "false",
+    `${pins() - pinsBefore} pin; menu ${menu.hidden ? "closed" : "open"}`,
+  );
+  // As it was.
+  more.click();
+  await wait(100);
+  pin()?.click();
+  await wait(150);
+  more.click();
+  await wait(100);
+  more.click();
+  await wait(100);
+  check("and pressing the button again closes the menu", menu.hidden, menu.hidden ? "closed" : "open");
+
+  // How it runs: said on the card, changed from there, one way at a time.
+  const runs = () => {
+    const at = [...card.querySelectorAll("dt")].findIndex((d) => d.textContent === "Runs");
+    return at < 0 ? null : card.querySelectorAll("dd")[at];
+  };
+  const change = () => runs()?.querySelector(".change");
+  const schedule = document.getElementById("schedule");
+  const tab = (id) => document.getElementById(id);
+  const panel = (id) => document.getElementById(id);
+  check("the card says how it runs, with a way to change it", /daily 07:00/.test(fact("Runs")) && change(), runs()?.textContent);
+  change().click();
+  await wait(300);
+  check(
+    "Change opens the three ways a task can run, at the one it runs by",
+    !schedule.hidden &&
+      tab("repeat").getAttribute("aria-selected") === "true" &&
+      !panel("routine").hidden &&
+      change().getAttribute("aria-expanded") === "true",
+    `tabs ${schedule.hidden ? "hidden" : "shown"}, schedule selected=${tab("repeat").getAttribute("aria-selected")}, routine ${panel("routine").hidden ? "closed" : "open"}`,
+  );
+  const ways = [...schedule.querySelectorAll("button")].map((b) => b.textContent);
+  check(
+    "said as the three answers to how it runs",
+    ways.join(" / ") === "On a schedule / When something changes / Until a goal is met",
+    ways.join(" / "),
+  );
+  tab("watch").click();
+  await wait(300);
+  check(
+    "choosing another puts the first away: one open at a time",
+    panel("routine").hidden &&
+      !panel("watching").hidden &&
+      tab("watch").getAttribute("aria-selected") === "true" &&
+      tab("repeat").getAttribute("aria-selected") === "false",
+    `routine ${panel("routine").hidden ? "closed" : "open"}, watch ${panel("watching").hidden ? "closed" : "open"}`,
+  );
+  if (beingDrawn()) {
+    const tabs = schedule.getBoundingClientRect();
+    const under = panel("watching").getBoundingClientRect();
+    check("the tabs sit right on top of what they open", Math.abs(under.top - tabs.bottom) <= 1, `${Math.round(tabs.bottom)} / ${Math.round(under.top)}`);
+  }
+  change().click();
+  await wait(250);
+  check(
+    "and Change again puts it all away",
+    schedule.hidden && panel("watching").hidden && panel("routine").hidden && change().getAttribute("aria-expanded") === "false",
+    `tabs ${schedule.hidden ? "hidden" : "shown"}`,
+  );
+
+  // A task that works toward a goal says so, and opens at it.
+  await openTalk(FIXTURE.goalIn);
+  await wait(200);
+  check("a task with a goal says it runs toward it", /^Toward a goal: Get the tests passing/.test(fact("Runs")), fact("Runs"));
+  change()?.click();
+  await wait(300);
+  check(
+    "and Change opens at its goal",
+    tab("goal").getAttribute("aria-selected") === "true" && !panel("aiming").hidden,
+    `goal selected=${tab("goal").getAttribute("aria-selected")}`,
+  );
+  change()?.click();
+  await wait(200);
+
+  // A task another teammate asked for is named by what it asked, and says who.
+  const was = FIXTURE.tasks["talk-3"];
+  FIXTURE.tasks["talk-3"] = { ...(was || {}), first: "Day Check asks: The weekly tally for Friday." };
+  tell("task_made", { conversation: "talk-3", agent: "agent-bitcoin", name: "Asked by Day Check" });
+  await wait(250);
+  await openTalk("talk-3");
+  const sideNames = [...document.querySelectorAll("#threads .task-name")].map((n) => n.textContent);
+  check(
+    "a task another teammate asked for is named by what it asked, not by who asked",
+    card.querySelector(".name")?.textContent === "The weekly tally for Friday" && sideNames.includes("The weekly tally for Friday"),
+    `${card.querySelector(".name")?.textContent}; ${sideNames.join(" | ")}`,
+  );
+  check("and its card says who asked", fact("From") === "Day Check", fact("From") || "no From");
+  FIXTURE.tasks["talk-3"] = was;
+  tell("task_made", { conversation: "talk-3", agent: "agent-bitcoin", name: "Asked by Day Check" });
+  await wait(200);
+
+  // Now: no tile shouts. The one filled button in the window is Send.
+  document.getElementById("overview-open").click();
+  await wait(600);
+  const open = document.querySelector("#overview-tiles .job-foot .open");
+  const send = getComputedStyle(document.getElementById("send")).backgroundColor;
+  check(
+    "Open on a tile in Now is tinted, not filled like Send",
+    open && getComputedStyle(open).backgroundColor !== send,
+    open ? `${getComputedStyle(open).backgroundColor} against ${send}` : "no tile",
+  );
+  document.getElementById("overview-done").click();
+  await wait(200);
   return found;
 }
