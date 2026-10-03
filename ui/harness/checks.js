@@ -7190,3 +7190,27 @@ export async function finishedTasksFoldAway() {
   await wait(100);
   return found;
 }
+
+/**
+ * The line under the header that says where a teammate's words go has room
+ * under the header's line, rather than sitting on it.
+ */
+export async function roomUnderTheHeader() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  await openTalk("talk-2");
+  const title = document.getElementById("title");
+  const words = document.getElementById("words-go");
+  if (!beingDrawn() || words.hidden) {
+    check("the line under the header has room above it", true, words.hidden ? "not judged: the line is hidden" : "not judged: not drawn");
+    return found;
+  }
+  const line = title.getBoundingClientRect().bottom;
+  const text = words.getBoundingClientRect().top + parseFloat(getComputedStyle(words).paddingTop);
+  check(
+    "the line under the header has room above it, not sitting on the header's line",
+    getComputedStyle(title).borderBottomWidth !== "0px" && text - line >= 7,
+    `${Math.round(text - line)}px between the header's line and the words`,
+  );
+  return found;
+}

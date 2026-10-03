@@ -1099,7 +1099,8 @@ main > aside, main > #title, main > #composer { flex: none; }
 #words-go {
   flex: none;
   margin: 0;
-  padding: 0 18px 6px 50px;
+  /* Room under the header's line: it sat right on it. */
+  padding: 8px 18px 6px 50px;
   font-size: 12px;
   color: var(--ink-soft);
 }
