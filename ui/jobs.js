@@ -8,16 +8,21 @@
  * is a rule somebody will notice the moment it is wrong.
  */
 
-/** The groups a job can be in by what it is doing, in the order they are looked at. */
+/**
+ * The groups a job can be in by what it is doing, in the order they are looked
+ * at. The same words as the chip on a task and the row in the list down the
+ * side: each place used to have words of its own for the same state, and
+ * "Working now", "Running" and "Working" were one thing said three ways.
+ */
 export const STATES = [
-  ["waiting", "Waiting on you"],
-  ["working", "Working now"],
+  ["waiting", "Needs you"],
+  ["working", "Running now"],
   ["stopped", "Stopped, needs a look"],
-  ["scheduled", "Repeating"],
-  // Its errand is done and nothing of it is running, waiting or due: done for
-  // now, by its own account. Finished is the person's word, and is its own
-  // group: completed is what the agent says, finished what they do.
-  ["idle", "Completed, not marked finished"],
+  ["scheduled", "Next up"],
+  // Its errand is done and nothing of it is running, waiting or due: answered,
+  // by its own account. Finished is the person's word, and is its own group:
+  // answered is what the agent says, finished what they do.
+  ["idle", "Answered, not marked finished"],
   ["paused", "Paused"],
   ["finished", "Finished"],
 ];
@@ -25,10 +30,10 @@ export const STATES = [
 /** What "Show" can be set to, and what each keeps. */
 export const SHOWING = [
   ["all", "All tasks"],
-  ["waiting", "Waiting on you"],
-  ["working", "Working now"],
-  ["repeating", "Repeating"],
-  ["idle", "Completed"],
+  ["waiting", "Needs you"],
+  ["working", "Running now"],
+  ["repeating", "Next up"],
+  ["idle", "Answered"],
   ["finished", "Finished"],
   ["stopped", "Stopped"],
   ["paused", "Paused"],
@@ -69,13 +74,60 @@ export function stateOf(t, a, running, standing) {
   if (waiting) return { state: "waiting", waiting };
   if (going.length) return { state: "working", working: going[0] };
   if (a?.paused) return { state: "paused" };
-  const stopped = theirs.find((s) => s.stopped || s.off);
+  // A watch that gave up needs a look; a routine somebody switched off is
+  // only paused, by their own hand, and Pause is what switched it off.
+  const stopped = theirs.find((s) => s.stopped);
   if (stopped) return { state: "stopped", stopped };
-  if (theirs.length) {
-    const next = theirs.filter((s) => s.due).sort((x, y) => x.due - y.due)[0];
-    return next ? { state: "scheduled", next } : { state: "scheduled", watch: theirs[0] };
+  const live = theirs.filter((s) => !s.off);
+  if (live.length) {
+    const next = live.filter((s) => s.due).sort((x, y) => x.due - y.due)[0];
+    return next ? { state: "scheduled", next } : { state: "scheduled", watch: live[0] };
   }
+  if (theirs.length) return { state: "paused", off: theirs[0] };
   return { state: "idle" };
+}
+
+/**
+ * A task's state as its chip says it: the kind it is drawn as, and the words.
+ *
+ * One place for the words, so the chip at the top of a task, the row in the
+ * list down the side and the group in Now cannot drift apart again.
+ *
+ * @param is what stateOf said
+ * @param t the task, for whether anything was said in it yet
+ * @param when how a next run is said, short enough for a chip
+ */
+export function chipOf(is, t, when) {
+  switch (is.state) {
+    case "waiting":
+      return { kind: "needs-you", says: "Needs you" };
+    case "working":
+      return { kind: "running", says: "Running now" };
+    case "stopped":
+      return { kind: "stopped", says: "Stopped" };
+    case "scheduled":
+      return { kind: "scheduled", says: is.next ? `Next ${when(is.next.due)}` : "Watching" };
+    case "paused":
+      return { kind: "paused", says: "Paused" };
+    case "finished":
+      return { kind: "finished", says: "Finished" };
+    default:
+      return { kind: "idle", says: t.said === false ? "New" : "Answered" };
+  }
+}
+
+/** Where each state comes in a list of tasks: the order they are looked at. */
+export function byState(list, stateFor) {
+  const rank = new Map(STATES.map(([state], at) => [state, at]));
+  return [...list].sort((x, y) => {
+    const [sx, sy] = [stateFor(x), stateFor(y)];
+    return (
+      rank.get(sx.state) - rank.get(sy.state) ||
+      // What is due soonest first, among what is due.
+      (sx.next?.due ?? Infinity) - (sy.next?.due ?? Infinity) ||
+      (y.spoke || 0) - (x.spoke || 0)
+    );
+  });
 }
 
 /**

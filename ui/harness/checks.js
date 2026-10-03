@@ -439,8 +439,8 @@ export async function stopping() {
   await new Promise((r) => setTimeout(r, 300));
   check(
     "sending something makes it working",
-    document.getElementById("threads").textContent.includes("Working"),
-    document.getElementById("threads").textContent.includes("Working") ? "Working" : "not working",
+    document.getElementById("threads").textContent.includes("Running now"),
+    document.getElementById("threads").textContent.includes("Running now") ? "Running now" : "not running",
   );
 
   open();
@@ -455,12 +455,12 @@ export async function stopping() {
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   await new Promise((r) => setTimeout(r, 300));
 
-  const stillSaysWorking = document.getElementById("threads").textContent.includes("Working");
+  const stillSaysWorking = document.getElementById("threads").textContent.includes("Running now");
   const stillThinking = !!document.getElementById("messages").querySelector(".thinking");
   check(
     "it stops saying it is working",
     !stillSaysWorking && !stillThinking,
-    [stillSaysWorking && "the list still says Working", stillThinking && "the dots are still there"]
+    [stillSaysWorking && "the list still says Running now", stillThinking && "the dots are still there"]
       .filter(Boolean)
       .join(" and ") || "clear",
   );
@@ -1231,7 +1231,7 @@ export async function running() {
   check("it opens", !panel.hidden, `hidden=${panel.hidden}`);
   check(
     "it counts what is waiting on somebody separately from what is merely busy",
-    panel.textContent.includes("3 running, 1 stopped waiting"),
+    panel.textContent.includes("3 running, 1 needs you"),
     panel.textContent.slice(0, 70),
   );
   check(
@@ -4320,7 +4320,7 @@ export async function aHandoverThatStopsWaiting() {
     where: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
   });
   await settle(200);
-  check("a handover says Waiting on you down the side, as a question does", said() === "Waiting on you", said());
+  check("a handover says Needs you down the side, as a question does", said() === "Needs you", said());
   const card = [...document.querySelectorAll("#messages .handover")].pop();
   const link = card?.querySelector("a.detail");
   check(
@@ -4337,7 +4337,7 @@ export async function aHandoverThatStopsWaiting() {
     /stopped waiting/.test(after?.textContent || ""),
     (after?.textContent || "").slice(0, 90),
   );
-  check("and the side stops saying Waiting on you", said() !== "Waiting on you", said());
+  check("and the side stops saying Needs you", said() !== "Needs you", said());
   const before = asked.length;
   after?.querySelector(".choices button")?.click();
   await settle(300);
@@ -4767,6 +4767,16 @@ export async function theOverview() {
   } catch {
     // Without storage there is nothing kept to fall back from.
   }
+  // What the app's list of what is running says, arriving the way the app
+  // sends it: a question in one task and a step in another. Now reads where a
+  // task stands from what arrived, as its chip and the side do; the list only
+  // words the line.
+  tell("happened", {
+    conversation: "talk-3", seq: 9801, kind: "needs_you", asking: "Running a command", detail: "ls",
+    tool: "Bash", call: "ov-q", step: "ov-q", can_remember: false, rule: "", allows: "",
+  });
+  tell("happened", { conversation: "talk-2", seq: 9802, kind: "doing", what: "Looking something up on the web", tool: "WebSearch", call: "ov-s" });
+  await settle(150);
   document.getElementById("overview-open").click();
   await settle(300);
   check("the overview opens over the window", !overview.hidden && getComputedStyle(overview).display !== "none", `hidden=${overview.hidden}`);
@@ -4782,7 +4792,7 @@ export async function theOverview() {
       /failed\. The model server answered with an error/.test(away.textContent),
     away.textContent.slice(0, 200),
   );
-  check("and what is open now, starting with what waits on you", /Waiting on you: [^\n]*Bitcoin Desk/.test(away.textContent), away.textContent.slice(-160));
+  check("and what is open now, starting with what needs you", /Needs you: [^\n]*Bitcoin Desk/.test(away.textContent), away.textContent.slice(-160));
 
   const tileOf = (id) => tiles.querySelector(`.job[data-task="${id}"]`);
   const stateOn = (id) => tileOf(id)?.querySelector(".job-state")?.dataset.state;
@@ -4794,7 +4804,7 @@ export async function theOverview() {
   );
   check(
     "one teammate's tasks are each in their own state, what waits on you first",
-    tiles.querySelector(".job-group h2")?.textContent.startsWith("Waiting on you") &&
+    tiles.querySelector(".job-group h2")?.textContent.startsWith("Needs you") &&
       stateOn("talk-3") === "waiting" &&
       stateOn("talk-2") === "working",
     `${tiles.querySelector(".job-group h2")?.textContent || "no groups"}: talk-3 ${stateOn("talk-3")}, talk-2 ${stateOn("talk-2")}`,
@@ -4889,6 +4899,7 @@ export async function theOverview() {
   await settle(400);
   check("and emptying it shows every task again", all().length >= 6, `${all().length} tiles`);
 
+  const before = stateOn("talk-4");
   [...tileOf("talk-4").querySelectorAll("button")].find((b) => b.textContent === "Finished").click();
   await settle(200);
   const finishedGroup = [...tiles.querySelectorAll(".job-group")].find((g) => g.querySelector("h2").textContent.startsWith("Finished"));
@@ -4908,10 +4919,10 @@ export async function theOverview() {
   [...tileOf("talk-4").querySelectorAll("button")].find((b) => b.textContent === "Not finished").click();
   await settle(200);
   check(
-    "and not finished after all puts it back",
+    "and not finished after all puts it back where it was",
     asked.some((a) => a.name === "finish_task" && a.args?.id === "talk-4" && a.args?.finished === false) &&
-      stateOn("talk-4") === "stopped",
-    stateOn("talk-4"),
+      stateOn("talk-4") === before,
+    `${stateOn("talk-4")}, was ${before}`,
   );
 
   const group = document.getElementById("overview-group");
@@ -4923,7 +4934,7 @@ export async function theOverview() {
   check(
     "grouped by teammate, each teammate's tasks are together under its name",
     headings.includes("Bitcoin Desk") &&
-      !headings.some((h) => /Waiting on you|Completed|Repeating/.test(h)) &&
+      !headings.some((h) => /Needs you|Answered|Next up/.test(h)) &&
       deskPanel?.querySelectorAll(".job").length >= 6,
     `${headings.join(", ")}; ${deskPanel?.querySelectorAll(".job").length || 0} under Bitcoin Desk`,
   );
@@ -5000,6 +5011,8 @@ export async function theOverview() {
     said && /for a week/.test(said.textContent) && /Nothing is deleted/.test(said.textContent) && !said.querySelector("input"),
     said ? said.textContent.trim().slice(0, 120) : "no card",
   );
+  tell("happened", { conversation: "talk-2", seq: 9803, kind: "done" });
+  await settle(100);
   return found;
 }
 
@@ -5418,7 +5431,7 @@ export async function aTurnSomethingElseStarted() {
   tell("noted", { conversation: "talk-outside", seq: 9901, kind: "mine", text: "What moved overnight?" });
   await settle(200);
   check("a routine's request appears in the open conversation as it is made", mine("What moved overnight?") === 1, `${mine("What moved overnight?")} on screen`);
-  check("and the agent reads as Working down the side", row() === "Working…", row());
+  check("and the agent reads as Running now down the side", row() === "Running now", row());
   const palette = () => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
   };
@@ -5430,7 +5443,7 @@ export async function aTurnSomethingElseStarted() {
   await settle(100);
   tell("happened", { conversation: "talk-outside", seq: 9902, kind: "done" });
   await settle(150);
-  check("until it ends", row() !== "Working…", row());
+  check("until it ends", row() !== "Running now", row());
 
   // The window's own request comes back the same way, and is not shown twice.
   document.getElementById("what").value = "Anything else?";
@@ -5452,7 +5465,7 @@ export async function aTurnSomethingElseStarted() {
   await settle(300);
   const saved = [...document.querySelectorAll("#messages li.ended")].pop();
   check("saving a copy says where, and not as a failure", /Saved to/.test(saved?.textContent || "") && !saved.classList.contains("failed"), `${saved?.className}: ${saved?.textContent}`);
-  check("and the turn still going is still going", row() === "Working…", row());
+  check("and the turn still going is still going", row() === "Running now", row());
   tell("happened", { conversation: "talk-outside", seq: 9906, kind: "done" });
   await settle(150);
   return found;
@@ -6334,7 +6347,7 @@ export async function whatRunsOnItsOwnStandsOut() {
   const going = badgeOf("agent-bitcoin");
   check(
     "while it works, the badge says it is running",
-    going?.classList.contains("now") && going.dataset.shows === "running" && /^Working now/.test(going.title) && getComputedStyle(going).backgroundColor === accent,
+    going?.classList.contains("now") && going.dataset.shows === "running" && /^Running now/.test(going.title) && getComputedStyle(going).backgroundColor === accent,
     going ? `${going.className} ${going.dataset.shows} "${going.title.split("\n")[0]}"` : "no badge",
   );
   tell("happened", { conversation: "talk-2", seq: 9950, kind: "done" });
@@ -6458,12 +6471,12 @@ export async function aTaskSaysWhatItIs() {
     `${JSON.stringify(asked.slice(stopping).map((a) => a.name))} hidden=${note.hidden} ${chip()?.dataset.kind}`,
   );
 
-  // Idle, done, and waiting on you.
+  // Answered, finished, and needing you.
   await openTalk("talk-overnight");
   check("a task with nothing of its own to run, not done, is idle until asked", chip()?.dataset.kind === "idle" && fact("Repeats") === "Only when you ask", `${chip()?.dataset.kind} / ${fact("Repeats")}`);
   document.getElementById("task-done").click();
   await wait(250);
-  check("marked finished, it says done", chip()?.dataset.kind === "done", `${chip()?.dataset.kind} "${chip()?.textContent}"`);
+  check("marked finished, it says finished", chip()?.dataset.kind === "finished" && /Finished/.test(chip()?.textContent || ""), `${chip()?.dataset.kind} "${chip()?.textContent}"`);
   document.getElementById("task-done").click();
   await wait(250);
   tell("happened", {
@@ -6482,9 +6495,9 @@ export async function aTaskSaysWhatItIs() {
   await wait(250);
   check("a task stopped on a question says it needs you", chip()?.dataset.kind === "needs-you", `${chip()?.dataset.kind} "${chip()?.textContent}"`);
 
-  // Another task, in plain sight.
-  const newTask = document.getElementById("new-task");
-  check("a teammate's header has New task in plain sight", newTask && !newTask.hidden && newTask.offsetWidth > 0, newTask ? `hidden=${newTask.hidden} width=${newTask.offsetWidth}` : "missing");
+  // Another task, in plain sight: under the teammate, in the list down the side.
+  const newTask = document.querySelector('#threads li[data-agent="agent-bitcoin"] .task-new .add');
+  check("a teammate's tasks end with New task in plain sight", newTask && newTask.offsetWidth > 0, newTask ? `width=${newTask.offsetWidth}` : "missing");
   const starting = asked.length;
   newTask.click();
   await wait(300);
@@ -6515,5 +6528,138 @@ export async function aTaskSaysWhatItIs() {
   );
   FIXTURE.conversations["agent-bitcoin"] = FIXTURE.conversations["agent-bitcoin"].filter((c) => c.id !== "talk-overdue");
   FIXTURE.standing = FIXTURE.standing.filter((s) => s.conversation !== "talk-overdue");
+  return found;
+}
+
+/**
+ * A teammate's tasks, down the side, and Now.
+ *
+ * Its tasks were a menu in the header, with New task at its bottom, and what
+ * a teammate had going could not be seen without opening that menu. What
+ * needed somebody across every teammate was behind four squares nobody read.
+ */
+export async function tasksDownTheSideAndNow() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  await window.__TAURI__.core.invoke("routine_off", { id: "talk-2", off: false });
+  tell("repeats", { conversation: "talk-2", repeats: true });
+  ["talk-1", "talk-2", "talk-3", "talk-4", "talk-overnight", "talk-cut-off"].forEach((id, n) =>
+    tell("happened", { conversation: id, seq: 9980 + n, kind: "done" }),
+  );
+  await wait(200);
+  await openTalk("talk-2");
+  const block = () => document.querySelector('#threads li[data-agent="agent-bitcoin"] .tasks-of');
+  const rows = () => [...(block()?.querySelectorAll(".task") || [])];
+  const menu = [...document.getElementById("talks").options].filter((o) => !["+", "room"].includes(o.value));
+  check(
+    "the teammate on screen has its tasks listed under it, one row each, as the menu had them",
+    block() && rows().length === menu.length && rows().length > 1,
+    `${rows().length} rows, ${menu.length} in the menu`,
+  );
+  check(
+    "inside its own row, so the list is still one row per teammate",
+    document.querySelectorAll("#threads > li .tasks-of").length === 1 && !document.querySelector("#threads > div"),
+    `${document.querySelectorAll("#threads .tasks-of").length} lists`,
+  );
+  const current = rows().find((r) => r.getAttribute("aria-current") === "true");
+  check("the task on screen is marked", current?.dataset.task === "talk-2", current?.dataset.task || "none");
+  check(
+    "each says where it stands, a scheduled one when it next runs",
+    rows().every((r) => r.querySelector(".task-mark svg")) &&
+      current?.dataset.kind === "scheduled" && /\d/.test(current.querySelector(".task-when")?.textContent || ""),
+    `${current?.dataset.kind} "${current?.querySelector(".task-when")?.textContent}"`,
+  );
+  const order = ["needs-you", "running", "stopped", "scheduled", "idle", "paused", "finished"];
+  const kinds = rows().map((r) => r.dataset.kind);
+  check(
+    "in the order they are looked at: what needs you first, what is finished last",
+    kinds.every((k, i) => i === 0 || order.indexOf(kinds[i - 1]) <= order.indexOf(k)),
+    kinds.join(", "),
+  );
+  check(
+    "the header no longer has a task menu or New task of its own",
+    getComputedStyle(document.getElementById("talks")).display === "none" &&
+      getComputedStyle(document.getElementById("new-task")).display === "none",
+    `${getComputedStyle(document.getElementById("talks")).display} ${getComputedStyle(document.getElementById("new-task")).display}`,
+  );
+
+  const other = rows().find((r) => r.dataset.task === "talk-overnight");
+  other?.querySelector("button").click();
+  await wait(500);
+  check(
+    "a task in the list opens with a click, and becomes the one marked",
+    document.getElementById("talks").value === "talk-overnight" &&
+      rows().find((r) => r.getAttribute("aria-current") === "true")?.dataset.task === "talk-overnight",
+    `${document.getElementById("talks").value}`,
+  );
+  check(
+    "and its teammate stays open around it",
+    document.querySelector('#threads li[aria-current="true"]')?.dataset.agent === "agent-bitcoin",
+    document.querySelector('#threads li[aria-current="true"]')?.dataset.agent,
+  );
+  const add = block()?.querySelector(".task-new .add");
+  const room = block()?.querySelector(".task-new .room");
+  check("after the tasks, New task and New room", add?.textContent === "+ New task" && room?.textContent === "New room", `${add?.textContent} / ${room?.textContent}`);
+  const starting = asked.length;
+  add.click();
+  await wait(400);
+  check(
+    "New task starts one for this teammate, listed and marked",
+    asked.slice(starting).some((a) => a.name === "start_conversation" && a.args?.agent === "agent-bitcoin") &&
+      rows().find((r) => r.getAttribute("aria-current") === "true")?.querySelector(".task-name")?.textContent === "New task",
+    rows().map((r) => `${r.getAttribute("aria-current") === "true" ? "*" : ""}${r.querySelector(".task-name")?.textContent}`).join(" | "),
+  );
+
+  // Now: said in words, with how many tasks need you.
+  const now = document.getElementById("overview-open");
+  check("the way to everything at once says Now", /^Now/.test(now.textContent.trim()), now.textContent.trim());
+  tell("happened", {
+    conversation: "talk-overnight", seq: 9990, kind: "needs_you", asking: "Delete last night's notes",
+    detail: "rm notes-old.md", tool: "Bash", call: "now-q", step: "now-q", can_remember: false, rule: "", allows: "",
+  });
+  await wait(250);
+  const count = document.getElementById("now-count");
+  check("with how many tasks need you beside it", !count.hidden && Number(count.textContent) >= 1, `hidden=${count.hidden} "${count.textContent}"`);
+
+  // Two coming up, the later one listed first, to be put in order.
+  FIXTURE.standing.push(
+    {
+      conversation: "talk-cut-off", agent: "agent-bitcoin", who: "Bitcoin Desk", name: "Cut off",
+      kind: "routine", at: "daily 23:00", what: "The late check", due: Date.now() + 7200000, off: false, stopped: null, paused: false,
+    },
+    {
+      conversation: "talk-room", agent: "agent-bitcoin", who: "Bitcoin Desk", name: "Bitcoin room",
+      kind: "routine", at: "daily 21:00", what: "The evening check", due: Date.now() + 600000, off: false, stopped: null, paused: false,
+    },
+  );
+  now.click();
+  await wait(600);
+  const overview = document.getElementById("overview");
+  check("Now opens, called Now", !overview.hidden && overview.querySelector("h1")?.textContent === "Now", overview.querySelector("h1")?.textContent);
+  const next = [...overview.querySelectorAll('.job-group[data-state="scheduled"] .job')].map((j) => j.dataset.task);
+  const heading = overview.querySelector('.job-group[data-state="scheduled"] h2')?.textContent || "";
+  const dueOf = (id) =>
+    Math.min(...FIXTURE.standing.filter((s) => s.conversation === id && !s.off && s.due).map((s) => s.due));
+  check(
+    "Next up lists what is coming soonest first",
+    heading.startsWith("Next up") && next.indexOf("talk-room") === 0 && next.includes("talk-cut-off") &&
+      next.every((id, n) => n === 0 || dueOf(next[n - 1]) <= dueOf(id)),
+    `${heading}: ${next.join(", ")}`,
+  );
+  check(
+    "and what needs you is the first group",
+    overview.querySelector(".job-group h2")?.textContent.startsWith("Needs you"),
+    overview.querySelector(".job-group h2")?.textContent,
+  );
+  // A notification opens its task, out from under Now.
+  tell("go_to", "talk-2");
+  await wait(500);
+  check(
+    "a notification opens its task from under Now",
+    overview.hidden && document.getElementById("talks").value === "talk-2",
+    `hidden=${overview.hidden} ${document.getElementById("talks").value}`,
+  );
+  FIXTURE.standing = FIXTURE.standing.filter((s) => !["daily 21:00", "daily 23:00"].includes(s.at));
   return found;
 }

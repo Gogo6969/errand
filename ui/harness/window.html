@@ -184,6 +184,8 @@
     }
   };
 
+  // The window opens on Now in the app; the checks start from a conversation.
+  window.__ERRAND_UNDER_TEST__ = true;
   const { standIn, FIXTURE } = await import(`./harness.js${fresh}`);
   // `?empty` is a copy of Errand nobody has ever used. It is its own mode
   // rather than a check, because a first run is a different page: the window
@@ -205,7 +207,7 @@
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
 
-  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut, aCall, stepsDoNotOverlap, openingAtLogin, sayingWhatThisIs, repeatingWhatWasAsked, whatElseIsAllowed, whatChangedInThisOne, theMenuOnAnAgent, settingAWatchExplainsItself, handingItOver, whatAgentsCanReach, whenThingsHappened, somethingYouHaveNotRead, whatYouTypedStaysPut, namingAndDeletingAConversation, aNotificationThatLeadsSomewhere, pausingARoutineAndSeeingHowItWent, findingWhereTheWordsAre, whatALongCommandIsPrinting, picturesYouCanSee, theQuestionBeforeDeletingIsReadable, aTurnTheAppWasClosedDuring, aPictureAnAgentMade, allowingSomethingOnce, seeingItBeforeYouSendIt, aRoomOfSeveral, madeOutsideTheWindow, pausingAnAgent, aHandoverThatStopsWaiting, anAgentThatStopsItsOwnSchedule, aTurnSomethingElseStarted, whatAnAgentRemembers, skillsInTheWindow, everythingThatRunsOnItsOwn, aLongConversation, copyingAnAgent, aMonthlyLimit, changingARoom, anOpenQuestion, whatItIsForAndWhereItWent, onlyModelsThatAnswer, aStepThatPrintedNothing, aDraftToCheck, listeningToAnAnswer, theOverview, aNewTeammate, keepingItLocal, choosingWhatToAllow, takingTheSuggestion, aKeyTheAgentForgot, whenEachThingWasSaid, whatRunsOnItsOwnStandsOut, aTaskSaysWhatItIs, firstRun } =
+  const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut, aCall, stepsDoNotOverlap, openingAtLogin, sayingWhatThisIs, repeatingWhatWasAsked, whatElseIsAllowed, whatChangedInThisOne, theMenuOnAnAgent, settingAWatchExplainsItself, handingItOver, whatAgentsCanReach, whenThingsHappened, somethingYouHaveNotRead, whatYouTypedStaysPut, namingAndDeletingAConversation, aNotificationThatLeadsSomewhere, pausingARoutineAndSeeingHowItWent, findingWhereTheWordsAre, whatALongCommandIsPrinting, picturesYouCanSee, theQuestionBeforeDeletingIsReadable, aTurnTheAppWasClosedDuring, aPictureAnAgentMade, allowingSomethingOnce, seeingItBeforeYouSendIt, aRoomOfSeveral, madeOutsideTheWindow, pausingAnAgent, aHandoverThatStopsWaiting, anAgentThatStopsItsOwnSchedule, aTurnSomethingElseStarted, whatAnAgentRemembers, skillsInTheWindow, everythingThatRunsOnItsOwn, aLongConversation, copyingAnAgent, aMonthlyLimit, changingARoom, anOpenQuestion, whatItIsForAndWhereItWent, onlyModelsThatAnswer, aStepThatPrintedNothing, aDraftToCheck, listeningToAnAnswer, theOverview, aNewTeammate, keepingItLocal, choosingWhatToAllow, takingTheSuggestion, aKeyTheAgentForgot, whenEachThingWasSaid, whatRunsOnItsOwnStandsOut, aTaskSaysWhatItIs, tasksDownTheSideAndNow, firstRun } =
     await import(`./checks.js${fresh}`);
   // A first run is looked at on its own, because there is nothing else in it.
   if (brandNew) {
@@ -299,6 +301,7 @@
     ["whenEachThingWasSaid", whenEachThingWasSaid],
     ["whatRunsOnItsOwnStandsOut", whatRunsOnItsOwnStandsOut],
     ["aTaskSaysWhatItIs", aTaskSaysWhatItIs],
+    ["tasksDownTheSideAndNow", tasksDownTheSideAndNow],
   ];
   const found = [];
   for (const [named, group] of groups) {

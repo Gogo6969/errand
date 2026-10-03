@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { STATES, SHOWING, shown, stateOf, stillInTheList, inOrder, byTeammate } from "./jobs.js";
+import { STATES, SHOWING, shown, stateOf, chipOf, byState, stillInTheList, inOrder, byTeammate } from "./jobs.js";
 
 const day = 86_400_000;
 const job = (id, more = {}) => ({ id, name: id, title: "", priority: 2, spoke: 0, finished: null, paused: false, ...more });
@@ -13,7 +13,7 @@ const teammate = (more = {}) => ({ id: "desk", name: "Bitcoin Desk", paused: fal
 
 test("a task somebody marked finished is finished, whatever else is going on", () => {
   const t = job("talk-1", { finished: 1000 });
-  const running = [{ conversation: "talk-1", agent: "desk", waiting: true, what: "Waiting on you: sign in" }];
+  const running = [{ conversation: "talk-1", agent: "desk", waiting: true, what: "Needs you: sign in" }];
   assert.equal(stateOf(t, teammate(), running, []).state, "finished");
 });
 
@@ -23,21 +23,62 @@ test("waiting on somebody comes before working, and working before anything set 
   assert.equal(stateOf(t, teammate(), [{ conversation: "talk-1", waiting: false, what: "Writing" }], standing).state, "working");
   const both = [
     { conversation: "talk-1", waiting: false, what: "Writing" },
-    { conversation: "talk-1", waiting: true, what: "Waiting on you: yes or no" },
+    { conversation: "talk-1", waiting: true, what: "Needs you: yes or no" },
   ];
   const is = stateOf(t, teammate(), both, standing);
   assert.equal(is.state, "waiting");
-  assert.equal(is.waiting.what, "Waiting on you: yes or no");
+  assert.equal(is.waiting.what, "Needs you: yes or no");
   // Another task of the same teammate being busy is not this one being busy.
   assert.equal(stateOf(job("talk-2"), teammate(), both, []).state, "idle");
 });
 
-test("a paused teammate pauses its tasks, and a stopped routine or watch needs a look", () => {
+test("a paused teammate or a routine switched off is paused, and a watch that gave up needs a look", () => {
   assert.equal(stateOf(job("talk-1"), teammate({ paused: true }), [], []).state, "paused");
+  // Switched off by somebody, with Pause: paused, not something gone wrong.
   const off = [{ conversation: "talk-1", off: true, at: "daily 07:00" }];
-  assert.equal(stateOf(job("talk-1"), teammate(), [], off).state, "stopped");
+  const paused = stateOf(job("talk-1"), teammate(), [], off);
+  assert.equal(paused.state, "paused");
+  assert.equal(paused.off.at, "daily 07:00");
   const lost = [{ conversation: "talk-1", stopped: "Stopped looking.", at: "https://example.com" }];
+  assert.equal(stateOf(job("talk-1"), teammate(), [], lost).state, "stopped");
   assert.equal(stateOf(job("talk-1"), teammate(), [], lost).stopped.stopped, "Stopped looking.");
+  // A routine switched off beside a watch still looking: it still runs.
+  const both = [
+    { conversation: "talk-1", off: true, at: "daily 07:00" },
+    { conversation: "talk-1", due: null, at: "mail every 10m" },
+  ];
+  assert.equal(stateOf(job("talk-1"), teammate(), [], both).state, "scheduled");
+});
+
+test("a chip says a state in the same words wherever it is shown", () => {
+  const when = () => "Fri 3 PM";
+  const t = job("talk-1", { said: true });
+  assert.deepEqual(chipOf({ state: "waiting" }, t, when), { kind: "needs-you", says: "Needs you" });
+  assert.deepEqual(chipOf({ state: "working" }, t, when), { kind: "running", says: "Running now" });
+  assert.deepEqual(chipOf({ state: "scheduled", next: { due: 1 } }, t, when), { kind: "scheduled", says: "Next Fri 3 PM" });
+  assert.deepEqual(chipOf({ state: "scheduled", watch: {} }, t, when), { kind: "scheduled", says: "Watching" });
+  assert.deepEqual(chipOf({ state: "paused" }, t, when), { kind: "paused", says: "Paused" });
+  assert.deepEqual(chipOf({ state: "stopped" }, t, when), { kind: "stopped", says: "Stopped" });
+  assert.deepEqual(chipOf({ state: "finished" }, t, when), { kind: "finished", says: "Finished" });
+  assert.deepEqual(chipOf({ state: "idle" }, t, when), { kind: "idle", says: "Answered" });
+  assert.deepEqual(chipOf({ state: "idle" }, job("talk-2", { said: false }), when), { kind: "idle", says: "New" });
+  // And a group in Now says it the same way.
+  const labels = Object.fromEntries(STATES);
+  assert.equal(labels.waiting, "Needs you");
+  assert.equal(labels.working, "Running now");
+});
+
+test("tasks are listed in the order their states are looked at, what is due soonest first", () => {
+  const states = {
+    a: { state: "idle" },
+    b: { state: "scheduled", next: { due: 300 } },
+    c: { state: "waiting" },
+    d: { state: "scheduled", next: { due: 100 } },
+    e: { state: "finished" },
+    f: { state: "working" },
+  };
+  const list = Object.keys(states).map((id) => job(id));
+  assert.deepEqual(byState(list, (t) => states[t.id]).map((t) => t.id), ["c", "f", "d", "b", "a", "e"]);
 });
 
 test("a task that repeats says which run is next, and one that only watches says so", () => {
@@ -90,11 +131,11 @@ test("by teammate, each teammate's tasks are together, teammates by name", () =>
   );
 });
 
-test("completed and finished are two groups: what the agent says, and what its person does", () => {
+test("answered and finished are two groups: what the agent says, and what its person does", () => {
   const labels = Object.fromEntries(STATES);
-  assert.match(labels.idle, /^Completed/);
+  assert.match(labels.idle, /^Answered/);
   assert.equal(labels.finished, "Finished");
-  assert.equal(labels.scheduled, "Repeating");
+  assert.equal(labels.scheduled, "Next up");
 });
 
 test("showing repeating keeps every job that repeats, whatever it is doing now", () => {

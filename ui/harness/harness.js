@@ -246,7 +246,7 @@ export const FIXTURE = {
   sshLoad: { added: ["id_ed25519"], holds: 1, why_not: null },
   whats_running: [
     { conversation: "talk-3", agent: "agent-bitcoin", who: "Bitcoin Desk", talk: "Asked by Day Check",
-      what: "Waiting on you: Running a command", waiting: true },
+      what: "Needs you: Running a command", waiting: true },
     { conversation: "talk-2", agent: "agent-bitcoin", who: "Bitcoin Desk", talk: "First",
       what: "Looking something up on the web", waiting: false },
     // A command left running, with what it is printing. Until this, only the

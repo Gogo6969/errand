@@ -323,9 +323,15 @@ fn how_many_are_waiting(held: &Held) -> i64 {
         .lock()
         .unwrap()
         .values()
-        .filter(|what| what.starts_with("Waiting on you"))
+        .filter(|what| what.starts_with(NEEDS_YOU))
         .count() as i64
 }
+
+/// How a task stopped on somebody begins, in what is shown as running. The
+/// window's chip, its list and Now say "Needs you" for the same state, and
+/// this said "Waiting on you"; it is also what the count on the icon and the
+/// list of what is running look for, so it is said once, here.
+const NEEDS_YOU: &str = "Needs you";
 
 /// What a thread is called, or something honest if it is not called anything.
 fn called(store: &Store, id: &str) -> String {
@@ -1092,13 +1098,13 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 let now = match &event {
                     Event::Doing(step) => Some(step.what.clone()),
                     Event::Said { .. } | Event::Started { .. } => Some("Writing".to_string()),
-                    Event::NeedsYou(ask) => Some(format!("Waiting on you: {}", ask.asking)),
+                    Event::NeedsYou(ask) => Some(format!("{NEEDS_YOU}: {}", ask.asking)),
                     _ => None,
                 };
                 // Not over a handover this conversation is parked on. The step
                 // that asked for it comes from the engine on a thread of its
                 // own, and landing after the handover it put "Over to you"
-                // where "Waiting on you" was: the badge counted nobody and the
+                // where "Needs you" was: the badge counted nobody and the
                 // side never said the agent was waiting. Seen in the system
                 // log, as a badge set to 0 the second a handover began.
                 if let Some(now) = now {
@@ -1741,10 +1747,7 @@ async fn answer(
     // a question answered at eight left a 1 on the icon all day.
     {
         let mut doing = held.doing.lock().unwrap();
-        if doing
-            .get(&id)
-            .is_some_and(|now| now.starts_with("Waiting on you"))
-        {
+        if doing.get(&id).is_some_and(|now| now.starts_with(NEEDS_YOU)) {
             doing.insert(id.clone(), "Writing".to_string());
         }
     }
@@ -4394,13 +4397,13 @@ async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Str
             },
         );
         // Told the way a question is: a banner unless this conversation is in
-        // front of them, the badge, and "Waiting on you" down the side. A
+        // front of them, the badge, and "Needs you" down the side. A
         // handover used to tell nobody, so one made while the window was
         // closed sat ten minutes unseen and then gave up.
         held.doing
             .lock()
             .unwrap()
-            .insert(asked.from.clone(), format!("Waiting on you: {what}"));
+            .insert(asked.from.clone(), format!("{NEEDS_YOU}: {what}"));
         tell_them_it_is_theirs(app, &held.store, &asked.from, what);
     }
 
@@ -4417,7 +4420,7 @@ async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Str
             let mut doing = held.doing.lock().unwrap();
             if doing
                 .get(&asked.from)
-                .is_some_and(|now| now.starts_with("Waiting on you"))
+                .is_some_and(|now| now.starts_with(NEEDS_YOU))
             {
                 doing.insert(asked.from.clone(), "Writing".to_string());
             }
@@ -4999,7 +5002,7 @@ async fn what_came_back(
                     // that waits at a terminal for something that will never
                     // arrive there.
                     Event::NeedsYou(ask) => telling.send(Meanwhile::Step(format!(
-                        "Waiting on you in the Errand window: {}",
+                        "{NEEDS_YOU} in the Errand window: {}",
                         ask.asking
                     ))),
                     Event::Failed { why } => {
@@ -5614,7 +5617,7 @@ async fn a_routines_turn(
         let held: State<Held> = app.state();
         if a_handover_waiting_in(&held, &conversation).is_some() {
             return Err(format!(
-                "it was waiting on you for a handover, {}",
+                "it needed you for a handover, {}",
                 routine::SKIPPED
             ));
         }
@@ -6798,7 +6801,7 @@ async fn whats_running(held: State<'_, Held>) -> Result<Vec<Working>, String> {
             .flatten()
             .map_or_else(|| "an agent".to_string(), |a| a.name);
         going.push(Working {
-            waiting: what.starts_with("Waiting on you"),
+            waiting: what.starts_with(NEEDS_YOU),
             // A turn is not a command, so it has nothing printing.
             tail: None,
             conversation,

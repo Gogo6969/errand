@@ -18,7 +18,7 @@ window.addEventListener("error", (e) => complain(e.message));
 window.addEventListener("unhandledrejection", (e) => complain(String(e.reason)));
 
 import { tile, forTool, kindOf } from "./icons.js";
-import { STATES, SHOWING, shown, stateOf, stillInTheList, inOrder, byTeammate } from "./jobs.js";
+import { STATES, SHOWING, shown, stateOf, chipOf, byState as inStateOrder, stillInTheList, inOrder, byTeammate } from "./jobs.js";
 import { render, reachTheAppWith } from "./markdown.js";
 import { toSay, worthSaying } from "./speech.js";
 
@@ -231,6 +231,7 @@ const el = {
   modelsDone: document.getElementById("models-done"),
   overview: document.getElementById("overview"),
   overviewOpen: document.getElementById("overview-open"),
+  nowCount: document.getElementById("now-count"),
   overviewDone: document.getElementById("overview-done"),
   overviewGroup: document.getElementById("overview-group"),
   overviewOrder: document.getElementById("overview-order"),
@@ -828,8 +829,13 @@ async function catchUp() {
   // A version somebody has not been told about yet, said once. After the tour,
   // because a brand new copy has nothing to have changed from.
   if (known.length) await whatChanged(false);
-  if (known.length) await openAgent(known[0].id);
-  else {
+  if (known.length) {
+    await openAgent(known[0].id);
+    // Now is home: what needs you, what is running and what is next, before
+    // any one teammate. The teammate opened under it is where Back goes. Not
+    // under the window harness, whose checks start from a conversation.
+    if (!window.__ERRAND_UNDER_TEST__) showOverview();
+  } else {
     await start();
     // Nothing has ever been done in this copy, so there is nothing on screen
     // to read and nothing to work out from. Shown once, here, rather than
@@ -1079,7 +1085,7 @@ function drawTalks() {
  *
  * Nothing else will say it stopped. A turn ends in the window when an ending
  * arrives from the engine, and an engine that was killed never sends one, so
- * without this the conversation goes on saying "Working" and offering to stop
+ * without this the conversation goes on saying "Running now" and offering to stop
  * something that stopped minutes ago.
  */
 async function stopTheRun(id) {
@@ -1091,38 +1097,57 @@ async function stopTheRun(id) {
   drawTalks();
 }
 
-/** Whether this one task is waiting on somebody: a question, or a handover. */
-function waitingHere(t) {
-  return t.messages.some(
+/** What this one task is waiting on somebody for: a question, or a handover. */
+function theOpenQuestion(t) {
+  return t?.messages?.find(
     (m) =>
       !m.answered &&
       (m.kind === "asking" || (m.kind === "over_to_you" && stillWaiting.has(m.handover))),
   );
 }
 
+/** Whether this one task is waiting on somebody: a question, or a handover. */
+function waitingHere(t) {
+  return !!theOpenQuestion(t);
+}
+
 /**
- * Where a task stands, in one word or two, the same wherever it is said.
- *
- * Working, waiting on somebody, due to run on its own, paused, done, or none of
- * those: idle until asked. Each used to be said by a different control, the
- * Pause button, the tick on the menu, the switch under Repeat, the line under
- * the name, and none of them said all of it.
+ * What the window knows is going on this minute, the way stateOf reads it:
+ * what is working, and what is stopped on a question.
  */
-function taskState(t) {
+function goingNow() {
+  return [...talks.values()]
+    .filter((x) => x.working || waitingHere(x))
+    .map((x) => ({ conversation: x.id, waiting: !x.working && waitingHere(x), what: "" }));
+}
+
+/**
+ * Where a task stands, read one way for every place that says it: the chip at
+ * its top, its row down the side, the count on Now and its group in Now. The
+ * chip had words of its own for a while, which is how one state came to be
+ * called three things; and Now read the app's list of what is running, up to
+ * ten seconds old, where the side read the window's own, so a task that had
+ * just finished was running in one and answered in the other.
+ *
+ * @param going what goingNow says, read once by a caller reading many tasks
+ */
+function whereItStands(id, agent, going = goingNow()) {
+  const task = tasksNow.find((x) => x.id === id) || {};
+  const finished = talks.get(id)?.finished ?? task.finished ?? null;
+  return stateOf({ id, finished }, agents.get(agent), going, standingNow);
+}
+
+/** Where a task stands, with its chip's words and what of it repeats. */
+function taskState(t, going = goingNow()) {
+  const task = tasksNow.find((x) => x.id === t.id) || {};
+  const is = whereItStands(t.id, t.agent, going);
   const mine = standingNow.filter((s) => s.conversation === t.id);
-  const routine = mine.find((s) => s.kind === "routine");
-  const watch = mine.find((s) => s.kind === "watch");
-  const routineLive = routine && !routine.off && !routine.paused;
-  const watchLive = watch && !watch.stopped && !watch.paused;
-  if (t.working) return { kind: "running", says: "Running now", routine, watch };
-  if (waitingHere(t)) return { kind: "needs-you", says: "Needs you", routine, watch };
-  if (routineLive) {
-    return { kind: "scheduled", says: routine.due ? `Next ${shortlyWhen(routine.due)}` : "Scheduled", routine, watch };
-  }
-  if (watchLive) return { kind: "scheduled", says: "Watching", routine, watch };
-  if (t.finished) return { kind: "done", says: "Done", routine, watch };
-  if (routine || watch) return { kind: "paused", says: "Paused", routine, watch };
-  return { kind: "idle", says: "Idle", routine, watch };
+  return {
+    ...is,
+    ...chipOf(is, { said: task.said !== false }, shortlyWhen),
+    routine: mine.find((s) => s.kind === "routine"),
+    watch: mine.find((s) => s.kind === "watch"),
+  };
 }
 
 /**
@@ -1147,7 +1172,8 @@ const STATE_MARKS = {
   "needs-you": '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 4.6v4.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="8" cy="11.3" r="1.1" fill="currentColor"/></svg>',
   scheduled: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 4.8V8l2.4 1.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   paused: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.5v9M10.5 3.5v9" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>',
-  done: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  finished: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  stopped: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="1.6" fill="currentColor"/></svg>',
   idle: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>',
 };
 
@@ -2084,9 +2110,9 @@ function drawThreads() {
           a.paused
           ? "Paused"
           : waitingOn(a.id)
-            ? "Waiting on you"
+            ? "Needs you"
             : busy(a.id)
-              ? "Working…"
+              ? "Running now"
               : // Something happened here and nobody has seen it. This takes
                 // the line for as long as that is true, because it is the one
                 // thing about an agent somebody cannot work out by looking at
@@ -2107,11 +2133,124 @@ function drawThreads() {
       if (a.hidden) li.classList.add("is-hidden");
       return li;
   };
+  // The teammate on screen with its tasks under it, rather than in a menu in
+  // the header. Not while searching: then the list is what was found.
+  const withTasks = (a) => {
+    const row = rowFor(a);
+    if (a.id === showingAgent && !narrowedTo) row.append(tasksUnder(a));
+    return row;
+  };
   el.threads.replaceChildren(
-    ...listed.map(rowFor),
+    ...listed.map(withTasks),
     ...(hiddenOnes.length ? [theHiddenRow(hiddenOnes.length)] : []),
-    ...(showingTheHidden ? hiddenOnes.map(rowFor) : []),
+    ...(showingTheHidden ? hiddenOnes.map(withTasks) : []),
   );
+  // How many tasks are stopped on a question, on the way into Now, read the
+  // way Now reads them.
+  const going = goingNow();
+  const needing = [...talks.values()].filter(
+    (t) => agents.has(t.agent) && whereItStands(t.id, t.agent, going).state === "waiting",
+  ).length;
+  el.nowCount.textContent = String(needing);
+  el.nowCount.hidden = !needing;
+  el.overviewOpen.title = needing
+    ? `Now: ${needing} ${needing === 1 ? "task needs" : "tasks need"} you, and what is running and what is next`
+    : "Now: what needs you, what is running and what is next";
+  // Now is read the same way, so it moves when this does rather than on its
+  // next tick: up to ten seconds of a finished task still under Running now.
+  if (!el.overview.hidden && statesAt(going) !== nowDrawnAt) drawOverview();
+}
+
+/** Every task's state in one line, to tell whether Now is out of date. */
+function statesAt(going) {
+  return tasksNow.map((t) => `${t.id}:${whereItStands(t.id, t.agent, going).state}`).join(" ");
+}
+
+/** The states Now was last drawn from. */
+let nowDrawnAt = "";
+
+/**
+ * The tasks of the teammate on screen, under its row down the side: each with
+ * where it stands and when it next runs, the one on screen marked, and New task
+ * and New room after them. They were a menu in the header, with New task at
+ * its bottom, and what a teammate had going could not be seen without opening
+ * that menu and reading every name in it.
+ */
+function tasksUnder(a) {
+  const now = Date.now();
+  const theirs = [...talks.values()].filter(
+    (t) => t.agent === a.id && (t.id === showing || stillInTheList(t, now, FINISHED_KEPT_DAYS)),
+  );
+  const going = goingNow();
+  const states = new Map(theirs.map((t) => [t.id, taskState(t, going)]));
+  const ordered = inStateOrder(
+    theirs.map((t) => ({ ...t, spoke: tasksNow.find((x) => x.id === t.id)?.spoke || 0 })),
+    (t) => states.get(t.id),
+  );
+  // Inside the teammate's own row rather than rows of their own, so the list
+  // down the side is still one row per teammate to everything that counts it.
+  const list = document.createElement("div");
+  list.className = "tasks-of";
+  list.setAttribute("role", "list");
+  list.setAttribute("aria-label", `Tasks of ${a.name}`);
+  for (const t of ordered) {
+    const state = states.get(t.id);
+    const task = tasksNow.find((x) => x.id === t.id) || { first: "" };
+    const name = titleOf({ ...task, name: t.name });
+    const row = document.createElement("div");
+    row.setAttribute("role", "listitem");
+    row.className = "task";
+    row.dataset.task = t.id;
+    row.dataset.kind = state.kind;
+    row.setAttribute("aria-current", String(t.id === showing));
+    const go = document.createElement("button");
+    go.type = "button";
+    go.title = `${name}: ${state.says}`;
+    const mark = document.createElement("span");
+    mark.className = "task-mark";
+    mark.innerHTML = STATE_MARKS[state.kind];
+    go.append(mark, note("span", name, "task-name"), note("span", sideways(state), "task-when"));
+    go.onclick = (e) => {
+      e.stopPropagation();
+      show(t.id);
+    };
+    row.append(go);
+    list.append(row);
+  }
+  const more = document.createElement("div");
+  more.className = "task-new";
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "add";
+  add.textContent = "+ New task";
+  add.title = "Start another task for this teammate, beside the ones it has";
+  add.onclick = (e) => {
+    e.stopPropagation();
+    alsoAsk();
+  };
+  const room = document.createElement("button");
+  room.type = "button";
+  room.className = "room";
+  room.textContent = "New room";
+  room.title = "Several teammates on one problem, taking turns";
+  room.onclick = (e) => {
+    e.stopPropagation();
+    offerARoom();
+  };
+  more.append(add, room);
+  list.append(more);
+  return list;
+}
+
+/**
+ * What a task's row down the side says beside its name: when it next runs,
+ * and that is all. Everything else is its mark and the colour of its name,
+ * with the words on hover and on the card at the top of the task: a sidebar
+ * is narrow, and "Needs you" beside every name cut each one to a word.
+ */
+function sideways(state) {
+  if (state.kind === "scheduled") return state.next ? shortlyWhen(state.next.due) : "";
+  return "";
 }
 
 /** The row at the bottom of the list that says how many are hidden, and shows them. */
@@ -2873,7 +3012,11 @@ listen("go_to", async ({ payload }) => {
       return;
     }
   }
-  if (talks.has(id)) await show(id);
+  if (talks.has(id)) {
+    // Out from under Now, which the window may have opened on.
+    if (!el.overview.hidden) closeOverview();
+    await show(id);
+  }
 });
 
 listen("settled", async ({ payload }) => {
@@ -4343,7 +4486,7 @@ async function setPaused(a, paused) {
   const was = a.paused;
   a.paused = paused;
   // Shown as paused at once, and its conversations as stopped: the app stops
-  // them and says so, but the row should not go on saying "Working" for the
+  // them and says so, but the row should not go on saying "Running now" for the
   // half second that takes.
   if (paused) {
     for (const t of talks.values()) if (t.agent === a.id && t.working) itHasStopped(t);
@@ -5606,7 +5749,7 @@ async function whatsRunning() {
     note(
       "p",
       waiting
-        ? `${going.length} running, ${waiting} stopped waiting on you.`
+        ? `${going.length} running, ${waiting} ${waiting === 1 ? "needs" : "need"} you.`
         : `${going.length} running.`,
     ),
     ...going.map((one) => {
@@ -6993,7 +7136,9 @@ function titleOf(t) {
     /, again$/.test(t.name);
   if (!madeUp) return t.name;
   const first = (t.first || "").trim().split("\n")[0];
-  if (!first) return "First task";
+  // Nothing asked yet: its own name, unless that is "First", which says
+  // nothing on its own. A new task called "First task" was the fifth.
+  if (!first) return t.name && t.name !== "First" ? t.name : "First task";
   return first.length > 70 ? `${first.slice(0, 69)}…` : first;
 }
 
@@ -7025,7 +7170,7 @@ function onItsOwn(a) {
   if (working) {
     badge.classList.add("now");
     shows = "running";
-    said = "Working now";
+    said = "Running now";
   } else if (live.length) {
     shows = live.some((s) => s.kind === "routine") ? "repeat" : "watch";
     const next = live.filter((s) => s.due).sort((x, y) => x.due - y.due)[0];
@@ -7288,16 +7433,24 @@ for (const [box, key] of [
   });
 }
 
-/** What a task is doing, and the line that says so. */
-function whatItIsDoing(t) {
-  const a = agents.get(t.agent);
-  const is = stateOf(t, a, overviewKnows.running, overviewKnows.standing);
+/**
+ * What a task is doing, and the line that says so. Where it stands is
+ * whereItStands, as for its chip and its row down the side; what the app last
+ * said is running only words the line, with the step a running task is on.
+ */
+function whatItIsDoing(t, going = goingNow()) {
+  const is = whereItStands(t.id, t.agent, going);
+  const told = overviewKnows.running.find(
+    (w) => w.conversation === t.id && !w.command && w.waiting === (is.state === "waiting"),
+  )?.what;
+  const open = theOpenQuestion(talks.get(t.id));
   const line = {
-    finished: () => `Finished ${howLongAgo(t.finished)}`,
-    waiting: () => is.waiting.what,
-    working: () => is.working.what,
-    paused: () => "Paused: nothing of it runs on its own",
-    stopped: () => is.stopped.stopped || `Its routine (${is.stopped.at}) is switched off`,
+    finished: () => `Finished ${howLongAgo(talks.get(t.id)?.finished ?? t.finished)}`,
+    waiting: () => told || `Needs you: ${(open?.kind === "asking" ? open.text : open?.what) || "a question"}`,
+    working: () => told || "Running now",
+    paused: () =>
+      is.off ? `Its routine (${is.off.at}) is paused` : "Paused: nothing of it runs on its own",
+    stopped: () => is.stopped.stopped || "Stopped",
     scheduled: () =>
       is.next ? `Next: ${whenNext(is.next.due)}, ${is.next.what}` : `Watching ${is.watch.at}`,
     idle: () => (t.spoke ? `Last spoke ${howLongAgo(t.spoke)}` : "Not asked anything yet"),
@@ -7319,25 +7472,28 @@ function whenNext(at) {
 /** Every task, grouped and ordered the way the controls say. */
 function drawOverview() {
   const show = el.overviewShow.value || "all";
+  const going = goingNow();
+  nowDrawnAt = statesAt(going);
   const everyone = tasksNow
     .filter((t) => agents.has(t.agent))
     .filter(
       (t) =>
         t.said ||
+        going.some((w) => w.conversation === t.id) ||
         overviewKnows.running.some((w) => w.conversation === t.id) ||
-        overviewKnows.standing.some((s) => s.conversation === t.id),
+        standingNow.some((s) => s.conversation === t.id),
     )
     .filter((t) => !overviewFound || overviewFound.ids.has(t.id))
     .filter((t) =>
       shown(
         show,
-        whatItIsDoing(t)[0],
-        overviewKnows.standing.some((s) => s.conversation === t.id),
+        whatItIsDoing(t, going)[0],
+        standingNow.some((s) => s.conversation === t.id),
       ),
     );
   for (const t of everyone) t.who = agents.get(t.agent)?.name || "";
   const byPriority = el.overviewOrder.value === "priority";
-  const doing = new Map(everyone.map((t) => [t.id, whatItIsDoing(t)]));
+  const doing = new Map(everyone.map((t) => [t.id, whatItIsDoing(t, going)]));
 
   // Each group with what it is, when that is a state: its panel says so in
   // colour as well as in words. Or each teammate's tasks together.
@@ -7364,7 +7520,11 @@ function drawOverview() {
       head.append(note("span", label, "label"), count);
       const tiles = document.createElement("div");
       tiles.className = "jobs";
-      tiles.append(...inOrder(list, byPriority).map((t) => aTask(t, doing.get(t.id))));
+      // What is next, soonest first: it is the one order a list of what is
+      // coming up can have.
+      const due = (t) => whereItStands(t.id, t.agent, going).next?.due ?? Infinity;
+      const ordered = state === "scheduled" ? [...list].sort((x, y) => due(x) - due(y)) : inOrder(list, byPriority);
+      tiles.append(...ordered.map((t) => aTask(t, doing.get(t.id))));
       group.append(head, tiles);
       return group;
     });
@@ -7525,16 +7685,22 @@ async function drawAway() {
   open.append(note("h2", "Open now", ""));
   // Tasks, each with its teammate: two of one teammate's tasks can be in two
   // different states, and it is the task somebody goes to look at.
+  const going = goingNow();
   const byState = (state) =>
     tasksNow
-      .filter((t) => agents.has(t.agent) && whatItIsDoing(t)[0] === state)
+      .filter((t) => agents.has(t.agent) && whatItIsDoing(t, going)[0] === state)
       .map((t) => `${titleOf(t)} (${agents.get(t.agent).name})`);
+  // A command left running is not where its task stands: the turn that
+  // started it is over, and the task can be asked something else. It is still
+  // running, though, and only the app's list knows it.
+  const commands = overviewKnows.running.filter((w) => w.command).map((w) => `${w.what} (${w.who})`);
   const said = [
-    ["Waiting on you", byState("waiting")],
-    ["Working", byState("working")],
+    ["Needs you", byState("waiting")],
+    ["Running now", byState("working")],
     ["Stopped", byState("stopped")],
+    ["Commands still running", commands],
   ].filter(([, names]) => names.length);
-  if (!said.length) open.append(note("p", "Nothing is waiting on you, working, or stopped.", ""));
+  if (!said.length) open.append(note("p", "Nothing needs you, is running, or is stopped.", ""));
   for (const [label, names] of said) {
     open.append(note("p", `${label}: ${names.join("; ")}`, ""));
   }
