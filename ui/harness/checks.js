@@ -5322,6 +5322,11 @@ export async function everythingThatRunsOnItsOwn() {
   [...again.querySelectorAll("button")].find((b) => b.textContent === "Open")?.click();
   await settle(700);
   check("and Open goes to its conversation", panel.hidden && document.getElementById("talks").value === "talk-2", `hidden=${panel.hidden}, showing ${document.getElementById("talks").value}`);
+  // Put back as it was: the groups after this one expect that routine live,
+  // and the stand-in switches it off for real, as the app does.
+  await window.__TAURI__.core.invoke("routine_off", { id: "talk-2", off: false });
+  tell("repeats", { conversation: "talk-2", repeats: true });
+  await settle(150);
   return found;
 }
 
@@ -6257,6 +6262,10 @@ export async function whatRunsOnItsOwnStandsOut() {
   const found = [];
   const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  // From Bitcoin Desk's daily routine live, whatever an earlier group left.
+  await window.__TAURI__.core.invoke("routine_off", { id: "talk-2", off: false });
+  tell("repeats", { conversation: "talk-2", repeats: true });
+  await wait(150);
   const list = document.getElementById("threads");
   const rowOf = (agent) => list.querySelector(`li[data-agent="${agent}"]`);
   const badgeOf = (agent) => rowOf(agent)?.querySelector(".on-its-own");
@@ -6359,5 +6368,152 @@ export async function whatRunsOnItsOwnStandsOut() {
       reopened && !reopened.classList.contains("idle") && reopened.dataset.shows === "repeat",
     reopened ? `${reopened.className} ${reopened.dataset.shows}` : "no badge",
   );
+  return found;
+}
+
+/**
+ * A task says what it is, at its top.
+ *
+ * Finding out what a task did, when it would run and whether it was running
+ * meant reading back through it, or opening Repeat; a new task was in three
+ * menus; and a message sent while it worked waited without a word.
+ */
+export async function aTaskSaysWhatItIs() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  // From Bitcoin Desk's daily routine live, whatever an earlier group left.
+  await window.__TAURI__.core.invoke("routine_off", { id: "talk-2", off: false });
+  tell("repeats", { conversation: "talk-2", repeats: true });
+  await wait(150);
+  const card = document.getElementById("task-card");
+  const chip = () => card.querySelector(".state");
+  const buttons = () => [...card.querySelectorAll(".actions button")];
+  const button = (label) => buttons().find((b) => b.textContent === label);
+  const fact = (label) => {
+    const at = [...card.querySelectorAll("dt")].findIndex((d) => d.textContent === label);
+    return at < 0 ? "" : card.querySelectorAll("dd")[at].textContent;
+  };
+  ["talk-1", "talk-2", "talk-3", "talk-4", "talk-overnight", "talk-cut-off"].forEach((id, n) =>
+    tell("happened", { conversation: id, seq: 9960 + n, kind: "done" }),
+  );
+  await wait(200);
+
+  await openTalk("talk-2");
+  check(
+    "a task says at its top where it stands: due to run, and when",
+    !card.hidden && chip()?.dataset.kind === "scheduled" && /^Next /.test(chip()?.textContent || ""),
+    `${card.hidden ? "hidden" : ""} ${chip()?.dataset.kind} "${chip()?.textContent}"`,
+  );
+  check("what it does", fact("Does") === "What moved overnight", fact("Does"));
+  check("when it repeats, and next", /daily 07:00/.test(fact("Repeats")) && /next /.test(fact("Repeats")), fact("Repeats"));
+  check("what came of it last, with when", /\d:\d\d/.test(fact("Last")) || fact("Last") === "Nothing yet", fact("Last"));
+  check("with Pause and Run now on it", button("Pause") && button("Run now"), buttons().map((b) => b.textContent).join(", "));
+
+  button("Pause").click();
+  await wait(300);
+  check(
+    "Pause holds its schedule, and the task says it is paused",
+    asked.some((a) => a.name === "routine_off" && a.args?.id === "talk-2" && a.args?.off === true) &&
+      chip()?.dataset.kind === "paused" && button("Resume"),
+    `${chip()?.textContent} / ${buttons().map((b) => b.textContent).join(", ")}`,
+  );
+  button("Resume").click();
+  await wait(300);
+  check(
+    "and Resume starts it again",
+    asked.some((a) => a.name === "routine_off" && a.args?.id === "talk-2" && a.args?.off === false) &&
+      chip()?.dataset.kind === "scheduled",
+    chip()?.textContent,
+  );
+  const before = asked.length;
+  button("Run now").click();
+  await wait(250);
+  check(
+    "Run now does it now, in this task",
+    asked.slice(before).some((a) => a.name === "say" && a.args?.id === "talk-2" && a.args?.text === "What moved overnight"),
+    JSON.stringify(asked.slice(before).map((a) => a.name)),
+  );
+
+  // Working: said on the card and above the box, with the way to stop it.
+  tell("happened", { conversation: "talk-2", kind: "said", settled: false, text: "Looking at the overnight moves" });
+  await wait(200);
+  const note = document.getElementById("running-note");
+  check(
+    "while it works, it says it is running, with Stop",
+    chip()?.dataset.kind === "running" && /Running now/.test(chip()?.textContent || "") && button("Stop"),
+    `${chip()?.dataset.kind} / ${buttons().map((b) => b.textContent).join(", ")}`,
+  );
+  check(
+    "and above the box, that what is sent waits for the run to end",
+    !note.hidden && /read when this run ends/.test(note.textContent),
+    `hidden=${note.hidden} "${note.textContent.trim().replace(/\s+/g, " ")}"`,
+  );
+  const stopping = asked.length;
+  document.getElementById("running-stop").click();
+  await wait(300);
+  check(
+    "its Stop stops the run, and the note goes",
+    asked.slice(stopping).some((a) => a.name === "stop" && a.args?.id === "talk-2") && note.hidden && chip()?.dataset.kind !== "running",
+    `${JSON.stringify(asked.slice(stopping).map((a) => a.name))} hidden=${note.hidden} ${chip()?.dataset.kind}`,
+  );
+
+  // Idle, done, and waiting on you.
+  await openTalk("talk-overnight");
+  check("a task with nothing of its own to run, not done, is idle until asked", chip()?.dataset.kind === "idle" && fact("Repeats") === "Only when you ask", `${chip()?.dataset.kind} / ${fact("Repeats")}`);
+  document.getElementById("task-done").click();
+  await wait(250);
+  check("marked finished, it says done", chip()?.dataset.kind === "done", `${chip()?.dataset.kind} "${chip()?.textContent}"`);
+  document.getElementById("task-done").click();
+  await wait(250);
+  tell("happened", {
+    conversation: "talk-overnight",
+    seq: 9970,
+    kind: "needs_you",
+    asking: "Delete last night's notes",
+    detail: "rm notes-old.md",
+    tool: "Bash",
+    call: "card-q",
+    step: "card-q",
+    can_remember: false,
+    rule: "",
+    allows: "",
+  });
+  await wait(250);
+  check("a task stopped on a question says it needs you", chip()?.dataset.kind === "needs-you", `${chip()?.dataset.kind} "${chip()?.textContent}"`);
+
+  // Another task, in plain sight.
+  const newTask = document.getElementById("new-task");
+  check("a teammate's header has New task in plain sight", newTask && !newTask.hidden && newTask.offsetWidth > 0, newTask ? `hidden=${newTask.hidden} width=${newTask.offsetWidth}` : "missing");
+  const starting = asked.length;
+  newTask.click();
+  await wait(300);
+  check(
+    "and it starts a new task for that teammate and opens it",
+    asked.slice(starting).some((a) => a.name === "start_conversation" && a.args?.agent === "agent-bitcoin") &&
+      (document.getElementById("talks").selectedOptions[0]?.textContent || "").startsWith("New task") &&
+      chip()?.dataset.kind === "idle" && fact("Does") === "Nothing asked yet",
+    `${document.getElementById("talks").selectedOptions[0]?.textContent} ${chip()?.dataset.kind} ${fact("Does")}`,
+  );
+
+  // A second schedule the app set up as a task of its own is there at once.
+  FIXTURE.conversations["agent-bitcoin"].push({
+    id: "talk-overdue", agent: "agent-bitcoin", name: "The overdue list", opened: false,
+    runs_at: "weekly mon 09:00", runs_what: "The overdue list", routine_off: false,
+  });
+  FIXTURE.standing.push({
+    conversation: "talk-overdue", agent: "agent-bitcoin", who: "Bitcoin Desk", name: "The overdue list",
+    kind: "routine", at: "weekly mon 09:00", what: "The overdue list", due: Date.now() + 3 * 86400000,
+    off: false, stopped: null, paused: false,
+  });
+  tell("task_made", { conversation: "talk-overdue", agent: "agent-bitcoin", name: "The overdue list" });
+  await wait(400);
+  check(
+    "a task the app made for a second schedule is in the task menu at once, with its clock",
+    [...document.getElementById("talks").options].some((o) => o.textContent.startsWith("The overdue list") && o.textContent.includes("⏱")),
+    [...document.getElementById("talks").options].map((o) => o.textContent).join(" | "),
+  );
+  FIXTURE.conversations["agent-bitcoin"] = FIXTURE.conversations["agent-bitcoin"].filter((c) => c.id !== "talk-overdue");
+  FIXTURE.standing = FIXTURE.standing.filter((s) => s.conversation !== "talk-overdue");
   return found;
 }

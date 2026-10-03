@@ -331,6 +331,12 @@
         <button id="hide" type="button" title="Out of the way, still running">Hide</button>
         <button id="pause" type="button" title="Nothing runs on its own until you start it again">Pause</button>
         <select id="talks" title="Which task"></select>
+        <!--
+          Another task for this teammate, in plain sight. It was an item in the
+          right-click menu, in Cmd-K and at the bottom of the task menu, and
+          somebody using the app every day could not find it.
+        -->
+        <button id="new-task" type="button" title="Start another task for this teammate, beside the ones it has" hidden>+ New task</button>
         <button id="task-done" type="button" aria-pressed="false" hidden>Mark finished</button>
         <!-- Who is in the room, when this is one. Empty and hidden otherwise. -->
         <button id="members" type="button" hidden title="Change who is in this room"></button>
@@ -353,6 +359,13 @@
       -->
       <p id="words-go" hidden></p>
       <p id="purpose" hidden></p>
+
+      <!--
+        The task on screen: where it stands, what it does, when it repeats and
+        what came of it last, with what can be done to it. Finding that out
+        meant reading back through the whole conversation, or opening Repeat.
+      -->
+      <section id="task-card" aria-label="This task" hidden></section>
 
       <!--
         What the thread can reach, opened rather than always on screen: finding
@@ -664,6 +677,15 @@
         have it. Said here with the one thing that fixes it, rather than left
         to the teammate, which can only tell you to do something.
       -->
+      <!--
+        The task on screen is working, so what is sent now waits for the run to
+        end: said, with the way to stop the run, rather than found out.
+      -->
+      <div id="running-note" role="status" hidden>
+        <span class="what">Running now. What you send is read when this run ends.</span>
+        <button id="running-stop" type="button">Stop this run</button>
+      </div>
+
       <div id="key-note" role="status" hidden>
         <p class="what">A teammate's SSH was refused your key: it isn't loaded in the key agent.</p>
         <p class="fix" id="key-note-says">

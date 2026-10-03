@@ -183,9 +183,12 @@ pub fn declarations() -> Vec<Value> {
                      rather than telling them where to set it up. It can run as often as \
                      `{floor}`. A command left to loop and sleep in the background is never a \
                      substitute: it is not under Repeat, nobody can see or stop it there, and \
-                     none of its runs is written down. It replaces whatever this conversation \
-                     was already set to do, and it appears under Repeat, where they can see it \
-                     and stop it. A schedule has no end of its own: for \"every hour until 9 \
+                     none of its runs is written down. A conversation holds one schedule. If \
+                     it already repeats something else, say which they meant: replace, when \
+                     they asked to change that schedule, or new_task, when this is another job \
+                     to run alongside it, which then gets a task of its own; when it is not \
+                     clear which, ask them. It appears under Repeat, where they can see it and \
+                     stop it. A schedule has no end of its own: for \"every hour until 9 \
                      tomorrow\", say in what it does each time that the run which finishes the \
                      job calls stop_repeating, and that run switches it off. Say nothing about \
                      it having been set: they will be told.",
@@ -208,6 +211,19 @@ pub fn declarations() -> Vec<Value> {
                             "description":
                                 "What to do each time, written in full as you would say it to \
                                  yourself tomorrow. It arrives with no other context."
+                        },
+                        "replace": {
+                            "type": "boolean",
+                            "description":
+                                "True when they asked to change the schedule this conversation \
+                                 already has. It replaces it."
+                        },
+                        "new_task": {
+                            "type": "boolean",
+                            "description":
+                                "True when this is another job to run alongside the one this \
+                                 conversation already repeats. It gets a task of its own, so \
+                                 both run and both can be seen."
                         }
                     },
                     "required": ["when", "what"]

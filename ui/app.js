@@ -239,6 +239,10 @@ const el = {
   overviewFind: document.getElementById("overview-find"),
   overviewShow: document.getElementById("overview-show"),
   taskDone: document.getElementById("task-done"),
+  newTask: document.getElementById("new-task"),
+  taskCard: document.getElementById("task-card"),
+  runningNote: document.getElementById("running-note"),
+  runningStop: document.getElementById("running-stop"),
   errandModelSays: document.getElementById("errand-model-says"),
   reachableList: document.getElementById("reachable-list"),
   atLogin: document.getElementById("at-login"),
@@ -1064,8 +1068,199 @@ function drawTalks() {
   room.textContent = "New room…";
   el.talks.append(room);
   el.talks.hidden = !a;
+  el.newTask.hidden = !a;
   drawTaskDone();
+  drawTaskCard();
+  drawRunningNote();
 }
+
+/**
+ * Stop what a conversation is doing.
+ *
+ * Nothing else will say it stopped. A turn ends in the window when an ending
+ * arrives from the engine, and an engine that was killed never sends one, so
+ * without this the conversation goes on saying "Working" and offering to stop
+ * something that stopped minutes ago.
+ */
+async function stopTheRun(id) {
+  if (!id) return;
+  await invoke("stop", { id });
+  itHasStopped(talks.get(id));
+  if (showing === id) drawMessages();
+  drawThreads();
+  drawTalks();
+}
+
+/** Whether this one task is waiting on somebody: a question, or a handover. */
+function waitingHere(t) {
+  return t.messages.some(
+    (m) =>
+      !m.answered &&
+      (m.kind === "asking" || (m.kind === "over_to_you" && stillWaiting.has(m.handover))),
+  );
+}
+
+/**
+ * Where a task stands, in one word or two, the same wherever it is said.
+ *
+ * Working, waiting on somebody, due to run on its own, paused, done, or none of
+ * those: idle until asked. Each used to be said by a different control, the
+ * Pause button, the tick on the menu, the switch under Repeat, the line under
+ * the name, and none of them said all of it.
+ */
+function taskState(t) {
+  const mine = standingNow.filter((s) => s.conversation === t.id);
+  const routine = mine.find((s) => s.kind === "routine");
+  const watch = mine.find((s) => s.kind === "watch");
+  const routineLive = routine && !routine.off && !routine.paused;
+  const watchLive = watch && !watch.stopped && !watch.paused;
+  if (t.working) return { kind: "running", says: "Running now", routine, watch };
+  if (waitingHere(t)) return { kind: "needs-you", says: "Needs you", routine, watch };
+  if (routineLive) {
+    return { kind: "scheduled", says: routine.due ? `Next ${shortlyWhen(routine.due)}` : "Scheduled", routine, watch };
+  }
+  if (watchLive) return { kind: "scheduled", says: "Watching", routine, watch };
+  if (t.finished) return { kind: "done", says: "Done", routine, watch };
+  if (routine || watch) return { kind: "paused", says: "Paused", routine, watch };
+  return { kind: "idle", says: "Idle", routine, watch };
+}
+
+/**
+ * When something next runs, short enough for a chip: the time today, the day
+ * and the hour this week, the date after that.
+ */
+function shortlyWhen(due) {
+  const at = new Date(due);
+  const hour = at.getMinutes()
+    ? at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : at.toLocaleTimeString([], { hour: "numeric" });
+  const midnight = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((midnight(at) - midnight(new Date())) / 86_400_000);
+  if (days <= 0) return hour;
+  if (days < 7) return `${at.toLocaleDateString([], { weekday: "short" })} ${hour}`;
+  return at.toLocaleDateString([], { day: "numeric", month: "short" });
+}
+
+/** The marks a state is said with, at the size of a chip. */
+const STATE_MARKS = {
+  running: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.2v9.6L13 8z" fill="currentColor"/></svg>',
+  "needs-you": '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 4.6v4.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="8" cy="11.3" r="1.1" fill="currentColor"/></svg>',
+  scheduled: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 4.8V8l2.4 1.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  paused: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 3.5v9M10.5 3.5v9" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>',
+  done: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  idle: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>',
+};
+
+/** A task's state as a chip. */
+function stateChip(state) {
+  const chip = document.createElement("span");
+  chip.className = "state";
+  chip.dataset.kind = state.kind;
+  chip.innerHTML = STATE_MARKS[state.kind];
+  chip.append(state.says);
+  return chip;
+}
+
+/**
+ * What the task on screen is, at the top of it: where it stands, what it
+ * does, when it repeats and what came of it last, with the buttons that act
+ * on it. Finding that out meant reading back through the conversation, or
+ * opening Repeat, which only knew half of it.
+ */
+function drawTaskCard() {
+  const t = talking();
+  if (!t || !whose()) {
+    el.taskCard.hidden = true;
+    el.taskCard.replaceChildren();
+    return;
+  }
+  const state = taskState(t);
+  const { routine, watch } = state;
+  const task = tasksNow.find((x) => x.id === t.id) || { name: t.name, first: "" };
+
+  const head = document.createElement("div");
+  head.className = "head";
+  const name = note("span", titleOf(task), "name");
+  name.title = titleOf(task);
+  const actions = document.createElement("span");
+  actions.className = "actions";
+  const button = (label, does, title) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    if (title) b.title = title;
+    b.onclick = does;
+    return b;
+  };
+  if (state.kind === "running") {
+    actions.append(button("Stop", () => stopTheRun(t.id), "Stop what it is doing now"));
+  }
+  // Its own schedule's switch. Not while its teammate is paused: that is the
+  // teammate's Pause, in the header, and this switch would only turn the
+  // routine off underneath it.
+  if (routine && (routine.off || !routine.paused)) {
+    actions.append(
+      button(
+        routine.off ? "Resume" : "Pause",
+        async () => {
+          await invoke("routine_off", { id: t.id, off: !routine.off });
+          t.repeats = routine.off;
+          drawTalks();
+        },
+        routine.off ? "Start its schedule again, counting from now" : "Hold its schedule without losing it",
+      ),
+    );
+  }
+  if ((routine || watch) && state.kind !== "running") {
+    actions.append(
+      button("Run now", () => sayIt((routine || watch).what), "Do it now, without changing when it next runs"),
+    );
+  }
+  head.append(stateChip(state), name, actions);
+
+  const said = (label, words, full) => {
+    const dt = note("dt", label);
+    const dd = note("dd", words);
+    dd.title = full || words;
+    return [dt, dd];
+  };
+  const does = (routine?.what || watch?.what || task.first || "").trim().split("\n")[0] || "Nothing asked yet";
+  const repeats = routine
+    ? `${routine.at}${routine.off ? ", switched off" : routine.paused ? ", its teammate is paused" : routine.due ? `, next ${whenNext(routine.due)}` : ""}`
+    : watch
+      ? `Watches ${watch.at}${watch.stopped ? ", stopped" : ""}`
+      : "Only when you ask";
+  const last = [...t.messages].reverse().find((m) => m.kind === "said" || (m.kind === "ended" && m.failed));
+  const lastWords = last ? `${stamped(last).textContent}: ${last.text.trim().split("\n")[0]}` : "Nothing yet";
+  const facts = document.createElement("dl");
+  facts.append(
+    ...said("Does", does, routine?.what || watch?.what || task.first),
+    ...said("Repeats", repeats),
+    ...said("Last", lastWords, last?.text),
+  );
+  el.taskCard.replaceChildren(head, facts);
+  el.taskCard.dataset.state = state.kind;
+  el.taskCard.hidden = false;
+}
+
+/** Said above the box while the task on screen is working, with a way to stop it. */
+function drawRunningNote() {
+  const t = talking();
+  el.runningNote.hidden = !(t && t.working && whose());
+}
+
+el.newTask.addEventListener("click", () => alsoAsk());
+el.runningStop.addEventListener("click", () => stopTheRun(showing));
+
+// A task made by the app rather than in this window: a second schedule set
+// alongside the one a task already had. Met, so it is in the menu and the
+// list straight away rather than at the next start.
+listen("task_made", async ({ payload }) => {
+  await meet(payload.conversation);
+  await readTasks();
+  await readStanding();
+  drawTalks();
+});
 
 /** The Finished button beside the task menu, for the task on screen. */
 function drawTaskDone() {
@@ -2078,6 +2273,10 @@ function drawMessages({ follow = false } = {}) {
   drawTheTail(t);
   box.scrollTop = following ? box.scrollHeight : keptTop;
   askedForAnAnswer(t);
+  // What the task is and whether it is running go with what it says: sending
+  // something sets it working, and only this is redrawn when it does.
+  drawTaskCard();
+  drawRunningNote();
 }
 
 /**
@@ -2872,6 +3071,12 @@ listen("happened", async ({ payload }) => {
           const a = agents.get(t.agent);
           if (a && payload.conversation === showing) drawMark(a);
           drawThreads();
+          // Running, at the top of the task and above the box, from its
+          // first words rather than its last.
+          if (payload.conversation === showing) {
+            drawTaskCard();
+            drawRunningNote();
+          }
         }
         return;
       }
@@ -5069,18 +5274,7 @@ function whatCouldBeDone() {
   add(
     "Stop what it is doing",
     "",
-    async () => {
-      const stopping = showing;
-      await invoke("stop", { id: stopping });
-      // Nothing else will say it stopped. A turn ends in the window when an
-      // ending arrives from the engine, and an engine that was killed never
-      // sends one, so without this the conversation goes on saying "Working"
-      // and offering to stop something that stopped minutes ago.
-      itHasStopped(talks.get(stopping));
-      if (showing === stopping) drawMessages();
-      drawThreads();
-      drawTalks();
-    },
+    () => stopTheRun(showing),
     !!t?.working,
   );
   return could;
@@ -6793,14 +6987,16 @@ function asTask(c) {
  * one the app made up rather than one somebody chose.
  */
 function titleOf(t) {
-  const madeUp = !t.name || ["First", "New task", "New conversation"].includes(t.name) || /, again$/.test(t.name);
+  const madeUp =
+    !t.name ||
+    ["First", "New task", "New conversation", "Asked by something outside"].includes(t.name) ||
+    /, again$/.test(t.name);
   if (!madeUp) return t.name;
   const first = (t.first || "").trim().split("\n")[0];
   if (!first) return "First task";
   return first.length > 70 ? `${first.slice(0, 69)}…` : first;
 }
 
-/** Read what repeats again, and redraw what shows it if any of it changed. */
 /**
  * Whether an agent has anything that runs by itself, or is running now, said
  * on its mark where a list of forty is skimmed: a badge in the corner, the way
@@ -6864,6 +7060,7 @@ const BADGE_ICONS = {
   running: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.2v9.6L13 8z" fill="currentColor"/></svg>',
 };
 
+/** Read what repeats again, and redraw what shows it if any of it changed. */
 async function readStanding() {
   let now;
   try {
@@ -6877,6 +7074,7 @@ async function readStanding() {
   standingNow = now;
   overviewKnows.standing = standingNow;
   drawThreads();
+  drawTaskCard();
   if (!el.overview.hidden) drawOverview();
 }
 // And now and then regardless, for a watch the app stopped on its own, which

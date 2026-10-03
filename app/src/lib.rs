@@ -3500,6 +3500,7 @@ fn set_it_running(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
             .unwrap_or("")
             .trim()
     };
+    let flag = |k: &str| asked.args.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
     let (when, what) = (said("when"), said("what"));
     if what.is_empty() {
         anyhow::bail!("say what it should do each time, or there is nothing to run");
@@ -3508,17 +3509,83 @@ fn set_it_running(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
     // sentence the model can act on, rather than at seven in the morning by not
     // happening.
     let read = When::read(when)?;
+    let written = read.written();
+
+    let held: State<Held> = app.state();
+    let here = held.store.conversation(&asked.from)?;
+    let already = here
+        .as_ref()
+        .and_then(|c| match (&c.runs_at, &c.runs_what) {
+            (Some(at), Some(was)) if !c.routine_off => Some((at.clone(), was.clone())),
+            _ => None,
+        });
+    let into = match where_a_schedule_goes(
+        already
+            .as_ref()
+            .map(|(at, was)| (at.as_str(), was.as_str())),
+        &written,
+        what,
+        flag("replace"),
+        flag("new_task"),
+    ) {
+        Goes::Here => asked.from.clone(),
+        Goes::AskFirst => {
+            let (at, was) = already.unwrap_or_default();
+            return Ok(format!(
+                "Nothing was changed. This conversation already repeats {at}: {}\n\n\
+                 A conversation holds one schedule. If they asked to change that one, call \
+                 every_day again with replace: true. If this is another job to run alongside \
+                 it, call every_day again with new_task: true, and it gets a task of its own, \
+                 so both run and both can be seen. If you cannot tell which they meant, ask \
+                 them.",
+                in_a_line(&was)
+            ));
+        }
+        Goes::ATaskOfItsOwn => {
+            let agent = here
+                .as_ref()
+                .map(|c| c.agent.clone())
+                .ok_or_else(|| anyhow::anyhow!("there is no such conversation"))?;
+            let id = uuid::Uuid::new_v4().to_string();
+            let name = a_name_for(what);
+            held.store.begin_conversation(&id, &agent, &name)?;
+            let from = here.as_ref().map(|c| c.name.clone()).unwrap_or_default();
+            let note = format!(
+                "Set up from \u{201c}{from}\u{201d}, which already repeats something else, so \
+                 that both run and both can be seen. This one runs {written}."
+            );
+            if let Ok(line) = held.store.the_app_says(&id, "note", &note) {
+                let _ = app.emit(
+                    "noted",
+                    Noted {
+                        conversation: id.clone(),
+                        seq: line.seq,
+                        kind: "note".to_string(),
+                        text: line.text,
+                        said_by: None,
+                    },
+                );
+            }
+            let _ = app.emit(
+                "task_made",
+                TaskMade {
+                    conversation: id.clone(),
+                    agent,
+                    name,
+                },
+            );
+            id
+        }
+    };
 
     // Stored the way it was read, so what Repeat shows is what runs. And
     // switched on: a schedule an agent was asked to set is one that runs,
     // even in a conversation whose last one it switched off a moment ago.
-    let held: State<Held> = app.state();
-    held.store
-        .runs_from_now(&asked.from, &read.written(), what)?;
+    held.store.runs_from_now(&into, &written, what)?;
     let _ = app.emit(
         "repeats",
         Repeats {
-            conversation: asked.from.clone(),
+            conversation: into.clone(),
             repeats: true,
         },
     );
@@ -3527,12 +3594,92 @@ fn set_it_running(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
         .next_after(chrono::Local::now())
         .map(|at| at.format("%A %-d %B at %H:%M").to_string())
         .unwrap_or_else(|| "at its next turn".to_string());
-    Ok(format!(
-        "Set. This conversation now runs {}, next on {next}, and says: {what}\n\n\
-         It is under Repeat, where it can be changed or stopped. {}",
-        read.written(),
-        routine::WHAT_KEEPS_IT_RUNNING
-    ))
+    Ok(match into == asked.from {
+        true => format!(
+            "Set. This conversation now runs {written}, next on {next}, and says: {what}\n\n\
+             It is under Repeat, where it can be changed or stopped. {}",
+            routine::WHAT_KEEPS_IT_RUNNING
+        ),
+        false => format!(
+            "Set, as a task of its own, \u{201c}{}\u{201d}, beside this one, which still repeats \
+             what it did. It runs {written}, next on {next}, and says: {what}\n\n\
+             Both are under Repeat, each in its own task. {}",
+            a_name_for(what),
+            routine::WHAT_KEEPS_IT_RUNNING
+        ),
+    })
+}
+
+/// Where a schedule an agent was asked to set goes.
+#[derive(Debug, PartialEq, Eq)]
+enum Goes {
+    /// Into the conversation that asked.
+    Here,
+    /// Into a new task beside it, so both run and both can be seen.
+    ATaskOfItsOwn,
+    /// Nowhere yet: the conversation already repeats something else, and
+    /// which was meant has to be said.
+    AskFirst,
+}
+
+/// The same, from what is there and what was asked.
+///
+/// A conversation holds one schedule, and setting another used to replace it
+/// without a word: somebody who asked a task that already ran every Friday to
+/// also send a list every Monday lost the Friday run, and nothing said so.
+/// Now the replacing is only on the word, a second job alongside gets a task
+/// of its own, and without either the model is told to say which.
+fn where_a_schedule_goes(
+    already: Option<(&str, &str)>,
+    when: &str,
+    what: &str,
+    replace: bool,
+    new_task: bool,
+) -> Goes {
+    match already {
+        None => Goes::Here,
+        Some((at, was)) if at == when && was.trim() == what.trim() => Goes::Here,
+        Some(_) if replace => Goes::Here,
+        Some(_) if new_task => Goes::ATaskOfItsOwn,
+        Some(_) => Goes::AskFirst,
+    }
+}
+
+/// A task made by the app rather than in the window, so the window can show it.
+#[derive(Clone, Serialize)]
+struct TaskMade {
+    conversation: String,
+    agent: String,
+    name: String,
+}
+
+/// What a task made for a schedule is called: what it does, cut to something
+/// a menu can show, at a word.
+fn a_name_for(what: &str) -> String {
+    let first = what
+        .split(['\n', '.', ':', ';'])
+        .next()
+        .unwrap_or(what)
+        .split(" (")
+        .next()
+        .unwrap_or(what)
+        .trim();
+    const ROOM: usize = 44;
+    if first.chars().count() <= ROOM {
+        return first.to_string();
+    }
+    let cut: String = first.chars().take(ROOM).collect();
+    let at_a_word = cut.rsplit_once(' ').map(|(head, _)| head).unwrap_or(&cut);
+    format!("{}\u{2026}", at_a_word.trim_end_matches([',', ' ']))
+}
+
+/// Something long, on one line and short enough to quote back.
+fn in_a_line(said: &str) -> String {
+    let one = said.split_whitespace().collect::<Vec<_>>().join(" ");
+    match one.chars().count() > 160 {
+        true => format!("{}\u{2026}", one.chars().take(159).collect::<String>()),
+        false => one,
+    }
 }
 
 /// A schedule set or switched off from inside a conversation, so the clock
@@ -8649,6 +8796,66 @@ mod tests {
             model_for(None, claude, true, Some(this_mac.clone())),
             Ok(this_mac)
         );
+    }
+
+    #[test]
+    fn a_second_schedule_never_replaces_the_first_without_being_told_to() {
+        // A task that ran every Friday, asked to also send a list every
+        // Monday, lost the Friday run without a word.
+        let friday = Some(("weekly fri 15:00", "The weekly tally"));
+        assert_eq!(
+            where_a_schedule_goes(friday, "weekly mon 09:00", "The overdue list", false, false),
+            Goes::AskFirst
+        );
+        assert_eq!(
+            where_a_schedule_goes(friday, "weekly mon 09:00", "The overdue list", false, true),
+            Goes::ATaskOfItsOwn
+        );
+        assert_eq!(
+            where_a_schedule_goes(friday, "weekly mon 09:00", "The weekly tally", true, false),
+            Goes::Here
+        );
+        // The same schedule again, or nothing there yet, or one switched off
+        // (which is never handed in as `already`), go where they were asked.
+        assert_eq!(
+            where_a_schedule_goes(
+                friday,
+                "weekly fri 15:00",
+                " The weekly tally ",
+                false,
+                false
+            ),
+            Goes::Here
+        );
+        assert_eq!(
+            where_a_schedule_goes(None, "every 1h", "Check the disk", false, false),
+            Goes::Here
+        );
+        assert_eq!(
+            where_a_schedule_goes(None, "every 1h", "Check the disk", false, true),
+            Goes::Here
+        );
+    }
+
+    #[test]
+    fn a_task_made_for_a_schedule_is_named_by_what_it_does() {
+        assert_eq!(
+            a_name_for("The overdue list. Send it to me."),
+            "The overdue list"
+        );
+        assert_eq!(
+            a_name_for("Hourly disk check on the studio over SSH (4-check window, then stop)"),
+            "Hourly disk check on the studio over SSH"
+        );
+        let long = a_name_for(
+            "Count every payment that came in this week and everyone who went quiet and write it up",
+        );
+        assert!(
+            long.ends_with('\u{2026}') && long.chars().count() <= 45,
+            "{long}"
+        );
+        assert!(!long.contains("  "), "{long}");
+        assert_eq!(in_a_line("one\n  two   three"), "one two three");
     }
 
     #[test]

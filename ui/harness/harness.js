@@ -675,8 +675,13 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
                   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
                 );
           // A routine switched off rather than thrown away, and what it did.
+          // Switched on the routine and in the list of what repeats, as the
+          // app keeps the one switch both read.
           case "routine_off":
             routineOff = !!args.off;
+            for (const one of fixture.standing || []) {
+              if (one.conversation === args.id && one.kind === "routine") one.off = !!args.off;
+            }
             return Promise.resolve(null);
           case "export_conversation":
             return Promise.resolve("/Users/you/Desktop/First.md");
