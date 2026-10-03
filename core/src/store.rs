@@ -1368,6 +1368,30 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
     }
 
+    /// What has not been read, task by task: the same lines as `what_is_new`,
+    /// by the conversation they are in rather than by agent, so the list down
+    /// the side can mark the one task with something new in it. An agent's
+    /// count said that one of its tasks had something; not which.
+    pub fn what_is_new_in_each_task(&self) -> Result<HashMap<String, Fresh>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT c.id, count(*), max(l.at)
+               FROM lines l JOIN conversations c ON c.id = l.conversation
+              WHERE l.seq > c.seen AND l.kind <> 'mine'
+              GROUP BY c.id",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                Fresh {
+                    lines: r.get(1)?,
+                    at: r.get(2)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
+
     /// Say that everything in this conversation has now been seen.
     ///
     /// Marked from the last line there is rather than from the clock, and never
@@ -5167,6 +5191,42 @@ mod tests {
         s.the_app_says_about("morning", "said", "Silver moved too.", "")
             .unwrap();
         assert_eq!(s.what_is_new().unwrap()["morning"].lines, 1);
+    }
+
+    #[test]
+    fn what_is_new_is_said_of_the_task_it_is_in_and_reading_one_task_leaves_the_other() {
+        // A teammate with two tasks, an answer in each. Its count said that
+        // something was new; the list down the side has to say which task.
+        let s = Store::in_memory().unwrap();
+        s.make_sure_it_exists("desk", NOT_YET_NAMED, Path::new("/tmp/desk"))
+            .unwrap();
+        s.begin_conversation("weekly", "desk", "Weekly").unwrap();
+        s.the_app_says_about("desk", "said", "Prices are flat.", "")
+            .unwrap();
+        s.the_app_says_about("weekly", "said", "The tally is done.", "")
+            .unwrap();
+        s.the_app_says_about("weekly", "said", "Two invoices are late.", "")
+            .unwrap();
+
+        let each = s.what_is_new_in_each_task().unwrap();
+        assert_eq!(each.get("desk").map(|f| f.lines), Some(1), "{each:?}");
+        assert_eq!(each.get("weekly").map(|f| f.lines), Some(2), "{each:?}");
+        assert_eq!(s.what_is_new().unwrap()["desk"].lines, 3);
+
+        // Reading one is reading that one. The teammate still has something
+        // new, in the task nobody opened.
+        s.seen("weekly").unwrap();
+        let each = s.what_is_new_in_each_task().unwrap();
+        assert!(
+            !each.contains_key("weekly"),
+            "reading it did not clear it: {each:?}"
+        );
+        assert_eq!(each.get("desk").map(|f| f.lines), Some(1), "{each:?}");
+        assert_eq!(s.what_is_new().unwrap()["desk"].lines, 1);
+
+        // Somebody's own words are never new, in a task as on a teammate.
+        s.asked("weekly", "And the one from March?").unwrap();
+        assert!(!s.what_is_new_in_each_task().unwrap().contains_key("weekly"));
     }
 
     #[test]

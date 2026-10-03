@@ -595,15 +595,53 @@ function busy(agent) {
  */
 let fresh = new Map();
 
+/**
+ * The same, by task: which of a teammate's tasks the new lines are in, for the
+ * dot on each task down the side. A teammate's count said one of its tasks had
+ * something; finding which meant opening them in turn.
+ */
+let freshTasks = new Map();
+
 async function whatIsNew() {
   try {
-    fresh = new Map(Object.entries(await invoke("what_is_new")));
+    const [byTeammate, byTask] = await Promise.all([
+      invoke("what_is_new"),
+      invoke("what_is_new_in_tasks"),
+    ]);
+    fresh = new Map(Object.entries(byTeammate || {}));
+    freshTasks = new Map(Object.entries(byTask || {}));
   } catch {
     // A count that could not be fetched is no count. Saying "3 new" from a
     // stale answer is worse than saying nothing, because somebody clicks it.
     fresh = new Map();
+    freshTasks = new Map();
   }
   drawThreads();
+}
+
+/**
+ * Whether somebody is looking at the task on screen: the window in front,
+ * and not covered by Now or Settings. Only then is something arriving in it
+ * read as it arrives; otherwise it waits, marked, for them to come back.
+ */
+function lookedAt() {
+  return (
+    document.visibilityState === "visible" &&
+    document.hasFocus() &&
+    el.overview.hidden &&
+    el.models.hidden
+  );
+}
+
+/** The dot that says something in it has not been read yet. */
+function unreadDot(lines) {
+  const dot = document.createElement("span");
+  dot.className = "unread";
+  dot.setAttribute("role", "img");
+  const said = `${lines} new, not read yet`;
+  dot.setAttribute("aria-label", said);
+  dot.title = said;
+  return dot;
 }
 
 /**
@@ -618,6 +656,15 @@ async function nowSeen(id) {
   await invoke("seen", { conversation: id }).catch(() => {});
   await whatIsNew();
 }
+
+// Coming back to the window is looking at the task on screen: what arrived in
+// it while somebody was elsewhere is read the moment they are back.
+window.addEventListener("focus", () => {
+  if (showing && lookedAt()) nowSeen(showing);
+});
+document.addEventListener("visibilitychange", () => {
+  if (showing && lookedAt()) nowSeen(showing);
+});
 
 /** How long ago, in the fewest words that are still true. */
 function howLongAgo(at) {
@@ -2288,11 +2335,18 @@ function drawThreads() {
       else if (waitingOn(a.id)) last.classList.add("waiting");
       if (news && !waitingOn(a.id) && !busy(a.id)) last.classList.add("new");
 
-      words.append(name, last);
+      // Something in one of its tasks nobody has read: a dot at the end of the
+      // name's line, in the same place on every row so a list of forty can be
+      // skimmed for it, and outside the name so a long one cannot cut it off.
+      // Whatever else the row says: needing you is no reason to hide that
+      // something new arrived.
+      const top = document.createElement("span");
+      top.className = "top";
+      top.append(name);
+      if (news) top.append(unreadDot(news.lines));
+      words.append(top, last);
       li.append(words);
-      // A mark on the row itself, not only in the line under the name, so a
-      // list of forty can be skimmed rather than read.
-      if (news && !waitingOn(a.id)) li.classList.add("has-new");
+      if (news) li.classList.add("has-new");
       if (a.hidden) li.classList.add("is-hidden");
       return li;
   };
@@ -2372,7 +2426,17 @@ function tasksUnder(a) {
     const mark = document.createElement("span");
     mark.className = "task-mark";
     mark.innerHTML = STATE_MARKS[state.kind];
-    go.append(mark, note("span", name, "task-name"), note("span", sideways(state), "task-when"));
+    // When it next runs, and a dot while something in it has not been read.
+    const end = document.createElement("span");
+    end.className = "task-end";
+    end.append(note("span", sideways(state), "task-when"));
+    const news = freshTasks.get(t.id);
+    if (news) {
+      end.append(unreadDot(news.lines));
+      row.dataset.unread = "true";
+      go.title += `\n${news.lines} new, not read yet`;
+    }
+    go.append(mark, note("span", name, "task-name"), end);
     go.onclick = (e) => {
       e.stopPropagation();
       show(t.id);
@@ -3234,6 +3298,11 @@ listen("noted", async ({ payload }) => {
   t.messages.push(fromStore(payload));
   if (showing === payload.conversation) drawMessages();
   drawThreads();
+  // A line written by the app, not typed, is something to read.
+  if (payload.kind !== "mine") {
+    if (payload.conversation === showing && lookedAt()) nowSeen(showing);
+    else whatIsNew();
+  }
 });
 
 // Somebody is wanted at the keyboard. Its own listener rather than a kind
@@ -3495,8 +3564,11 @@ listen("happened", async ({ payload }) => {
   // asked for again, rather than left at whatever it was when the window last
   // had a reason to ask. Without this, an agent asked from a terminal sat
   // under "Nothing said yet" with its answer on disk.
-  if ((payload.kind === "done" || payload.kind === "failed") && payload.conversation !== showing) {
-    whatIsNew();
+  if (payload.kind === "done" || payload.kind === "failed") {
+    // Watched as it arrived, it has been read. Arriving in the task on screen
+    // while nobody was looking, it waits with a dot like any other.
+    if (payload.conversation === showing && lookedAt()) nowSeen(showing);
+    else whatIsNew();
   }
 });
 

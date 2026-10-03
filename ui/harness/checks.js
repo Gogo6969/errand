@@ -6914,3 +6914,115 @@ export async function theHeaderAndTheCard() {
   await wait(200);
   return found;
 }
+
+/**
+ * Something new in a task, not read yet, is an orange dot down the side: on
+ * the task and on its teammate, until the task is opened.
+ *
+ * The app knew which lines nobody had read and said so only by teammate, in a
+ * line of grey words, with a dot after the name that was never drawn: an
+ * empty inline pseudo-element has no size.
+ */
+export async function anOrangeDotUntilItIsRead() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const stand = window.__TAURI__;
+  const rowOf = (agent) => document.querySelector(`#threads li[data-agent="${agent}"]`);
+  const taskRow = (id) => document.querySelector(`#threads .task[data-task="${id}"]`);
+  const dotOn = (el) => el?.querySelector(".unread") || null;
+  const orange = (() => {
+    const probe = document.createElement("span");
+    probe.style.color = "var(--new)";
+    document.body.append(probe);
+    const seen = getComputedStyle(probe).color;
+    probe.remove();
+    return seen;
+  })();
+
+  // Something new in one task of Bitcoin Desk, with another of its tasks open.
+  await openTalk("talk-2");
+  stand.nowUnreadIn("talk-cut-off", 2);
+  await openTalk("talk-overnight");
+  const teammate = rowOf("agent-bitcoin");
+  check(
+    "the task with something new has a dot",
+    dotOn(taskRow("talk-cut-off")) && taskRow("talk-cut-off")?.dataset.unread === "true",
+    taskRow("talk-cut-off")?.outerHTML.slice(0, 120) || "no row",
+  );
+  check("the ones without do not", !dotOn(taskRow("talk-overnight")) && !dotOn(taskRow("talk-2")), "checked talk-overnight and talk-2");
+  check("and so does its teammate", dotOn(teammate?.querySelector(".top")), teammate?.className);
+  check(
+    "orange, in the colour kept for it",
+    getComputedStyle(dotOn(taskRow("talk-cut-off"))).backgroundColor === orange &&
+      getComputedStyle(dotOn(teammate)).backgroundColor === orange,
+    `${getComputedStyle(dotOn(taskRow("talk-cut-off"))).backgroundColor} / ${orange}`,
+  );
+  check(
+    "saying in words what it means, for whoever cannot see a colour",
+    /2 new, not read yet/.test(dotOn(taskRow("talk-cut-off"))?.getAttribute("aria-label") || ""),
+    dotOn(taskRow("talk-cut-off"))?.getAttribute("aria-label"),
+  );
+  if (beingDrawn()) {
+    const sizeOf = (dot) => dot.getBoundingClientRect();
+    const onTask = sizeOf(dotOn(taskRow("talk-cut-off")));
+    const onTeammate = sizeOf(dotOn(teammate));
+    const row = teammate.getBoundingClientRect();
+    check(
+      "drawn, at a size that can be seen, inside its row",
+      onTask.width >= 7 && onTeammate.width >= 7 && onTeammate.right <= row.right && onTeammate.left > row.left,
+      `task dot ${Math.round(onTask.width)}px, teammate dot ${Math.round(onTeammate.width)}px at ${Math.round(onTeammate.right)} of ${Math.round(row.right)}`,
+    );
+    // In the same place on every teammate's row, so a list can be skimmed.
+    stand.nowUnreadIn("talk-waiting", 1);
+    await openTalk("talk-overnight");
+    const other = dotOn(rowOf("agent-unnamed"));
+    check(
+      "a teammate whose task is not open has one too, lined up with the others",
+      other && Math.abs(other.getBoundingClientRect().right - dotOn(rowOf("agent-bitcoin")).getBoundingClientRect().right) <= 1,
+      other ? `${Math.round(other.getBoundingClientRect().right)} / ${Math.round(dotOn(rowOf("agent-bitcoin")).getBoundingClientRect().right)}` : "no dot",
+    );
+  }
+
+  // Opening the task is reading it.
+  await openTalk("talk-cut-off");
+  await wait(150);
+  check(
+    "opening the task reads it, and its dot goes",
+    asked.some((a) => a.name === "seen" && a.args?.conversation === "talk-cut-off") && !dotOn(taskRow("talk-cut-off")),
+    taskRow("talk-cut-off")?.dataset.unread || "no mark",
+  );
+  check("and its teammate's, with nothing else of its unread", !dotOn(rowOf("agent-bitcoin")), rowOf("agent-bitcoin")?.className);
+
+  // Something arriving in the task on screen: read at once if somebody is
+  // looking, and the moment they come back to the window if not.
+  stand.nowUnreadIn("talk-cut-off", 1);
+  tell("happened", { conversation: "talk-cut-off", seq: 9930, kind: "done" });
+  await wait(250);
+  window.dispatchEvent(new Event("focus"));
+  await wait(250);
+  check(
+    "an answer in the task on screen is read once somebody is looking at the window",
+    !document.hasFocus() || (!dotOn(taskRow("talk-cut-off")) && !dotOn(rowOf("agent-bitcoin"))),
+    document.hasFocus() ? (dotOn(taskRow("talk-cut-off")) ? "still marked" : "read") : "not judged: this window is not in front",
+  );
+
+  // A teammate that needs you still says something new arrived.
+  stand.nowUnreadIn("talk-waiting", 1);
+  tell("happened", {
+    conversation: "talk-waiting", seq: 9931, kind: "needs_you", asking: "Sign in to the shop",
+    detail: "", tool: "Bash", call: "dot-q", step: "dot-q", can_remember: false, rule: "", allows: "",
+  });
+  tell("happened", { conversation: "talk-waiting", seq: 9932, kind: "done" });
+  await wait(250);
+  const waiting = rowOf("agent-unnamed");
+  check(
+    "a teammate that needs you still shows that something new arrived",
+    /Needs you/.test(waiting?.querySelector(".last")?.textContent || "") && dotOn(waiting),
+    `${waiting?.querySelector(".last")?.textContent} ${dotOn(waiting) ? "with a dot" : "no dot"}`,
+  );
+  await openTalk("talk-waiting");
+  await wait(150);
+  check("until it is read", !dotOn(rowOf("agent-unnamed")), rowOf("agent-unnamed")?.className);
+  return found;
+}

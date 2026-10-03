@@ -472,12 +472,17 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
   /** Which connectors are switched on, once anything has switched one. */
   const connected = new Set();
   /**
-   * What each agent has said that nobody has read, which a check clears by
-   * opening the conversation it is in. Mutable, because the behaviour under
-   * test is that it goes away: a fixture answering the same thing twice cannot
-   * tell a mark that clears from one that was never drawn.
+   * What has not been read, task by task, which a check clears by opening the
+   * task it is in. Mutable, because the behaviour under test is that it goes
+   * away: a fixture answering the same thing twice cannot tell a mark that
+   * clears from one that was never drawn. Counted by teammate the way the app
+   * counts it, from the same lines, so the two cannot disagree.
    */
-  const unread = new Map([["agent-bitcoin", { lines: 2, at: Date.now() - 3600000 }]]);
+  const unread = new Map([["talk-2", { lines: 2, at: Date.now() - 3600000 }]]);
+  const ownerOf = (conversation) =>
+    Object.entries((fixture || FIXTURE).conversations).find(([, talks]) =>
+      talks.some((t) => t.id === conversation),
+    )?.[0];
   /** Whether the routine under test has been switched off. */
   let routineOff = false;
   return {
@@ -489,7 +494,12 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
      * whole behaviour under test is that reading clears this.
      */
     nowUnread(agent, lines = 2, at = Date.now() - 3600000) {
-      unread.set(agent, { lines, at });
+      const first = (fixture || FIXTURE).conversations[agent]?.[0]?.id;
+      if (first) unread.set(first, { lines, at });
+    },
+    /** The same for one task, which is what the dot on a task is about. */
+    nowUnreadIn(conversation, lines = 1, at = Date.now()) {
+      unread.set(conversation, { lines, at });
     },
     core: {
       invoke(name, args) {
@@ -634,15 +644,21 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           // the whole behaviour under test is that opening a conversation
           // clears it: a fixture that answers the same thing twice cannot tell
           // a mark that goes away from one that was never drawn.
-          case "what_is_new":
-            return Promise.resolve(Object.fromEntries(unread));
-          case "seen": {
-            const owner = Object.entries(fixture.conversations).find(([, talks]) =>
-              talks.some((t) => t.id === args.conversation),
-            )?.[0];
-            if (owner) unread.delete(owner);
-            return Promise.resolve(null);
+          case "what_is_new": {
+            const byTeammate = {};
+            for (const [conversation, { lines, at }] of unread) {
+              const owner = ownerOf(conversation);
+              if (!owner) continue;
+              const was = byTeammate[owner];
+              byTeammate[owner] = { lines: (was?.lines || 0) + lines, at: Math.max(was?.at || 0, at) };
+            }
+            return Promise.resolve(byTeammate);
           }
+          case "what_is_new_in_tasks":
+            return Promise.resolve(Object.fromEntries(unread));
+          case "seen":
+            unread.delete(args.conversation);
+            return Promise.resolve(null);
           case "forget_conversation":
           case "looking_at":
             return Promise.resolve(null);

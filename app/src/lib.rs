@@ -4259,6 +4259,17 @@ async fn what_is_new(
     held.store.what_is_new().map_err(|e| e.to_string())
 }
 
+/// What has not been read, task by task, for the dot on each task down the
+/// side; `what_is_new` is the same lines counted by teammate.
+#[tauri::command]
+async fn what_is_new_in_tasks(
+    held: State<'_, Held>,
+) -> Result<std::collections::HashMap<String, errand_core::store::Fresh>, String> {
+    held.store
+        .what_is_new_in_each_task()
+        .map_err(|e| e.to_string())
+}
+
 /// Say that a conversation has now been read.
 ///
 /// Separate from opening it. Opening is what the window does to draw a thread,
@@ -8332,6 +8343,7 @@ pub fn run() {
             waiting_on_you,
             connectors,
             what_is_new,
+            what_is_new_in_tasks,
             seen,
             connect,
             seen_what_changed,
