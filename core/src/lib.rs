@@ -28,6 +28,7 @@ pub mod doorway;
 pub mod elsewhere;
 pub mod engine;
 pub mod goal;
+pub mod home;
 pub mod jobs;
 pub mod keeping;
 pub mod keys;

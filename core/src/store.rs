@@ -1152,6 +1152,24 @@ const CHANGES: &[&str] = &[
          shown       TEXT NOT NULL,
          said_at     INTEGER NOT NULL
      );",
+    // What Errand last wrote into each file of a teammate's home, so a file
+    // the person has changed since is told from one that is only out of date.
+    // Last, as every change is.
+    "CREATE TABLE IF NOT EXISTS home_files (
+         agent      TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+         path       TEXT NOT NULL,
+         written    TEXT NOT NULL,
+         written_at INTEGER NOT NULL,
+         PRIMARY KEY (agent, path)
+     );",
+    // A task given to a team rather than to one teammate: the lead's, named
+    // after the team, and the lead told so when the person first says what it
+    // is. Last, as every change is.
+    "CREATE TABLE IF NOT EXISTS team_tasks (
+         conversation TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+         team         TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+         told         INTEGER NOT NULL DEFAULT 0
+     );",
 ];
 
 /// What finishing a task switched off, or reopening it switched back on.
@@ -3549,6 +3567,76 @@ impl Store {
         Ok(())
     }
 
+    /// Say a conversation is a task for a team.
+    pub fn mark_team_task(&self, conversation: &str, team: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT OR REPLACE INTO team_tasks (conversation, team, told) VALUES (?, ?, 0)",
+            params![conversation, team],
+        )?;
+        Ok(())
+    }
+
+    /// The team a conversation is a task for, and whether its lead has been
+    /// told yet. Nothing for any other conversation.
+    pub fn team_task(&self, conversation: &str) -> Result<Option<(Team, bool)>> {
+        let found: Option<(String, bool)> = self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT team, told FROM team_tasks WHERE conversation = ?",
+                [conversation],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)),
+            )
+            .optional()?;
+        let Some((team, told)) = found else {
+            return Ok(None);
+        };
+        Ok(self
+            .teams()?
+            .into_iter()
+            .find(|t| t.id == team)
+            .map(|t| (t, told)))
+    }
+
+    /// The lead of a team task has been told it is the team's.
+    pub fn team_task_told(&self, conversation: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE team_tasks SET told = 1 WHERE conversation = ?",
+            [conversation],
+        )?;
+        Ok(())
+    }
+
+    /// What Errand last wrote into each file of a teammate's home, by path.
+    pub fn home_written(&self, agent: &str) -> Result<HashMap<String, String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare("SELECT path, written FROM home_files WHERE agent = ?")?;
+        let rows = q.query_map([agent], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
+
+    /// Say what was just written into a file of a home.
+    pub fn set_home_written(&self, agent: &str, path: &str, written: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO home_files (agent, path, written, written_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(agent, path) DO UPDATE SET written = ?3, written_at = ?4",
+            params![agent, path, written, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Forget a file of a home that is no more.
+    pub fn forget_home_written(&self, agent: &str, path: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM home_files WHERE agent = ? AND path = ?",
+            params![agent, path],
+        )?;
+        Ok(())
+    }
+
     /// The servers the person allowed, by name, with what each ran then.
     pub fn servers_allowed(&self) -> Result<HashMap<String, String>> {
         let conn = self.conn.lock().unwrap();
@@ -4353,6 +4441,24 @@ mod tests {
         );
         s.stop_allowing_server("mine").unwrap();
         assert!(s.servers_allowed().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_task_given_to_a_team_is_known_as_the_teams_until_the_team_is_gone() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "lead", "/tmp/l");
+        s.make_team("crew", "A-TEAM", Some("lead"), 1).unwrap();
+        s.begin_conversation("task", "lead", "A-TEAM").unwrap();
+        assert!(s.team_task("task").unwrap().is_none());
+        s.mark_team_task("task", "crew").unwrap();
+        let (team, told) = s.team_task("task").unwrap().unwrap();
+        assert_eq!(team.name, "A-TEAM");
+        assert!(!told);
+        s.team_task_told("task").unwrap();
+        assert!(s.team_task("task").unwrap().unwrap().1);
+        // Broken up, the task is the lead's own again.
+        s.break_up_team("crew").unwrap();
+        assert!(s.team_task("task").unwrap().is_none());
     }
 
     #[test]

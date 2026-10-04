@@ -306,7 +306,7 @@ fn profile_keeping_out(
     }
     profile.push_str(&daemons_kept_out(home));
     if let Some(errand) = errand {
-        profile.push_str(&keep_out(errand, inside));
+        profile.push_str(&keep_out(errand, inside, Some(home)));
     }
     profile.push_str(NOTHING_IS_OPENED_FROM_INSIDE);
     profile.push_str(NOTHING_DRIVES_THE_SCREEN);
@@ -699,7 +699,7 @@ pub fn nothing_opens_from_inside() -> &'static str {
 /// After everything that allows, because in a profile the last rule that
 /// matches is the one that holds: a folder allowed under Allowed that happened
 /// to contain these would otherwise open them again.
-fn keep_out(errand: &Path, inside: Inside) -> String {
+fn keep_out(errand: &Path, inside: Inside, working_in: Option<&Path>) -> String {
     // The real path, because the sandbox compares real paths: a place named
     // through a link would be a rule that matches nothing.
     let errand = errand
@@ -737,7 +737,24 @@ fn keep_out(errand: &Path, inside: Inside) -> String {
     for store in &stores {
         never.push(format!("  (literal {})", quoted(store)));
     }
+    // Every teammate's home: what it remembers and how it is told to work,
+    // written out for the person. No teammate writes any, and none reads
+    // another's. Its own it may read, below.
+    never.push(format!(
+        "  (subpath {})",
+        quoted(&errand.join(crate::home::HOMES))
+    ));
+    never.push(format!(
+        "  (subpath {})",
+        quoted(&errand.join(crate::home::INDEX))
+    ));
     let mut kept = format!("\n(deny file-read* file-write*\n{})", never.join("\n"));
+    if let Some(own) = whose_home(&errand, working_in) {
+        kept.push_str(&format!(
+            "\n(allow file-read* (subpath {}))",
+            quoted(&crate::home::of(&errand, &own))
+        ));
+    }
     kept.push_str(&format!(
         "\n(deny network-outbound (subpath {}))",
         quoted(&errand.join("mcp"))
@@ -751,6 +768,16 @@ fn keep_out(errand: &Path, inside: Inside) -> String {
         ));
     }
     kept
+}
+
+/// Which teammate a working folder belongs to: the one whose folder it is
+/// under Errand's threads, by its name there.
+fn whose_home(errand: &Path, working_in: Option<&Path>) -> Option<String> {
+    let real = working_in?.canonicalize().ok()?;
+    let threads = errand.join("threads");
+    (real.parent()? == threads)
+        .then(|| real.file_name().map(|n| n.to_string_lossy().to_string()))
+        .flatten()
 }
 
 /// Folders allowed on top of each errand's own, by the errand's folder.
@@ -1052,7 +1079,7 @@ fn only_kept_out(
         "(version 1)\n(allow default){}{}{}",
         its_own_settings_kept(working_in),
         theirs.map(keys_kept_out).unwrap_or_default(),
-        keep_out(errand, Inside::ClaudeCode { doorway }),
+        keep_out(errand, Inside::ClaudeCode { doorway }, Some(working_in)),
     )
 }
 
@@ -1936,6 +1963,85 @@ mod tests {
         let (ok, said) = walled(&home, "/usr/bin/dscacheutil -q host -a name localhost");
         assert!(ok && said.contains("ip_address"), "names: {said}");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_teammate_reads_its_own_home_writes_none_and_reads_no_other() {
+        if !possible() {
+            return;
+        }
+        let errand = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("errand-homes-wall-{}", std::process::id()));
+        std::fs::remove_dir_all(&errand).ok();
+        let home = errand.join("threads").join("a1");
+        std::fs::create_dir_all(&home).unwrap();
+        for who in ["a1", "a2"] {
+            let at = crate::home::of(&errand, who);
+            std::fs::create_dir_all(&at).unwrap();
+            std::fs::write(at.join("memory.md"), format!("{who}'s notes")).unwrap();
+        }
+        std::fs::create_dir_all(errand.join(crate::home::INDEX)).unwrap();
+        std::os::unix::fs::symlink(
+            crate::home::of(&errand, "a2"),
+            errand.join(crate::home::INDEX).join("Other"),
+        )
+        .unwrap();
+        let run = |inside: Inside, command: &str| {
+            let out = std::process::Command::new(THE_SANDBOX)
+                .arg("-p")
+                .arg(profile_keeping_out(&home, inside, Some(&errand), None))
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(command)
+                .output()
+                .expect("sandbox-exec runs");
+            (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stdout).to_string(),
+            )
+        };
+        let own = crate::home::of(&errand, "a1").join("memory.md");
+        let other = crate::home::of(&errand, "a2").join("memory.md");
+        for inside in [Inside::ACommand, Inside::ClaudeCode { doorway: None }] {
+            let (ok, said) = run(inside, &format!("cat {}", quoted(&own)));
+            assert!(
+                ok && said.contains("a1's notes"),
+                "its own home was not readable: {said}"
+            );
+            assert!(
+                !run(inside, &format!("echo x >> {}", quoted(&own))).0,
+                "it wrote its own home"
+            );
+            assert!(
+                !run(inside, &format!("cat {}", quoted(&other))).0,
+                "it read another's home"
+            );
+            let through = errand
+                .join(crate::home::INDEX)
+                .join("Other")
+                .join("memory.md");
+            assert!(
+                !run(inside, &format!("cat {}", quoted(&through))).0,
+                "it read another's home through its listing"
+            );
+        }
+        // Nor where the person approves each step.
+        let kept = only_kept_out(&errand, None, None, &home);
+        let (wrote, _) = {
+            let out = std::process::Command::new(THE_SANDBOX)
+                .arg("-p")
+                .arg(&kept)
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(format!("echo x >> {}", quoted(&own)))
+                .output()
+                .unwrap();
+            (out.status.success(), ())
+        };
+        assert!(!wrote, "an agent that asks wrote its home");
+        std::fs::remove_dir_all(&errand).ok();
     }
 
     #[test]

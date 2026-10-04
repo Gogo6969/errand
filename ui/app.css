@@ -2998,6 +2998,50 @@ body.in-a-call #what {
 .went.unfinished .went-what { color: var(--faint); }
 #routine-went-more { margin-top: 6px; }
 
+/* Its home, the first thing under who it is: where, and any edit waiting. */
+#home-box { flex: 1 1 100%; margin-top: 4px; font-size: 13px; }
+#home-where { display: flex; align-items: center; gap: 10px; margin: 0; min-width: 0; }
+#home-where .home-label { color: var(--ink-soft); flex: none; }
+#home-path {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+#home-box button {
+  flex: none;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+#home-box button:hover { border-color: var(--edge); }
+#home-box button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#home-box button.yes { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 500; }
+#home-box button.yes:hover { background: var(--accent-lit); border-color: var(--accent-lit); }
+#home-edits { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+#home-edits:empty { display: none; }
+#home-edits > li {
+  border: 1px solid var(--accent);
+  border-radius: 9px;
+  padding: 10px 12px;
+  background: var(--card);
+  display: grid;
+  gap: 6px;
+}
+#home-edits .edit-what { margin: 0; font-weight: 600; }
+#home-edits .edit-changes { margin: 0; padding-left: 18px; color: var(--ink-soft); display: grid; gap: 2px; overflow-wrap: anywhere; }
+#home-edits .edit-choices { display: flex; gap: 8px; }
+#home-edits .edit-said { margin: 0; color: var(--ink-soft); }
+
 /* How it checks its work, first under who it is. */
 #checklist { margin-top: 10px; font-size: 13px; }
 /* Open, a row of its own: the other summaries waited beside its form. */
@@ -3678,6 +3722,21 @@ a.on-disk {
   font-size: 12.5px;
 }
 #teams .changes .team-break { margin-left: auto; }
+#teams .team-task {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  flex: 1 1 100%;
+}
+#teams .team-task:hover:not(:disabled) { background: var(--accent-lit); border-color: var(--accent-lit); }
+#teams .team-task:disabled { opacity: .5; cursor: default; }
 #teams .team-break:hover { color: var(--wrong); border-color: var(--wrong); }
 
 /* Who is on no team, at a glance. */

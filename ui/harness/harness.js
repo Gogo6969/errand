@@ -682,6 +682,25 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             if (team) team.members = team.members.filter((m) => m !== args.agent);
             return Promise.resolve(null);
           }
+          // A task for a team: a conversation of the lead's, named after the
+          // team, with the app's line saying whose it is.
+          case "a_task_for_the_team": {
+            const team = (fixture.teams || []).find((t) => t.id === args.team);
+            if (!team?.lead) return Promise.reject("the team has no lead yet: choose one first");
+            const id = `talk-team-${team.id}`;
+            (fixture.conversations[team.lead] ||= []).push({ id, agent: team.lead, name: team.name, opened: true });
+            fixture.lines[id] = [{ seq: 1, at: Date.now(), kind: "note", text: `A task for ${team.name}. It is told this is the team's task.` }];
+            return Promise.resolve(id);
+          }
+          // A teammate's home, and what the person changed in it.
+          case "home_of":
+            return Promise.resolve(structuredClone((fixture.homes || {})[args.agent] || { path: `/x/Errand/Teammates/${args.agent}`, edits: [] }));
+          case "take_home_edit":
+          case "put_home_back": {
+            const home = (fixture.homes || {})[args.agent];
+            if (home) home.edits = home.edits.filter((e) => e.path !== args.path);
+            return Promise.resolve(name === "take_home_edit" ? fixture.homeRefused || [] : null);
+          }
           case "break_up_team":
             fixture.teams = (fixture.teams || []).filter((t) => t.id !== args.id);
             return Promise.resolve(null);

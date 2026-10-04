@@ -238,6 +238,10 @@ const el = {
   learnNoteText: document.getElementById("learn-note-text"),
   learnSays: document.getElementById("learn-says"),
   learnDone: document.getElementById("learn-done"),
+  homeBox: document.getElementById("home-box"),
+  homePath: document.getElementById("home-path"),
+  homeShow: document.getElementById("home-show"),
+  homeEdits: document.getElementById("home-edits"),
   checklist: document.getElementById("checklist"),
   checklistSummary: document.getElementById("checklist-summary"),
   checklistStarter: document.getElementById("checklist-starter"),
@@ -2581,6 +2585,16 @@ function drawThreads() {
       top.className = "top";
       top.append(name);
       if (news) top.append(unreadDot(news.lines));
+      // A file of its home the person changed, waiting to be taken or put
+      // back: the same dot, saying something different.
+      else if (homeEdited.has(a.id)) {
+        const dot = unreadDot(0);
+        const said = "You changed a file in its home: open its card to take the edit or put the file back";
+        dot.setAttribute("aria-label", said);
+        dot.title = said;
+        dot.classList.add("home-edited");
+        top.append(dot);
+      }
       words.append(top, last);
       li.append(words);
       if (news) li.classList.add("has-new");
@@ -4906,10 +4920,120 @@ el.name.addEventListener("click", () => {
   el.whoisLocal.checked = !!t.keepLocal;
   el.whois.hidden = false;
   el.whoisName.focus();
+  drawHome();
   drawChecklist();
   drawNotes();
   drawSkills();
   drawLimit();
+});
+
+/**
+ * Teammates whose home has an edit of the person's waiting, by id. Told by the
+ * app when one appears or is settled, so the list down the side can say so
+ * without anybody opening each card to look.
+ */
+const homeEdited = new Set();
+
+/**
+ * Its home: where it is, and any file the person changed there that has not
+ * been taken yet, with what changed in words and the choice of taking it or
+ * putting the file back. Nothing is taken until they say so: these files are
+ * the teammate's instructions.
+ */
+async function drawHome() {
+  const a = whose();
+  if (!a) return;
+  let home = { path: "", edits: [] };
+  try {
+    home = (await invoke("home_of", { agent: a.id })) || home;
+  } catch {
+    // Not made yet, for a teammate that has only just been named.
+  }
+  if (whose()?.id !== a.id) return;
+  el.homePath.textContent = home.path || "being made";
+  el.homePath.title = home.path || "";
+  el.homeEdits.replaceChildren(
+    ...(home.edits || []).map((one) => {
+      const li = document.createElement("li");
+      li.dataset.path = one.path;
+      li.append(note("p", `You changed ${one.path}`, "edit-what"));
+      const changes = document.createElement("ul");
+      changes.className = "edit-changes";
+      for (const change of one.changes || []) changes.append(note("li", change, ""));
+      li.append(changes);
+      const choices = document.createElement("div");
+      choices.className = "edit-choices";
+      const said = note("p", "", "edit-said");
+      const press = (label, primary, act) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = label;
+        if (primary) b.className = "yes";
+        b.onclick = async () => {
+          for (const each of choices.querySelectorAll("button")) each.disabled = true;
+          try {
+            const refused = await act();
+            if (refused?.length) {
+              said.textContent = `Taken, except: ${refused.join(" ")}`;
+              li.replaceChildren(said);
+              setTimeout(() => drawAfterTheHomeChanged(a), 4000);
+              return;
+            }
+          } catch (why) {
+            said.textContent = String(why);
+            for (const each of choices.querySelectorAll("button")) each.disabled = false;
+            return;
+          }
+          await drawAfterTheHomeChanged(a);
+        };
+        return b;
+      };
+      if (one.takeable) {
+        choices.append(press("Take these edits", true, () => invoke("take_home_edit", { agent: a.id, path: one.path })));
+      }
+      choices.append(press("Put the file back", !one.takeable, () => invoke("put_home_back", { agent: a.id, path: one.path })));
+      li.append(choices, said);
+      return li;
+    }),
+  );
+  if ((home.edits || []).length) homeEdited.add(a.id);
+  else homeEdited.delete(a.id);
+  drawThreads();
+}
+
+/** After an edit was taken or put back: who it is, its notes and its checklist may all have changed. */
+async function drawAfterTheHomeChanged(a) {
+  await meetAgent(a.id);
+  const now = agents.get(a.id);
+  if (now && whose()?.id === a.id) {
+    el.whoisName.value = now.name === NOT_YET_NAMED ? "" : now.name;
+    el.whoisTitle.value = now.title;
+    el.whoisAbout.value = now.about;
+    drawPurpose(now);
+  }
+  await drawHome();
+  drawChecklist();
+  drawNotes();
+}
+
+el.homeShow.addEventListener("click", () => {
+  const a = whose();
+  if (a) invoke("show_home", { agent: a.id }).catch(() => {});
+});
+
+listen("home_edited", async ({ payload }) => {
+  const agent = String(payload || "");
+  if (!agent) return;
+  let home = null;
+  try {
+    home = await invoke("home_of", { agent });
+  } catch {
+    return;
+  }
+  if ((home?.edits || []).length) homeEdited.add(agent);
+  else homeEdited.delete(agent);
+  if (whose()?.id === agent && !el.whois.hidden) await drawHome();
+  else drawThreads();
 });
 
 /**
@@ -8596,6 +8720,32 @@ async function drawTeams() {
 
     const changes = document.createElement("div");
     changes.className = "changes";
+    // The team's own work: a task of the lead's, named after the team, whose
+    // lead is told it is the team's and hands out the parts.
+    const give = document.createElement("button");
+    give.type = "button";
+    give.className = "team-task";
+    give.textContent = `Give ${team.name} a task`;
+    give.disabled = !leader;
+    give.title = leader
+      ? `A new task for ${team.name}: ${leader.name} hands each part to whoever on the team fits`
+      : "Choose a lead first: it is the one the team's tasks go to";
+    give.addEventListener("click", async () => {
+      give.disabled = true;
+      let id;
+      try {
+        id = await invoke("a_task_for_the_team", { team: team.id });
+      } catch (why) {
+        give.disabled = false;
+        give.title = String(why);
+        return;
+      }
+      talks.set(id, asTalk({ id, agent: team.lead, name: team.name }, { loaded: false }));
+      closeTeams();
+      await show(id);
+      el.what.focus();
+    });
+    changes.append(give);
     const onIt = new Set([team.lead, ...team.members]);
     const addable = everybody.filter((a) => !onIt.has(a.id)).map((a) => [a.id, label(a)]);
     if (addable.length) {

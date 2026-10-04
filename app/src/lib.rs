@@ -111,6 +111,11 @@ struct Held {
     /// arriving while the first is still on screen must not be ended by the
     /// first card being pressed.
     handovers: Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<String>)>>,
+    /// Files the person changed in a teammate's home and has not yet said what
+    /// to do with, by teammate and path, with what they said when last looked:
+    /// told to the window once the same text has been there twice running, so
+    /// an editor halfway through saving is not shown as an edit.
+    home_edits: Mutex<HashMap<(String, String), (String, bool)>>,
     /// What the person said no to opening, by conversation and real path, so
     /// a teammate cannot ask the same thing again until somebody says yes.
     not_opened: Mutex<std::collections::HashSet<(String, std::path::PathBuf)>>,
@@ -1362,12 +1367,97 @@ async fn say_as(
     let _ = held.store.a_turn_began(&id);
     stay_awake(&held);
 
+    // A task given to a team: the first thing the person says reaches the
+    // lead with what it is for, the way a teammate handing work on is named.
+    // The person's own words are what was written down and shown.
+    let text = match (by, held.store.team_task(&id)) {
+        (None, Ok(Some((team, false)))) => {
+            let _ = held.store.team_task_told(&id);
+            format!("{}\n\n{text}", a_task_for_the_team_in_words(&held, &team))
+        }
+        _ => text,
+    };
+
     let mut live = held.live.lock().unwrap();
     let thread = live
         .get_mut(&id)
         .ok_or_else(|| "that conversation is not open".to_string())?;
     thread.say(&text, &pictures).map_err(|e| e.to_string())?;
     Ok(Some(written.seq))
+}
+
+/// What the lead is told about a task given to its team.
+fn a_task_for_the_team_in_words(held: &Held, team: &errand_core::store::Team) -> String {
+    let named: Vec<String> = team
+        .members
+        .iter()
+        .filter_map(|m| held.store.agent(m).ok().flatten())
+        .map(|a| match a.title.as_deref().map(str::trim) {
+            Some(title) if !title.is_empty() => format!("{} ({title})", a.name),
+            _ => a.name,
+        })
+        .collect();
+    format!(
+        "[This task is for your team, {}. You lead it. Break it into parts, hand each part to \
+         the member it fits with ask ({}), do yourself what fits nobody, check what comes \
+         back against the task and your checklist, and put the result together. What the \
+         person wants done follows.]",
+        team.name,
+        match named.is_empty() {
+            true => "nobody is on it yet, so say so and do it yourself".to_string(),
+            false => named.join(", "),
+        }
+    )
+}
+
+/// Give a team a task: a task of its lead's, named after the team, whose lead
+/// is told it is the team's. Says the task's id.
+#[tauri::command]
+async fn a_task_for_the_team(held: State<'_, Held>, team: String) -> Result<String, String> {
+    let found = held
+        .store
+        .teams()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|t| t.id == team)
+        .ok_or("there is no such team")?;
+    let lead = found
+        .lead
+        .clone()
+        .ok_or("the team has no lead yet: choose one first")?;
+    let lead_name = held
+        .store
+        .agent(&lead)
+        .map_err(|e| e.to_string())?
+        .map(|a| a.name)
+        .unwrap_or_default();
+    let id = uuid::Uuid::new_v4().to_string();
+    held.store
+        .begin_conversation(&id, &lead, &found.name)
+        .map_err(|e| e.to_string())?;
+    held.store
+        .mark_team_task(&id, &found.id)
+        .map_err(|e| e.to_string())?;
+    let members: Vec<String> = found
+        .members
+        .iter()
+        .filter_map(|m| held.store.agent(m).ok().flatten())
+        .map(|a| a.name)
+        .collect();
+    let said = match members.is_empty() {
+        true => format!(
+            "A task for {}. {lead_name} leads it, and nobody else is on the team yet.",
+            found.name
+        ),
+        false => format!(
+            "A task for {}. {lead_name} leads it: it is told this is the team's task, and \
+             hands each part to whoever fits: {}.",
+            found.name,
+            members.join(", ")
+        ),
+    };
+    let _ = held.store.the_app_says_about(&id, "note", &said, "");
+    Ok(id)
 }
 
 /// Write down what somebody said, and keep the pictures that came with it.
@@ -6383,6 +6473,238 @@ fn watch_the_clock(app: AppHandle) {
     });
 }
 
+/// Keep every teammate's home in line with what is true, and notice what the
+/// person changes there.
+///
+/// Every few seconds, because a file somebody saves in an editor should be
+/// noticed while they are still looking at it, and a pass is a few small
+/// files for each teammate.
+fn keep_the_homes(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            if tauri::async_runtime::spawn(homes_once(app.clone()))
+                .await
+                .is_err()
+            {
+                eprintln!("the homes: a pass stopped in a way it could not report");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    });
+}
+
+/// What a teammate's team is, in a line, for its home.
+fn its_team_in_words(held: &Held, agent: &str) -> String {
+    let named = |id: &str| {
+        held.store
+            .agent(id)
+            .ok()
+            .flatten()
+            .map(|a| a.name)
+            .unwrap_or_default()
+    };
+    held.store
+        .teams()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|t| match t.lead.as_deref() == Some(agent) {
+            true => Some(format!("leads {}", t.name)),
+            false if t.members.iter().any(|m| m == agent) => Some(match &t.lead {
+                Some(lead) => format!("on {}, led by {}", t.name, named(lead)),
+                None => format!("on {}", t.name),
+            }),
+            false => None,
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// One pass over every home.
+async fn homes_once(app: AppHandle) {
+    let Some(errand) = errand_core::where_errand_lives() else {
+        return;
+    };
+    let held: State<Held> = app.state();
+    let Ok(agents) = held.store.agents() else {
+        return;
+    };
+    let labels = team::told_apart(&agents);
+    let mut still: std::collections::HashSet<(String, String)> = Default::default();
+    let mut tell: Vec<String> = Vec::new();
+    for (agent, label) in agents.iter().zip(labels) {
+        // Named first: a home for nobody yet would be a folder called that.
+        if agent.name == NOT_YET_NAMED {
+            continue;
+        }
+        let team = its_team_in_words(&held, &agent.id);
+        let Ok(changed) = errand_core::home::keep(&held.store, &errand, agent, &team) else {
+            continue;
+        };
+        let _ = errand_core::home::list(&errand, &agent.id, &label);
+        let mut edits = held.home_edits.lock().unwrap();
+        for one in changed {
+            let key = (agent.id.clone(), one.path.clone());
+            still.insert(key.clone());
+            match edits.get(&key) {
+                // The same as last time: steady now, and said once.
+                Some((was, told)) if *was == one.now => {
+                    if !told {
+                        edits.insert(key, (one.now, true));
+                        tell.push(agent.id.clone());
+                    }
+                }
+                _ => {
+                    edits.insert(key, (one.now, false));
+                }
+            }
+        }
+    }
+    {
+        let mut edits = held.home_edits.lock().unwrap();
+        let gone: Vec<(String, String)> = edits
+            .keys()
+            .filter(|key| !still.contains(*key))
+            .cloned()
+            .collect();
+        for key in gone {
+            if edits.remove(&key).is_some_and(|(_, told)| told) {
+                tell.push(key.0);
+            }
+        }
+    }
+    tell.sort();
+    tell.dedup();
+    for agent in tell {
+        let _ = app.emit("home_edited", agent);
+    }
+}
+
+/// A teammate's home, as the window shows it.
+#[derive(Serialize)]
+struct HomeNow {
+    /// Where it is, by its listing under the teammate's name.
+    path: String,
+    /// The files the person changed and has not said what to do with.
+    edits: Vec<HomeEdit>,
+}
+
+#[derive(Serialize)]
+struct HomeEdit {
+    path: String,
+    /// What changed, in words.
+    changes: Vec<String>,
+    /// Whether it can be taken at all, or only put back.
+    takeable: bool,
+}
+
+/// Where a teammate's home is, and what the person changed in it.
+#[tauri::command]
+async fn home_of(held: State<'_, Held>, agent: String) -> Result<HomeNow, String> {
+    let errand = errand_core::where_errand_lives().ok_or("there is no Errand folder")?;
+    let home = errand_core::home::of(&errand, &agent);
+    let written = held.store.home_written(&agent).map_err(|e| e.to_string())?;
+    let mut edits = Vec::new();
+    for (path, before) in &written {
+        let at = home.join(path);
+        let plain = std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_file());
+        let Some(now) = plain.then(|| std::fs::read_to_string(&at).ok()).flatten() else {
+            continue;
+        };
+        if now == *before {
+            continue;
+        }
+        let takeable = !matches!(
+            errand_core::home::read_back(path, &now),
+            errand_core::home::ReadBack::NotReadBack
+        );
+        edits.push(HomeEdit {
+            changes: errand_core::home::what_changed(path, before, &now),
+            path: path.clone(),
+            takeable,
+        });
+    }
+    edits.sort_by(|a, b| a.path.cmp(&b.path));
+    let listed = held
+        .store
+        .agent(&agent)
+        .ok()
+        .flatten()
+        .map(|a| {
+            errand
+                .join(errand_core::home::INDEX)
+                .join(errand_core::home::listed_as(&a.name))
+        })
+        .filter(|at| std::fs::read_link(at).is_ok_and(|to| to == home))
+        .unwrap_or_else(|| home.clone());
+    Ok(HomeNow {
+        path: listed.display().to_string(),
+        edits,
+    })
+}
+
+/// Take what the person changed in a file of a teammate's home. Says what
+/// could not be taken.
+#[tauri::command]
+async fn take_home_edit(
+    held: State<'_, Held>,
+    agent: String,
+    path: String,
+) -> Result<Vec<String>, String> {
+    let errand = errand_core::where_errand_lives().ok_or("there is no Errand folder")?;
+    let at = errand_core::home::of(&errand, &agent).join(&path);
+    let plain = std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_file());
+    if !plain {
+        return Err("that file is not there any more".into());
+    }
+    let now = std::fs::read_to_string(&at).map_err(|e| e.to_string())?;
+    let when = chrono::Local::now().timestamp_millis();
+    let refused = errand_core::home::take(&held.store, &agent, &path, &now, when)
+        .map_err(|e| e.to_string())?;
+    home_settled(&held, &errand, &agent, &path, &now);
+    tell_them_who_it_is(&held, &agent);
+    close_what_is_idle(&held, &agent);
+    Ok(refused)
+}
+
+/// Put a file of a teammate's home back the way Errand wrote it.
+#[tauri::command]
+async fn put_home_back(held: State<'_, Held>, agent: String, path: String) -> Result<(), String> {
+    let errand = errand_core::where_errand_lives().ok_or("there is no Errand folder")?;
+    let at = errand_core::home::of(&errand, &agent).join(&path);
+    let now = std::fs::read_to_string(&at).unwrap_or_default();
+    home_settled(&held, &errand, &agent, &path, &now);
+    Ok(())
+}
+
+/// After an edit is taken or put back: the file counts as Errand's again, and
+/// is written from what is true now.
+fn home_settled(held: &Held, errand: &std::path::Path, agent: &str, path: &str, now: &str) {
+    let _ = held.store.set_home_written(agent, path, now);
+    held.home_edits
+        .lock()
+        .unwrap()
+        .remove(&(agent.to_string(), path.to_string()));
+    if let Ok(Some(who)) = held.store.agent(agent) {
+        let team = its_team_in_words(held, agent);
+        let _ = errand_core::home::keep(&held.store, errand, &who, &team);
+    }
+}
+
+/// Open a teammate's home in Finder.
+#[tauri::command]
+async fn show_home(agent: String) -> Result<(), String> {
+    let errand = errand_core::where_errand_lives().ok_or("there is no Errand folder")?;
+    let home = errand_core::home::of(&errand, &agent);
+    if !home.is_dir() {
+        return Err("its home is being made: try again in a moment".into());
+    }
+    std::process::Command::new("/usr/bin/open")
+        .arg(&home)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Everything the clock does once, which is the part allowed to go wrong.
 async fn one_tick(app: AppHandle) {
     if let Err(why) = run_what_is_due(&app).await {
@@ -8991,7 +9313,12 @@ async fn forget(app: AppHandle, held: State<'_, Held>, id: String) -> Result<(),
     for conversation in theirs {
         let _ = stop_it(&app, &held, &conversation, "deleted");
     }
-    held.store.forget(&id).map_err(|e| e.to_string())
+    held.store.forget(&id).map_err(|e| e.to_string())?;
+    // Its home goes with it: what it remembered, written out.
+    if let Some(errand) = errand_core::where_errand_lives() {
+        errand_core::home::take_away(&errand, &id);
+    }
+    Ok(())
 }
 
 /// How to reach a running Errand from a script or a terminal.
@@ -9235,6 +9562,7 @@ pub fn run() {
                 doorways: Mutex::new(HashMap::new()),
                 handovers: Mutex::new(HashMap::new()),
                 not_opened: Mutex::new(std::collections::HashSet::new()),
+                home_edits: Mutex::new(HashMap::new()),
                 opening: Mutex::new(HashMap::new()),
                 fresh: Mutex::new(std::collections::HashSet::new()),
                 held_back: Mutex::new(std::collections::HashSet::new()),
@@ -9360,6 +9688,11 @@ pub fn run() {
             break_up_team,
             allow_server,
             stop_allowing_server,
+            a_task_for_the_team,
+            home_of,
+            take_home_edit,
+            put_home_back,
+            show_home,
             checklist_of,
             set_checklist,
             what_they_bring,
@@ -9644,6 +9977,7 @@ fn everything_that_waits_for_the_app(app: &AppHandle) {
     // store before it is in place, and neither is spawned into an
     // app that is still being built.
     watch_the_clock(app.clone());
+    keep_the_homes(app.clone());
     load_ssh_keys_if_wanted(app);
     let waiting = {
         let parked: State<Waiting> = app.state();

@@ -373,12 +373,32 @@ pub fn opening_as(store: &Store, agent: &Agent) -> Result<Knowing> {
 /// place, so a conversation that opens and one told of a change in place are
 /// told the same thing.
 pub fn identity_of(store: &Store, agent: &Agent) -> Result<String> {
-    Ok(crate::checklist::with_its_checklist(
+    let said = crate::checklist::with_its_checklist(
         with_its_team(
             who_you_are(&agent.name, agent.title.as_deref(), agent.about.as_deref()),
             &your_team(store, &agent.id)?,
         ),
         &store.checklist(&agent.id)?,
+    );
+    Ok(match (said.is_empty(), your_home(agent)) {
+        (true, _) | (_, None) => said,
+        (false, Some(home)) => format!("{said}\n\n{home}"),
+    })
+}
+
+/// Where its home is, and what it is for. Said because a teammate asked
+/// where its things were told the person there was no such place.
+fn your_home(agent: &Agent) -> Option<String> {
+    let errand = crate::where_errand_lives()?;
+    let home = crate::home::of(&errand, &agent.id);
+    Some(format!(
+        "YOUR HOME\n\nYour home in Errand is {}: card.md (who you are), memory.md (your \
+         notes), checklist.md (how you check your work) and skills/ (what you have been \
+         taught), kept there for the person to read and change. You may read them; you \
+         never write them. You change through remember and suggest_learning, and the person \
+         through those files. Your work goes in your working folder, {}.",
+        home.display(),
+        agent.cwd
     ))
 }
 

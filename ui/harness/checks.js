@@ -7821,3 +7821,71 @@ export async function allowingAServer() {
   FIXTURE.outside = kept;
   return found;
 }
+
+/**
+ * A teammate's home: where it is, and an edit the person made there shown in
+ * words and taken only on their say. And a task given to a whole team.
+ */
+export async function aHomeAndATeamTask() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  FIXTURE.homes = {
+    "agent-bitcoin": {
+      path: "/Users/me/Library/Application Support/Errand/Teammates/Bitcoin Desk",
+      edits: [
+        { path: "memory.md", takeable: true, changes: ["Adds the note \"sources\": Use two exchanges", "Takes away the note \"old_feed\""] },
+        { path: "skills/morning-prices.md", takeable: false, changes: ["This file shows what is true and is not read back."] },
+      ],
+    },
+  };
+  await openTalk("talk-2");
+  // The app says a file changed: the teammate is marked down the side.
+  tell("home_edited", "agent-bitcoin");
+  await wait(300);
+  const row = () => document.querySelector('#threads li[data-agent="agent-bitcoin"]');
+  check("a teammate whose home has an edit waiting is marked down the side", row()?.querySelector(".unread.home-edited"), row()?.querySelector(".top")?.innerHTML.slice(0, 160));
+  document.getElementById("thread-name").click();
+  await wait(400);
+  const box = document.getElementById("home-box");
+  check("its card says where its home is first", box && document.querySelector("#whois > #home-box") && /Teammates\/Bitcoin Desk/.test(document.getElementById("home-path").textContent), document.getElementById("home-path").textContent);
+  check("and Show in Finder opens it", (() => { document.getElementById("home-show").click(); return true; })() && asked.some((a) => a.name === "show_home" && a.args?.agent === "agent-bitcoin"), "");
+  const edits = [...document.querySelectorAll("#home-edits > li")];
+  check("an edit says which file and what changed, in words", edits.length === 2 && /You changed memory\.md/.test(edits[0].textContent) && /Adds the note "sources"/.test(edits[0].textContent) && /Takes away the note "old_feed"/.test(edits[0].textContent), edits.map((e) => e.textContent.slice(0, 80)).join(" | "));
+  const buttons = (li) => [...li.querySelectorAll("button")].map((b) => b.textContent).join(" | ");
+  check("a file that is read back offers Take these edits or Put the file back", buttons(edits[0]) === "Take these edits | Put the file back", buttons(edits[0]));
+  check("a file that is not read back can only be put back", buttons(edits[1]) === "Put the file back", buttons(edits[1]));
+  if (beingDrawn()) {
+    const [take, back] = [...edits[0].querySelectorAll("button")].map((b) => b.getBoundingClientRect());
+    check("its two buttons are one height on one line", Math.round(take.height) === Math.round(back.height) && Math.round(take.top) === Math.round(back.top), `${Math.round(take.height)}/${Math.round(back.height)}`);
+  }
+  edits[0].querySelector("button.yes").click();
+  await wait(500);
+  check("taking them takes that file, and nothing else", asked.some((a) => a.name === "take_home_edit" && a.args?.path === "memory.md") && !asked.some((a) => a.name === "take_home_edit" && a.args?.path !== "memory.md"), "");
+  check("and the card then shows only what is still waiting", document.querySelectorAll("#home-edits > li").length === 1, document.querySelectorAll("#home-edits > li").length);
+  document.querySelector("#home-edits > li button").click();
+  await wait(500);
+  check("putting the last one back clears the card and the mark", !document.querySelector("#home-edits > li") && !row()?.querySelector(".home-edited"), row()?.querySelector(".top")?.innerHTML.slice(0, 120));
+  document.getElementById("thread-name").click();
+  await wait(150);
+
+  // A task for a whole team.
+  FIXTURE.teams = [{ id: "team-a", name: "A-TEAM", lead: "agent-bitcoin", members: [], made_at: 0 }];
+  document.getElementById("teams-open").click();
+  await wait(400);
+  const give = document.querySelector('#teams .team[data-team="team-a"] .team-task');
+  check("each team with a lead offers to give it a task, by its name", give && give.textContent === "Give A-TEAM a task" && !give.disabled, give?.outerHTML.slice(0, 120));
+  give.click();
+  await wait(700);
+  check("which starts a task with the lead, named after the team, and opens it", asked.some((a) => a.name === "a_task_for_the_team" && a.args?.team === "team-a") && document.getElementById("teams").hidden && /A task for A-TEAM/.test(document.getElementById("messages").textContent), document.getElementById("messages").textContent.slice(-120));
+  check("ready for the person to say what it is", document.activeElement === document.getElementById("what"), document.activeElement?.id);
+  FIXTURE.teams = [{ id: "team-b", name: "B-TEAM", lead: null, members: [], made_at: 0 }];
+  document.getElementById("teams-open").click();
+  await wait(400);
+  const none = document.querySelector('#teams .team[data-team="team-b"] .team-task');
+  check("a team with no lead cannot be given one yet, and says why", none?.disabled && /Choose a lead first/.test(none.title), none?.title);
+  document.getElementById("teams-done").click();
+  await wait(150);
+  FIXTURE.teams = [];
+  return found;
+}
