@@ -2008,6 +2008,30 @@ body.catching #what { border-color: var(--accent); }
 }
 #task-card dd { margin: 0; color: var(--ink); display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 #task-card dd .words { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* What it does and what came of it last: two lines, with More for the rest,
+   line breaks kept so a routine's numbered steps read as steps. */
+#task-card dd.long { display: block; }
+#task-card dd.long .words {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+#task-card dd.long.open .words { display: block; -webkit-line-clamp: unset; }
+#task-card dd .more {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+}
+#task-card dd .more[hidden] { display: none; }
+#task-card dd .more:hover { text-decoration: underline; text-underline-offset: 2px; }
+#task-card dd .more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 /* How it runs is changed where it is said: a word in the accent at the end of
    the line, rather than three more buttons in a row of them. */
 #task-card dd .change {

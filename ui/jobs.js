@@ -218,15 +218,18 @@ export function headline(request, room = 52) {
   );
   const sentence = /^(.+?[.!?])(?:\s|$)/.exec(said);
   if (sentence) said = sentence[1];
-  // A question keeps its mark; anything else ends where its words do.
-  said = said.replace(/[.!,;:\s]+$/, "");
+  // A question keeps its mark; anything else ends where its words do, a dash
+  // left hanging included.
+  said = said.replace(/[.!,;:\s\-\u2013\u2014]+$/, "");
   if (!said) return "";
   // An address stays as it is written.
   if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(said)) said = said[0].toUpperCase() + said.slice(1);
   if (said.length <= room) return said;
   // Where its first part ends, when that part is a name on its own: "and tell
   // me if it is low" is how to report, not what the task is.
-  const part = said.split(/,\s|;\s|\s(?:and|then|but)\s/i)[0];
+  const part = said
+    .split(/,\s|;\s|\s[-\u2013\u2014]\s|\s(?:and|then|but)\s/i)[0]
+    .replace(/[\s,;:\-\u2013\u2014]+$/, "");
   if (part.length >= room / 2 && part.length <= room) return part;
   const cut = said.slice(0, room);
   const space = cut.lastIndexOf(" ");

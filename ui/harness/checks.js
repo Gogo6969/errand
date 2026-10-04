@@ -7214,3 +7214,81 @@ export async function roomUnderTheHeader() {
   );
   return found;
 }
+
+/**
+ * What a task does, all of it: two lines on its card, and More for the rest.
+ *
+ * A routine's instructions are often a numbered list of steps, and the card
+ * cut them at the first line with no way to read the rest of them anywhere on
+ * it.
+ */
+export async function aTaskSaysAllOfWhatItDoes() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const long =
+    "Weekly update check: 1) Get the installed version with npm ls -g and note it.\n" +
+    "2) Look up the newest release on the registry.\n" +
+    "3) If they differ, update it and say what changed.\n" +
+    "4) Otherwise say it is current, with both version numbers.";
+  const routine = FIXTURE.standing.find((s) => s.conversation === "talk-2" && s.kind === "routine");
+  const was = routine.what;
+  routine.what = long;
+  await window.__TAURI__.core.invoke("routine_off", { id: "talk-2", off: false });
+  tell("repeats", { conversation: "talk-2", repeats: true });
+  await wait(150);
+  await openTalk("talk-2");
+  const card = document.getElementById("task-card");
+  const here = () => card.querySelector(".task-row.here");
+  const fact = (label) => {
+    const dts = [...(here()?.querySelectorAll("dt") || [])];
+    const at = dts.findIndex((d) => d.textContent === label);
+    return at < 0 ? null : here().querySelectorAll("dd")[at];
+  };
+  const words = () => fact("Does")?.querySelector(".words");
+  const more = () => fact("Does")?.querySelector(".more");
+  const folded = !here()?.classList.contains("open");
+  if (folded) {
+    here().querySelector(".fold").click();
+    await wait(150);
+  }
+  check("what it does is all there, not cut at its first line", words()?.textContent === long, JSON.stringify(words()?.textContent?.slice(0, 90)));
+  if (beingDrawn()) {
+    const line = parseFloat(getComputedStyle(words()).lineHeight) || 18;
+    const shut = words().getBoundingClientRect().height;
+    check(
+      "two lines of it, with More for the rest",
+      shut <= line * 2 + 2 && more() && !more().hidden && more().textContent === "More",
+      `${Math.round(shut)}px at ${line}px a line; More ${more()?.hidden ? "hidden" : more()?.textContent}`,
+    );
+    more().click();
+    await wait(150);
+    const open = words().getBoundingClientRect().height;
+    check(
+      "More shows all of it, its steps on lines of their own",
+      open >= line * 4 && more().textContent === "Less" && more().getAttribute("aria-expanded") === "true",
+      `${Math.round(open)}px, ${more()?.textContent}`,
+    );
+    tell("happened", { conversation: "talk-2", seq: 9905, kind: "done" });
+    await wait(300);
+    check("and stays open while the card is drawn again", fact("Does")?.classList.contains("open"), fact("Does")?.className);
+    more().click();
+    await wait(150);
+    check(
+      "Less puts it back to two lines",
+      words().getBoundingClientRect().height <= line * 2 + 2 && more().textContent === "More",
+      `${Math.round(words().getBoundingClientRect().height)}px`,
+    );
+  }
+  routine.what = was;
+  tell("repeats", { conversation: "talk-2", repeats: true });
+  await wait(250);
+  if (beingDrawn()) {
+    check("one that fits in its two lines has no More", fact("Does") && more()?.hidden, `More ${more()?.hidden ? "hidden" : "shown"}: ${words()?.textContent}`);
+  }
+  if (folded) {
+    here()?.querySelector(".fold")?.click();
+    await wait(100);
+  }
+  return found;
+}

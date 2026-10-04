@@ -1292,7 +1292,29 @@ function drawTaskCard() {
   el.taskCard.dataset.state = taskState(t, going).kind;
   el.taskCard.dataset.tasks = String(ordered.length + 1);
   el.taskCard.hidden = false;
+  fitTheFacts();
 }
+
+/**
+ * Which of a task's long facts somebody opened with More, by task and fact,
+ * so the redraws a running task makes every few seconds do not shut them.
+ */
+const factsOpen = new Set();
+
+/**
+ * More only where there is more: a Does that fits in its two lines has none.
+ * Measured, because how much fits depends on the window's width.
+ */
+function fitTheFacts() {
+  for (const dd of el.taskCard.querySelectorAll("dd.long")) {
+    const words = dd.querySelector(".words");
+    const more = dd.querySelector(".more");
+    more.hidden = !dd.classList.contains("open") && words.scrollHeight <= words.clientHeight + 1;
+  }
+}
+window.addEventListener("resize", () => {
+  if (!el.taskCard.hidden) fitTheFacts();
+});
 
 /** The states a teammate's other tasks are shown above the chat in. */
 const TASKS_SHOWN = new Set(["needs-you", "running", "stopped", "scheduled"]);
@@ -1439,10 +1461,35 @@ function taskRow(t, { here = false, going, alone }) {
     dd.append(text);
     return [dt, dd];
   };
-  const does = (routine?.what || watch?.what || withoutWhoAsked(task.first || "")).trim().split("\n")[0] || "Nothing asked yet";
+  // What it does and what came of it last can be paragraphs: two lines of
+  // each, and More for the rest. They were cut at their first line, with no
+  // way to read the rest of a routine's steps anywhere on the card.
+  const saidAtLength = (label, words) => {
+    const dt = note("dt", label);
+    const dd = document.createElement("dd");
+    dd.className = "long";
+    const key = `${t.id}:${label}`;
+    const open = factsOpen.has(key);
+    if (open) dd.classList.add("open");
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "more";
+    more.textContent = open ? "Less" : "More";
+    more.setAttribute("aria-expanded", String(open));
+    more.title = open ? "Show only the start" : "Show all of it";
+    more.onclick = (e) => {
+      e.stopPropagation();
+      if (open) factsOpen.delete(key);
+      else factsOpen.add(key);
+      drawTaskCard();
+    };
+    dd.append(note("span", words, "words"), more);
+    return [dt, dd];
+  };
+  const does = (routine?.what || watch?.what || withoutWhoAsked(task.first || "")).trim() || "Nothing asked yet";
   const facts = document.createElement("dl");
   facts.id = factsId;
-  facts.append(...said("Does", does, routine?.what || watch?.what || task.first));
+  facts.append(...saidAtLength("Does", does));
   // How it runs, and the one way to change that: on a schedule, when
   // something changes, or until a goal is met. Those were Repeat, Watch and
   // Goal in the header, three buttons nothing said were one question.
@@ -1473,8 +1520,8 @@ function taskRow(t, { here = false, going, alone }) {
   // in this window has none to say it from.
   if (here || t.loaded) {
     const last = [...t.messages].reverse().find((m) => m.kind === "said" || (m.kind === "ended" && m.failed));
-    const lastWords = last ? `${stamped(last).textContent}: ${last.text.trim().split("\n")[0]}` : "Nothing yet";
-    facts.append(...said("Last", lastWords, last?.text));
+    const lastWords = last ? `${stamped(last).textContent}: ${last.text.trim()}` : "Nothing yet";
+    facts.append(...saidAtLength("Last", lastWords));
   }
   row.append(head, facts);
   return row;

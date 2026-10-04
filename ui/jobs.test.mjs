@@ -200,3 +200,12 @@ test("a standing job set up in words about setting it up is named by what it doe
   // Nothing asked, nothing to name it from: the name it has stands.
   assert.equal(aNameFrom("", "Check the backup drive"), "");
 });
+
+test("a name does not end on a dash left hanging", () => {
+  assert.equal(
+    headline("Look for the photo backup tool on this computer - and update it if there is a newer version"),
+    "Look for the photo backup tool on this computer",
+  );
+  assert.equal(headline("Check the drive -"), "Check the drive");
+  assert.equal(headline("Clean up the downloads folder \u2013 keep anything from this week"), "Clean up the downloads folder");
+});
