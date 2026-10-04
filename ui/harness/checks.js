@@ -7766,3 +7766,58 @@ export async function learningFromATask() {
   delete FIXTURE.couldKeep;
   return found;
 }
+
+/**
+ * Which servers Errand starts: only the person's own, only once allowed, and
+ * only as they were when allowed. A server runs as the person outside every
+ * wall, and the file it is read from is one a teammate can write.
+ */
+export async function allowingAServer() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const kept = FIXTURE.outside;
+  FIXTURE.outside = [
+    { name: "mempalace", from: "~/.claude.json", tools: [], standing: "not yet", screen: false,
+      shown: "/opt/venv/bin/python -m mempalace (with PALACE_HOME set)", fingerprint: "f-mem",
+      trouble: "not started: you have not allowed it in Errand yet", fix: "If \"mempalace\" is yours and you want these agents to use it, press Allow." },
+    { name: "peekaboo", from: "~/.claude.json", tools: [], standing: "not yet", screen: true,
+      shown: "npx -y @steipete/peekaboo", fingerprint: "f-peek",
+      trouble: "not started: you have not allowed it in Errand yet", fix: "press Allow." },
+    { name: "planted", from: ".mcp.json", tools: [], standing: "in its own folder", screen: false,
+      shown: "/bin/sh -c evil", fingerprint: "f-planted",
+      trouble: "not started: it is set up in this agent's own folder, which the agent can write", fix: "Errand never starts a server set up in an agent's own folder." },
+    { name: "notes", from: "~/.claude.json", tools: ["add_note"], standing: "allowed", screen: false,
+      shown: "/usr/local/bin/notes-mcp", fingerprint: "f-notes", trouble: null },
+  ];
+  await openTalk("talk-2");
+  const panel = document.getElementById("reachable");
+  if (!panel.hidden) document.getElementById("reach").click();
+  document.getElementById("reach").click();
+  await wait(400);
+  const row = (name) => panel.querySelector(`.server[data-server="${name}"]`);
+  check("a server not allowed yet is a choice, drawn quietly rather than in red", row("mempalace")?.classList.contains("held") && !row("mempalace")?.classList.contains("broken"), row("mempalace")?.className);
+  check("it shows what it runs, with variable names and no values", /python -m mempalace \(with PALACE_HOME set\)/.test(row("mempalace")?.querySelector(".server-runs")?.textContent || ""), row("mempalace")?.querySelector(".server-runs")?.textContent);
+  check("and offers Allow", row("mempalace")?.querySelector(".server-act.yes")?.textContent === "Allow", row("mempalace")?.querySelector(".server-act")?.textContent);
+  check("one that drives the screen says so before it can be allowed", /drives your screen/.test(row("peekaboo")?.querySelector(".server-warning")?.textContent || ""), row("peekaboo")?.textContent.slice(0, 160));
+  check("and its Allow is a plain button, not the inviting one", row("peekaboo")?.querySelector(".server-act") && !row("peekaboo").querySelector(".server-act").classList.contains("yes"), row("peekaboo")?.querySelector(".server-act")?.className);
+  check("one set up in the agent's own folder is never offered", !row("planted")?.querySelector(".server-act") && /own folder/.test(row("planted")?.textContent || ""), row("planted")?.textContent.slice(0, 160));
+  check("an allowed one lists its tools and can be stopped", /add_note/.test(row("notes")?.textContent || "") && row("notes")?.querySelector(".server-act")?.textContent === "Stop allowing", row("notes")?.textContent.slice(0, 120));
+  if (beingDrawn()) {
+    const allow = row("mempalace").querySelector(".server-act").getBoundingClientRect();
+    const stop = row("notes").querySelector(".server-act").getBoundingClientRect();
+    check("Allow and Stop allowing are one height", Math.round(allow.height) === Math.round(stop.height), `${Math.round(allow.height)}/${Math.round(stop.height)}`);
+  }
+  const before = asked.length;
+  row("mempalace").querySelector(".server-act").click();
+  await wait(400);
+  check("Allow allows exactly what was shown", asked.slice(before).some((a) => a.name === "allow_server" && a.args?.name === "mempalace" && a.args?.fingerprint === "f-mem"), JSON.stringify(asked.slice(before).map((a) => [a.name, a.args])));
+  check("and the panel says it is allowed now", row("mempalace")?.querySelector(".server-act")?.textContent === "Stop allowing", row("mempalace")?.textContent.slice(0, 120));
+  row("notes").querySelector(".server-act").click();
+  await wait(400);
+  check("Stop allowing takes it back", asked.some((a) => a.name === "stop_allowing_server" && a.args?.name === "notes") && row("notes")?.querySelector(".server-act")?.textContent === "Allow", row("notes")?.textContent.slice(0, 120));
+  document.getElementById("reach").click();
+  await wait(100);
+  FIXTURE.outside = kept;
+  return found;
+}

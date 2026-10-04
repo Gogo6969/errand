@@ -1142,6 +1142,16 @@ const CHANGES: &[&str] = &[
          points TEXT NOT NULL,
          set_at INTEGER NOT NULL
      );",
+    // The servers the person allowed this app to start, each as exactly what
+    // it ran when they allowed it. Kept here because no wall lets a teammate
+    // touch the store, unlike the file the servers are read from. Last, as
+    // every change is.
+    "CREATE TABLE IF NOT EXISTS servers_allowed (
+         name        TEXT PRIMARY KEY,
+         fingerprint TEXT NOT NULL,
+         shown       TEXT NOT NULL,
+         said_at     INTEGER NOT NULL
+     );",
 ];
 
 /// What finishing a task switched off, or reopening it switched back on.
@@ -3539,6 +3549,33 @@ impl Store {
         Ok(())
     }
 
+    /// The servers the person allowed, by name, with what each ran then.
+    pub fn servers_allowed(&self) -> Result<HashMap<String, String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare("SELECT name, fingerprint FROM servers_allowed")?;
+        let rows = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
+
+    /// Allow a server as it is now, in place of anything allowed before.
+    pub fn allow_server(&self, name: &str, fingerprint: &str, shown: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO servers_allowed (name, fingerprint, shown, said_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(name) DO UPDATE SET fingerprint = ?2, shown = ?3, said_at = ?4",
+            params![name, fingerprint, shown, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Stop allowing a server.
+    pub fn stop_allowing_server(&self, name: &str) -> Result<()> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM servers_allowed WHERE name = ?", [name])?;
+        Ok(())
+    }
+
     /// How an agent checks its work, point by point. Empty for none.
     pub fn checklist(&self, agent: &str) -> Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
@@ -4302,6 +4339,20 @@ mod tests {
         s.break_up_team("crew").unwrap();
         assert!(s.teams().unwrap().is_empty());
         assert!(s.agent("w").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_server_allowed_is_remembered_replaced_and_taken_back() {
+        let s = Store::in_memory().unwrap();
+        assert!(s.servers_allowed().unwrap().is_empty());
+        s.allow_server("mine", "aaa", "/bin/srv").unwrap();
+        s.allow_server("mine", "bbb", "/bin/srv --x").unwrap();
+        assert_eq!(
+            s.servers_allowed().unwrap().get("mine").map(String::as_str),
+            Some("bbb")
+        );
+        s.stop_allowing_server("mine").unwrap();
+        assert!(s.servers_allowed().unwrap().is_empty());
     }
 
     #[test]

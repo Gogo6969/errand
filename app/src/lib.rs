@@ -3359,6 +3359,31 @@ fn say_if_the_name_is_taken(here: &std::path::Path) {
     }
 }
 
+/// Tell the server starter what the person allowed, from the store.
+///
+/// The first time this build runs, the person's own servers as they are that
+/// day are allowed, so what worked yesterday works today, apart from anything
+/// that drives the screen: that is never allowed without them choosing it.
+/// After that only the person allows anything, in Tools.
+fn know_which_servers_are_allowed(held: &Held) {
+    const FIRST_ALLOWED: &str = "servers_first_allowed";
+    if held.store.setting(FIRST_ALLOWED).ok().flatten().is_none() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        for server in mcp::configured(std::path::Path::new(&home)) {
+            if server.found != mcp::Found::TheirOwn || mcp::drives_the_screen(&server) {
+                continue;
+            }
+            if let Some(fingerprint) = server.fingerprint() {
+                let _ = held
+                    .store
+                    .allow_server(&server.name, &fingerprint, &server.shown());
+            }
+        }
+        let _ = held.store.set_setting(FIRST_ALLOWED, "yes");
+    }
+    mcp::allow_these(held.store.servers_allowed().unwrap_or_default());
+}
+
 /// The receiving end, held between setup and Ready.
 struct Waiting(Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<team::Wants>>>);
 
@@ -4363,9 +4388,12 @@ async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Str
     // instruction is "go and find it", and for Automation that is four levels
     // down a screen most people have never opened. The scheme opens Settings at
     // a pane and can do nothing else.
+    // Never the panes that would give Errand, and so every teammate, the
+    // screen: those the person opens themselves or not at all.
+    let a_pane = where_at.starts_with("x-apple.systempreferences:");
     let can_be_opened = where_at.starts_with("https://")
         || where_at.starts_with("http://")
-        || where_at.starts_with("x-apple.systempreferences:");
+        || (a_pane && errand_core::wall::a_pane_a_teammate_may_open(where_at));
     let where_at = match can_be_opened {
         true => where_at,
         false => "",
@@ -4382,9 +4410,11 @@ async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Str
             .insert(handover.clone(), (asked.from.clone(), tell_me));
     }
 
-    // Opened before the card is shown, so that by the time somebody reads what
-    // to do, the thing to do it in is already in front of them.
-    if !where_at.is_empty() {
+    // A pane of Settings is opened before the card is shown, so that by the
+    // time somebody reads what to do, the place to do it is in front of them.
+    // A web page is not: it would open in their browser, signed in as them, on
+    // a teammate's say alone. Its link is on the card for them to press.
+    if !where_at.is_empty() && a_pane {
         let _ = std::process::Command::new("open").arg(where_at).spawn();
     }
 
@@ -8029,6 +8059,17 @@ async fn show_in_browser(url: String) -> Result<(), String> {
 /// Leading space is trimmed because `  javascript:...` is the oldest trick
 /// there is.
 fn worth_opening(url: &str) -> bool {
+    // A teammate's message can carry a link, so of the panes of Settings only
+    // the ones on the list: never one that would give Errand, and so every
+    // teammate, the screen.
+    if url
+        .trim()
+        .to_lowercase()
+        .starts_with("x-apple.systempreferences:")
+        && !errand_core::wall::a_pane_a_teammate_may_open(url)
+    {
+        return false;
+    }
     let url = url.trim().to_lowercase();
     // And a pane of System Settings, the commonest place a handover sends
     // somebody. The card showed the link and pressing it did nothing, because
@@ -8073,6 +8114,16 @@ struct Outside {
     trouble: Option<String>,
     /// And what to do about it.
     fix: Option<String>,
+    /// Whether this app starts it: "allowed", "not yet", "changed", or "in its
+    /// own folder". Nothing for a server on the network.
+    standing: Option<String>,
+    /// What it runs, names of variables and never their values, for the
+    /// person to judge before allowing it.
+    shown: String,
+    /// What exactly was shown, so allowing it allows that and nothing else.
+    fingerprint: Option<String>,
+    /// Whether it drives the screen.
+    screen: bool,
 }
 
 /// The tools this thread can reach, whichever engine is answering it.
@@ -8096,36 +8147,97 @@ async fn outside(held: State<'_, Held>, id: String) -> Result<Vec<Outside>, Stri
         .map_err(|e| e.to_string())?
         .map(|c| c.agent)
         .and_then(|agent| held.store.agent(&agent).ok().flatten())
-        .map(|a| std::path::PathBuf::from(a.cwd))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+        .map(|a| std::path::PathBuf::from(a.cwd));
+    // No folder found is no folder's servers, rather than whatever folder the
+    // app happens to be standing in.
+    let home = home.unwrap_or_else(|| std::path::PathBuf::from("/nowhere/at/all"));
 
     let configured = mcp::configured(&home);
-    let running = mcp::Servers::open(&home).await;
+    let allowed = mcp::allowed_now();
+    let running = mcp::Servers::open_these(configured.clone(), &allowed).await;
 
     Ok(configured
         .into_iter()
         .map(|server| {
-            let trouble = running
-                .trouble
-                .iter()
-                .find(|(name, _)| *name == server.name)
-                .map(|(_, why)| why.clone());
-            Outside {
-                tools: running
-                    .tools()
+            let standing = match (&server.how, mcp::standing(&server, &allowed)) {
+                (mcp::How::Remote { .. }, _) => None,
+                (_, mcp::Standing::Allowed) => Some("allowed"),
+                (_, mcp::Standing::NotYet) => Some("not yet"),
+                (_, mcp::Standing::Changed) => Some("changed"),
+                (_, mcp::Standing::InItsFolder) => Some("in its own folder"),
+            };
+            // By where it came from as well as its name: the same name can be
+            // in the person's list and in the folder, and only one starts.
+            let trouble = match standing {
+                Some("allowed") | None => running
+                    .trouble
                     .iter()
-                    .filter(|t| t.server == server.name)
-                    .map(|t| t.own_name.clone())
-                    .collect(),
+                    .find(|(name, why)| *name == server.name && !mcp::not_started_by_choice(why))
+                    .map(|(_, why)| why.clone()),
+                Some("not yet") => Some(mcp::NOT_ALLOWED_YET.to_string()),
+                Some("changed") => Some(mcp::CHANGED_SINCE_ALLOWED.to_string()),
+                Some(_) => Some(mcp::IN_ITS_OWN_FOLDER.to_string()),
+            };
+            Outside {
+                tools: match standing {
+                    Some("allowed") => running
+                        .tools()
+                        .iter()
+                        .filter(|t| t.server == server.name)
+                        .map(|t| t.own_name.clone())
+                        .collect(),
+                    _ => Vec::new(),
+                },
                 fix: trouble
                     .as_deref()
                     .map(|why| mcp::what_to_do(&server.name, why)),
+                standing: standing.map(str::to_string),
+                shown: server.shown(),
+                fingerprint: server.fingerprint(),
+                screen: mcp::drives_the_screen(&server),
                 name: server.name,
                 from: server.from,
                 trouble,
             }
         })
         .collect())
+}
+
+/// Allow one of the person's own servers, exactly as the panel showed it.
+///
+/// Refused when it has changed since it was shown, so what is allowed is what
+/// was seen. Only the window calls this: it is no tool of any teammate's.
+#[tauri::command]
+async fn allow_server(
+    held: State<'_, Held>,
+    name: String,
+    fingerprint: String,
+) -> Result<(), String> {
+    let server = mcp::the_one_shown(&name, &fingerprint).map_err(|e| format!("{e:#}"))?;
+    held.store
+        .allow_server(&name, &fingerprint, &server.shown())
+        .map_err(|e| e.to_string())?;
+    servers_changed(&held);
+    Ok(())
+}
+
+/// Stop allowing one.
+#[tauri::command]
+async fn stop_allowing_server(held: State<'_, Held>, name: String) -> Result<(), String> {
+    held.store
+        .stop_allowing_server(&name)
+        .map_err(|e| e.to_string())?;
+    servers_changed(&held);
+    Ok(())
+}
+
+/// After the allowed servers changed: the starter is told, and engines doing
+/// nothing are closed, so the next thing said opens them with the new list.
+fn servers_changed(held: &Held) {
+    mcp::allow_these(held.store.servers_allowed().unwrap_or_default());
+    for agent in held.store.agents().unwrap_or_default() {
+        close_what_is_idle(held, &agent.id);
+    }
 }
 
 /// Change an agent's identity by hand, whatever it settled on.
@@ -9144,6 +9256,7 @@ pub fn run() {
             say_what_was_cut_off(app.handle());
             sweep_up_after_a_crash(&here);
             say_if_the_name_is_taken(&here);
+            know_which_servers_are_allowed(&app.state::<Held>());
 
             Ok(())
         })
@@ -9245,6 +9358,8 @@ pub fn run() {
             join_team,
             leave_team,
             break_up_team,
+            allow_server,
+            stop_allowing_server,
             checklist_of,
             set_checklist,
             what_they_bring,

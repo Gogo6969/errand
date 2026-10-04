@@ -532,15 +532,94 @@ async fn fetched(url: &str) -> Result<String> {
 /// nothing. This makes sure it is still that when the write happens: a command
 /// running at the same moment could put a link there between the check and the
 /// write, and an ordinary write would follow it out of the folder.
+///
+/// And never through a link anywhere along it: `inside` resolved every folder
+/// on the way, and a walled command running at the same moment could swap one
+/// of them for a link to somewhere else. The file tools run in the app, outside
+/// the wall, so a write that followed it would land wherever the person can
+/// write. `O_NOFOLLOW_ANY` refuses a link at any step, not only the last.
 fn write_here(at: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
-        .truncate(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(NO_LINK_ANYWHERE | libc::O_NONBLOCK)
         .open(at)?;
+    a_plain_file(&file)?;
+    file.set_len(0)?;
     std::io::Write::write_all(&mut file, contents)
+}
+
+/// Only a plain file is read or written: a pipe a walled command made would
+/// hold the app waiting on it for ever, and a device is nothing to read.
+/// Opened without waiting, then looked at, so a pipe is found before it can
+/// block anything.
+fn a_plain_file(file: &std::fs::File) -> std::io::Result<()> {
+    match file.metadata()?.file_type().is_file() {
+        true => Ok(()),
+        false => Err(std::io::Error::other("that is not a plain file")),
+    }
+}
+
+/// Read a file at exactly this path, never through a link anywhere along it,
+/// for the same reason: read by the app, a link swapped in would hand the
+/// teammate what its wall keeps from it, Errand's own keys among them.
+fn read_here(at: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(NO_LINK_ANYWHERE | libc::O_NONBLOCK)
+        .open(at)?;
+    a_plain_file(&file)?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+/// Refuse a link at any step of a path, on the systems that can, and at the
+/// last step on the others. On macOS the two flags together are refused as an
+/// invalid argument, and the first covers the last step anyway.
+#[cfg(target_os = "macos")]
+const NO_LINK_ANYWHERE: libc::c_int = libc::O_NOFOLLOW_ANY;
+#[cfg(not(target_os = "macos"))]
+const NO_LINK_ANYWHERE: libc::c_int = libc::O_NOFOLLOW;
+
+/// What an engine reads from the top of its own folder as its settings, and
+/// so what no teammate may write there: Claude Code's project settings, with
+/// their hooks and their allow-rules, its instructions, and the servers it
+/// starts. Lower case, compared without regard to case, as the disk does.
+pub const WHAT_AN_ENGINE_READS: &[&str] = &[".claude", ".mcp.json", "claude.md", "claude.local.md"];
+
+/// Whether a path, relative to the working directory, is one of those.
+fn an_engine_reads(home: &Path, at: &Path) -> bool {
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    let Ok(rest) = at.strip_prefix(&home) else {
+        return false;
+    };
+    // Folded the way the disk folds names, not only by case: `.mcp.jſon`,
+    // with a long s, is the same file as `.mcp.json` there.
+    rest.components()
+        .next()
+        .map(|first| {
+            first
+                .as_os_str()
+                .to_string_lossy()
+                .chars()
+                .flat_map(char::to_uppercase)
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .is_some_and(|first| WHAT_AN_ENGINE_READS.contains(&first.as_str()))
+}
+
+/// What to say when one of those was refused.
+fn not_its_own_settings(said: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{said} is not yours to write: at the top of your folder it would be the settings an \
+         engine reads, and you change what you are only through suggest_learning, with the \
+         person's yes. Put project files in a subfolder instead."
+    )
 }
 
 /// The command, wrapped so it cannot write outside where it belongs.
@@ -600,6 +679,8 @@ const MOST_WORTH_LISTING: usize = 200;
 /// has answered a question nobody asked.
 const NOT_WORTH_LOOKING_IN: &[&str] = &[
     ".git",
+    // Where its tools keep their caches, inside the wall.
+    ".cache",
     "node_modules",
     "target",
     ".venv",
@@ -704,7 +785,7 @@ fn searching(at: &Path, home: &Path, looking_for: &str, named: &str) -> String {
         }
         // Read as text or not at all. A binary read as UTF-8 is either lost or
         // a screen of replacement characters, and neither is an answer.
-        let Ok(text) = std::fs::read_to_string(file) else {
+        let Ok(text) = read_here(file) else {
             return;
         };
         let shown = said_from(home, file);
@@ -760,8 +841,7 @@ pub async fn run(
     match name {
         "read_file" => {
             let at = inside(home, &get("path"))?;
-            let text = std::fs::read_to_string(&at)
-                .with_context(|| format!("reading {}", at.display()))?;
+            let text = read_here(&at).with_context(|| format!("reading {}", at.display()))?;
             Ok(cut_to_something_readable(&text))
         }
 
@@ -801,20 +881,34 @@ pub async fn run(
 
         "write_file" => {
             let at = inside(home, &get("path"))?;
+            if an_engine_reads(home, &at) {
+                return Err(not_its_own_settings(&get("path")));
+            }
             if let Some(parent) = at.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
+            // Looked at again once the folders exist: one swapped for a link
+            // while they were being made is caught here, and the write below
+            // refuses a link anywhere along the way besides.
+            anyhow::ensure!(
+                inside(home, &get("path"))? == at,
+                "{} changed while it was being written",
+                get("path")
+            );
             write_here(&at, get("contents").as_bytes())
                 .map_err(|why| why_that_failed(why, &at, home))?;
             Ok(format!("Written: {}", at.display()))
         }
 
         "search_files" => {
+            // From the folder's real path, since every file in it is read
+            // refusing a link anywhere along the way.
+            let real = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
             let at = match get("path").as_str() {
-                "" => home.to_path_buf(),
+                "" => real.clone(),
                 p => inside(home, p)?,
             };
-            Ok(searching(&at, home, &get("pattern"), &get("named")))
+            Ok(searching(&at, &real, &get("pattern"), &get("named")))
         }
 
         "find_files" => {
@@ -847,8 +941,10 @@ pub async fn run(
 
         "change_file" => {
             let at = inside(home, &get("path"))?;
-            let was = std::fs::read_to_string(&at)
-                .with_context(|| format!("reading {}", at.display()))?;
+            if an_engine_reads(home, &at) {
+                return Err(not_its_own_settings(&get("path")));
+            }
+            let was = read_here(&at).with_context(|| format!("reading {}", at.display()))?;
             let from = get("from");
             anyhow::ensure!(!from.is_empty(), "say what text to replace");
             // Once, or not at all. Replacing the first of several is how an
@@ -1386,6 +1482,108 @@ mod tests {
 
         std::fs::remove_dir_all(&home).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[tokio::test]
+    async fn the_settings_an_engine_reads_at_the_top_of_its_folder_are_not_its_to_write() {
+        let home = std::env::temp_dir().join(format!("errand-own-settings-{}", std::process::id()));
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(home.join("project")).unwrap();
+        for refused in [
+            ".claude/settings.json",
+            "CLAUDE.md",
+            "claude.MD",
+            ".MCP.json",
+            "CLAUDE.local.md",
+        ] {
+            let said = run(
+                "write_file",
+                &json!({ "path": refused, "contents": "hooks" }),
+                &home,
+                "a-conversation",
+            )
+            .await;
+            assert!(said.is_err(), "{refused} was written: {said:?}");
+            assert!(
+                said.unwrap_err().to_string().contains("suggest_learning"),
+                "and it is told how it changes itself instead"
+            );
+        }
+        assert!(!home.join(".claude").exists() && !home.join("CLAUDE.md").exists());
+        // A project's own files, a folder down, are the project's.
+        run(
+            "write_file",
+            &json!({ "path": "project/CLAUDE.md", "contents": "notes" }),
+            &home,
+            "a-conversation",
+        )
+        .await
+        .expect("a subfolder is fine");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[tokio::test]
+    async fn a_settings_name_spelt_the_way_the_disk_folds_it_is_still_refused() {
+        let home = std::env::temp_dir().join(format!("errand-fold-{}", std::process::id()));
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(&home).unwrap();
+        for spelt in [".mcp.j\u{17f}on", "CLAUDE.\u{4d}D", ".CLAUDE"] {
+            let said = run(
+                "write_file",
+                &json!({ "path": spelt, "contents": "x" }),
+                &home,
+                "a-conversation",
+            )
+            .await;
+            assert!(said.is_err(), "{spelt} was written: {said:?}");
+        }
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_pipe_is_refused_rather_than_waited_on() {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("errand-fifo-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+        let pipe = root.join("pipe");
+        let made = std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&pipe)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        // Both return at once with a refusal rather than blocking the test.
+        assert!(read_here(&pipe).is_err());
+        assert!(write_here(&pipe, b"x").is_err());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn nothing_is_read_or_written_through_a_folder_swapped_for_a_link() {
+        // The check and the read are two moments, and a walled command can
+        // swap a folder for a link between them. So the read and the write
+        // themselves refuse a link at any step.
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("errand-swap-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let home = root.join("home");
+        let secret = root.join("kept-out");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&secret).unwrap();
+        std::fs::write(secret.join("key"), "the key").unwrap();
+        std::os::unix::fs::symlink(&secret, home.join("swapped")).unwrap();
+        let through = home.join("swapped").join("key");
+        assert!(read_here(&through).is_err(), "read through a linked folder");
+        assert!(write_here(&home.join("swapped").join("new"), b"x").is_err());
+        assert!(!secret.join("new").exists());
+        // A plain path is read and written as ever.
+        write_here(&home.join("plain.txt"), b"fine").unwrap();
+        assert_eq!(read_here(&home.join("plain.txt")).unwrap(), "fine");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[tokio::test]

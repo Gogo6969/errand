@@ -17,6 +17,14 @@
 //!
 //! Nothing in here ever prints a server's environment. Those are the variables
 //! people put API keys in.
+//!
+//! Only the person's own servers are started, and only in the form they
+//! allowed. The servers started here run as the person, outside every wall,
+//! and they were read from files a teammate could write: its own folder's
+//! `.mcp.json` is inside its wall, and walled Claude Code may write
+//! `~/.claude.json`. So a server named in a teammate's folder is listed and
+//! never started, and one in the person's own list starts only while its
+//! command, arguments and environment are exactly what the person allowed.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -48,7 +56,170 @@ pub struct Configured {
     /// Which file said so, for a window that has to explain where a tool came
     /// from.
     pub from: String,
+    /// Whose list it is in, which decides whether this app may start it.
+    pub found: Found,
 }
+
+/// Where a server was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Found {
+    /// The person's own list, at the top of `~/.claude.json`.
+    TheirOwn,
+    /// Filed under this folder in `~/.claude.json`.
+    ThisFolder,
+    /// The folder's own `.mcp.json`, which a teammate can write.
+    McpJson,
+}
+
+/// Whether this app starts a server, and if not why not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// The person allowed it as it is now.
+    Allowed,
+    /// The person has not allowed it yet.
+    NotYet,
+    /// Allowed once, and changed since.
+    Changed,
+    /// Set up in a teammate's own folder, which this app never starts.
+    InItsFolder,
+}
+
+/// Why a server was not started, in the words the Tools panel shows.
+pub const NOT_ALLOWED_YET: &str = "not started: you have not allowed it in Errand yet";
+pub const CHANGED_SINCE_ALLOWED: &str = "not started: it changed since you allowed it";
+pub const IN_ITS_OWN_FOLDER: &str =
+    "not started: it is set up for this agent's folder rather than in your own list";
+
+impl Configured {
+    /// What exactly this app would run, as a fingerprint: the command, its
+    /// arguments, and its environment with values, in a fixed order. Values
+    /// count, because an added interpreter or loader variable turns an allowed
+    /// command into any code at all. Nothing for a server on the network.
+    pub fn fingerprint(&self) -> Option<String> {
+        use sha2::Digest;
+        let How::Program { command, args, env } = &self.how else {
+            return None;
+        };
+        let mut env: Vec<(&String, &String)> = env.iter().collect();
+        env.sort();
+        let canonical = serde_json::to_string(&(command, args, env)).ok()?;
+        let hash = sha2::Sha256::digest(canonical.as_bytes());
+        Some(hash.iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// What it runs, for the person to judge: the command line, and the names
+    /// of the variables it sets, never their values.
+    pub fn shown(&self) -> String {
+        match &self.how {
+            How::Remote { kind, url } => format!("{kind} at {url}"),
+            How::Program { command, args, env } => {
+                let mut said = std::iter::once(command.as_str())
+                    .chain(args.iter().map(String::as_str))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !env.is_empty() {
+                    let mut keys: Vec<&String> = env.keys().collect();
+                    keys.sort();
+                    said.push_str(&format!(
+                        " (with {} set)",
+                        keys.iter()
+                            .map(|k| k.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                said
+            }
+        }
+    }
+}
+
+/// Whether a server is one that drives the screen: clicking, typing, looking.
+///
+/// Never allowed without the person choosing it, because such a server can
+/// press a teammate's own cards and type into a terminal, which runs outside
+/// every wall.
+pub fn drives_the_screen(server: &Configured) -> bool {
+    let named = |s: &str| {
+        let s = s.to_ascii_lowercase();
+        s.contains("peekaboo") || s.contains("computer-use") || s.contains("computer_use")
+    };
+    named(&server.name)
+        || match &server.how {
+            How::Program { command, args, .. } => named(command) || args.iter().any(|a| named(a)),
+            How::Remote { url, .. } => named(url),
+        }
+}
+
+/// Whether a reason a server was not started is one of the app's own choices
+/// rather than the server failing: a server and a copy of it in a teammate's
+/// folder share a name, and only the reason tells their two lines apart.
+pub fn not_started_by_choice(why: &str) -> bool {
+    why == NOT_ALLOWED_YET || why == CHANGED_SINCE_ALLOWED || why == IN_ITS_OWN_FOLDER
+}
+
+/// Whether this app may start a server, against what the person allowed.
+pub fn standing(server: &Configured, allowed: &HashMap<String, String>) -> Standing {
+    if server.found != Found::TheirOwn {
+        return Standing::InItsFolder;
+    }
+    match (allowed.get(&server.name), server.fingerprint()) {
+        (Some(was), Some(now)) if *was == now => Standing::Allowed,
+        (Some(_), _) => Standing::Changed,
+        (None, _) => Standing::NotYet,
+    }
+}
+
+/// What the person has allowed, by server name, kept in this process.
+///
+/// In memory rather than read from a file each time, the way the wall keeps
+/// the folders allowed: the app fills it from its own store, which no wall
+/// lets a teammate touch, and a file this side of the wall would be one more
+/// thing to keep out of reach. Empty until the app says otherwise, so a test,
+/// or the command-line harness, starts nothing.
+fn allowed_registry() -> &'static Mutex<HashMap<String, String>> {
+    static ALLOWED: std::sync::OnceLock<Mutex<HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    ALLOWED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Replace what is allowed with this, by name and fingerprint.
+pub fn allow_these(allowed: HashMap<String, String>) {
+    *allowed_registry().lock().unwrap_or_else(|e| e.into_inner()) = allowed;
+}
+
+/// What is allowed now.
+pub fn allowed_now() -> HashMap<String, String> {
+    allowed_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// The person's own server by this name, as long as it is still exactly what
+/// they were shown: allowing what the panel showed, and not whatever the entry
+/// was changed to while they looked.
+pub fn the_one_shown(name: &str, fingerprint: &str) -> Result<Configured> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    the_one_shown_in(Path::new(&home), name, fingerprint)
+}
+
+fn the_one_shown_in(theirs: &Path, name: &str, fingerprint: &str) -> Result<Configured> {
+    let found = configured_in(theirs, Path::new("/nowhere/at/all"))
+        .into_iter()
+        .find(|c| c.name == name && c.found == Found::TheirOwn)
+        .ok_or_else(|| anyhow!("there is no server called {name} in your own list"))?;
+    if found.fingerprint().as_deref() != Some(fingerprint) {
+        anyhow::bail!("{name} changed since it was shown, so it was not allowed: look again");
+    }
+    Ok(found)
+}
+
+/// Where a server's program is looked for when the person's own PATH cannot
+/// be read. Their own is used first, as their terminal has it: the folders on
+/// it that package managers keep programs in are no longer writable from
+/// inside any wall, so what is found there is what they put there.
+const WHERE_PROGRAMS_ARE: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
 /// The ways a server can be reached.
 #[derive(Debug, Clone)]
@@ -80,28 +251,34 @@ pub struct Tool {
 
 /// Every server named in the files Claude Code reads.
 ///
-/// User-level first, then anything the working directory adds, so a project can
-/// bring tools of its own. A name defined twice takes the nearer one, which is
-/// the rule everywhere else that layers configuration.
+/// User-level first, then anything the working directory adds. Each is kept
+/// with where it was found, and none replaces another by name: a teammate's
+/// folder defining `mempalace` would otherwise quietly take the place of the
+/// person's own.
 pub fn configured(cwd: &Path) -> Vec<Configured> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    configured_in(Path::new(&home), cwd)
+}
+
+/// The same, with the home folder named, so a test can lay one out.
+fn configured_in(home: &Path, cwd: &Path) -> Vec<Configured> {
     let mut found: Vec<Configured> = Vec::new();
-    let mut add = |name: String, spec: &Value, from: &str| {
+    let mut add = |name: String, spec: &Value, from: &str, whose: Found| {
         if let Some(how) = read_how(spec) {
-            found.retain(|c| c.name != name);
             found.push(Configured {
                 name,
                 how,
                 from: from.to_string(),
+                found: whose,
             });
         }
     };
 
-    let home = std::env::var("HOME").unwrap_or_default();
-    let theirs = Path::new(&home).join(".claude.json");
+    let theirs = home.join(".claude.json");
     if let Some(all) = read_json(&theirs) {
         if let Some(servers) = all.get("mcpServers").and_then(|m| m.as_object()) {
             for (name, spec) in servers {
-                add(name.clone(), spec, "~/.claude.json");
+                add(name.clone(), spec, "~/.claude.json", Found::TheirOwn);
             }
         }
         // Claude Code also files servers under the project they belong to,
@@ -110,16 +287,23 @@ pub fn configured(cwd: &Path) -> Vec<Configured> {
         if let Some(mine) = all.pointer(&format!("/projects/{}", escape(&here))) {
             if let Some(servers) = mine.get("mcpServers").and_then(|m| m.as_object()) {
                 for (name, spec) in servers {
-                    add(name.clone(), spec, "this folder");
+                    add(name.clone(), spec, "this folder", Found::ThisFolder);
                 }
             }
         }
     }
 
-    if let Some(all) = read_json(&cwd.join(".mcp.json")) {
-        if let Some(servers) = all.get("mcpServers").and_then(|m| m.as_object()) {
-            for (name, spec) in servers {
-                add(name.clone(), spec, ".mcp.json");
+    // Only a plain file, and not a large one: it is listed, never started, so
+    // nothing here needs more than its names.
+    let mcp_json = cwd.join(".mcp.json");
+    let plain = std::fs::symlink_metadata(&mcp_json)
+        .is_ok_and(|m| m.file_type().is_file() && m.len() < 1_000_000);
+    if plain {
+        if let Some(all) = read_json(&mcp_json) {
+            if let Some(servers) = all.get("mcpServers").and_then(|m| m.as_object()) {
+                for (name, spec) in servers {
+                    add(name.clone(), spec, ".mcp.json", Found::McpJson);
+                }
             }
         }
     }
@@ -190,7 +374,23 @@ impl Link {
         args: &[String],
         env: &HashMap<String, String>,
     ) -> Result<Self> {
-        let mut child = tokio::process::Command::new(command)
+        // As little of this app's own environment as a program needs, and the
+        // server's own variables on top: whatever else the app was started
+        // with is not part of what the person allowed.
+        let mut child = tokio::process::Command::new(command);
+        child.env_clear();
+        for keep in [
+            "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "SHELL",
+        ] {
+            if let Ok(value) = std::env::var(keep) {
+                child.env(keep, value);
+            }
+        }
+        child.env(
+            "PATH",
+            crate::claude::the_persons_path().unwrap_or_else(|| WHERE_PROGRAMS_ARE.to_string()),
+        );
+        let mut child = child
             .args(args)
             .envs(env)
             .stdin(Stdio::piped())
@@ -332,6 +532,27 @@ pub struct Servers {
 /// server: No such file or directory", with nothing to say that the file is
 /// Claude Code's settings, which entry, or that deleting it is a fine answer.
 pub fn what_to_do(name: &str, trouble: &str) -> String {
+    if trouble == NOT_ALLOWED_YET {
+        return format!(
+            "Errand starts a server for agents on other models only once you allow it, \
+             because it runs as you, outside every wall. If \"{name}\" is yours and you want \
+             these agents to use it, press Allow."
+        );
+    }
+    if trouble == CHANGED_SINCE_ALLOWED {
+        return format!(
+            "What \"{name}\" runs changed since you allowed it: its command, arguments or \
+             settings. If you changed it yourself, press Allow again. If you did not, look at \
+             it in ~/.claude.json before you do."
+        );
+    }
+    if trouble == IN_ITS_OWN_FOLDER {
+        return "Errand starts only servers in your own list, at the top of ~/.claude.json, \
+                and never one set up for an agent's folder, in its .mcp.json or under its \
+                folder in ~/.claude.json: an agent could have put it there. If you want it, \
+                add it to your own list and allow it here."
+            .to_string();
+    }
     let lower = trouble.to_lowercase();
     if lower.contains("not reached from here yet") {
         return "Agents on Claude Code reach this one themselves. Agents on any other model \
@@ -369,13 +590,19 @@ pub fn what_to_do(name: &str, trouble: &str) -> String {
 }
 
 impl Servers {
-    /// Start everything configured for this directory and ask what it offers.
+    /// Start everything configured for this directory that the person allowed,
+    /// and ask what it offers.
     ///
     /// One that fails to start does not stop the others. Most people have a
     /// server configured that they have not used for months.
     pub async fn open(cwd: &Path) -> Self {
+        Self::open_these(configured(cwd), &allowed_now()).await
+    }
+
+    /// The same, for a given list against a given allowance.
+    pub async fn open_these(wanted: Vec<Configured>, allowed: &HashMap<String, String>) -> Self {
         let mut servers = Servers::default();
-        for want in configured(cwd) {
+        for want in wanted {
             let (command, args, env) = match &want.how {
                 How::Program { command, args, env } => (command, args, env),
                 How::Remote { kind, .. } => {
@@ -386,6 +613,16 @@ impl Servers {
                     continue;
                 }
             };
+            let why_not = match standing(&want, allowed) {
+                Standing::Allowed => None,
+                Standing::NotYet => Some(NOT_ALLOWED_YET),
+                Standing::Changed => Some(CHANGED_SINCE_ALLOWED),
+                Standing::InItsFolder => Some(IN_ITS_OWN_FOLDER),
+            };
+            if let Some(why) = why_not {
+                servers.trouble.push((want.name.clone(), why.to_string()));
+                continue;
+            }
 
             match Link::start(&want.name, command, args, env).await {
                 // `{:#}` rather than `{}`: the plain form gives only the
@@ -754,6 +991,231 @@ mod tests {
         assert_eq!(said, "3 more from peekaboo (2), notes (1)");
         assert!(!said.contains("see"), "no tool names, ever");
         assert!(!said.contains("add_note"));
+    }
+
+    /// A home folder of its own with a `.claude.json`, and an agent folder.
+    fn laid_out(tag: &str, claude_json: Value, mcp_json: Option<Value>) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("errand-mcp-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let home = root.join("home");
+        let cwd = root.join("agent");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(home.join(".claude.json"), claude_json.to_string()).unwrap();
+        if let Some(planted) = mcp_json {
+            std::fs::write(cwd.join(".mcp.json"), planted.to_string()).unwrap();
+        }
+        (home, cwd)
+    }
+
+    use std::path::PathBuf;
+
+    #[test]
+    fn only_the_persons_own_list_can_ever_be_started_and_a_folder_cannot_shadow_it() {
+        let (home, cwd) = laid_out("whose", json!({}), None);
+        let cwd_key = cwd.to_string_lossy().to_string();
+        std::fs::write(
+            home.join(".claude.json"),
+            json!({
+                "mcpServers": { "mine": { "command": "/usr/bin/true" } },
+                "projects": { cwd_key: { "mcpServers": { "proj": { "command": "/usr/bin/true" } } } }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".mcp.json"),
+            json!({ "mcpServers": { "mine": { "command": "/usr/bin/false" }, "planted": { "command": "/usr/bin/true" } } })
+                .to_string(),
+        )
+        .unwrap();
+        let all = configured_in(&home, &cwd);
+        let whose: Vec<(String, Found)> = all.iter().map(|c| (c.name.clone(), c.found)).collect();
+        assert!(
+            whose.contains(&("mine".into(), Found::TheirOwn)),
+            "{whose:?}"
+        );
+        assert!(
+            whose.contains(&("proj".into(), Found::ThisFolder)),
+            "{whose:?}"
+        );
+        assert!(
+            whose.contains(&("planted".into(), Found::McpJson)),
+            "{whose:?}"
+        );
+        // The person's own `mine` is still there beside the folder's.
+        assert_eq!(all.iter().filter(|c| c.name == "mine").count(), 2);
+        // Allowing every fingerprint there is still starts only the person's
+        // own: the folder's entries, its own `mine` included, never.
+        let theirs = all
+            .iter()
+            .find(|c| c.name == "mine" && c.found == Found::TheirOwn)
+            .unwrap();
+        let mut allowed: HashMap<String, String> =
+            [("mine".to_string(), theirs.fingerprint().unwrap())].into();
+        for c in all
+            .iter()
+            .filter(|c| c.found != Found::TheirOwn && c.name != "mine")
+        {
+            allowed.insert(c.name.clone(), c.fingerprint().unwrap());
+        }
+        for c in &all {
+            let expected = match c.found {
+                Found::TheirOwn => Standing::Allowed,
+                _ => Standing::InItsFolder,
+            };
+            assert_eq!(
+                standing(c, &allowed),
+                expected,
+                "{} from {:?}",
+                c.name,
+                c.found
+            );
+        }
+        std::fs::remove_dir_all(home.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn allowing_a_server_covers_exactly_what_was_shown() {
+        let one = |command: &str, args: &[&str], env: &[(&str, &str)]| Configured {
+            name: "x".into(),
+            how: How::Program {
+                command: command.into(),
+                args: args.iter().map(|a| a.to_string()).collect(),
+                env: env
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            },
+            from: "~/.claude.json".into(),
+            found: Found::TheirOwn,
+        };
+        let base = one("/bin/srv", &["--a"], &[("K", "1"), ("J", "2")]);
+        // The same entry, its variables in another order, is the same.
+        assert_eq!(
+            base.fingerprint(),
+            one("/bin/srv", &["--a"], &[("J", "2"), ("K", "1")]).fingerprint()
+        );
+        // Any change to what runs is a different one.
+        for changed in [
+            one("/bin/other", &["--a"], &[("K", "1"), ("J", "2")]),
+            one("/bin/srv", &["--b"], &[("K", "1"), ("J", "2")]),
+            one("/bin/srv", &["--a"], &[("K", "9"), ("J", "2")]),
+            one(
+                "/bin/srv",
+                &["--a"],
+                &[("K", "1"), ("J", "2"), ("DYLD_INSERT_LIBRARIES", "/x")],
+            ),
+        ] {
+            assert_ne!(base.fingerprint(), changed.fingerprint());
+        }
+        let allowed: HashMap<String, String> =
+            [("x".to_string(), base.fingerprint().unwrap())].into();
+        assert_eq!(standing(&base, &allowed), Standing::Allowed);
+        assert_eq!(
+            standing(
+                &one("/bin/srv", &["--a"], &[("K", "9"), ("J", "2")]),
+                &allowed
+            ),
+            Standing::Changed
+        );
+        assert_eq!(standing(&base, &HashMap::new()), Standing::NotYet);
+        // A server on the network has nothing to fingerprint and is never allowed.
+        let remote = Configured {
+            name: "r".into(),
+            how: How::Remote {
+                kind: "http".into(),
+                url: "https://example.com/mcp".into(),
+            },
+            from: "~/.claude.json".into(),
+            found: Found::TheirOwn,
+        };
+        assert_eq!(remote.fingerprint(), None);
+        // What the person is shown names variables and never their values.
+        let shown = one("/bin/srv", &["--a"], &[("API_KEY", "sekrit-value")]).shown();
+        assert!(
+            shown.contains("/bin/srv --a") && shown.contains("API_KEY"),
+            "{shown}"
+        );
+        assert!(!shown.contains("sekrit-value"), "{shown}");
+    }
+
+    #[test]
+    fn allowing_refuses_a_server_that_changed_after_it_was_shown() {
+        let (home, _cwd) = laid_out(
+            "shown",
+            json!({ "mcpServers": { "mine": { "command": "/bin/srv", "args": ["--a"] } } }),
+            None,
+        );
+        let shown = configured_in(&home, Path::new("/x"))[0]
+            .fingerprint()
+            .unwrap();
+        assert!(the_one_shown_in(&home, "mine", &shown).is_ok());
+        std::fs::write(
+            home.join(".claude.json"),
+            json!({ "mcpServers": { "mine": { "command": "/bin/srv", "args": ["--evil"] } } })
+                .to_string(),
+        )
+        .unwrap();
+        assert!(the_one_shown_in(&home, "mine", &shown).is_err());
+        assert!(the_one_shown_in(&home, "nobody", &shown).is_err());
+        std::fs::remove_dir_all(home.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn a_server_a_teammate_wrote_into_its_folder_never_runs() {
+        // Run rather than read: each command only leaves a mark, and which
+        // marks exist afterwards is which servers this app started.
+        let (home, cwd) = laid_out("run", json!({}), None);
+        let mark = |n: &str| home.parent().unwrap().join(n);
+        let touching =
+            |n: &str| json!({ "command": "/usr/bin/touch", "args": [mark(n).to_string_lossy()] });
+        let cwd_key = cwd.to_string_lossy().to_string();
+        std::fs::write(
+            home.join(".claude.json"),
+            json!({
+                "mcpServers": { "allowed": touching("m-allowed"), "unallowed": touching("m-unallowed") },
+                "projects": { cwd_key: { "mcpServers": { "project": touching("m-project") } } }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".mcp.json"),
+            json!({ "mcpServers": { "planted": touching("m-planted"), "allowed": touching("m-shadow") } }).to_string(),
+        )
+        .unwrap();
+        let all = configured_in(&home, &cwd);
+        let theirs = all
+            .iter()
+            .find(|c| c.name == "allowed" && c.found == Found::TheirOwn)
+            .unwrap()
+            .fingerprint()
+            .unwrap();
+        let allowed: HashMap<String, String> = [("allowed".to_string(), theirs)].into();
+        let servers = Servers::open_these(all, &allowed).await;
+        assert!(mark("m-allowed").exists(), "the person's allowed one runs");
+        for never in ["m-unallowed", "m-project", "m-planted", "m-shadow"] {
+            assert!(!mark(never).exists(), "{never} must never run");
+        }
+        assert!(servers
+            .trouble
+            .iter()
+            .any(|(n, why)| n == "planted" && why == IN_ITS_OWN_FOLDER));
+        assert!(servers
+            .trouble
+            .iter()
+            .any(|(n, why)| n == "unallowed" && why == NOT_ALLOWED_YET));
+        std::fs::remove_dir_all(home.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_server_that_was_not_started_says_how_to_allow_it() {
+        assert!(what_to_do("m", NOT_ALLOWED_YET).contains("press Allow"));
+        assert!(what_to_do("m", CHANGED_SINCE_ALLOWED).contains("changed since you allowed it"));
+        assert!(
+            what_to_do("m", IN_ITS_OWN_FOLDER).contains("never one set up for an agent's folder")
+        );
     }
 
     #[test]

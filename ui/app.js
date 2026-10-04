@@ -4715,6 +4715,10 @@ el.reach.addEventListener("click", async () => {
     return;
   }
   if (!showing) return;
+  await drawTheServers();
+});
+
+async function drawTheServers() {
   el.reachable.hidden = false;
   el.reachable.replaceChildren(saying("Asking them…"));
 
@@ -4794,10 +4798,18 @@ el.reach.addEventListener("click", async () => {
           ),
         ]
       : []),
-    note("p", "MCP servers, read from ~/.claude.json. Both engines get the same ones."),
+    note(
+      "p",
+      engine === "local"
+        ? "MCP servers, read from ~/.claude.json. Errand starts only the ones you allow here, as they were when you allowed them: they run as you, outside every wall."
+        : "MCP servers, read from ~/.claude.json. Claude Code starts these itself, as its own children: inside the wall when it never asks, and asking first otherwise. What you allow here is for agents on other models.",
+    ),
     ...servers.map((s) => {
       const box = document.createElement("div");
-      box.className = s.trouble ? "server broken" : "server";
+      // Not allowed is a choice, not a fault, so it is not drawn in red.
+      const chosen = s.standing && s.standing !== "allowed";
+      box.className = s.trouble && !chosen ? "server broken" : chosen ? "server held" : "server";
+      box.dataset.server = s.name;
 
       const name = document.createElement("span");
       name.className = "server-name";
@@ -4818,10 +4830,48 @@ el.reach.addEventListener("click", async () => {
       // What to do about it, under what went wrong. Red alone told somebody
       // something was broken and nothing about whether or how to mend it.
       if (s.trouble && s.fix) box.append(note("p", s.fix, "server-fix"));
+      // What it runs, and the person's say over whether Errand starts it.
+      if (s.standing === "not yet" || s.standing === "changed") {
+        box.append(note("code", s.shown, "server-runs"));
+        if (s.screen) {
+          box.append(
+            note(
+              "p",
+              "It drives your screen: it can click, type and look at anything, including Errand's own cards and a terminal, which runs outside every wall. Teammates on auto use it without asking.",
+              "server-warning",
+            ),
+          );
+        }
+        // Not the inviting button for one that drives the screen: allowing that
+        // should be a decision, not the obvious next step.
+        box.append(serverButton("Allow", s.screen ? "" : "yes", () => invoke("allow_server", { name: s.name, fingerprint: s.fingerprint })));
+      } else if (s.standing === "allowed") {
+        box.append(serverButton("Stop allowing", "", () => invoke("stop_allowing_server", { name: s.name })));
+      }
       return box;
     }),
   );
-});
+}
+
+/** A button on a server's row that changes what Errand starts, then shows the list again. */
+function serverButton(label, kind, act) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = kind ? `server-act ${kind}` : "server-act";
+  b.textContent = label;
+  b.onclick = async () => {
+    b.disabled = true;
+    try {
+      await act();
+    } catch (why) {
+      b.disabled = false;
+      b.after(note("p", String(why), "server-fix"));
+      return;
+    }
+    await drawTheServers();
+  };
+  return b;
+}
 
 /** One line of explanation in a panel, as whichever element belongs there. */
 function note(as, text, looks = "server-what") {

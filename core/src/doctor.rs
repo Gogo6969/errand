@@ -128,13 +128,50 @@ pub async fn tools_from_outside(cwd: &Path) -> Vec<Finding> {
     }
 
     let running = crate::mcp::Servers::open(cwd).await;
+    let allowed = crate::mcp::allowed_now();
     let mut found = Vec::new();
     for server in &configured {
-        match running
-            .trouble
-            .iter()
-            .find(|(name, _)| *name == server.name)
-        {
+        // By the server's own standing, not its name alone: a copy of it in a
+        // folder shares the name and says something different.
+        let why_not = match crate::mcp::standing(server, &allowed) {
+            crate::mcp::Standing::Allowed => running
+                .trouble
+                .iter()
+                .find(|(name, why)| *name == server.name && !crate::mcp::not_started_by_choice(why))
+                .cloned(),
+            crate::mcp::Standing::NotYet => {
+                Some((server.name.clone(), crate::mcp::NOT_ALLOWED_YET.to_string()))
+            }
+            crate::mcp::Standing::Changed => Some((
+                server.name.clone(),
+                crate::mcp::CHANGED_SINCE_ALLOWED.to_string(),
+            )),
+            crate::mcp::Standing::InItsFolder => Some((
+                server.name.clone(),
+                crate::mcp::IN_ITS_OWN_FOLDER.to_string(),
+            )),
+        };
+        let why_not = match &server.how {
+            crate::mcp::How::Remote { .. } => running
+                .trouble
+                .iter()
+                .find(|(name, _)| *name == server.name)
+                .cloned(),
+            _ => why_not,
+        };
+        match why_not.as_ref().map(|(n, w)| (n, w)) {
+            // Not started because nobody allowed it is a choice, not a fault.
+            Some((_, why))
+                if why == crate::mcp::NOT_ALLOWED_YET
+                    || why == crate::mcp::IN_ITS_OWN_FOLDER
+                    || why == crate::mcp::CHANGED_SINCE_ALLOWED =>
+            {
+                found.push(Finding::odd(
+                    &format!("Tool server: {}", server.name),
+                    why,
+                    crate::mcp::what_to_do(&server.name, why),
+                ))
+            }
             Some((_, why)) => found.push(Finding::broken(
                 &format!("Tool server: {}", server.name),
                 why.clone(),
@@ -299,6 +336,64 @@ pub fn the_wall() -> Finding {
     }
 }
 
+/// Whether Errand can drive or see the screen.
+///
+/// Every teammate runs as Errand, so whatever the app may do on screen, any
+/// teammate may: click its own cards, type into a terminal, which runs outside
+/// every wall, read whatever is shown. Today it holds neither, which is what
+/// makes a teammate's click or screenshot fail; this says so the day that
+/// changes.
+pub fn the_screen() -> Finding {
+    let (drives, sees) = holds_the_screen();
+    match (drives, sees) {
+        (false, false) => Finding::fine(
+            "The screen",
+            "Errand cannot drive or see your screen, so no teammate can",
+        ),
+        _ => Finding::broken(
+            "The screen",
+            match (drives, sees) {
+                (true, true) => "Errand has Accessibility and Screen Recording",
+                (true, false) => "Errand has Accessibility",
+                _ => "Errand has Screen Recording",
+            },
+            "Every teammate runs as Errand, so any of them can click, type and look at \
+             anything on your screen, Errand's own cards included. Unless you meant that, \
+             remove Errand under System Settings, Privacy & Security, Accessibility, Screen \
+             Recording and Input Monitoring.",
+        ),
+    }
+}
+
+/// Whether this process is trusted for Accessibility, and may record the screen.
+#[cfg(target_os = "macos")]
+fn holds_the_screen() -> (bool, bool) {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGPreflightPostEventAccess() -> bool;
+        fn CGPreflightListenEventAccess() -> bool;
+    }
+    // SAFETY: each only reads this process's own permission state, takes no
+    // arguments and never prompts. Posting input drives the screen as surely
+    // as Accessibility does, and listening to it sees what is typed.
+    unsafe {
+        (
+            AXIsProcessTrusted() || CGPreflightPostEventAccess(),
+            CGPreflightScreenCaptureAccess() || CGPreflightListenEventAccess(),
+        )
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn holds_the_screen() -> (bool, bool) {
+    (false, false)
+}
+
 /// Whether macOS will put one of this app's notifications on screen.
 ///
 /// Learnt by the app, which is the side that can ask the system, and judged
@@ -417,6 +512,7 @@ pub async fn everything(
         the_store(store),
         notifications(may),
         the_wall(),
+        the_screen(),
         doorways(here),
     ];
     // Bounded, because two of these talk to the network and a check that hangs

@@ -12,12 +12,14 @@
 //! and a wall does not. So the wall goes up around Claude Code exactly when the
 //! asking is switched off, and nowhere else.
 //!
-//! The allowances below are not generous, they are load-bearing. Every one of
-//! them was added because something real stopped working without it, and the
-//! way it stopped working is the argument for keeping the list honest: with
-//! `~/.npm` missing, `npx` failed with npm's own advice to run `sudo chown` on
-//! a directory that was fine. A wall that produces misleading errors somewhere
-//! else is worse than no wall, because somebody will follow the advice.
+//! What may be written is a short list on purpose, and every entry on it was
+//! added because something real stopped working without it. A wall that
+//! produces misleading errors is worse than no wall, because somebody will
+//! follow the advice: with `~/.npm` closed, `npx` failed with npm's own advice
+//! to run `sudo chown` on a directory that was fine. The answer to that is
+//! never to open the person's own folders again, whose contents their tools
+//! run later, but to give each tool a folder of the errand's own, which is
+//! what `kept_in_its_own_folder` does.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -29,36 +31,161 @@ use std::sync::{Mutex, OnceLock};
 /// plain process can ask for without entitlements or a helper.
 const THE_SANDBOX: &str = "/usr/bin/sandbox-exec";
 
-/// Places that are not the errand's own folder and still have to be writable,
-/// relative to the home directory.
+/// Where each tool keeps its downloads and caches while walled in, inside
+/// the errand's own folder, by the variable that tells the tool so.
 ///
-/// These are all one kind of thing: somewhere a tool keeps its own working
-/// state. None of them is anybody's documents.
-const TOOLS_KEEP_THEIR_OWN_STATE_IN: &[&str] = &[
-    // Package managers, which is how most MCP servers are started. `npx`
-    // without `~/.npm` fails with advice to change the ownership of a
-    // directory that is not the problem.
-    ".npm",
-    ".cache",
-    ".bun",
-    ".deno",
-    ".cargo",
-    "Library/Caches",
+/// They used to be the person's own: `~/.npm`, `~/.cargo`, `~/.cache`,
+/// `~/Library/Caches` and the rest were writable from inside the wall, because
+/// without them `npx` failed with npm's advice to run `sudo chown` on a folder
+/// that was fine. But what is in those folders is run later, outside the wall,
+/// by the person's own tools: a package `npx` reuses, a crate `cargo` builds,
+/// a wheel `pip` installs, a browser Playwright starts. A teammate that could
+/// write there could leave code behind for them. Each tool is pointed at a
+/// folder of the errand's own instead, which it can fill as it likes, and the
+/// person's folders are only read. Checked on 4 October 2026 with npm, npx,
+/// node-gyp, pnpm, bun, deno, cargo, pip, uv, go, swift, clang and git.
+const KEPT_IN_ITS_OWN_FOLDER: &[(&str, &str)] = &[
+    ("XDG_CACHE_HOME", ".cache"),
+    ("npm_config_cache", ".cache/npm"),
+    ("npm_package_config_node_gyp_devdir", ".cache/node-gyp"),
+    ("PNPM_HOME", ".cache/pnpm"),
+    ("CARGO_HOME", ".cache/cargo"),
+    ("BUN_INSTALL_CACHE_DIR", ".cache/bun"),
+    ("DENO_DIR", ".cache/deno"),
+    ("UV_CACHE_DIR", ".cache/uv"),
+    ("UV_TOOL_DIR", ".cache/uv-tools"),
+    ("UV_TOOL_BIN_DIR", ".cache/uv-tools/bin"),
+    ("PIP_CACHE_DIR", ".cache/pip"),
+    ("PYTHONPYCACHEPREFIX", ".cache/pycache"),
+    ("MPLCONFIGDIR", ".cache/matplotlib"),
+    ("IPYTHONDIR", ".cache/ipython"),
+    ("JUPYTER_CONFIG_DIR", ".cache/jupyter/config"),
+    ("JUPYTER_RUNTIME_DIR", ".cache/jupyter/runtime"),
+    ("GOCACHE", ".cache/go-build"),
+    ("GOMODCACHE", ".cache/go-mod"),
+    ("GOPATH", ".cache/go"),
+    ("HF_HOME", ".cache/huggingface"),
+    ("CLANG_MODULE_CACHE_PATH", ".cache/clang-modules"),
+    ("NODE_COMPILE_CACHE", ".cache/node-compile-cache"),
+    ("ZSH_COMPDUMP", ".cache/zcompdump"),
 ];
 
-/// Claude Code's sessions, todos and settings. Without these it cannot record
-/// the conversation it is having.
-///
-/// Apart from the list above, and only for Claude Code, because a command a
-/// model runs has no use for them and every reason not to have them: the
-/// settings in here hold the hooks Claude Code runs, unwalled, in the person's
-/// own sessions. A command that could write there could leave something behind
-/// that runs outside the wall the next time they open Claude Code themselves.
-const CLAUDE_CODE_KEEPS_ITS_STATE_IN: &str = ".claude";
+/// The variables above, with the errand's folder filled in, and a few that
+/// are values rather than places: Go's module cache is made writable so the
+/// folder can be cleared, and rustup installs no toolchain from inside.
+pub fn kept_in_its_own_folder(home: &Path) -> Vec<(String, String)> {
+    let mut set: Vec<(String, String)> = KEPT_IN_ITS_OWN_FOLDER
+        .iter()
+        .map(|(name, place)| (name.to_string(), format!("{}/{place}", home.display())))
+        .collect();
+    // Temporary files in a folder of its own with a short name, rather than
+    // inside its folder: a socket's path has to fit in 104 bytes, and one
+    // made under a teammate's folder, ninety-odd characters already, did not,
+    // so Python's process pools and tmux failed there.
+    let temporary = its_own_temporary_folder(home);
+    set.push(("TMPDIR".into(), format!("{}/", temporary.display())));
+    set.push(("CLAUDE_CODE_TMPDIR".into(), temporary.display().to_string()));
+    // Claude Code's own memory, which it keeps beside its record and reads
+    // into every later session in the folder: a teammate could write its own
+    // instructions there, around the rule that it changes only through the
+    // person's yes. Errand's notes are its memory instead.
+    set.push(("CLAUDE_CODE_DISABLE_AUTO_MEMORY".into(), "1".into()));
+    set.push(("GOFLAGS".into(), "-modcacherw".into()));
+    set.push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
+    set
+}
 
-/// The one file rather than a directory, since the rest of the home directory
-/// is the thing being protected. Claude Code's, like the folder above.
-const AND_THIS_ONE_FILE: &str = ".claude.json";
+/// Where an errand's temporary files go: a folder of its own under the
+/// system's shared one, named after a digest of its folder so that every
+/// errand has a different one and the name stays short.
+pub fn its_own_temporary_folder(home: &Path) -> PathBuf {
+    use sha2::Digest;
+    let real = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    let digest = sha2::Sha256::digest(real.to_string_lossy().as_bytes());
+    let short: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    PathBuf::from(format!("/private/tmp/errand-{short}"))
+}
+
+/// Make that folder, only the person's to read, and never through a link
+/// something else put there first.
+fn make_its_own_temporary_folder(at: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::symlink_metadata(at).is_ok_and(|m| !m.file_type().is_dir()) {
+        std::fs::remove_file(at).ok();
+    }
+    if std::fs::create_dir_all(at).is_ok() {
+        std::fs::set_permissions(at, std::fs::Permissions::from_mode(0o700)).ok();
+    }
+}
+
+/// Where Claude Code keeps a conversation, relative to the home directory:
+/// one folder per working directory, named after it with everything but
+/// letters and digits made a dash.
+const CLAUDE_CODE_KEEPS_CONVERSATIONS_IN: &str = ".claude/projects";
+
+/// The folder Claude Code keeps this working directory's conversations in.
+///
+/// Named after the real path, as Claude Code names it: a folder reached
+/// through a link was given a record folder Claude Code never wrote to, and
+/// the conversation could not be carried on.
+pub fn claude_codes_folder_for(theirs: &Path, cwd: &Path) -> PathBuf {
+    let theirs = theirs
+        .canonicalize()
+        .unwrap_or_else(|_| theirs.to_path_buf());
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let named: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| match c.is_ascii_alphanumeric() {
+            true => c,
+            false => '-',
+        })
+        .collect();
+    theirs.join(CLAUDE_CODE_KEEPS_CONVERSATIONS_IN).join(named)
+}
+
+/// The system's own temporary folder for the person, by its real path.
+///
+/// Asked of the system rather than read from `TMPDIR`, because that is what
+/// the programs that use it do, and it is set to the errand's own folder
+/// inside the wall.
+pub fn the_systems_temporary_folder() -> Option<PathBuf> {
+    let mut buffer = vec![0 as libc::c_char; 1024];
+    // SAFETY: the buffer is as long as said, and confstr writes at most that
+    // much, terminated.
+    let wrote = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+        )
+    };
+    if wrote == 0 || wrote > buffer.len() {
+        return None;
+    }
+    // SAFETY: confstr terminated what it wrote.
+    let said = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
+    PathBuf::from(said.to_string_lossy().to_string())
+        .canonicalize()
+        .ok()
+}
+
+/// A path as a regular expression matching exactly it, in the profile's
+/// language. Nothing for a path the language could not hold.
+fn as_a_pattern(path: &Path) -> Option<String> {
+    let text = path.display().to_string();
+    if text.contains('"') {
+        return None;
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        if "\\.^$*+?()[]{}|".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    Some(out)
+}
 
 /// What is being walled in, because the two need different room.
 #[derive(Debug, Clone, Copy)]
@@ -71,9 +198,6 @@ pub enum Inside<'a> {
     ACommand,
 }
 
-/// Somewhere to write that is not a file anybody owns.
-const SCRATCH: &[&str] = &["/private/tmp", "/private/var/folders", "/tmp"];
-
 /// The profile: everything allowed, writing denied, and then the places writing
 /// is allowed after all.
 ///
@@ -81,15 +205,33 @@ const SCRATCH: &[&str] = &["/private/tmp", "/private/var/folders", "/tmp"];
 /// list of forbidden places is a list somebody has to keep complete, and the
 /// day it is not complete is the day it is worth nothing.
 pub fn profile(home: &Path, inside: Inside) -> String {
-    profile_keeping_out(home, inside, crate::where_errand_lives().as_deref())
+    // The environment rather than a crate, because this is the same HOME the
+    // process being walled in will use, and the two agreeing is the point.
+    let theirs = std::env::var("HOME").ok().map(PathBuf::from);
+    profile_keeping_out(
+        home,
+        inside,
+        crate::where_errand_lives().as_deref(),
+        theirs.as_deref(),
+    )
 }
 
-/// The profile, with the place Errand keeps its own things named.
+/// The profile, with the place Errand keeps its own things named, and the
+/// person's home folder.
 ///
-/// Separate so that a test can lay out a place of its own rather than reach
-/// for the real one.
-fn profile_keeping_out(home: &Path, inside: Inside, errand: Option<&Path>) -> String {
-    let mut allowed = vec![format!("  (subpath {})", quoted(home))];
+/// Separate so that a test can lay out places of its own rather than reach
+/// for the real ones.
+fn profile_keeping_out(
+    home: &Path,
+    inside: Inside,
+    errand: Option<&Path>,
+    theirs: Option<&Path>,
+) -> String {
+    // By its real path, because the sandbox compares real paths: a folder
+    // named through a link would be a rule that matches nothing, and the
+    // errand could write nowhere at all.
+    let real = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    let mut allowed = vec![format!("  (subpath {})", quoted(&real))];
     // Folders somebody allowed for this agent on purpose, on top of its own.
     // The wall used to be absolute: an agent set never to ask could not write
     // outside its folder by any means, and somebody who wanted a file on an
@@ -97,26 +239,43 @@ fn profile_keeping_out(home: &Path, inside: Inside, errand: Option<&Path>) -> St
     for place in also_allowed(home) {
         allowed.push(format!("  (subpath {})", quoted(&place)));
     }
-    // The environment rather than a crate, because this is the same HOME the
-    // process being walled in will use, and the two agreeing is the point.
-    let theirs = std::env::var("HOME").ok().map(PathBuf::from);
-    if let Some(theirs) = &theirs {
-        for place in TOOLS_KEEP_THEIR_OWN_STATE_IN {
-            allowed.push(format!("  (subpath {})", quoted(&theirs.join(place))));
-        }
-        if matches!(inside, Inside::ClaudeCode { .. }) {
+    // Claude Code's record of this conversation, so it can be carried on, and
+    // nothing else of Claude Code's: its settings, hooks, skills and plugins
+    // are run by the person's own sessions, outside every wall, and so is the
+    // list of servers in `~/.claude.json`. Run with a stand-in for the model on
+    // 4 October 2026, it finished turns and carried them on with only this,
+    // and said what it could not save and went on.
+    let record = theirs.map(|theirs| claude_codes_folder_for(theirs, home));
+    if let (Some(record), Inside::ClaudeCode { .. }) = (&record, inside) {
+        allowed.push(format!("  (subpath {})", quoted(record)));
+    }
+    // Its own temporary folder, made by the app before it starts.
+    allowed.push(format!(
+        "  (subpath {})",
+        quoted(&its_own_temporary_folder(home))
+    ));
+    // The system's own temporary folder, and only what the system's own tools
+    // make there whatever TMPDIR says: Swift's working folders, Foundation's
+    // items, lock files, and `mktemp`'s names. None of the rest. That folder
+    // also holds what the person's programs keep and run again, such as the
+    // cache the system's `git` and `clang` are found through, and a teammate
+    // that could rewrite it could put another program in their place.
+    if let Some(temporary) = the_systems_temporary_folder() {
+        if let Some(pattern) = as_a_pattern(&temporary) {
+            allowed.push(format!(
+                "  (regex #\"^{pattern}/TemporaryDirectory\\.[^/]+(/|$)\")"
+            ));
             allowed.push(format!(
                 "  (subpath {})",
-                quoted(&theirs.join(CLAUDE_CODE_KEEPS_ITS_STATE_IN))
+                quoted(&temporary.join("TemporaryItems"))
             ));
+            allowed.push(format!("  (regex #\"^{pattern}/[^/]+\\.lock$\")"));
+            // `mktemp` and `mktemp -t name`, which ignore TMPDIR on macOS.
+            allowed.push(format!("  (regex #\"^{pattern}/tmp\\.[A-Za-z0-9]+(/|$)\")"));
             allowed.push(format!(
-                "  (literal {})",
-                quoted(&theirs.join(AND_THIS_ONE_FILE))
+                "  (regex #\"^{pattern}/[A-Za-z0-9_-]+\\.[A-Za-z0-9]{{8}}(/|$)\")"
             ));
         }
-    }
-    for place in SCRATCH {
-        allowed.push(format!("  (subpath {})", quoted(Path::new(place))));
     }
     // Writing to the terminal is not writing to a file, and a process that
     // cannot print is a process nobody can be told anything by.
@@ -124,32 +283,99 @@ fn profile_keeping_out(home: &Path, inside: Inside, errand: Option<&Path>) -> St
     allowed.push("  (literal \"/dev/stdout\")".to_string());
     allowed.push("  (literal \"/dev/stderr\")".to_string());
     allowed.push("  (regex #\"^/dev/tty\")".to_string());
+    // Every process asks for this and is refused, harmlessly; allowed so the
+    // refusal is not mistaken for anything.
+    allowed.push("  (literal \"/dev/dtracehelper\")".to_string());
 
     let mut profile = format!(
         "(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*\n{})",
         allowed.join("\n")
     );
-    // The package managers keep their programs beside their caches, and those
-    // folders are on the person's PATH. A program left there by a walled
-    // command runs unwalled the next time anybody types its name: a `git` in
-    // `~/.cargo/bin` answers for git in every terminal. The caches stay
-    // writable, which is what the allowance was for.
-    if let Some(theirs) = &theirs {
-        let programs: Vec<String> = PROGRAMS_ON_THE_PATH
-            .iter()
-            .map(|place| format!("  (subpath {})", quoted(&theirs.join(place))))
-            .collect();
-        profile.push_str(&format!("\n(deny file-write*\n{})", programs.join("\n")));
+    profile.push_str(&its_own_settings_kept(home));
+    // Claude Code's own memory beside its record, which it would read into
+    // every later session in this folder: switched off, and kept unwritable
+    // for a version that ignores the switch.
+    if let (Some(record), Inside::ClaudeCode { .. }) = (&record, inside) {
+        profile.push_str(&format!(
+            "\n(deny file-write* (subpath {}))",
+            quoted(&record.join("memory"))
+        ));
     }
-    if let Some(theirs) = &theirs {
+    if let Some(theirs) = theirs {
         profile.push_str(&keys_kept_out(theirs));
     }
+    profile.push_str(&daemons_kept_out(home));
     if let Some(errand) = errand {
         profile.push_str(&keep_out(errand, inside));
     }
     profile.push_str(NOTHING_IS_OPENED_FROM_INSIDE);
+    profile.push_str(NOTHING_DRIVES_THE_SCREEN);
     profile
 }
+
+/// What an engine reads from the top of its own folder as its settings, by
+/// name: Claude Code's project settings, with their hooks and allow-rules, its
+/// instructions, and the servers it starts. A teammate that could write these
+/// would be choosing its own rules, and they would hold the day it is set to
+/// ask rather than walled. Matched without regard to case, as the disk is.
+const WHAT_AN_ENGINE_READS: &[&str] = &[".claude", ".mcp.json", "CLAUDE.md", "CLAUDE.local.md"];
+
+/// Its own folder may not be renamed or removed, nor its settings written.
+///
+/// The folder itself as well as the names, because a rule on a path inside a
+/// writable folder holds only while the folder stays where it is: renamed to
+/// somewhere else writable, edited there, and renamed back, the rule never
+/// matches. Seen happen, on a throwaway folder, to the rule that kept
+/// programs out of `~/.cargo/bin`.
+fn its_own_settings_kept(home: &Path) -> String {
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    let mut kept = vec![format!("  (literal {})", quoted(&home))];
+    for name in WHAT_AN_ENGINE_READS {
+        kept.push(format!("  (subpath {})", quoted(&home.join(name))));
+    }
+    format!("\n(deny file-write*\n{})", kept.join("\n"))
+}
+
+/// Where the system keeps the sockets of its own services: the one that
+/// answers for names, and the key agent's.
+const NAMES_ARE_LOOKED_UP_AT: &str = "/private/var/run/mDNSResponder";
+const THE_KEY_AGENT_LISTENS_AT: &str = "^/private/var/run/com\\.apple\\.launchd\\.[^/]+/Listeners$";
+
+/// No socket of anybody else's server, other than the two the system needs.
+///
+/// A server that runs commands for whoever connects to its socket runs them
+/// outside the wall: a terminal multiplexer, a container daemon, a helper of
+/// the person's own. So connecting to a local socket is refused, and then
+/// allowed again for looking up names, for the key agent, so SSH keeps
+/// working, and for anything the errand itself started in its own folder.
+/// Connections over the network are untouched. Errand's own doorway is
+/// allowed back after this, by `keep_out`.
+fn daemons_kept_out(home: &Path) -> String {
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    format!(
+        "\n(deny network-outbound (remote unix-socket (path-prefix \"/\")))\n\
+         (allow network-outbound\n  (literal \"{NAMES_ARE_LOOKED_UP_AT}\")\n  \
+         (regex #\"{THE_KEY_AGENT_LISTENS_AT}\")\n  (subpath {}))",
+        quoted(&home)
+    )
+}
+
+/// Nothing inside the wall may drive the screen, should Errand ever be
+/// allowed to: Accessibility is how one program presses another's buttons,
+/// and synthetic input is how it types. Every teammate runs as Errand, so
+/// whatever the app may do on screen, a teammate could, its own cards and a
+/// terminal included. Today the app holds neither and the system refuses;
+/// this is for the day somebody grants it.
+///
+/// And no Apple Event to another app: a running Terminal told to run a
+/// command would run it outside the wall. Every teammate transcript on record
+/// already shows the system refusing sandboxed senders (-10004, from Mail,
+/// Calendar, Finder, Messages, Notes, Reminders and System Events); this says
+/// so in the wall as well, whatever a later macOS decides.
+pub const NOTHING_DRIVES_THE_SCREEN: &str =
+    "\n(deny mach-lookup (global-name \"com.apple.axserver\"))\n\
+     (deny iokit-open-user-client (iokit-user-client-class \"IOHIDParamUserClient\"))\n\
+     (deny appleevent-send)";
 
 /// Where SSH keeps its keys, relative to the home directory.
 const SSH: &str = ".ssh";
@@ -318,9 +544,6 @@ pub(crate) fn keys_the_config_names(ssh: &Path, theirs: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Where the package managers above keep programs, rather than caches.
-const PROGRAMS_ON_THE_PATH: &[&str] = &[".cargo/bin", ".bun/bin", ".deno/bin"];
-
 /// A path as a string in the profile's own language.
 ///
 /// Only the backslash and the quote are special there. Rust's debug quoting was
@@ -364,6 +587,84 @@ fn quoted(path: &Path) -> String {
 /// What it does instead is ask, with `open_outside`: the person sees a card
 /// and their click is what opens it, done by the app.
 pub const NOTHING_IS_OPENED_FROM_INSIDE: &str = "\n(deny lsopen)\n(deny job-creation)";
+
+/// Whether an address opens the System Settings pane that would let Errand
+/// drive or see the screen: Accessibility, Screen Recording, Input Monitoring,
+/// or posting input.
+///
+/// Every teammate runs as Errand. Today the app holds none of these, so a
+/// teammate's click or screenshot fails, and that is the real gate. A teammate
+/// can still ask the person to grant one, on a card or in a link, so those are
+/// never opened for it. Compared on letters only, lower case and with
+/// percent-escapes undone, so neither case, punctuation nor an escape hides
+/// one.
+pub fn gives_the_screen(address: &str) -> bool {
+    let letters = letters_of(address);
+    letters.contains("systempreferences")
+        && [
+            "accessibility",
+            "screencapture",
+            "screenrecording",
+            "listenevent",
+            "postevent",
+            "inputmonitoring",
+        ]
+        .iter()
+        .any(|pane| letters.contains(pane))
+}
+
+/// An address as its letters and digits alone, lower case, with
+/// percent-escapes undone and letters folded the way the disk and Settings
+/// fold them (a long s is an s), so no spelling hides what it names.
+fn letters_of(address: &str) -> String {
+    let bytes = address.as_bytes();
+    let hex = |b: u8| (b as char).to_digit(16);
+    let mut undone: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                undone.push((high * 16 + low) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        undone.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&undone)
+        .chars()
+        .flat_map(char::to_uppercase)
+        .flat_map(char::to_lowercase)
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect()
+}
+
+/// The panes of System Settings a teammate may send the person to: the ones
+/// an errand really needs granted to the app, and nothing that gives the
+/// screen. Listed rather than refused by kind, because a list of refusals has
+/// to know every pane there is, and the top of Privacy & Security is one click
+/// from all of them.
+const PANES_A_TEAMMATE_MAY_OPEN: &[&str] = &[
+    "privacyautomation",
+    "privacyallfiles",
+    "privacymicrophone",
+    "privacycalendars",
+    "privacycontacts",
+    "privacyreminders",
+    "privacyphotos",
+    "notificationssettings",
+];
+
+/// Whether a teammate may have this Settings pane opened for the person.
+pub fn a_pane_a_teammate_may_open(address: &str) -> bool {
+    let letters = letters_of(address);
+    letters.starts_with("xapplesystempreferences")
+        && !gives_the_screen(address)
+        && PANES_A_TEAMMATE_MAY_OPEN
+            .iter()
+            .any(|pane| letters.contains(pane))
+}
 
 /// Whether what a command printed is the wall refusing to open something.
 ///
@@ -501,8 +802,27 @@ pub fn also_allowed(home: &Path) -> Vec<PathBuf> {
 /// to end: a model that reads "Operation not permitted" on an external disk
 /// sends somebody to System Settings to grant access the app already has.
 pub fn looks_like_the_wall(said: &str) -> bool {
-    said.to_ascii_lowercase()
+    without_what_is_harmless(said)
+        .to_ascii_lowercase()
         .contains("operation not permitted")
+}
+
+/// What a command printed, without the refusals that change nothing.
+///
+/// The system's `git`, `python3` and `clang` are found through a cache of
+/// where the developer tools are, kept in the system's temporary folder, and
+/// the wall keeps that cache from being rewritten. Each of them says so, as
+/// "couldn't create cache file ... Operation not permitted", and then works.
+/// Read as the wall stopping the command, it sent a model looking for a
+/// folder to have allowed.
+fn without_what_is_harmless(said: &str) -> String {
+    said.lines()
+        .filter(|line| {
+            let line = line.to_ascii_lowercase();
+            !(line.contains("couldn't create cache file") && line.contains("xcrun_db"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Whether what a command printed is SSH refused one of the person's private
@@ -517,7 +837,7 @@ pub fn looks_like_the_wall(said: &str) -> bool {
 /// exactly what a teammate refused its key was given.
 pub fn a_key_was_kept_out(said: &str) -> bool {
     said.contains(A_KEY_NOT_LOADED)
-        || said.lines().any(|line| {
+        || without_what_is_harmless(said).lines().any(|line| {
             let line = line.to_ascii_lowercase();
             line.contains("operation not permitted")
                 && (line.contains("load key")
@@ -578,7 +898,8 @@ pub fn what_the_wall_means(home: &Path) -> String {
     format!(
         "WHERE YOU CAN WRITE\n\n\
          You run inside Errand's own wall. You can write only inside your working \
-         directory, {}, and the usual temporary places.{more} Everywhere else on this \
+         directory, {}, and your own temporary folder, which TMPDIR names.{more} \
+         Everywhere else on this \
          Mac is read-only to you, whatever permissions the app has: a write there fails \
          with \"Operation not permitted\", and that is the wall, never a macOS setting. \
          Full Disk Access does not change it, so never send the person to System \
@@ -599,7 +920,26 @@ pub fn what_the_wall_means(home: &Path) -> String {
          opened, an app you built or a report, call open_outside with its path and why: \
          the person sees a card and decides, and an app can also be started at every \
          login if they agree. A bare program or script has to go in a .app bundle first. \
-         For a web page they should see, use over_to_you with `where`.",
+         For a web page they should see, use over_to_you with `where`.\n\n\
+         At the top of your folder, .claude, .mcp.json, CLAUDE.md and CLAUDE.local.md are \
+         not yours to write: they would be the settings an engine reads, and you change what \
+         you are only through suggest_learning. Clone or unpack a project into a subfolder, \
+         never into your folder itself. Other programs' local sockets are closed to you \
+         (a terminal multiplexer, a container daemon): the web, names and the SSH key agent \
+         still work, and so does a socket of your own inside your folder.\n\n\
+         Your tools keep their caches in your folder, under .cache, and their temporary \
+         files in the folder TMPDIR names; the person's own (~/.npm, ~/.cargo, ~/.cache, \
+         ~/Library/Caches, /tmp) are read-only to you, so the first download of a package \
+         is yours to make again. Install packages locally (npm install, npx, a venv with \
+         python3 -m venv .venv, cargo): global installs (npm -g, pip --user, rustup \
+         toolchains, playwright install) cannot work here, and npm's advice to use sudo or \
+         chown never applies. Write temporary files in $TMPDIR or your folder, never in \
+         /tmp. To build a Swift package use swift build --disable-sandbox --cache-path \
+         .cache/swiftpm --config-path .cache/swiftpm-config --security-path \
+         .cache/swiftpm-security; with xcodebuild, pass -derivedDataPath .build/xcode. For \
+         plots use MPLBACKEND=Agg. The system's git, python3 and clang may print \
+         \"couldn't create cache file ... xcrun_db ... Operation not permitted\": that line \
+         is harmless and the command still works.",
         home.display()
     )
 }
@@ -655,6 +995,16 @@ pub fn holds(pid: u32) -> Option<bool> {
 pub fn around(program: &str, home: &Path, inside: Inside) -> tokio::process::Command {
     let mut walled = tokio::process::Command::new(THE_SANDBOX);
     walled.arg("-p").arg(profile(home, inside)).arg(program);
+    // Every tool's caches in the errand's own folder, and its temporary files
+    // in a folder of its own, which are the places inside the wall they can
+    // be written. Made here, outside it.
+    make_its_own_temporary_folder(&its_own_temporary_folder(home));
+    for (name, place) in kept_in_its_own_folder(home) {
+        if name == "XDG_CACHE_HOME" {
+            std::fs::create_dir_all(&place).ok();
+        }
+        walled.env(name, place);
+    }
     walled
 }
 
@@ -667,12 +1017,22 @@ pub fn around(program: &str, home: &Path, inside: Inside) -> tokio::process::Com
 /// read can ask it to read the keys and fetch an address with them in it. So
 /// what `keep_out` keeps from every walled errand is kept from this one too,
 /// and nothing else is.
-pub fn kept_out(program: &str, doorway: Option<&Path>) -> tokio::process::Command {
+pub fn kept_out(
+    program: &str,
+    doorway: Option<&Path>,
+    working_in: &Path,
+) -> tokio::process::Command {
     match (possible(), crate::where_errand_lives()) {
         (true, Some(errand)) => {
+            let theirs = std::env::var("HOME").ok().map(PathBuf::from);
             let mut kept = tokio::process::Command::new(THE_SANDBOX);
             kept.arg("-p")
-                .arg(only_kept_out(&errand, doorway))
+                .arg(only_kept_out(
+                    &errand,
+                    doorway,
+                    theirs.as_deref(),
+                    working_in,
+                ))
                 .arg(program);
             kept
         }
@@ -680,13 +1040,18 @@ pub fn kept_out(program: &str, doorway: Option<&Path>) -> tokio::process::Comman
     }
 }
 
-/// The profile for that: everything allowed, and then the app's own things and
-/// the person's private keys not.
-fn only_kept_out(errand: &Path, doorway: Option<&Path>) -> String {
-    let theirs = std::env::var("HOME").ok().map(PathBuf::from);
+/// The profile for that: everything allowed, and then the app's own things,
+/// the person's private keys, and the agent's own settings not.
+fn only_kept_out(
+    errand: &Path,
+    doorway: Option<&Path>,
+    theirs: Option<&Path>,
+    working_in: &Path,
+) -> String {
     format!(
-        "(version 1)\n(allow default){}{}",
-        theirs.as_deref().map(keys_kept_out).unwrap_or_default(),
+        "(version 1)\n(allow default){}{}{}",
+        its_own_settings_kept(working_in),
+        theirs.map(keys_kept_out).unwrap_or_default(),
         keep_out(errand, Inside::ClaudeCode { doorway }),
     )
 }
@@ -719,7 +1084,7 @@ pub fn why_it_could_not_write(where_to: &Path, home: &Path) -> String {
     format!(
         "{} could not be written to, and that is Errand's own wall, not a macOS \
          permission. This agent runs without being asked about anything, so it is \
-         walled in instead: it can write inside {} and the usual temporary places, \
+         walled in instead: it can write inside {} and its own temporary folder, \
          and nowhere else, whatever access the app has been granted. Full Disk Access \
          does not change it. Nothing is wrong with the folder itself. To let it write \
          there, allow that folder for this agent under Allowed, choosing \"a folder\"; \
@@ -736,8 +1101,8 @@ pub fn why_it_could_not_write(where_to: &Path, home: &Path) -> String {
 pub fn the_wall_refused(home: &Path) -> String {
     format!(
         "That \"Operation not permitted\" is Errand's own wall, not a macOS permission: \
-         this agent runs without being asked, so it can write only inside {} and the \
-         usual temporary places, whatever access the app has been granted. Full Disk \
+         this agent runs without being asked, so it can write only inside {} and its \
+         own temporary folder, whatever access the app has been granted. Full Disk \
          Access does not change it. To write somewhere else, the folder has to be \
          allowed for this agent under Allowed, choosing \"a folder\".",
         home.display()
@@ -808,24 +1173,92 @@ mod tests {
         );
     }
 
+    /// Not a test: writes the profile and environment this module would use,
+    /// for a probe to run things under exactly them. Run by hand with
+    /// ERRAND_PROBE_HOME (the errand's folder), ERRAND_PROBE_INSIDE (command or
+    /// claude), ERRAND_PROBE_THEIRS (the home folder to keep out, which may be
+    /// a stand-in) and ERRAND_PROBE_OUT (where to write).
     #[test]
-    fn the_places_tools_keep_their_own_state_are_all_allowed() {
-        // Each of these was added because something real stopped working, and
-        // the failure was misleading every time. Losing one silently would put
-        // that back.
-        let theirs = std::path::PathBuf::from(std::env::var("HOME").expect("a home"));
-        for inside in [Inside::ACommand, Inside::ClaudeCode { doorway: None }] {
-            let said = profile(Path::new("/tmp/an-errand"), inside);
-            for place in TOOLS_KEEP_THEIR_OWN_STATE_IN {
-                let want = theirs.join(place).display().to_string();
-                assert!(said.contains(&want), "{place} is not allowed:\n{said}");
-            }
-        }
-        let claude = profile(
-            Path::new("/tmp/an-errand"),
-            Inside::ClaudeCode { doorway: None },
+    #[ignore = "a tool for probes, run by hand"]
+    fn write_the_profile_for_a_probe() {
+        let home = PathBuf::from(std::env::var("ERRAND_PROBE_HOME").expect("ERRAND_PROBE_HOME"));
+        let theirs =
+            PathBuf::from(std::env::var("ERRAND_PROBE_THEIRS").expect("ERRAND_PROBE_THEIRS"));
+        let out = PathBuf::from(std::env::var("ERRAND_PROBE_OUT").expect("ERRAND_PROBE_OUT"));
+        let inside = match std::env::var("ERRAND_PROBE_INSIDE").as_deref() {
+            Ok("claude") => Inside::ClaudeCode { doorway: None },
+            _ => Inside::ACommand,
+        };
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(
+            out.join("profile.sb"),
+            profile_keeping_out(&home, inside, None, Some(&theirs)),
+        )
+        .unwrap();
+        let env: Vec<String> = kept_in_its_own_folder(&home)
+            .into_iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        std::fs::write(out.join("env.txt"), env.join("\n")).unwrap();
+    }
+
+    #[test]
+    fn a_walled_command_is_given_those_folders_and_its_own_temporary_one() {
+        let home = std::env::temp_dir().join(format!("errand-env-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let walled = around("/bin/sh", &home, Inside::ACommand);
+        let set: HashMap<String, String> = walled
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().to_string(),
+                    v?.to_string_lossy().to_string(),
+                ))
+            })
+            .collect();
+        let temporary = its_own_temporary_folder(&home);
+        assert_eq!(
+            set.get("TMPDIR"),
+            Some(&format!("{}/", temporary.display()))
         );
-        assert!(claude.contains(&theirs.join(AND_THIS_ONE_FILE).display().to_string()));
+        assert!(set
+            .get("CARGO_HOME")
+            .is_some_and(|c| c.contains("/.cache/cargo")));
+        assert_eq!(
+            set.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+                .map(String::as_str),
+            Some("1")
+        );
+        // Made, as a real folder, with a name short enough for a socket in it.
+        assert!(std::fs::symlink_metadata(&temporary).is_ok_and(|m| m.is_dir()));
+        assert!(
+            temporary.to_string_lossy().len() < 40,
+            "{}",
+            temporary.display()
+        );
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::remove_dir(&temporary).ok();
+    }
+
+    #[test]
+    fn each_tool_keeps_its_caches_in_the_errands_own_folder() {
+        // The person's own tool folders are run from later, outside the wall,
+        // so each tool is pointed at one of the errand's own instead.
+        let home = Path::new("/tmp/an-errand");
+        let set: HashMap<String, String> = kept_in_its_own_folder(home).into_iter().collect();
+        for name in [
+            "npm_config_cache",
+            "CARGO_HOME",
+            "PIP_CACHE_DIR",
+            "UV_CACHE_DIR",
+            "GOMODCACHE",
+            "CLANG_MODULE_CACHE_PATH",
+        ] {
+            let at = set.get(name).unwrap_or_else(|| panic!("{name} is not set"));
+            assert!(at.starts_with("/tmp/an-errand/"), "{name} = {at}");
+        }
+        assert_eq!(set.get("GOFLAGS").map(String::as_str), Some("-modcacherw"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -845,7 +1278,12 @@ mod tests {
         let run = |command: &str| {
             let out = std::process::Command::new(THE_SANDBOX)
                 .arg("-p")
-                .arg(only_kept_out(&errand, None))
+                .arg(only_kept_out(
+                    &errand,
+                    None,
+                    std::env::var("HOME").ok().map(PathBuf::from).as_deref(),
+                    &errand.join("agent"),
+                ))
                 .arg("/bin/sh")
                 .arg("-c")
                 .arg(command)
@@ -868,46 +1306,108 @@ mod tests {
     }
 
     #[test]
-    fn claude_codes_own_state_is_writable_only_behind_claude_codes_wall() {
-        // A command a local model runs has no use for ~/.claude, and the hooks
-        // in its settings run unwalled in the person's own sessions: a command
-        // that could write there could leave behind something that runs
-        // outside the wall the next time they open Claude Code themselves.
-        let theirs = std::path::PathBuf::from(std::env::var("HOME").expect("a home"));
-        let folder = format!(
-            "(subpath {})",
-            quoted(&theirs.join(CLAUDE_CODE_KEEPS_ITS_STATE_IN))
-        );
-        let file = format!("(literal {})", quoted(&theirs.join(AND_THIS_ONE_FILE)));
-
-        let command = profile(Path::new("/tmp/an-errand"), Inside::ACommand);
-        assert!(!command.contains(&folder), "{command}");
-        assert!(!command.contains(&file), "{command}");
-
-        let claude = profile(
-            Path::new("/tmp/an-errand"),
-            Inside::ClaudeCode { doorway: None },
-        );
-        assert!(claude.contains(&folder), "{claude}");
-        assert!(claude.contains(&file), "{claude}");
-    }
-
-    #[test]
-    fn the_folders_package_managers_keep_programs_in_are_never_writable() {
-        // They are on the person's PATH, so a program left in one runs
-        // unwalled the next time anybody types its name.
-        let theirs = std::path::PathBuf::from(std::env::var("HOME").expect("a home"));
-        for inside in [Inside::ACommand, Inside::ClaudeCode { doorway: None }] {
-            let said = profile(Path::new("/tmp/an-errand"), inside);
-            let denied = said
-                .split("\n(deny file-write*\n")
-                .nth(1)
-                .unwrap_or_else(|| panic!("nothing is denied after the allowances:\n{said}"));
-            for place in PROGRAMS_ON_THE_PATH {
-                let want = format!("(subpath {})", quoted(&theirs.join(place)));
-                assert!(denied.contains(&want), "{place} is writable:\n{said}");
-            }
+    fn nothing_of_the_persons_but_claude_codes_record_of_this_folder_is_writable() {
+        if !possible() {
+            return;
         }
+        // A home folder of its own, laid out like the person's, so a rule that
+        // failed could only ever write here.
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("errand-their-folders-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let theirs = root.join("person");
+        let home = theirs.join("Library/Application Support/Errand/threads/agent-1");
+        std::fs::create_dir_all(&home).unwrap();
+        let own = claude_codes_folder_for(&theirs, &home);
+        std::fs::create_dir_all(&own).unwrap();
+        let elsewhere = theirs.join(".claude/projects/-Users-someone-else");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        for place in [
+            ".cargo/bin",
+            ".npm/_npx",
+            ".cache/uv",
+            "Library/Caches/ms-playwright",
+            ".claude/skills",
+        ] {
+            std::fs::create_dir_all(theirs.join(place)).unwrap();
+        }
+        std::fs::write(theirs.join(".claude.json"), "{}").unwrap();
+        std::fs::write(theirs.join(".claude/settings.json"), "{}").unwrap();
+
+        let run = |inside: Inside, command: &str| {
+            std::process::Command::new(THE_SANDBOX)
+                .arg("-p")
+                .arg(profile_keeping_out(&home, inside, None, Some(&theirs)))
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(command)
+                .output()
+                .expect("sandbox-exec runs")
+                .status
+                .success()
+        };
+        let claude = Inside::ClaudeCode { doorway: None };
+        for (inside, kind) in [(Inside::ACommand, "a command"), (claude, "Claude Code")] {
+            for refused in [
+                ".cargo/bin/git",
+                ".npm/_npx/planted.js",
+                ".cache/uv/planted",
+                "Library/Caches/ms-playwright/planted",
+                ".claude/skills/planted.md",
+                ".claude/settings.json",
+                ".claude.json",
+                ".claude/projects/-Users-someone-else/planted.jsonl",
+            ] {
+                let at = theirs.join(refused);
+                assert!(
+                    !run(inside, &format!("echo x >> {}", quoted(&at))),
+                    "{kind} wrote {refused}"
+                );
+            }
+            // Nor the shared temporary folders, where the person's own things sit.
+            assert!(
+                !run(inside, "echo x > /private/tmp/errand-wall-tmp-probe"),
+                "{kind} wrote /private/tmp"
+            );
+        }
+        assert!(!Path::new("/private/tmp/errand-wall-tmp-probe").exists());
+        // Claude Code's record of this very folder, and only Claude Code's,
+        // without the memory beside it that later sessions would read.
+        let record = own.join("a-session.jsonl");
+        assert!(
+            run(claude, &format!("echo x >> {}", quoted(&record))),
+            "Claude Code could not keep its record"
+        );
+        assert!(
+            !run(
+                claude,
+                &format!(
+                    "mkdir -p {} && echo x > {}",
+                    quoted(&own.join("memory")),
+                    quoted(&own.join("memory/MEMORY.md"))
+                )
+            ),
+            "Claude Code could write its own memory"
+        );
+        assert!(!run(
+            Inside::ACommand,
+            &format!("echo x >> {}", quoted(&own.join("b.jsonl")))
+        ));
+        // And the system's temporary folder only for what Swift makes there.
+        if let Some(temporary) = the_systems_temporary_folder() {
+            let made = temporary.join(format!("TemporaryDirectory.errand{}", std::process::id()));
+            assert!(run(
+                Inside::ACommand,
+                &format!("mkdir {} && rmdir {}", quoted(&made), quoted(&made))
+            ));
+            assert!(!run(
+                Inside::ACommand,
+                &format!("echo x >> {}", quoted(&temporary.join("xcrun_db")))
+            ));
+        }
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -966,7 +1466,12 @@ mod tests {
         let run = |inside: Inside, command: &str| {
             let out = std::process::Command::new(THE_SANDBOX)
                 .arg("-p")
-                .arg(profile_keeping_out(&home, inside, Some(&errand)))
+                .arg(profile_keeping_out(
+                    &home,
+                    inside,
+                    Some(&errand),
+                    std::env::var("HOME").ok().map(PathBuf::from).as_deref(),
+                ))
                 .arg("/bin/sh")
                 .arg("-c")
                 .arg(command)
@@ -1296,18 +1801,198 @@ mod tests {
         std::fs::remove_dir_all(&theirs).ok();
     }
 
+    /// A walled shell under the full wall, on throwaway places only: no
+    /// errand folder of the real app and no home folder of the person's.
+    fn walled(home: &Path, command: &str) -> (bool, String) {
+        let out = std::process::Command::new(THE_SANDBOX)
+            .arg("-p")
+            .arg(profile_keeping_out(home, Inside::ACommand, None, None))
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(home)
+            .output()
+            .expect("sandbox-exec runs");
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    }
+
+    #[test]
+    fn its_own_folder_stays_where_it_is_and_its_settings_are_not_its_to_write() {
+        if !possible() {
+            return;
+        }
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("errand-own-settings-wall-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let home = root.join("agent");
+        std::fs::create_dir_all(home.join("project")).unwrap();
+        // Ordinary work goes on.
+        assert!(
+            walled(
+                &home,
+                "echo hi > notes.txt && mkdir -p a/b && echo x > a/b/c && git init -q repo"
+            )
+            .0
+        );
+        assert!(
+            walled(&home, "echo hi > project/CLAUDE.md").0,
+            "a project's own, a folder down"
+        );
+        // Its settings, however they are spelt or reached, are not.
+        for attempt in [
+            "mkdir -p .claude && echo '{}' > .claude/settings.json",
+            "echo x > CLAUDE.md",
+            "echo x > claude.md",
+            "echo x > CLAUDE.local.md",
+            "echo '{}' > .mcp.json",
+            "echo '{}' > .MCP.json",
+            "echo '{}' > .mcp.j\u{17f}on",
+            "mkdir side && echo '{}' > side/settings.json && mv side .claude",
+            "ln -s /tmp/elsewhere .claude",
+        ] {
+            let (ok, said) = walled(&home, attempt);
+            assert!(!ok, "{attempt} went through: {said}");
+        }
+        assert!(!home.join(".claude").exists() && !home.join(".mcp.json").exists());
+        assert!(!home.join("CLAUDE.md").exists() && !home.join("claude.md").exists());
+        // Nor can the folder itself be moved somewhere writable, edited there
+        // and moved back, which is how a rule on a path inside it is undone.
+        // Somewhere really writable, so the move fails only for the rule.
+        if let Some(temporary) = the_systems_temporary_folder() {
+            let away = temporary.join(format!(
+                "TemporaryDirectory.errand-away-{}",
+                std::process::id()
+            ));
+            let (ok, said) = walled(&home, &format!("mv {} {}", quoted(&home), quoted(&away)));
+            assert!(!ok, "the folder was moved: {said}");
+            assert!(home.exists() && !away.exists());
+            let (ok, said) = walled(
+                &home,
+                &format!("mkdir -p {} && rmdir {}", quoted(&away), quoted(&away)),
+            );
+            assert!(
+                ok,
+                "the place moved to is not writable, so this proves nothing: {said}"
+            );
+        }
+        // mktemp names its own files in the system's temporary folder,
+        // whatever TMPDIR says, and is allowed there.
+        let (ok, said) = walled(
+            &home,
+            "f=$(mktemp) && echo x > \"$f\" && rm \"$f\" && d=$(mktemp -d) && rmdir \"$d\"",
+        );
+        assert!(ok, "mktemp: {said}");
+        let away = root.join("away");
+        let (ok, said) = walled(&home, &format!("mv {} {}", home.display(), away.display()));
+        assert!(!ok, "the folder was moved: {said}");
+        assert!(home.exists() && !away.exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn no_other_server_s_socket_is_reachable_from_inside_and_its_own_is() {
+        if !possible() {
+            return;
+        }
+        use std::os::unix::net::UnixListener;
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("errand-sockets-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let home = root.join("agent");
+        std::fs::create_dir_all(&home).unwrap();
+        let listen = |at: PathBuf| {
+            let listener = UnixListener::bind(&at).unwrap();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    drop(stream);
+                }
+            });
+            at
+        };
+        let theirs = listen(root.join("someone-elses.sock"));
+        let its_own = listen(home.join("its-own.sock"));
+        let reach = |at: &Path| {
+            walled(
+                &home,
+                &format!("/usr/bin/nc -U {} < /dev/null", at.display()),
+            )
+        };
+        let (ok, said) = reach(&theirs);
+        assert!(!ok, "another server's socket was reached: {said}");
+        let (ok, said) = reach(&its_own);
+        assert!(ok, "its own socket was refused: {said}");
+        // Names are still looked up, through the system's own socket.
+        let (ok, said) = walled(&home, "/usr/bin/dscacheutil -q host -a name localhost");
+        assert!(ok && said.contains("ip_address"), "names: {said}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn no_teammate_can_send_the_person_to_give_errand_the_screen() {
+        for pane in [
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            "X-APPLE.SYSTEMPREFERENCES:com.apple.preference.security?privacy_listenevent",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy%5FPostEvent",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Screen-Capture",
+        ] {
+            assert!(gives_the_screen(pane), "{pane}");
+        }
+        for fine in [
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Automation",
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension",
+            "https://example.com/accessibility",
+        ] {
+            assert!(!gives_the_screen(fine), "{fine}");
+        }
+        // Spelt with a long s, and with an escape before a letter that is not
+        // one byte long, which used to stop the check with a panic.
+        assert!(gives_the_screen(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Acce\u{17f}\u{17f}ibility"
+        ));
+        assert!(!gives_the_screen("x-apple.systempreferences:%\u{e9}"));
+        // Only the panes on the list open for a teammate: never the top of
+        // Privacy & Security, one click from the rest.
+        assert!(a_pane_a_teammate_may_open(
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Automation"
+        ));
+        assert!(a_pane_a_teammate_may_open(
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.errandai.errand"
+        ));
+        for refused in [
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension",
+            "x-apple.systempreferences:com.apple.preference.security",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            "x-apple.systempreferences:com.apple.preference.universalaccess",
+            "https://example.com/?Privacy_Automation",
+        ] {
+            assert!(!a_pane_a_teammate_may_open(refused), "{refused}");
+        }
+    }
+
     #[test]
     fn nothing_inside_the_wall_may_open_anything_or_start_a_job() {
         let home = Path::new("/tmp/errand-wall-open");
         for inside in [Inside::ACommand, Inside::ClaudeCode { doorway: None }] {
-            let profile = profile_keeping_out(home, inside, None);
+            let profile = profile_keeping_out(home, inside, None, None);
             assert!(profile.contains("(deny lsopen)"), "{profile}");
             assert!(profile.contains("(deny job-creation)"), "{profile}");
         }
         let errand = std::env::temp_dir().join("errand-wall-open-kept");
         // Not where the person approves each command: there it would only
         // break `open -a Simulator` and the like, and close nothing.
-        let kept = only_kept_out(&errand, None);
+        let kept = only_kept_out(&errand, None, None, home);
         assert!(!kept.contains("(deny lsopen)"), "{kept}");
         // And a model refused is told why, and what to do instead.
         assert!(an_opening_was_refused(

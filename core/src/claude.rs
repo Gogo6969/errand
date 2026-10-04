@@ -248,11 +248,14 @@ impl OffTheRecord {
                     doorway: self.doorway.as_deref(),
                 },
             ),
-            false => crate::wall::kept_out(&claude, self.doorway.as_deref()),
+            false => crate::wall::kept_out(&claude, self.doorway.as_deref(), &self.cwd),
         };
         if let Some(path) = the_persons_path() {
             command.env("PATH", path);
         }
+        // Claude Code's own memory is read into every later session in the
+        // folder and Errand never shows it: Errand's notes are the memory.
+        command.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
         command
             .args([
                 "--print",
@@ -470,17 +473,7 @@ pub fn already_going(session: &str, cwd: &std::path::Path) -> bool {
     let Ok(home) = std::env::var("HOME") else {
         return false;
     };
-    let flattened: String = cwd
-        .to_string_lossy()
-        .chars()
-        .map(|c| match c {
-            '/' | '.' | ' ' => '-',
-            other => other,
-        })
-        .collect();
-    std::path::Path::new(&home)
-        .join(".claude/projects")
-        .join(flattened)
+    crate::wall::claude_codes_folder_for(std::path::Path::new(&home), cwd)
         .join(format!("{session}.jsonl"))
         .exists()
 }
@@ -596,15 +589,30 @@ impl Claude {
         // folders with no Claude Code in any of them.
         let claude = where_claude_is();
         let claude = claude.to_string_lossy();
+        // The one folder of Claude Code's a walled one may write is its record
+        // of this conversation, and it can only make that inside a folder that
+        // is already there: made here, outside the wall.
+        if walled {
+            if let Ok(theirs) = std::env::var("HOME") {
+                let record =
+                    crate::wall::claude_codes_folder_for(std::path::Path::new(&theirs), cwd);
+                if let Some(above) = record.parent() {
+                    std::fs::create_dir_all(above).ok();
+                }
+            }
+        }
         let mut command = match walled {
             true => crate::wall::around(&claude, cwd, crate::wall::Inside::ClaudeCode { doorway }),
-            false => crate::wall::kept_out(&claude, doorway),
+            false => crate::wall::kept_out(&claude, doorway, cwd),
         };
         // And the person's own PATH for everything it runs, so the tools they
         // have in a terminal are the tools their agent has.
         if let Some(path) = the_persons_path() {
             command.env("PATH", path);
         }
+        // Claude Code's own memory is read into every later session in the
+        // folder and Errand never shows it: Errand's notes are the memory.
+        command.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
         let mut child = command
             .args([
                 "--print",

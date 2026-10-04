@@ -300,8 +300,10 @@ pub fn declarations() -> Vec<Value> {
                                  address, or a pane of macOS System Settings as \
                                  `x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Automation` \
                                  -- swap the last part for `Privacy_AllFiles` for Full Disk \
-                                 Access, `Privacy_Microphone`, `Privacy_Calendars`, \
-                                 `Privacy_Contacts` or `Privacy_ScreenCapture`. Always send \
+                                 Access, `Privacy_Microphone`, `Privacy_Calendars` or \
+                                 `Privacy_Contacts`. Never Accessibility, Screen Recording or \
+                                 Input Monitoring: no teammate is given the screen, and those \
+                                 are not opened. Always send \
                                  them to the pane rather than describing where it is: \
                                  Automation is four levels down a screen most people have \
                                  never opened. Left out when there is nothing to open."

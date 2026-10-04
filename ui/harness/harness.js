@@ -586,6 +586,18 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           }
           case "outside":
             return Promise.resolve(fixture.outside);
+          // Allowing a server, and taking it back, as the app would: the row
+          // says so the next time the panel asks.
+          case "allow_server": {
+            const row = (fixture.outside || []).find((r) => r.name === args.name);
+            if (row) Object.assign(row, { standing: "allowed", trouble: null, fix: null, tools: ["a_tool"] });
+            return Promise.resolve(null);
+          }
+          case "stop_allowing_server": {
+            const row = (fixture.outside || []).find((r) => r.name === args.name);
+            if (row) Object.assign(row, { standing: "not yet", trouble: "not started: you have not allowed it in Errand yet", tools: [] });
+            return Promise.resolve(null);
+          }
           case "checkup":
             return Promise.resolve(fixture.checkup);
           case "whats_running":

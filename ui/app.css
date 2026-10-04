@@ -1913,6 +1913,36 @@ body.catching #what { border-color: var(--accent); }
 .server.broken .server-name { color: var(--wrong); }
 .server.broken .server-what { color: var(--wrong-soft); }
 .server-fix { margin: 4px 0 0; color: var(--ink-soft); font-size: 12.5px; line-height: 1.45; }
+/* Not started because nobody allowed it: a choice, so quiet rather than red. */
+.server.held .server-what { color: var(--ink-soft); }
+.server-runs {
+  display: block;
+  margin: 6px 0 0;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+}
+.server-warning { margin: 6px 0 0; color: var(--wrong-soft); font-size: 12.5px; line-height: 1.45; }
+.server-act {
+  margin-top: 8px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.server-act:hover { border-color: var(--edge); }
+.server-act:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.server-act.yes { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 500; }
+.server-act.yes:hover { background: var(--accent-lit); border-color: var(--accent-lit); }
 
 /* ------------------------------------------------------------- agents -- */
 
