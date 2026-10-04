@@ -673,6 +673,24 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           case "break_up_team":
             fixture.teams = (fixture.teams || []).filter((t) => t.id !== args.id);
             return Promise.resolve(null);
+          // How a teammate checks its work, and the starter its role offers:
+          // only a role with Code in it has one here.
+          case "checklist_of": {
+            const a = fixture.agents.find((x) => x.id === args.agent);
+            const starter = /code/i.test(a?.title || "")
+              ? ["Code", ["It builds without warnings", "Its tests pass, and there is a test for what changed"]]
+              : null;
+            return Promise.resolve({ points: (fixture.checklists ||= {})[args.agent] || [], starter });
+          }
+          case "set_checklist": {
+            const kept = [...new Set(args.points.map((p) => p.trim()).filter(Boolean))].slice(0, 12);
+            (fixture.checklists ||= {})[args.agent] = kept;
+            return Promise.resolve(kept);
+          }
+          case "what_they_bring":
+            return Promise.resolve(
+              fixture.agents.map((a) => [a.id, (fixture.skills?.[a.id] || []).map((k) => k.name), (fixture.checklists?.[a.id] || []).length]),
+            );
           // Which handovers are still being waited on. A line on disk cannot
           // say, so the window asks.
           case "waiting_on_you":

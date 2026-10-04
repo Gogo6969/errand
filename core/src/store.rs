@@ -279,6 +279,9 @@ pub struct Blueprint {
     /// there was such a thing, which is how every agent was then.
     #[serde(default)]
     pub keep_local: bool,
+    /// How it checks its work.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checklist: Vec<String>,
 }
 
 /// One conversation's schedule and watch, as a blueprint carries it.
@@ -1131,6 +1134,14 @@ const CHANGES: &[&str] = &[
          joined_at INTEGER NOT NULL,
          PRIMARY KEY (team, agent)
      );",
+    // How a teammate checks its work before it says it is done: a few points
+    // the person writes, read into every conversation it has. JSON, because
+    // the list is only ever read and written whole. Last, as every change is.
+    "CREATE TABLE IF NOT EXISTS checklists (
+         agent  TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+         points TEXT NOT NULL,
+         set_at INTEGER NOT NULL
+     );",
 ];
 
 /// What finishing a task switched off, or reopening it switched back on.
@@ -1718,6 +1729,7 @@ impl Store {
             allowed,
             standing,
             keep_local: found.keep_local,
+            checklist: self.checklist(agent)?,
         })
     }
 
@@ -1784,6 +1796,13 @@ impl Store {
                     serde_json::to_string(&one.steps)?,
                     one.made_at
                 ],
+            )?;
+        }
+        let checklist = crate::checklist::cleaned(&plan.checklist);
+        if !checklist.is_empty() {
+            tx.execute(
+                "INSERT INTO checklists (agent, points, set_at) VALUES (?, ?, ?)",
+                params![to, serde_json::to_string(&checklist)?, now],
             )?;
         }
         for (tool, rule) in &plan.allowed {
@@ -3520,6 +3539,37 @@ impl Store {
         Ok(())
     }
 
+    /// How an agent checks its work, point by point. Empty for none.
+    pub fn checklist(&self, agent: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let points: Option<String> = conn
+            .query_row(
+                "SELECT points FROM checklists WHERE agent = ?",
+                [agent],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(points
+            .and_then(|p| serde_json::from_str(&p).ok())
+            .unwrap_or_default())
+    }
+
+    /// Set how an agent checks its work. An empty list takes it away.
+    pub fn set_checklist(&self, agent: &str, points: &[String], now: i64) -> Result<Vec<String>> {
+        let points = crate::checklist::cleaned(points);
+        let conn = self.conn.lock().unwrap();
+        if points.is_empty() {
+            conn.execute("DELETE FROM checklists WHERE agent = ?", [agent])?;
+        } else {
+            conn.execute(
+                "INSERT INTO checklists (agent, points, set_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(agent) DO UPDATE SET points = ?2, set_at = ?3",
+                params![agent, serde_json::to_string(&points)?, now],
+            )?;
+        }
+        Ok(points)
+    }
+
     /// Who an agent may hand work to, because of its teams: its leads and
     /// everybody on them, not itself. Nothing for an agent on no team, which
     /// may ask anybody, as every agent could before there were teams.
@@ -4239,6 +4289,35 @@ mod tests {
         s.break_up_team("crew").unwrap();
         assert!(s.teams().unwrap().is_empty());
         assert!(s.agent("w").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_checklist_is_kept_tidy_taken_away_when_emptied_and_copied_with_its_teammate() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a", "/tmp/a");
+        assert!(s.checklist("a").unwrap().is_empty());
+        let kept = s
+            .set_checklist(
+                "a",
+                &[" It builds ".into(), "".into(), "Tests pass".into()],
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            kept,
+            vec!["It builds".to_string(), "Tests pass".to_string()]
+        );
+        assert_eq!(s.checklist("a").unwrap(), kept);
+        // A copy checks its work the same way.
+        let plan = s.blueprint("a").unwrap();
+        assert_eq!(plan.checklist, kept);
+        s.from_blueprint(&plan, "b", Path::new("/tmp/b")).unwrap();
+        assert_eq!(s.checklist("b").unwrap(), kept);
+        // Emptied, it is gone; deleted with its teammate, too.
+        s.set_checklist("a", &[], 2).unwrap();
+        assert!(s.checklist("a").unwrap().is_empty());
+        s.forget("b").unwrap();
+        assert!(s.checklist("b").unwrap().is_empty());
     }
 
     #[test]

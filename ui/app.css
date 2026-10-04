@@ -2963,6 +2963,39 @@ body.in-a-call #what {
 .went.unfinished .went-what { color: var(--faint); }
 #routine-went-more { margin-top: 6px; }
 
+/* How it checks its work, first under who it is. */
+#checklist { margin-top: 10px; font-size: 13px; }
+/* Open, a row of its own: the other summaries waited beside its form. */
+#checklist[open] { flex: 1 1 100%; }
+#checklist summary { color: var(--ink-soft); cursor: pointer; }
+#checklist-list { margin: 8px 0; padding: 0 0 0 1.4em; display: grid; gap: 6px; }
+#checklist-list li { padding-top: 6px; border-top: 1px solid var(--rule); }
+#checklist-list li::marker { color: var(--faint); font-variant-numeric: tabular-nums; }
+#checklist-list li.point-none { list-style: none; margin-left: -1.4em; color: var(--ink-soft); line-height: 1.5; }
+#checklist-list .point { display: flex; align-items: baseline; gap: 10px; }
+#checklist-list .point-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+#checklist-starter { margin: 8px 0; color: var(--ink-soft); line-height: 1.5; }
+#checklist-starter[hidden] { display: none; }
+#checklist-starter button { margin-left: 8px; }
+#checklist-new { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: end; }
+#checklist-new label { flex: 1 1 22em; }
+#checklist-says:empty { display: none; }
+#checklist button {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  flex: none;
+}
+#checklist button:hover { color: var(--ink); border-color: var(--edge); }
+#checklist button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#checklist-new button, #checklist-new input { box-sizing: border-box; height: var(--whois-field); }
+
 /* What an agent remembers, under who it is. */
 #notes { margin-top: 10px; font-size: 13px; }
 #notes summary { color: var(--ink-soft); cursor: pointer; }
@@ -3542,6 +3575,8 @@ a.on-disk {
   text-transform: uppercase;
   color: var(--ink-soft);
 }
+#teams .person .brings { font-size: 11.5px; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#teams .person .brings.none { color: var(--faint); }
 #teams .person .does { font-size: 12.5px; color: var(--ink-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 #teams .lead { padding: 8px 10px; margin: 0 -2px; border-radius: 9px; background: var(--card); border: 1px solid var(--rule); }

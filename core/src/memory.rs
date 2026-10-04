@@ -361,15 +361,25 @@ impl Knowing {
 }
 
 /// Everything an agent opens a conversation knowing: who it is, its team,
-/// and its notes.
+/// how it checks its work, and its notes.
 pub fn opening_as(store: &Store, agent: &Agent) -> Result<Knowing> {
     Ok(Knowing {
-        identity: with_its_team(
+        identity: identity_of(store, agent)?,
+        notes: opening(store, &agent.id)?,
+    })
+}
+
+/// Who an agent is, all of it: its card, its team, and its checklist. One
+/// place, so a conversation that opens and one told of a change in place are
+/// told the same thing.
+pub fn identity_of(store: &Store, agent: &Agent) -> Result<String> {
+    Ok(crate::checklist::with_its_checklist(
+        with_its_team(
             who_you_are(&agent.name, agent.title.as_deref(), agent.about.as_deref()),
             &your_team(store, &agent.id)?,
         ),
-        notes: opening(store, &agent.id)?,
-    })
+        &store.checklist(&agent.id)?,
+    ))
 }
 
 /// Who it is, and then its team, under a heading of its own.
@@ -624,6 +634,39 @@ mod tests {
         let said = opening(&store, "a1").unwrap();
         assert!(said.contains("your own notes"), "{said}");
         assert!(said.contains("where it goes: Telegram"), "{said}");
+    }
+
+    #[test]
+    fn a_teammate_opens_knowing_how_it_checks_its_work() {
+        let store = Store::in_memory().unwrap();
+        store
+            .begin("q", NOT_YET_NAMED, std::path::Path::new("/tmp/q"))
+            .unwrap();
+        store
+            .rename("q", "Bug Hunter", "QA", "Tries to break it")
+            .unwrap();
+        let agent = store.agent("q").unwrap().unwrap();
+        assert!(!opening_as(&store, &agent)
+            .unwrap()
+            .identity
+            .contains("HOW YOU CHECK"));
+        store
+            .set_checklist(
+                "q",
+                &[
+                    "I tried the main path".into(),
+                    "I said what I did not test".into(),
+                ],
+                1,
+            )
+            .unwrap();
+        let identity = opening_as(&store, &agent).unwrap().identity;
+        assert!(identity.starts_with("WHO YOU ARE"), "{identity}");
+        assert!(identity.contains("HOW YOU CHECK YOUR WORK"), "{identity}");
+        assert!(
+            identity.contains("2. I said what I did not test"),
+            "{identity}"
+        );
     }
 
     #[test]

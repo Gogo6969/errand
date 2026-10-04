@@ -7611,3 +7611,73 @@ export async function teamsOfTeammates() {
   check("Back closes it", page.hidden, String(page.hidden));
   return found;
 }
+
+/**
+ * How a teammate checks its work: the role made concrete. A list on its card
+ * that it goes through before it may say a task is done, started from what
+ * its role offers, and shown on the Teams page as what it brings.
+ */
+export async function howATeammateChecksItsWork() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  // The lead from the Teams checks, whose role is Code.
+  [...document.querySelectorAll("#threads li")].find((li) => li.dataset.agent === "agent-ship")?.click();
+  await wait(500);
+  document.getElementById("thread-name").click();
+  await wait(400);
+  const box = document.getElementById("checklist");
+  const firstDetails = document.querySelector("#whois details");
+  check("the card has a checklist, first among what it has picked up", box && firstDetails === box, firstDetails?.id);
+  box.open = true;
+  const starter = document.getElementById("checklist-starter");
+  check("an empty list on a Code teammate offers the Code checklist, point by point", !starter.hidden && /Code checklist: It builds without warnings; Its tests pass/.test(starter.textContent), starter.textContent.trim().slice(0, 140));
+  check("and says what a point is for while it is empty", /before it says a task is done/.test(document.getElementById("checklist-list").textContent), document.getElementById("checklist-list").textContent.slice(0, 120));
+
+  document.getElementById("checklist-use").click();
+  await wait(300);
+  const points = () => [...document.querySelectorAll("#checklist-list .point-text")].map((p) => p.textContent);
+  check("Use these keeps the starter points as its own", points().length === 2 && asked.some((a) => a.name === "set_checklist" && a.args?.agent === "agent-ship"), points().join(" | "));
+  check("and the offer goes once the list has points", starter.hidden, String(starter.hidden));
+  check("the summary says how many points it checks", /\(2 points\)/.test(document.getElementById("checklist-summary").textContent), document.getElementById("checklist-summary").textContent);
+
+  document.getElementById("checklist-point").value = "I ran it and looked at the result myself";
+  document.getElementById("checklist-new").requestSubmit();
+  await wait(300);
+  check("a point of its own is added at the end", points()[2] === "I ran it and looked at the result myself", points().join(" | "));
+  if (beingDrawn()) {
+    const input = document.getElementById("checklist-point").getBoundingClientRect();
+    const add = document.querySelector("#checklist-new button").getBoundingClientRect();
+    check("Add is the height of the box beside it, on the same line", Math.round(input.height) === Math.round(add.height) && Math.round(input.bottom) === Math.round(add.bottom), `${Math.round(input.height)}/${Math.round(add.height)}, ${Math.round(input.bottom)}/${Math.round(add.bottom)}`);
+    const out = document.querySelector("#checklist-list .point button").getBoundingClientRect();
+    const words = document.querySelector("#checklist-list .point-text").getBoundingClientRect();
+    check("each Take out sits beside its point, not under it", Math.abs(out.top - words.top) < 12, `${Math.round(out.top)} / ${Math.round(words.top)}`);
+  }
+  document.querySelector("#checklist-list .point button").click();
+  await wait(300);
+  check("Take out takes out that point and no other", points().length === 2 && !points().includes("It builds without warnings"), points().join(" | "));
+
+  document.getElementById("thread-name").click();
+  await wait(200);
+
+  // On the Teams page, what each one brings.
+  document.getElementById("teams-open").click();
+  await wait(300);
+  document.getElementById("teams-new").click();
+  await wait(400);
+  const card = document.querySelector("#teams .team:last-of-type");
+  const pick = async (cls, id) => {
+    const select = document.querySelector(`#teams .team[data-team="${card.dataset.team}"] ${cls}`);
+    select.value = id;
+    select.dispatchEvent(new Event("change"));
+    await wait(350);
+  };
+  await pick(".team-lead", "agent-ship");
+  await pick(".team-add", "agent-page");
+  const row = (id) => document.querySelector(`#teams .team[data-team="${card.dataset.team}"] .person[data-agent="${id}"] .brings`);
+  check("a teammate with a checklist says how many points it checks its work against", /Checks its work against 2 points/.test(row("agent-ship")?.textContent || ""), row("agent-ship")?.textContent);
+  check("one with neither says so, quietly", row("agent-page")?.classList.contains("none") && /No skills or checklist yet/.test(row("agent-page").textContent), row("agent-page")?.textContent);
+  document.getElementById("teams-done").click();
+  await wait(150);
+  return found;
+}

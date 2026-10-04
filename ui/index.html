@@ -429,6 +429,24 @@
         </label>
         <button id="whois-save" type="button">Save</button>
         <!--
+          How it checks its work before it says it is done: the role made
+          concrete, read into every conversation it has. First, because it is
+          what the role means, and the rest is what it has picked up since.
+        -->
+        <details id="checklist">
+          <summary id="checklist-summary">How it checks its work</summary>
+          <p id="checklist-starter" hidden>
+            <span id="checklist-starter-says"></span>
+            <button id="checklist-use" type="button">Use these</button>
+          </p>
+          <ol id="checklist-list"></ol>
+          <form id="checklist-new">
+            <label>A point it checks <input id="checklist-point" type="text" placeholder="I ran it and looked at the result myself" autocomplete="off" /></label>
+            <button type="submit">Add</button>
+          </form>
+          <p id="checklist-says"></p>
+        </details>
+        <!--
           What it has written down, read into every conversation it has. Here,
           where somebody looks to overrule it, because a wrong note is repeated
           to the model every time and nothing else on screen showed it.

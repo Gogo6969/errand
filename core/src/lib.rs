@@ -18,6 +18,7 @@
 pub mod allowing;
 pub mod atlogin;
 pub mod changes;
+pub mod checklist;
 pub mod claims;
 pub mod claude;
 pub mod connectors;

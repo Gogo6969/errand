@@ -229,6 +229,15 @@ const el = {
   setup: document.getElementById("setup"),
   models: document.getElementById("models"),
   modelsDone: document.getElementById("models-done"),
+  checklist: document.getElementById("checklist"),
+  checklistSummary: document.getElementById("checklist-summary"),
+  checklistStarter: document.getElementById("checklist-starter"),
+  checklistStarterSays: document.getElementById("checklist-starter-says"),
+  checklistUse: document.getElementById("checklist-use"),
+  checklistList: document.getElementById("checklist-list"),
+  checklistNew: document.getElementById("checklist-new"),
+  checklistPoint: document.getElementById("checklist-point"),
+  checklistSays: document.getElementById("checklist-says"),
   teams: document.getElementById("teams"),
   teamsOpen: document.getElementById("teams-open"),
   teamsNew: document.getElementById("teams-new"),
@@ -4747,9 +4756,88 @@ el.name.addEventListener("click", () => {
   el.whoisLocal.checked = !!t.keepLocal;
   el.whois.hidden = false;
   el.whoisName.focus();
+  drawChecklist();
   drawNotes();
   drawSkills();
   drawLimit();
+});
+
+/**
+ * How this teammate checks its work: the points it goes through before it
+ * may say a task is done, read into every conversation it has.
+ *
+ * Its role was a word on a card. A role the app recognises offers a starter
+ * list, and the person keeps, changes or drops each point.
+ */
+let checklistNow = { agent: null, points: [], starter: null };
+
+async function drawChecklist() {
+  const a = whose();
+  if (!a) return;
+  el.checklistSays.textContent = "";
+  let got = { points: [], starter: null };
+  try {
+    got = (await invoke("checklist_of", { agent: a.id })) || got;
+  } catch {
+    // Drawn empty: the list can still be written.
+  }
+  checklistNow = { agent: a.id, points: got.points || [], starter: got.starter || null };
+  const points = checklistNow.points;
+  el.checklistSummary.textContent = points.length
+    ? `How it checks its work (${points.length} ${points.length === 1 ? "point" : "points"})`
+    : "How it checks its work";
+  // Offered only to an empty list: a starter is a start, not a second list.
+  const [called, starts] = checklistNow.starter || [];
+  el.checklistStarter.hidden = !(points.length === 0 && starts?.length);
+  if (!el.checklistStarter.hidden) {
+    el.checklistStarterSays.textContent = `Its role has a starter list, the ${called} checklist: ${starts.join("; ")}.`;
+  }
+  el.checklistList.replaceChildren(
+    ...(points.length
+      ? points.map((point, i) => {
+          const li = document.createElement("li");
+          const row = document.createElement("div");
+          row.className = "point";
+          const out = document.createElement("button");
+          out.type = "button";
+          out.textContent = "Take out";
+          out.onclick = () => keepChecklist(points.filter((_, j) => j !== i));
+          row.append(note("span", point, "point-text"), out);
+          li.append(row);
+          return li;
+        })
+      : [
+          note(
+            "li",
+            "Nothing yet. Each point is something it goes through before it says a task is done; a point that fails means not done yet.",
+            "point-none",
+          ),
+        ]),
+  );
+}
+
+async function keepChecklist(points) {
+  const agent = checklistNow.agent;
+  if (!agent) return;
+  try {
+    checklistNow.points = await invoke("set_checklist", { agent, points });
+  } catch (why) {
+    el.checklistSays.textContent = String(why);
+    return;
+  }
+  if (whose()?.id === agent) await drawChecklist();
+}
+
+el.checklistUse.addEventListener("click", () => {
+  const [, starts] = checklistNow.starter || [];
+  if (starts?.length) keepChecklist([...checklistNow.points, ...starts]);
+});
+el.checklistNew.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const point = el.checklistPoint.value.trim();
+  if (!point) return;
+  el.checklistPoint.value = "";
+  await keepChecklist([...checklistNow.points, point]);
 });
 
 /**
@@ -8098,6 +8186,8 @@ async function searchTheOverview() {
  * job description rather than anything the app knew.
  */
 let teamsKnown = [];
+/** What each teammate brings, by id: its skills by name, and its checklist's length. */
+let bringsNow = new Map();
 
 async function showTeams() {
   if (!el.overview.hidden) closeOverview();
@@ -8135,6 +8225,19 @@ function personRow(a, more) {
   does.textContent = a.about || "Has not said what it handles";
   does.title = a.about || "";
   who.append(name, does);
+  // What it brings: the skills it has been taught and how it checks its work.
+  const brought = bringsNow.get(a.id);
+  if (brought) {
+    const said = [];
+    if (brought.skills.length) said.push(`Skills: ${brought.skills.join(", ")}`);
+    if (brought.checks) said.push(`checks its work against ${brought.checks} ${brought.checks === 1 ? "point" : "points"}`);
+    const brings = document.createElement("span");
+    brings.className = said.length ? "brings" : "brings none";
+    brings.textContent = said.length
+      ? said.join(" \u00b7 ").replace(/^checks/, "Checks")
+      : "No skills or checklist yet";
+    who.append(brings);
+  }
   row.append(tile(kindFor(a), busy(a.id), a.hue), who, more || document.createElement("span"));
   return row;
 }
@@ -8171,6 +8274,12 @@ async function drawTeams() {
     teamsKnown = (await invoke("teams")) || [];
   } catch {
     teamsKnown = [];
+  }
+  try {
+    const brought = (await invoke("what_they_bring")) || [];
+    bringsNow = new Map(brought.map(([id, skills, checks]) => [id, { skills: skills || [], checks: checks || 0 }]));
+  } catch {
+    bringsNow = new Map();
   }
   const everybody = teammatesToChoose();
   const byId = new Map([...agents.values()].map((a) => [a.id, a]));

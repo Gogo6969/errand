@@ -5005,6 +5005,73 @@ async fn break_up_team(held: State<'_, Held>, id: String) -> Result<(), String> 
     Ok(())
 }
 
+/// How a teammate checks its work, and the starter list its role offers.
+#[derive(Serialize)]
+struct Checklist {
+    points: Vec<String>,
+    /// What the starter list is called, and its points, when the role asks
+    /// for one.
+    starter: Option<(String, Vec<String>)>,
+}
+
+#[tauri::command]
+async fn checklist_of(held: State<'_, Held>, agent: String) -> Result<Checklist, String> {
+    let points = held.store.checklist(&agent).map_err(|e| e.to_string())?;
+    let role = held
+        .store
+        .agent(&agent)
+        .map_err(|e| e.to_string())?
+        .and_then(|a| a.title)
+        .unwrap_or_default();
+    let starter = errand_core::checklist::starter_for(&role).map(|s| {
+        (
+            s.called.to_string(),
+            s.points.iter().map(|p| p.to_string()).collect(),
+        )
+    });
+    Ok(Checklist { points, starter })
+}
+
+/// Set how a teammate checks its work, and tell it, in a conversation that is
+/// open or the next time one opens.
+#[tauri::command]
+async fn set_checklist(
+    held: State<'_, Held>,
+    agent: String,
+    points: Vec<String>,
+) -> Result<Vec<String>, String> {
+    let now = chrono::Local::now().timestamp_millis();
+    let kept = held
+        .store
+        .set_checklist(&agent, &points, now)
+        .map_err(|e| e.to_string())?;
+    tell_them_who_it_is(&held, &agent);
+    Ok(kept)
+}
+
+/// What each teammate brings, for the Teams page: the skills it has been
+/// taught, by name, and how many points it checks its work against.
+#[tauri::command]
+async fn what_they_bring(
+    held: State<'_, Held>,
+) -> Result<Vec<(String, Vec<String>, usize)>, String> {
+    let everybody = held.store.agents().map_err(|e| e.to_string())?;
+    Ok(everybody
+        .into_iter()
+        .map(|a| {
+            let skills = held
+                .store
+                .skills(&a.id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| s.name)
+                .collect();
+            let checks = held.store.checklist(&a.id).unwrap_or_default().len();
+            (a.id, skills, checks)
+        })
+        .collect())
+}
+
 /// Every teammate's app that starts at login, for Settings.
 #[tauri::command]
 async fn teammates_at_login() -> Result<Vec<(String, String)>, String> {
@@ -5297,8 +5364,26 @@ fn who_else(app: &AppHandle, from: &str) -> anyhow::Result<String> {
         .filter(|(a, _)| Some(&a.id) != mine.as_ref() && a.name != NOT_YET_NAMED)
         .filter(|(a, _)| reach.as_ref().is_none_or(|r| r.contains(&a.id)))
         .map(|(a, label)| {
+            // What it brings, as well as what it is called: the skills it has
+            // been taught and how it checks its work, so a lead can choose by
+            // what each one is good at rather than by a word on a card.
+            let skills: Vec<String> = held
+                .store
+                .skills(&a.id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| s.name)
+                .collect();
+            let checks = held.store.checklist(&a.id).unwrap_or_default().len();
+            let mut brings = String::new();
+            if !skills.is_empty() {
+                brings.push_str(&format!(" Skills: {}.", skills.join(", ")));
+            }
+            if checks > 0 {
+                brings.push_str(&format!(" Checks its work against {checks} points."));
+            }
             format!(
-                "  {} ({}) -- {}",
+                "  {} ({}) -- {}{brings}",
                 label,
                 a.title.unwrap_or_else(|| "no role".into()),
                 a.about
@@ -6800,10 +6885,9 @@ fn tell_them_who_it_is(held: &Held, agent: &str) {
     let Ok(Some(who)) = held.store.agent(agent) else {
         return;
     };
-    let identity = errand_core::memory::with_its_team(
-        errand_core::memory::who_you_are(&who.name, who.title.as_deref(), who.about.as_deref()),
-        &errand_core::memory::your_team(&held.store, agent).unwrap_or_default(),
-    );
+    let Ok(identity) = errand_core::memory::identity_of(&held.store, &who) else {
+        return;
+    };
     let open: Vec<String> = held.live.lock().unwrap().keys().cloned().collect();
     for id in open {
         let theirs = matches!(held.store.conversation(&id), Ok(Some(c)) if c.agent == agent);
@@ -8925,6 +9009,9 @@ pub fn run() {
             join_team,
             leave_team,
             break_up_team,
+            checklist_of,
+            set_checklist,
+            what_they_bring,
             seen,
             connect,
             seen_what_changed,
