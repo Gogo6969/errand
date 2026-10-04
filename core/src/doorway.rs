@@ -1047,6 +1047,7 @@ mod tests {
                 "every_day",
                 "keep_an_eye_on",
                 "over_to_you",
+                "open_outside",
                 "who_else",
                 "save_skill",
                 "run_skill",

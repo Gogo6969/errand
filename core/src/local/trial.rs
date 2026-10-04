@@ -996,6 +996,7 @@ fn usual(world: &mut World, name: &str, args: &Value) -> String {
         "recall" => "Nothing noted about that.".to_string(),
         "forget" => "Forgotten.".to_string(),
         "over_to_you" => "Handed over. Nobody is at the window just now.".to_string(),
+        "open_outside" => "Not opened: nobody is at the window just now.".to_string(),
         "ask" | "who_else" => "Nobody else is on the team.".to_string(),
         "skills" | "run_skill" | "save_skill" => "No skills yet.".to_string(),
         _ => "Done.".to_string(),

@@ -60,6 +60,12 @@ pub fn what_to_start(running: &Path) -> Vec<String> {
 /// `KeepAlive`, because an app somebody quit should stay quit, and a window
 /// that comes back every time it is closed is not a feature anybody asked for.
 pub fn plist(start: &[String]) -> String {
+    labelled(NAMED, start)
+}
+
+/// The file, under a label of the caller's: Errand's own, or a teammate's app.
+fn labelled(label: &str, start: &[String]) -> String {
+    let label = escaped(label);
     let arguments = start
         .iter()
         .map(|word| format!("    <string>{}</string>", escaped(word)))
@@ -71,7 +77,7 @@ pub fn plist(start: &[String]) -> String {
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>{NAMED}</string>
+  <string>{label}</string>
   <key>ProgramArguments</key>
   <array>
 {arguments}
@@ -321,5 +327,140 @@ mod tests {
         let written = plist(&started);
         assert!(written.contains("Ben &amp; Jerry"), "{written}");
         assert!(!written.contains("Ben & Jerry"), "{written}");
+    }
+}
+
+/// What a teammate's app is started at login under: a label of its own,
+/// beginning with this, so every one of them can be listed and taken away
+/// together and none is ever mistaken for Errand's own.
+pub const FOR_A_TEAMMATE: &str = "com.errandai.teammate.";
+
+/// The label for one teammate's app: which teammate, which time it asked, and
+/// which app. The asking is in it because two names can come out the same
+/// once everything but letters and digits is a dash (`Tide Clock.app` and
+/// `Tide_Clock.app`), and the second would quietly replace the first.
+pub fn label_for(agent: &str, asked: &str, app: &str) -> String {
+    let short = |id: &str| -> String {
+        id.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(8)
+            .collect()
+    };
+    let name: String = app
+        .trim_end_matches(".app")
+        .chars()
+        .map(|c| match c.is_ascii_alphanumeric() {
+            true => c.to_ascii_lowercase(),
+            false => '-',
+        })
+        .collect();
+    let name = name.trim_matches('-');
+    let name = match name.is_empty() {
+        true => "app",
+        false => name,
+    };
+    format!("{FOR_A_TEAMMATE}{}.{}.{name}", short(agent), short(asked))
+}
+
+/// Start a teammate's app at every login: the copy the person agreed to,
+/// opened the way they would open it.
+pub fn start_for_a_teammate(home: &Path, label: &str, app: &Path) -> std::io::Result<PathBuf> {
+    if !label.starts_with(FOR_A_TEAMMATE) {
+        return Err(std::io::Error::other("not a teammate's label"));
+    }
+    let at = home
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{label}.plist"));
+    if let Some(folder) = at.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    let start = [
+        "/usr/bin/open".to_string(),
+        app.to_string_lossy().to_string(),
+    ];
+    std::fs::write(&at, labelled(label, &start))?;
+    Ok(at)
+}
+
+/// Every teammate's app that starts at login: its label and what it opens.
+pub fn teammates_at_login(home: &Path) -> Vec<(String, String)> {
+    let Ok(found) = std::fs::read_dir(home.join("Library").join("LaunchAgents")) else {
+        return Vec::new();
+    };
+    let mut theirs: Vec<(String, String)> = found
+        .flatten()
+        .filter_map(|one| {
+            let name = one.file_name().to_string_lossy().to_string();
+            let label = name.strip_suffix(".plist")?.to_string();
+            if !label.starts_with(FOR_A_TEAMMATE) {
+                return None;
+            }
+            let plist = std::fs::read_to_string(one.path()).ok()?;
+            let opens = what_it_starts(&plist).last().cloned().unwrap_or_default();
+            Some((label, opens))
+        })
+        .collect();
+    theirs.sort();
+    theirs
+}
+
+/// Stop one teammate's app starting at login. Only ever a teammate's.
+pub fn stop_for_a_teammate(home: &Path, label: &str) -> std::io::Result<()> {
+    if !label.starts_with(FOR_A_TEAMMATE) || label.contains('/') {
+        return Err(std::io::Error::other("not a teammate's label"));
+    }
+    let at = home
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{label}.plist"));
+    match std::fs::remove_file(at) {
+        Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod for_teammates {
+    use super::*;
+
+    #[test]
+    fn a_teammates_app_starts_at_login_under_its_own_label_and_can_be_taken_away() {
+        let home =
+            std::env::temp_dir().join(format!("errand-atlogin-teammate-{}", std::process::id()));
+        std::fs::remove_dir_all(&home).ok();
+        let label = label_for("5e7a9c21-3b1b-4285", "a0c4e7f2-91d3", "Tide Clock.app");
+        assert_eq!(label, "com.errandai.teammate.5e7a9c21.a0c4e7f2.tide-clock");
+        // Two names that come out the same are still two labels, asked twice.
+        assert_ne!(
+            label_for("5e7a9c21", "a0c4e7f2", "Tide Clock.app"),
+            label_for("5e7a9c21", "b19d0e33", "Tide_Clock.app")
+        );
+        // A name with nothing plain in it still makes a label that ends well.
+        assert!(label_for("5e7a9c21", "a0c4e7f2", "日本.app").ends_with(".app"));
+        let app = Path::new("/tmp/opened/Tide Clock.app");
+        let at = start_for_a_teammate(&home, &label, app).unwrap();
+        let written = std::fs::read_to_string(&at).unwrap();
+        assert!(
+            written.contains(&format!("<string>{label}</string>")),
+            "{written}"
+        );
+        assert!(
+            written.contains("<string>/usr/bin/open</string>"),
+            "{written}"
+        );
+        assert_eq!(
+            teammates_at_login(&home),
+            vec![(label.clone(), "/tmp/opened/Tide Clock.app".to_string())]
+        );
+        // Errand's own is never one of them, and cannot be taken away here.
+        std::fs::write(where_it_goes(&home), plist(&["/x".to_string()])).unwrap();
+        assert_eq!(teammates_at_login(&home).len(), 1);
+        assert!(stop_for_a_teammate(&home, NAMED).is_err());
+        assert!(start_for_a_teammate(&home, NAMED, app).is_err());
+        stop_for_a_teammate(&home, &label).unwrap();
+        assert!(teammates_at_login(&home).is_empty());
+        assert!(where_it_goes(&home).exists());
+        std::fs::remove_dir_all(&home).ok();
     }
 }

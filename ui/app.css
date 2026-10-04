@@ -1164,11 +1164,15 @@ main > aside, main > #title, main > #composer { flex: none; }
 /* Off, said in the colour of something that needs doing. */
 #notifications-says[data-state="refused"] { color: var(--wrong); }
 
-/* A switch among the fields of who it is, said in words rather than shouted. */
+/* A switch among the fields of who it is, said in words rather than shouted.
+   As tall as the fields and Save beside it: the row lines its pieces up by
+   their bottoms, so a label only as tall as its words sat below their middle. */
 #whois .keep-local {
   flex: 0 0 auto;
   flex-direction: row;
   align-items: center;
+  box-sizing: border-box;
+  height: var(--whois-field);
   gap: 6px;
   font-size: 13px;
   letter-spacing: 0;
@@ -1434,6 +1438,13 @@ main > aside, main > #title, main > #composer { flex: none; }
   border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--rule));
 }
 .handover.done { border-color: var(--rule); }
+/* Asking to open something outside the wall: the app's facts, plainly, then
+   the teammate's reason, set apart as its words. */
+.handover.open-outside .facts { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 3px; font-size: 13px; color: var(--ink-soft); }
+.handover.open-outside .facts .warning { color: var(--ink); }
+.handover.open-outside .facts code { font-size: 12px; overflow-wrap: anywhere; }
+.handover.open-outside .why { margin: 6px 0 0; font-size: 13px; color: var(--ink-soft); }
+.handover.open-outside .why .label { color: var(--faint); }
 .handover .tile { margin-top: 1px; }
 .handover a.detail {
   display: block;
@@ -2164,6 +2175,8 @@ body.catching #what { border-color: var(--accent); }
 
 #whois[hidden] { display: none; }
 #whois {
+  /* One height for every field and button in the row, so they share a line. */
+  --whois-field: 32px;
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
@@ -2199,8 +2212,11 @@ body.catching #what { border-color: var(--accent); }
   letter-spacing: 0;
 }
 #whois input:focus { outline: none; border-color: var(--edge); }
+#whois > label > input:not([type="checkbox"]) { box-sizing: border-box; height: var(--whois-field); }
 #whois-save {
-  padding: 7px 16px;
+  box-sizing: border-box;
+  height: var(--whois-field);
+  padding: 0 16px;
   border-radius: 8px;
   border: 0;
   background: var(--accent);
@@ -3378,3 +3394,25 @@ a.on-disk {
 #rooming button:hover { border-color: var(--edge); }
 #rooming-says { font-size: 12px; color: var(--ink-soft); }
 #rooming-says:empty { display: none; }
+
+/* Teammates' apps that start at login, under Errand's own switch. */
+#teammate-logins[hidden] { display: none; }
+#teammate-logins { margin-top: 14px; }
+#teammate-logins h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+#teammate-logins ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+#teammate-logins li { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+#teammate-logins li .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#teammate-logins li button {
+  flex: none;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+#teammate-logins li button:hover { color: var(--wrong); border-color: var(--wrong); }
+#teammate-logins li button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

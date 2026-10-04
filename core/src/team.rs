@@ -320,6 +320,46 @@ pub fn declarations() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "open_outside",
+                "description":
+                    "Ask the person to open something you made, outside your wall: an app \
+                     (a .app bundle in your own folder), a folder, or a document. Nothing \
+                     inside your wall can open anything and you must not try to: this is the \
+                     way. They see a card with your reason and decide, and only their click \
+                     opens it. An app or a document is opened from a copy Errand takes when \
+                     you ask; a folder is only shown in Finder. If they say no, do not ask \
+                     again. An app can also be started at every login, if they agree to that \
+                     too. A bare program or a script cannot be opened this way: put it in a \
+                     .app bundle first. You get back what they chose.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description":
+                                "What to open, in your own folder: `TideClock.app`, \
+                                 `reports`, or `reports/summary.pdf`"
+                        },
+                        "why": {
+                            "type": "string",
+                            "description":
+                                "Why it has to be opened outside your wall, in one line, so \
+                                 they can judge whether to."
+                        },
+                        "at_login": {
+                            "type": "boolean",
+                            "description":
+                                "Also start this app every time they log in. Only for an app, \
+                                 and only when they asked for that."
+                        }
+                    },
+                    "required": ["path", "why"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "who_else",
                 "description":
                     "List the other agents you can hand work to, with what each one handles. \
@@ -474,6 +514,7 @@ pub enum Ours {
     EveryDay,
     KeepAnEyeOn,
     OverToYou,
+    OpenOutside,
     SaveSkill,
     RunSkill,
     Skills,
@@ -493,6 +534,7 @@ impl Ours {
             Ours::EveryDay => "every_day",
             Ours::KeepAnEyeOn => "keep_an_eye_on",
             Ours::OverToYou => "over_to_you",
+            Ours::OpenOutside => "open_outside",
             Ours::SaveSkill => "save_skill",
             Ours::RunSkill => "run_skill",
             Ours::Skills => "skills",
@@ -513,6 +555,7 @@ pub fn ours(tool: &str) -> Option<Ours> {
         "every_day" => Some(Ours::EveryDay),
         "keep_an_eye_on" => Some(Ours::KeepAnEyeOn),
         "over_to_you" => Some(Ours::OverToYou),
+        "open_outside" => Some(Ours::OpenOutside),
         "save_skill" => Some(Ours::SaveSkill),
         "run_skill" => Some(Ours::RunSkill),
         "skills" => Some(Ours::Skills),
@@ -571,6 +614,10 @@ pub fn in_plain_words(tool: Ours, args: &Value) -> String {
         Ours::OverToYou => match get("what") {
             "" => "Handing this over to you".to_string(),
             what => format!("Over to you: {what}"),
+        },
+        Ours::OpenOutside => match get("path").rsplit('/').find(|part| !part.is_empty()) {
+            None => "Asking you to open something outside its wall".to_string(),
+            Some(name) => format!("Asking you to open {name} outside its wall"),
         },
         Ours::Remember => match get("about") {
             "" => "Making a note".to_string(),
@@ -632,6 +679,8 @@ pub fn the_thing_itself(tool: Ours, args: &Value) -> String {
         // Nothing. An "always" here would be somebody agreeing in advance to be
         // interrupted, which is not a thing anybody wants to agree to once.
         Ours::OverToYou => String::new(),
+        // Nor here: what was agreed to opening once is never agreed to again.
+        Ours::OpenOutside => String::new(),
         Ours::EveryDay => args
             .get("when")
             .and_then(|v| v.as_str())
@@ -739,6 +788,9 @@ pub fn asks_first(tool: Ours) -> bool {
         // asking. A permission card in front of a request to come and do
         // something is two questions where one was meant.
         Ours::OverToYou => false,
+        // Nor this, for the same reason: the tool is a question, answered on
+        // the app's own card, which nothing stored can answer for them.
+        Ours::OpenOutside => false,
         // Saving and listing reach this agent's own records and nothing else.
         // Running one is not delegation: it opens a conversation for the same
         // agent on the same posture, and every step the run takes goes
@@ -773,6 +825,10 @@ pub fn without_the_app(tool: Ours) -> &'static str {
         Ours::OverToYou => {
             "There is nobody at a window here to hand anything to. Say what somebody would \
              have to do, and stop there."
+        }
+        Ours::OpenOutside => {
+            "There is nobody at a window here to open anything for. Say what would have to \
+             be opened, and stop there."
         }
         Ours::SaveSkill | Ours::RunSkill | Ours::Skills => {
             "There is nowhere to keep skills here. This is an engine with no app behind it, \
@@ -1267,6 +1323,7 @@ mod tests {
                 "every_day",
                 "keep_an_eye_on",
                 "over_to_you",
+                "open_outside",
                 "who_else",
                 "save_skill",
                 "run_skill",

@@ -248,6 +248,16 @@
           <span>Open Errand when I log in</span>
         </label>
         <p id="at-login-says" class="quiet"></p>
+        <!--
+          Teammates' apps that start at every login, because somebody agreed to
+          it on a card. Each started from a copy Errand keeps, and taken away
+          here: a teammate cannot take one away, nor add one, from inside its
+          wall.
+        -->
+        <div id="teammate-logins" hidden>
+          <h3>Teammates' apps that start at login</h3>
+          <ul id="teammate-logins-list"></ul>
+        </div>
       </div>
 
       <!--

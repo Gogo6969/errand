@@ -5168,6 +5168,19 @@ export async function keepingItLocal() {
   document.getElementById("thread-name").click();
   await settle(150);
   const box = document.getElementById("whois-local");
+  // On the line of the fields and Save beside it. The row lines its pieces up
+  // by their bottoms, and a label only as tall as its words sat below the
+  // middle of the fields, which is the first thing somebody noticed.
+  if (beingDrawn()) {
+    const middle = (e) => { const r = e.getBoundingClientRect(); return Math.round(r.top + r.height / 2); };
+    const [field, save, words] = [document.getElementById("whois-name"), document.getElementById("whois-save"), box.closest("label")];
+    const [f, b, w] = [field, save, box].map(middle);
+    check(
+      "Keep it local sits on the same line as the fields and Save",
+      f === b && Math.abs(f - w) <= 1 && Math.abs(middle(words) - f) <= 1,
+      `middles: field ${f}, save ${b}, box ${w}, label ${middle(words)}`,
+    );
+  }
   box.checked = true;
   box.dispatchEvent(new Event("change"));
   await settle(200);
@@ -7389,5 +7402,99 @@ export async function answeredIsThreeGroups() {
   await wait(200);
   FIXTURE.tasks["talk-room"] = kept.room;
   FIXTURE.tasks["talk-cut-off"] = kept.cut;
+  return found;
+}
+
+/**
+ * A teammate asking to open something outside its wall, and only the person's
+ * click opening it. Nothing inside the wall can open anything any more: macOS
+ * opened it outside every sandbox, so it was a door straight through.
+ */
+export async function askingToOpenOutside() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  await openTalk("talk-2");
+  const ask = (handover, more = {}) =>
+    tell("asking_to_open", {
+      conversation: "talk-2", seq: 9800 + Number(handover.slice(-1)), handover,
+      path: "tide-clock/TideClock.app", name: "TideClock.app", kind: "an app",
+      why: "Start at Login needs your normal rights, which nothing inside the wall has.", at_login: true, ...more,
+    });
+  const heard = ask("o-1");
+  await wait(250);
+  check("the window is listening for a teammate asking to open something", heard > 0, `${heard} listener(s)`);
+  const card = () => document.querySelector('#messages .open-outside[data-handover="o-1"]');
+  const said = card()?.textContent || "";
+  check("a card of its own says who asks to open what, outside its wall", /asks you to open TideClock\.app outside its wall/.test(said), said.slice(0, 90));
+  check("with where it is, and that it runs as you outside the wall", said.includes("tide-clock/TideClock.app") && /runs as you, outside the wall/.test(said), said.slice(0, 200));
+  check("and that it asks to start at every login", /start every time you log in/.test(said), said);
+  check("and the teammate's own reason, set apart as its words", card()?.querySelector(".why q")?.textContent.includes("normal rights"), card()?.querySelector(".why")?.textContent);
+  const buttons = [...(card()?.querySelectorAll(".choices button") || [])].map((b) => b.textContent);
+  check(
+    "three answers, and no Always",
+    buttons.join(" | ") === "Open it and start it at login | Just open it | Don't open it" && !buttons.some((b) => /Always/.test(b)),
+    buttons.join(" | "),
+  );
+  check("and the teammate says it needs you down the side", /Needs you/.test(document.querySelector('#threads li[data-agent="agent-bitcoin"] .last')?.textContent || ""), document.querySelector('#threads li[data-agent="agent-bitcoin"] .last')?.textContent);
+  const before = asked.length;
+  [...card().querySelectorAll(".choices button")][0].click();
+  await wait(250);
+  check(
+    "pressing one sends exactly that answer to the teammate waiting",
+    asked.slice(before).some((a) => a.name === "handed_back" && a.args?.handover === "o-1" && a.args?.how === "open_at_login"),
+    JSON.stringify(asked.slice(before).map((a) => [a.name, a.args?.how])),
+  );
+  check("and the card says what was done, with no buttons left", /start at every login/.test(card()?.textContent || "") && !card()?.querySelector(".choices"), card()?.textContent.slice(-80));
+
+  // Stopped waiting: nothing can be opened from it, and nothing is said into the conversation.
+  ask("o-2", { at_login: false });
+  await wait(200);
+  tell("handover_ended", { conversation: "talk-2", handover: "o-2" });
+  await wait(200);
+  const gone = document.querySelector('#messages .open-outside[data-handover="o-2"]');
+  check("one that stopped waiting says nothing was opened, and offers nothing", /Nothing was opened/.test(gone?.textContent || "") && !gone?.querySelector(".choices"), gone?.textContent.slice(-80));
+  // Words typed in place of a button are never a yes.
+  ask("o-3", { at_login: false });
+  await wait(200);
+  check("without login, two answers", [...(document.querySelector('#messages .open-outside[data-handover="o-3"]')?.querySelectorAll(".choices button") || [])].map((b) => b.textContent).join(" | ") === "Open it | Don't open it", "");
+  tell("handed_back", { conversation: "talk-2", handover: "o-3", how: "no, leave it" });
+  await wait(200);
+  const typed = document.querySelector('#messages .open-outside[data-handover="o-3"]');
+  check("words typed instead of pressing a button open nothing", /Nothing was opened/.test(typed?.textContent || ""), typed?.textContent.slice(-80));
+
+  // A folder is only shown in Finder, and the button says so.
+  ask("o-4", { at_login: false, kind: "a folder", name: "reports", path: "reports" });
+  await wait(200);
+  const folder = document.querySelector('#messages .open-outside[data-handover="o-4"]');
+  check(
+    "a folder is shown in Finder, and its button says that rather than open",
+    /shown in Finder\. Nothing runs/.test(folder?.textContent || "") &&
+      [...(folder?.querySelectorAll(".choices button") || [])].map((b) => b.textContent).join(" | ") === "Show it in Finder | Don't open it",
+    folder?.textContent.slice(0, 160),
+  );
+  // A document says what kind it is, by its ending, and that a copy is opened.
+  ask("o-5", { at_login: false, kind: "a .pdf document", name: "summary.pdf", path: "out/summary.pdf" });
+  await wait(200);
+  const doc = document.querySelector('#messages .open-outside[data-handover="o-5"]')?.textContent || "";
+  check("a document says its ending, and that it is a copy that opens", /A \.pdf document in its own folder/.test(doc) && /from a copy taken when it asked/.test(doc), doc.slice(0, 200));
+  // Nothing on an app's card promises more than the copy keeps.
+  check("an app's card does not promise that what runs is what is shown", !/what runs is what you see/.test(said), said.slice(0, 200));
+
+  // Settings: what starts at login for teammates, each with a way to stop it.
+  FIXTURE.teammate_logins = [["com.errandai.teammate.5e7a9c21.a0c4e7f2.tide-clock", "/x/opened/abc/TideClock.app"]];
+  document.getElementById("setup")?.click();
+  await wait(500);
+  const list = document.getElementById("teammate-logins");
+  check("Settings lists the teammates' apps that start at login", !list.hidden && /TideClock\.app/.test(list.textContent), list.hidden ? "hidden" : list.textContent);
+  list.querySelector("button")?.click();
+  await wait(300);
+  check(
+    "and stopping one stops it, and it leaves the list",
+    asked.some((a) => a.name === "stop_teammate_at_login" && a.args?.label === "com.errandai.teammate.5e7a9c21.a0c4e7f2.tide-clock") && list.hidden,
+    list.hidden ? "gone" : list.textContent,
+  );
+  document.getElementById("models-done")?.click();
+  await wait(150);
   return found;
 }

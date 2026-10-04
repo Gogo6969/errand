@@ -1284,6 +1284,11 @@ fn must_ask(asks: &str, name: &str, mine: Option<team::Ours>, worth_stopping_for
         // rather than the tool. So is a command that changes a disk:
         // `tools::touches_a_disk`.
         _ if worth_stopping_for => true,
+        // Asking to open something outside the wall is a question already,
+        // answered on the app's own card, which no stored "always" reaches. A
+        // permission card in front of it, the one plan used to raise for every
+        // team tool, offered exactly that "always".
+        _ if mine == Some(team::Ours::OpenOutside) => false,
         // `auto` next, or it would not mean never: handing work to another
         // agent had its own default and quietly outranked the posture somebody
         // had chosen for this agent.

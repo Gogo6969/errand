@@ -150,6 +150,9 @@ const GRANTED: &[&str] = &[
     // entirely a question. Putting a permission card in front of it would be
     // asking whether it may ask.
     "mcp__errand__over_to_you",
+    // Nor in front of asking to open something outside the wall: the app's
+    // own card is the question, and nothing stored can answer it.
+    "mcp__errand__open_outside",
     // Saving and listing reach this agent's own records and nothing else.
     // Running one opens a conversation for the same agent on the same
     // posture, and every step the run takes goes through the same cards as

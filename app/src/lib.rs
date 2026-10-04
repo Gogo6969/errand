@@ -111,6 +111,9 @@ struct Held {
     /// arriving while the first is still on screen must not be ended by the
     /// first card being pressed.
     handovers: Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<String>)>>,
+    /// What the person said no to opening, by conversation and real path, so
+    /// a teammate cannot ask the same thing again until somebody says yes.
+    not_opened: Mutex<std::collections::HashSet<(String, std::path::PathBuf)>>,
     /// Which opening of a conversation is the current one.
     ///
     /// An engine that has stopped takes itself out of `live`, which is right
@@ -3417,6 +3420,7 @@ fn answer_what_engines_cannot(
                     Some(team::Ours::EveryDay) => set_it_running(&app, &asked),
                     Some(team::Ours::KeepAnEyeOn) => keep_an_eye_on(&app, &asked),
                     Some(team::Ours::OverToYou) => over_to_you(&app, &asked).await,
+                    Some(team::Ours::OpenOutside) => open_outside(&app, &asked).await,
                     Some(team::Ours::SaveSkill) => save_skill(&app, &asked),
                     Some(team::Ours::RunSkill) => run_skill(&app, &asked).await,
                     Some(team::Ours::Skills) => list_skills(&app, &asked),
@@ -4478,6 +4482,434 @@ async fn over_to_you(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Str
              there."
         )),
     }
+}
+
+/// What can be opened outside a teammate's wall, and how.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Opening {
+    /// An app bundle it built, copied when it asks.
+    App,
+    /// A folder, only shown in Finder, which runs nothing.
+    Folder,
+    /// A document, copied when it asks and opened in the app it belongs to.
+    Document,
+}
+
+impl Opening {
+    fn in_words(self) -> &'static str {
+        match self {
+            Opening::App => "an app",
+            Opening::Folder => "a folder",
+            Opening::Document => "a document",
+        }
+    }
+}
+
+/// Documents that open in an app without running anything of their own.
+/// Listed rather than refused by kind, because what opens a script, an
+/// installer, a profile or a web location is a second way round the wall.
+const OPENS_AS_A_DOCUMENT: &[&str] = &[
+    "pdf", "txt", "md", "rtf", "html", "htm", "csv", "json", "log", "png", "jpg", "jpeg", "gif",
+    "heic", "svg", "mp3", "m4a", "wav", "mp4", "mov", "docx", "xlsx", "pptx", "pages", "numbers",
+    "key",
+];
+
+/// What kind of thing this is to open, or why it cannot be.
+fn what_opening(real: &std::path::Path) -> Result<Opening, String> {
+    let kind = real
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if real.is_dir() {
+        return match kind.as_str() {
+            "app" if real.join("Contents").join("Info.plist").is_file() => Ok(Opening::App),
+            "app" => Err("that .app has no Contents/Info.plist, so it is not an app".into()),
+            "" => Ok(Opening::Folder),
+            // A folder with an ending is a package to macOS (.xcodeproj,
+            // .rtfd, .key): it goes to the app that claims it, not to Finder.
+            _ => Err(format!(
+                "a .{kind} folder cannot be opened this way: macOS hands it to an app. Only an \
+                 app, a plain folder or a document"
+            )),
+        };
+    }
+    if OPENS_AS_A_DOCUMENT.contains(&kind.as_str()) {
+        return Ok(Opening::Document);
+    }
+    Err(format!(
+        "{} cannot be opened this way: a program or a script runs as soon as it is opened. \
+         Put it in a .app bundle first, and ask again with that",
+        real.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+    ))
+}
+
+/// Whether anything inside a copied app points outside it: a link that would
+/// let what runs at login be changed afterwards from the teammate's folder.
+fn points_outside(root: &std::path::Path) -> bool {
+    let mut left = vec![root.to_path_buf()];
+    while let Some(dir) = left.pop() {
+        let Ok(found) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for one in found.flatten() {
+            let path = one.path();
+            let Ok(kind) = one.file_type() else { continue };
+            if kind.is_symlink() {
+                match path.canonicalize() {
+                    Ok(to) if to.starts_with(root) => {}
+                    _ => return true,
+                }
+            } else if kind.is_dir() {
+                left.push(path);
+            }
+        }
+    }
+    false
+}
+
+/// Characters that change how a name looks without being seen: line breaks
+/// and other controls, and the marks that turn text round, which can make
+/// `summary\u{202E}fdp.html` read as `summarylmth.pdf`.
+fn hides_what_it_is(name: &str) -> bool {
+    name.chars().any(|c| {
+        c.is_control()
+            || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    })
+}
+
+/// A copy of what is to be opened, in a folder of Errand's that no teammate
+/// can read or write, taken before the card is shown. What is opened after the
+/// click is then what the card described, whatever happens in the teammate's
+/// folder while it waits.
+fn copy_to_open(
+    real: &std::path::Path,
+    kept: &std::path::Path,
+    name: &str,
+    opening: Opening,
+) -> Result<std::path::PathBuf, String> {
+    let is_a_link = std::fs::symlink_metadata(real)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(true);
+    if is_a_link {
+        return Err(format!("{name} changed while it was being looked at"));
+    }
+    std::fs::create_dir_all(kept).map_err(|e| e.to_string())?;
+    let copy = kept.join(name);
+    let copied = match opening {
+        Opening::App => std::process::Command::new("/usr/bin/ditto")
+            .arg(real)
+            .arg(&copy)
+            .status()
+            .is_ok_and(|s| s.success()),
+        Opening::Document => std::fs::copy(real, &copy).is_ok(),
+        Opening::Folder => false,
+    };
+    let fine = copied
+        && std::fs::symlink_metadata(&copy).is_ok_and(|m| !m.file_type().is_symlink())
+        && what_opening(&copy) == Ok(opening);
+    if !fine {
+        return Err(format!("{name} could not be copied to be opened"));
+    }
+    if opening == Opening::App && points_outside(&copy) {
+        return Err(format!(
+            "something inside {name} links to outside it, so what runs could be changed after \
+             they agreed. Build it with everything inside the bundle"
+        ));
+    }
+    Ok(copy)
+}
+
+/// Open something a teammate made, outside its wall, if the person says so.
+///
+/// Nothing inside the wall can open anything any more: macOS opens things in a
+/// process of its own, outside the sandbox, so `open` was a way straight out.
+/// This is the way that stays: a card with the teammate's reason, and the
+/// person's click, after which the app, which is not walled, opens it. An app
+/// or a document is copied, before the card is shown, into a folder of
+/// Errand's that no teammate can touch, and it is the copy that is opened and
+/// started at login, not whatever is in the teammate's folder by the time the
+/// person clicks. A folder is only shown in Finder.
+async fn open_outside(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let said = |k: &str| {
+        asked
+            .args
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let (path, why) = (said("path"), said("why"));
+    let at_login = asked
+        .args
+        .get("at_login")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if asked.from.is_empty() {
+        anyhow::bail!("there is no task here, so nothing to open anything from");
+    }
+    if path.is_empty() {
+        anyhow::bail!("say what to open: a path in your own folder");
+    }
+    if why.is_empty() {
+        anyhow::bail!(
+            "say why it has to be opened outside your wall, so they can judge whether to"
+        );
+    }
+    let (agent, home) = {
+        let held: State<Held> = app.state();
+        let talk = held
+            .store
+            .conversation(&asked.from)?
+            .ok_or_else(|| anyhow::anyhow!("there is no such conversation"))?;
+        let agent = held
+            .store
+            .agent(&talk.agent)?
+            .ok_or_else(|| anyhow::anyhow!("there is no such teammate"))?;
+        let home = std::path::PathBuf::from(&agent.cwd);
+        (agent, home)
+    };
+    if agent.asks == "plan" {
+        return Ok(
+            "Not asked: on plan, nothing is changed and nothing is opened. Say in your \
+                   plan what should be opened, and why."
+                .to_string(),
+        );
+    }
+    let home = home.canonicalize()?;
+    let wanted = match std::path::Path::new(&path).is_absolute() {
+        true => std::path::PathBuf::from(&path),
+        false => home.join(&path),
+    };
+    // Its real path, links followed, so a link in its folder to something
+    // elsewhere is seen as elsewhere.
+    let Ok(real) = wanted.canonicalize() else {
+        anyhow::bail!("there is nothing at {path} in your folder");
+    };
+    if !real.starts_with(&home) || real == home {
+        anyhow::bail!("only something inside your own folder can be opened this way, not {path}");
+    }
+    let opening = what_opening(&real).map_err(|why| anyhow::anyhow!(why))?;
+    let at_login = at_login && opening == Opening::App;
+    let name = real
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let shown = real
+        .strip_prefix(&home)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| name.clone());
+    if hides_what_it_is(&shown) {
+        anyhow::bail!(
+            "its name has characters in it that change how it looks, so they could not see \
+             what they were agreeing to. Rename it with plain letters and ask again"
+        );
+    }
+    let asked_before = (asked.from.clone(), real.clone());
+    {
+        let held: State<Held> = app.state();
+        if held.not_opened.lock().unwrap().contains(&asked_before) {
+            return Ok(format!(
+                "Not asked again: they already chose not to open {name} in this task."
+            ));
+        }
+    }
+    // What the card says it is, ending included for a document, so the kind
+    // is the app's to say and not only the name's.
+    let kind = match opening {
+        Opening::Document => format!(
+            "a .{} document",
+            real.extension()
+                .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default()
+        ),
+        _ => opening.in_words().to_string(),
+    };
+
+    let handover = uuid::Uuid::new_v4().to_string();
+    let kept = where_things_live(app)
+        .map_err(|e| anyhow::anyhow!(e))?
+        .join("opened")
+        .join(&agent.id)
+        .join(&handover);
+    let target = match opening {
+        Opening::Folder => real.clone(),
+        Opening::App | Opening::Document => match copy_to_open(&real, &kept, &name, opening) {
+            Ok(copy) => copy,
+            Err(why) => {
+                std::fs::remove_dir_all(&kept).ok();
+                return Ok(format!("Not asked: {why}."));
+            }
+        },
+    };
+    let (tell_me, answered) = tokio::sync::oneshot::channel();
+    {
+        let held: State<Held> = app.state();
+        held.handovers
+            .lock()
+            .unwrap()
+            .insert(handover.clone(), (asked.from.clone(), tell_me));
+        // Written as JSON, so a name with a line break in it cannot add a
+        // line of its own to the card.
+        let card = serde_json::json!({
+            "path": shown,
+            "name": name,
+            "kind": kind,
+            "why": why,
+            "at_login": at_login,
+        });
+        let line = held.store.the_app_says_about(
+            &asked.from,
+            "open_outside",
+            &card.to_string(),
+            &handover,
+        )?;
+        let _ = app.emit(
+            "asking_to_open",
+            AskingToOpen {
+                conversation: asked.from.clone(),
+                seq: line.seq,
+                handover: handover.clone(),
+                path: shown.clone(),
+                name: name.clone(),
+                kind: kind.clone(),
+                why: why.clone(),
+                at_login,
+            },
+        );
+        let asking = format!("open {name} outside its wall");
+        held.doing
+            .lock()
+            .unwrap()
+            .insert(asked.from.clone(), format!("{NEEDS_YOU}: {asking}"));
+        tell_them_it_is_theirs(app, &held.store, &asked.from, &asking);
+    }
+
+    let back = tokio::time::timeout(std::time::Duration::from_secs(600), answered).await;
+    {
+        let held: State<Held> = app.state();
+        held.handovers.lock().unwrap().remove(&handover);
+        {
+            let mut doing = held.doing.lock().unwrap();
+            if doing
+                .get(&asked.from)
+                .is_some_and(|now| now.starts_with(NEEDS_YOU))
+            {
+                doing.insert(asked.from.clone(), "Writing".to_string());
+            }
+        }
+        onscreen::waiting(how_many_are_waiting(&held));
+    }
+    if back.is_err() {
+        let _ = app.emit(
+            "handover_ended",
+            HandoverEnded {
+                conversation: asked.from.clone(),
+                handover: handover.clone(),
+            },
+        );
+    }
+    // Only the two words a button sends open anything. Words instead, a stop,
+    // or nobody coming back, open nothing, and the copy goes.
+    let how = match back {
+        Ok(Ok(word)) => word,
+        _ => {
+            std::fs::remove_dir_all(&kept).ok();
+            return Ok(format!(
+                "Nobody came back about opening {name}. Nothing was opened."
+            ));
+        }
+    };
+    if let Some(said) = how.strip_prefix(SAID_INSTEAD) {
+        std::fs::remove_dir_all(&kept).ok();
+        return Ok(format!(
+            "It was answered in words instead of a click: \"{said}\". Nothing was opened."
+        ));
+    }
+    if how != "open" && how != "open_at_login" {
+        std::fs::remove_dir_all(&kept).ok();
+        let held: State<Held> = app.state();
+        held.not_opened.lock().unwrap().insert(asked_before);
+        return Ok(format!(
+            "They chose not to open {name}. Do not ask again for it."
+        ));
+    }
+    let start_at_login = at_login && how == "open_at_login";
+
+    // A folder is not copied, so it is looked at again: still the same plain
+    // folder, and only shown in Finder, which runs nothing even if it has
+    // been swapped for something else since.
+    if opening == Opening::Folder {
+        let same = std::fs::symlink_metadata(&real).is_ok_and(|m| m.is_dir())
+            && real.canonicalize().is_ok_and(|now| now == real)
+            && what_opening(&real) == Ok(Opening::Folder);
+        if !same {
+            return Ok(format!(
+                "Not opened: {name} changed while they were deciding."
+            ));
+        }
+    }
+    let mut open = std::process::Command::new("/usr/bin/open");
+    if opening == Opening::Folder {
+        open.arg("-R");
+    }
+    let opened = open.arg(&target).status()?;
+    if !opened.success() {
+        anyhow::bail!("macOS would not open {name}");
+    }
+    let mut what_happened = match opening {
+        Opening::Folder => format!("Showed {name} in Finder, outside the wall."),
+        _ => format!("Opened {name} outside the wall, as {kind}."),
+    };
+    if start_at_login {
+        let (home_dir, _) = at_login_needs().map_err(|e| anyhow::anyhow!(e))?;
+        let label = errand_core::atlogin::label_for(&agent.id, &handover, &name);
+        errand_core::atlogin::start_for_a_teammate(&home_dir, &label, &target)?;
+        what_happened.push_str(" It starts at every login now; it can be stopped under Settings.");
+    }
+    {
+        let held: State<Held> = app.state();
+        held.store
+            .the_app_says_about(&asked.from, "note", &what_happened, "")
+            .ok();
+    }
+    Ok(match opening {
+        Opening::Folder => what_happened,
+        _ => format!(
+            "{what_happened} It runs as them, outside your wall, from a copy taken when you \
+             asked: changing the one in your folder does not change that copy. To have a newer \
+             one opened, ask again."
+        ),
+    })
+}
+
+/// A teammate asking to open something outside its wall, for the window's card.
+#[derive(Clone, Serialize)]
+struct AskingToOpen {
+    conversation: String,
+    seq: i64,
+    handover: String,
+    path: String,
+    name: String,
+    kind: String,
+    why: String,
+    at_login: bool,
+}
+
+/// Every teammate's app that starts at login, for Settings.
+#[tauri::command]
+async fn teammates_at_login() -> Result<Vec<(String, String)>, String> {
+    let (home, _) = at_login_needs()?;
+    Ok(errand_core::atlogin::teammates_at_login(&home))
+}
+
+/// Stop one teammate's app starting at login.
+#[tauri::command]
+async fn stop_teammate_at_login(label: String) -> Result<(), String> {
+    let (home, _) = at_login_needs()?;
+    errand_core::atlogin::stop_for_a_teammate(&home, &label).map_err(|e| e.to_string())
 }
 
 /// Tell somebody an agent needs their hands, the way a question is told.
@@ -8231,6 +8663,7 @@ pub fn run() {
                 looking: Arc::default(),
                 doorways: Mutex::new(HashMap::new()),
                 handovers: Mutex::new(HashMap::new()),
+                not_opened: Mutex::new(std::collections::HashSet::new()),
                 opening: Mutex::new(HashMap::new()),
                 fresh: Mutex::new(std::collections::HashSet::new()),
                 held_back: Mutex::new(std::collections::HashSet::new()),
@@ -8344,6 +8777,8 @@ pub fn run() {
             connectors,
             what_is_new,
             what_is_new_in_tasks,
+            teammates_at_login,
+            stop_teammate_at_login,
             seen,
             connect,
             seen_what_changed,
@@ -9391,5 +9826,69 @@ mod tests {
             140,
             "139 and the mark"
         );
+    }
+
+    #[test]
+    fn only_an_app_a_plain_folder_or_a_listed_document_can_be_opened_outside() {
+        let place = std::env::temp_dir().join(format!("errand-opening-{}", std::process::id()));
+        std::fs::remove_dir_all(&place).ok();
+        let app = place.join("Tide Clock.app");
+        std::fs::create_dir_all(app.join("Contents")).unwrap();
+        std::fs::write(app.join("Contents").join("Info.plist"), "<plist/>").unwrap();
+        std::fs::create_dir_all(place.join("reports")).unwrap();
+        // A folder with an ending is a package: macOS hands it to an app.
+        std::fs::create_dir_all(place.join("Notes.rtfd")).unwrap();
+        std::fs::create_dir_all(place.join("Shell.app")).unwrap();
+        std::fs::write(place.join("summary.pdf"), "%PDF").unwrap();
+        std::fs::write(place.join("run.command"), "#!/bin/sh").unwrap();
+
+        assert_eq!(what_opening(&app), Ok(Opening::App));
+        assert_eq!(what_opening(&place.join("reports")), Ok(Opening::Folder));
+        assert!(what_opening(&place.join("Notes.rtfd")).is_err());
+        assert!(what_opening(&place.join("Shell.app")).is_err());
+        assert_eq!(
+            what_opening(&place.join("summary.pdf")),
+            Ok(Opening::Document)
+        );
+        assert!(what_opening(&place.join("run.command")).is_err());
+
+        // A name that turns itself round, or breaks a line, is not shown.
+        assert!(hides_what_it_is("summary\u{202E}fdp.html"));
+        assert!(hides_what_it_is("two\nlines.pdf"));
+        assert!(!hides_what_it_is("out/Summary 2026.pdf"));
+
+        // What is opened is a copy taken when it asked: changed afterwards in
+        // the teammate's folder, the copy is still what the card described.
+        let kept = place.join("opened").join("agent").join("asked");
+        let copy = copy_to_open(
+            &place.join("summary.pdf"),
+            &kept,
+            "summary.pdf",
+            Opening::Document,
+        )
+        .unwrap();
+        std::fs::write(place.join("summary.pdf"), "changed").unwrap();
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "%PDF");
+        let app_copy = copy_to_open(&app, &kept, "Tide Clock.app", Opening::App).unwrap();
+        assert_eq!(what_opening(&app_copy), Ok(Opening::App));
+
+        // A link inside an app to somewhere else, and a link in place of the
+        // thing itself, are both refused.
+        let linked = place.join("Linked.app");
+        std::fs::create_dir_all(linked.join("Contents")).unwrap();
+        std::fs::write(linked.join("Contents").join("Info.plist"), "<plist/>").unwrap();
+        std::os::unix::fs::symlink(&place, linked.join("Contents").join("out")).unwrap();
+        let elsewhere = place.join("opened").join("agent").join("linked");
+        assert!(copy_to_open(&linked, &elsewhere, "Linked.app", Opening::App).is_err());
+        std::os::unix::fs::symlink(&app, place.join("Swapped.app")).unwrap();
+        let swapped = place.join("opened").join("agent").join("swapped");
+        assert!(copy_to_open(
+            &place.join("Swapped.app"),
+            &swapped,
+            "Swapped.app",
+            Opening::App
+        )
+        .is_err());
+        std::fs::remove_dir_all(&place).ok();
     }
 }

@@ -147,6 +147,7 @@ fn profile_keeping_out(home: &Path, inside: Inside, errand: Option<&Path>) -> St
     if let Some(errand) = errand {
         profile.push_str(&keep_out(errand, inside));
     }
+    profile.push_str(NOTHING_IS_OPENED_FROM_INSIDE);
     profile
 }
 
@@ -341,6 +342,46 @@ fn quoted(path: &Path) -> String {
     out
 }
 
+/// Nothing inside the wall may ask macOS to open anything: an app, a file, a
+/// folder or a page, nor start a job of its own with launchd.
+///
+/// macOS opens things in a process of its own, outside every sandbox, so
+/// `open` was a door straight through the wall: a teammate could build an app
+/// in its own folder, open it, and have it write anywhere and add itself to
+/// what starts at login. Tried on 4 October 2026 with a test app that only
+/// wrote a file, from inside this very profile, and it wrote it. `lsopen` is
+/// Apple's own name for asking LaunchServices to open something, so this
+/// stops `open` and NSWorkspace alike rather than one program by name, and
+/// AppleScript's way of starting an app that is not running. It does not stop
+/// AppleScript talking to an app that is already running, and `launchctl` can
+/// still look; it only cannot start a job. A program the teammate built still
+/// runs when it runs it directly: inside the wall, which is the point.
+///
+/// Only in the full wall. A teammate on ask or edits is not walled for writing,
+/// so it could leave a login item for next time whatever this said, and there
+/// it would only break what the person approves card by card.
+///
+/// What it does instead is ask, with `open_outside`: the person sees a card
+/// and their click is what opens it, done by the app.
+pub const NOTHING_IS_OPENED_FROM_INSIDE: &str = "\n(deny lsopen)\n(deny job-creation)";
+
+/// Whether what a command printed is the wall refusing to open something.
+///
+/// The system says only `_LSOpenURLsWithCompletionHandler() failed with error
+/// -54`, which tells a model nothing it can act on.
+pub fn an_opening_was_refused(said: &str) -> bool {
+    said.contains("_LSOpenURLsWithCompletionHandler()")
+        || said.contains("LSOpenURLsWithRole() failed")
+}
+
+/// What to say when something could not be opened from inside the wall.
+pub fn nothing_opens_from_inside() -> &'static str {
+    "That was the wall: nothing inside it can open an app, a file, a folder or a page. \
+     To have something you made opened, call open_outside with its path and why, and the \
+     person decides. For a web page they should see, use over_to_you with `where`. Never \
+     look for another way round it."
+}
+
 /// What no errand may touch, read or write, whatever else it has been allowed.
 ///
 /// The wall was about writing, and reading was left open on purpose: an errand
@@ -363,7 +404,13 @@ fn keep_out(errand: &Path, inside: Inside) -> String {
     let errand = errand
         .canonicalize()
         .unwrap_or_else(|_| errand.to_path_buf());
-    let mut never = vec![format!("  (subpath {})", quoted(&errand.join("keys")))];
+    let mut never = vec![
+        format!("  (subpath {})", quoted(&errand.join("keys"))),
+        // What a teammate asked to have opened outside its wall, copied there
+        // so that what runs is what the person agreed to: changed from inside
+        // a wall, it would be a way back out of it.
+        format!("  (subpath {})", quoted(&errand.join("opened"))),
+    ];
     // The store, its journal files, and any copy of it kept beside it, such as
     // the one taken before clearing. Named one by one rather than by pattern,
     // because a pattern is a second language inside this one with escaping of
@@ -546,7 +593,13 @@ pub fn what_the_wall_means(home: &Path) -> String {
          send them there for it. If a host is not yet in known_hosts, stop and say that \
          plainly too. Never copy a key, an SSH config or known_hosts somewhere else, and \
          never look for another way round the wall: the wall is the person's decision, \
-         and working round it is the one thing that is never the errand.",
+         and working round it is the one thing that is never the errand.\n\n\
+         Nothing inside the wall can open anything: an app, a file, a folder or a page. \
+         `open` and NSWorkspace fail here, and nothing can start a launchd job. To have something you made \
+         opened, an app you built or a report, call open_outside with its path and why: \
+         the person sees a card and decides, and an app can also be started at every \
+         login if they agree. A bare program or script has to go in a .app bundle first. \
+         For a web page they should see, use over_to_you with `where`.",
         home.display()
     )
 }
@@ -634,7 +687,7 @@ fn only_kept_out(errand: &Path, doorway: Option<&Path>) -> String {
     format!(
         "(version 1)\n(allow default){}{}",
         theirs.as_deref().map(keys_kept_out).unwrap_or_default(),
-        keep_out(errand, Inside::ClaudeCode { doorway })
+        keep_out(errand, Inside::ClaudeCode { doorway }),
     )
 }
 
@@ -1241,6 +1294,76 @@ mod tests {
         let _ = agent.kill();
         let _ = agent.wait();
         std::fs::remove_dir_all(&theirs).ok();
+    }
+
+    #[test]
+    fn nothing_inside_the_wall_may_open_anything_or_start_a_job() {
+        let home = Path::new("/tmp/errand-wall-open");
+        for inside in [Inside::ACommand, Inside::ClaudeCode { doorway: None }] {
+            let profile = profile_keeping_out(home, inside, None);
+            assert!(profile.contains("(deny lsopen)"), "{profile}");
+            assert!(profile.contains("(deny job-creation)"), "{profile}");
+        }
+        let errand = std::env::temp_dir().join("errand-wall-open-kept");
+        // Not where the person approves each command: there it would only
+        // break `open -a Simulator` and the like, and close nothing.
+        let kept = only_kept_out(&errand, None);
+        assert!(!kept.contains("(deny lsopen)"), "{kept}");
+        // And a model refused is told why, and what to do instead.
+        assert!(an_opening_was_refused(
+            "_LSOpenURLsWithCompletionHandler() failed with error -54 for the file /x/A.app."
+        ));
+        assert!(!an_opening_was_refused("exited 1"));
+        assert!(nothing_opens_from_inside().contains("open_outside"));
+        assert!(what_the_wall_means(home).contains("open_outside"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_app_built_inside_the_wall_cannot_be_opened_from_inside_it() {
+        // The door this closes: macOS opens an app in a process of its own,
+        // outside the sandbox, so an app a teammate built and opened wrote
+        // wherever it liked. Run rather than read, with an app that only
+        // writes a file outside the folder it was built in.
+        if !possible() {
+            return;
+        }
+        let place = std::env::temp_dir().join(format!("errand-wall-open-{}", std::process::id()));
+        std::fs::remove_dir_all(&place).ok();
+        let home = place.join("home");
+        let probe = home.join("Probe.app").join("Contents");
+        std::fs::create_dir_all(probe.join("MacOS")).expect("a bundle");
+        let place = place.canonicalize().expect("a real path");
+        let home = place.join("home");
+        let marker = place.join("opened-outside");
+        std::fs::write(
+            home.join("Probe.app/Contents/Info.plist"),
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
+             <key>CFBundleExecutable</key><string>probe</string>\
+             <key>CFBundleIdentifier</key><string>test.errand.wall.probe</string>\
+             <key>LSBackgroundOnly</key><true/></dict></plist>",
+        )
+        .unwrap();
+        let program = home.join("Probe.app/Contents/MacOS/probe");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\necho out > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let opened = shell(&home, "/usr/bin/open -g Probe.app")
+            .output()
+            .await
+            .expect("it runs");
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        assert!(
+            !marker.exists(),
+            "an app opened from inside the wall ran outside it: {}",
+            String::from_utf8_lossy(&opened.stderr)
+        );
+        assert!(!opened.status.success(), "open said it opened it");
+        std::fs::remove_dir_all(&place).ok();
     }
 
     #[test]

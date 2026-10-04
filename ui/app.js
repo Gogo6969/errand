@@ -247,6 +247,8 @@ const el = {
   reachableList: document.getElementById("reachable-list"),
   atLogin: document.getElementById("at-login"),
   atLoginSays: document.getElementById("at-login-says"),
+  teammateLogins: document.getElementById("teammate-logins"),
+  teammateLoginsList: document.getElementById("teammate-logins-list"),
   lookHere: document.getElementById("look-here"),
   lookWide: document.getElementById("look-wide"),
   findSays: document.getElementById("find-says"),
@@ -797,7 +799,8 @@ function waitingOn(agent) {
       t.messages.some(
         (m) =>
           !m.answered &&
-          (m.kind === "asking" || (m.kind === "over_to_you" && stillWaiting.has(m.handover))),
+          (m.kind === "asking" ||
+            ((m.kind === "over_to_you" || m.kind === "open_outside") && stillWaiting.has(m.handover))),
       ),
   );
 }
@@ -1155,7 +1158,8 @@ function theOpenQuestion(t) {
   return t?.messages?.find(
     (m) =>
       !m.answered &&
-      (m.kind === "asking" || (m.kind === "over_to_you" && stillWaiting.has(m.handover))),
+      (m.kind === "asking" ||
+        ((m.kind === "over_to_you" || m.kind === "open_outside") && stillWaiting.has(m.handover))),
   );
 }
 
@@ -2149,6 +2153,31 @@ function fromStoreLine(line, live = false) {
         stillThere: still,
       };
     }
+    // A teammate asking to open something outside its wall. Kept as JSON, so a
+    // name with a line break in it cannot add a line to the card. Once nobody
+    // is waiting on it, it is history: nothing can be opened from it any more.
+    case "open_outside": {
+      let asked = {};
+      try {
+        asked = JSON.parse(line.text) || {};
+      } catch {
+        asked = {};
+      }
+      const still = stillWaiting.has(line.call);
+      return {
+        kind: "open_outside",
+        seq: line.seq,
+        handover: line.call || "",
+        path: asked.path || "",
+        name: asked.name || "",
+        what: `open ${asked.name || "something"} outside its wall`,
+        opening: asked.kind || "",
+        why: asked.why || "",
+        at_login: !!asked.at_login,
+        answered: still ? null : "It is no longer waiting. Nothing was opened from this card.",
+        stillThere: still,
+      };
+    }
     // An email left to be checked: its words as they were last kept, and how
     // it ended if it has. "sending" on disk is a send the app did not see
     // finish, which is not a send anybody should be invited to repeat.
@@ -3008,6 +3037,8 @@ function draw(m) {
       return asks(m);
     case "over_to_you":
       return handItOver(m);
+    case "open_outside":
+      return openItOutside(m);
     case "draft":
       return aDraft(m);
     case "ended": {
@@ -3280,6 +3311,83 @@ function handItOver(m) {
     words.append(choices);
   }
 
+  card.append(tile("person", true), words);
+  return card;
+}
+
+/**
+ * A teammate asking to open something outside its wall.
+ *
+ * The app's own facts first, then the teammate's reason in its own words, and
+ * only two answers. There is no Always: what was agreed to once is never agreed
+ * to again by itself. And no falling back to saying it into the conversation,
+ * as a handover does: "I opened it" said to a teammate that has stopped waiting
+ * would be a teammate told something happened that did not.
+ */
+function openItOutside(m) {
+  const card = document.createElement("li");
+  card.className = m.answered ? "handover open-outside done" : "handover open-outside";
+  card.dataset.handover = m.handover || "";
+  const who = agents.get(talks.get(showing)?.agent)?.name || "This teammate";
+  const words = document.createElement("div");
+  words.className = "question";
+  words.append(note("p", `${who} asks you to open ${m.name || "something"} outside its wall`, "wants"));
+  const facts = document.createElement("ul");
+  facts.className = "facts";
+  const fact = (text, how = "") => facts.append(note("li", text, how));
+  fact(`${m.opening ? m.opening[0].toUpperCase() + m.opening.slice(1) : "Something"} in its own folder:`);
+  facts.lastChild.append(" ", note("code", m.path || m.name, "path"));
+  if (m.opening === "an app") {
+    fact("It runs as you, outside the wall, and can do anything you can, including things the teammate sets up for it later.", "warning");
+  } else if (m.opening === "a folder") {
+    fact("It is shown in Finder. Nothing runs.");
+  } else {
+    fact("It opens in the app it belongs to, from a copy taken when it asked.");
+  }
+  if (m.at_login) fact("It also asks to start every time you log in.", "warning");
+  words.append(facts);
+  if (m.why) {
+    const why = note("p", "", "why");
+    why.append(note("span", "It says: ", "label"), note("q", m.why));
+    words.append(why);
+  }
+  if (m.answered) {
+    words.append(note("p", m.answered, "answered"));
+  } else {
+    const choices = document.createElement("div");
+    choices.className = "choices";
+    const press = (label, how, said, primary = false) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      if (primary) b.className = "yes";
+      b.onclick = async () => {
+        try {
+          await invoke("handed_back", { handover: m.handover, how });
+          m.answered = said;
+        } catch {
+          m.answered = "It stopped waiting before you answered. Nothing was opened.";
+        }
+        m.stillThere = false;
+        stillWaiting.delete(m.handover);
+        drawMessages();
+        drawThreads();
+      };
+      return b;
+    };
+    if (m.at_login) {
+      choices.append(
+        press("Open it and start it at login", "open_at_login", "You opened it and set it to start at every login", true),
+        press("Just open it", "open", "You opened it, not at login"),
+      );
+    } else if (m.opening === "a folder") {
+      choices.append(press("Show it in Finder", "open", "You had it shown in Finder", true));
+    } else {
+      choices.append(press("Open it", "open", "You opened it", true));
+    }
+    choices.append(press("Don't open it", "skip", "You chose not to open it"));
+    words.append(choices);
+  }
   card.append(tile("person", true), words);
   return card;
 }
@@ -3582,7 +3690,11 @@ listen("handed_back", ({ payload }) => {
   if (!t) return;
   stillWaiting.delete(payload.handover);
   const m = t.messages.find((one) => one.handover === payload.handover);
-  if (m && m.answered == null) m.answered = payload.how;
+  if (m && m.answered == null) {
+    // Words typed in place of a button: for a request to open something, they
+    // are never a yes.
+    m.answered = m.kind === "open_outside" ? "It was answered in words. Nothing was opened." : payload.how;
+  }
   if (showing === payload.conversation) drawMessages();
 });
 
@@ -3595,6 +3707,7 @@ listen("handover_ended", ({ payload }) => {
   if (!t) return;
   const m = t.messages.find((one) => one.handover === payload.handover);
   if (m) m.stillThere = false;
+  if (m?.kind === "open_outside" && !m.answered) m.answered = "It stopped waiting. Nothing was opened.";
   if (showing === payload.conversation) drawMessages();
   drawThreads();
 });
@@ -3624,6 +3737,27 @@ listen("repeats", async ({ payload }) => {
   el.routineSays.textContent = sayWhen(mine);
   el.routinePause.textContent = mine?.off ? "Start again" : "Pause";
   el.routinePause.hidden = !mine;
+});
+
+listen("asking_to_open", async ({ payload }) => {
+  const t = talks.get(payload.conversation) || (await meet(payload.conversation));
+  if (!t) return;
+  stillWaiting.add(payload.handover);
+  t.working = false;
+  t.messages.push({
+    kind: "open_outside",
+    seq: payload.seq,
+    handover: payload.handover,
+    path: payload.path,
+    name: payload.name,
+    what: `open ${payload.name} outside its wall`,
+    opening: payload.kind,
+    why: payload.why,
+    at_login: !!payload.at_login,
+    answered: null,
+  });
+  if (showing === payload.conversation) drawMessages();
+  drawThreads();
 });
 
 listen("handing_over", async ({ payload }) => {
@@ -7180,7 +7314,7 @@ async function showModels() {
       return b;
     }),
   );
-  await Promise.all([drawChosen(), drawKept(), drawAtLogin(), drawReachable()]);
+  await Promise.all([drawChosen(), drawKept(), drawAtLogin(), drawTeammateLogins(), drawReachable()]);
 }
 
 /**
@@ -7264,6 +7398,42 @@ async function drawAtLogin() {
       ? "Another copy of Errand starts at login. Turning this on points it at this one."
       : "",
     how === "something_else",
+  );
+}
+
+/**
+ * Teammates' apps that start at every login, each with a way to stop it. Read
+ * from the files the system obeys, every time, like the switch above.
+ */
+async function drawTeammateLogins() {
+  let theirs = [];
+  try {
+    theirs = (await invoke("teammates_at_login")) || [];
+  } catch {
+    theirs = [];
+  }
+  el.teammateLogins.hidden = !theirs.length;
+  el.teammateLoginsList.replaceChildren(
+    ...theirs.map(([label, opens]) => {
+      const li = document.createElement("li");
+      const name = String(opens).split("/").filter(Boolean).pop() || label;
+      const what = note("span", name, "name");
+      what.title = opens;
+      const stop = document.createElement("button");
+      stop.type = "button";
+      stop.textContent = "Stop starting it at login";
+      stop.onclick = async () => {
+        try {
+          await invoke("stop_teammate_at_login", { label });
+        } catch (why) {
+          stop.textContent = String(why);
+          return;
+        }
+        drawTeammateLogins();
+      };
+      li.append(what, stop);
+      return li;
+    }),
   );
 }
 

@@ -632,6 +632,11 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           case "handed_back":
           case "show_in_browser":
             return Promise.resolve(null);
+          case "teammates_at_login":
+            return Promise.resolve(fixture.teammate_logins || []);
+          case "stop_teammate_at_login":
+            fixture.teammate_logins = (fixture.teammate_logins || []).filter(([label]) => label !== args.label);
+            return Promise.resolve(null);
           // Which handovers are still being waited on. A line on disk cannot
           // say, so the window asks.
           case "waiting_on_you":

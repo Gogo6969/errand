@@ -932,6 +932,8 @@ pub async fn run(
                     // was ever the problem. The key was not loaded.
                     if crate::wall::a_key_was_kept_out(&said) {
                         format!("\n\n{}", crate::wall::the_key_is_not_loaded())
+                    } else if crate::wall::an_opening_was_refused(&said) {
+                        format!("\n\n{}", crate::wall::nothing_opens_from_inside())
                     } else if crate::wall::looks_like_the_wall(&said) {
                         format!("\n\n{}", crate::wall::the_wall_refused(home))
                     } else {
