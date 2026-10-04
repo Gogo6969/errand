@@ -49,6 +49,11 @@
           header because it is not about the agent that happens to be open: it
           is about the app, and it is the same list whichever agent you are on.
         -->
+        <!--
+          Who leads, and who each lead hands work to. Down here with Settings
+          because it is about the whole crew, not the teammate that is open.
+        -->
+        <button id="teams-open" type="button" title="Teams: who leads, and who they hand work to">Teams</button>
         <button id="setup" type="button" title="Which models show in the picker">
           <span aria-hidden="true">&#9881;</span>
           <span class="sr">Models</span>
@@ -330,6 +335,28 @@
       </header>
       <div id="overview-away" class="away"></div>
       <div id="overview-tiles"></div>
+    </section>
+
+    <!--
+      Teams: a lead and the teammates it hands work to. Over the whole window,
+      like Now, because it is somewhere you go to see how the crew is put
+      together, and the one place that changes it.
+    -->
+    <section id="teams" hidden>
+      <header>
+        <h1>Teams</h1>
+        <button id="teams-new" type="button">New team</button>
+        <button id="teams-done" type="button">&#8592; Back</button>
+      </header>
+      <p id="teams-rule" class="quiet">
+        A lead hands work to the teammates on its team. A teammate on a team hands work only to
+        its own team; one on no team can still ask anybody.
+      </p>
+      <div id="teams-list"></div>
+      <section id="teams-free" hidden>
+        <h2>On no team</h2>
+        <ul id="teams-free-list"></ul>
+      </section>
     </section>
 
     <main>

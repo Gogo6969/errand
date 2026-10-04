@@ -637,6 +637,42 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           case "stop_teammate_at_login":
             fixture.teammate_logins = (fixture.teammate_logins || []).filter(([label]) => label !== args.label);
             return Promise.resolve(null);
+          // Teams, kept the way the store keeps them: the lead apart from the
+          // members, and never both.
+          case "teams":
+            return Promise.resolve(structuredClone(fixture.teams || []));
+          case "make_team": {
+            fixture.teams ||= [];
+            const id = `team-${fixture.teams.length + 1}`;
+            fixture.teams.push({ id, name: args.name, lead: args.lead || null, members: [], made_at: Date.now() });
+            return Promise.resolve(id);
+          }
+          case "rename_team": {
+            const team = (fixture.teams || []).find((t) => t.id === args.id);
+            if (team) team.name = args.name.trim();
+            return Promise.resolve(null);
+          }
+          case "lead_team": {
+            const team = (fixture.teams || []).find((t) => t.id === args.id);
+            if (team) {
+              team.lead = args.lead || null;
+              team.members = team.members.filter((m) => m !== args.lead);
+            }
+            return Promise.resolve(null);
+          }
+          case "join_team": {
+            const team = (fixture.teams || []).find((t) => t.id === args.id);
+            if (team && team.lead !== args.agent && !team.members.includes(args.agent)) team.members.push(args.agent);
+            return Promise.resolve(null);
+          }
+          case "leave_team": {
+            const team = (fixture.teams || []).find((t) => t.id === args.id);
+            if (team) team.members = team.members.filter((m) => m !== args.agent);
+            return Promise.resolve(null);
+          }
+          case "break_up_team":
+            fixture.teams = (fixture.teams || []).filter((t) => t.id !== args.id);
+            return Promise.resolve(null);
           // Which handovers are still being waited on. A line on disk cannot
           // say, so the window asks.
           case "waiting_on_you":

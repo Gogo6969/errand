@@ -4898,6 +4898,113 @@ struct AskingToOpen {
     at_login: bool,
 }
 
+/// Every team, with its lead and members, for the Teams page.
+#[tauri::command]
+async fn teams(held: State<'_, Held>) -> Result<Vec<errand_core::store::Team>, String> {
+    held.store.teams().map_err(|e| e.to_string())
+}
+
+/// Who is on a team now, lead included, so they can be told when it changes.
+fn on_the_team(held: &Held, id: &str) -> Vec<String> {
+    held.store
+        .teams()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| t.id == id)
+        .flat_map(|t| t.lead.into_iter().chain(t.members))
+        .collect()
+}
+
+/// After a team changed: everybody who was on it or is on it now is told
+/// what their team is, in a conversation that is open, or the next time one
+/// opens. Everybody else is left alone.
+fn tell_the_team(held: &Held, before: Vec<String>, id: &str) {
+    let mut everyone = before;
+    everyone.extend(on_the_team(held, id));
+    everyone.sort();
+    everyone.dedup();
+    for agent in everyone {
+        tell_them_who_it_is(held, &agent);
+    }
+}
+
+/// A new team, with a lead or none yet. Says the id it was given.
+#[tauri::command]
+async fn make_team(
+    held: State<'_, Held>,
+    name: String,
+    lead: Option<String>,
+) -> Result<String, String> {
+    let name = match name.trim() {
+        "" => "A team".to_string(),
+        named => named.to_string(),
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Local::now().timestamp_millis();
+    held.store
+        .make_team(&id, &name, lead.as_deref(), now)
+        .map_err(|e| e.to_string())?;
+    tell_the_team(&held, Vec::new(), &id);
+    Ok(id)
+}
+
+/// Call a team something else.
+#[tauri::command]
+async fn rename_team(held: State<'_, Held>, id: String, name: String) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("a team needs a name".into());
+    }
+    let before = on_the_team(&held, &id);
+    held.store
+        .rename_team(&id, &name)
+        .map_err(|e| e.to_string())?;
+    tell_the_team(&held, before, &id);
+    Ok(())
+}
+
+/// Who leads a team, or nobody.
+#[tauri::command]
+async fn lead_team(held: State<'_, Held>, id: String, lead: Option<String>) -> Result<(), String> {
+    let before = on_the_team(&held, &id);
+    held.store
+        .lead_team(&id, lead.as_deref().filter(|l| !l.is_empty()))
+        .map_err(|e| e.to_string())?;
+    tell_the_team(&held, before, &id);
+    Ok(())
+}
+
+/// Put a teammate on a team.
+#[tauri::command]
+async fn join_team(held: State<'_, Held>, id: String, agent: String) -> Result<(), String> {
+    let before = on_the_team(&held, &id);
+    let now = chrono::Local::now().timestamp_millis();
+    held.store
+        .join_team(&id, &agent, now)
+        .map_err(|e| e.to_string())?;
+    tell_the_team(&held, before, &id);
+    Ok(())
+}
+
+/// Take a teammate off a team.
+#[tauri::command]
+async fn leave_team(held: State<'_, Held>, id: String, agent: String) -> Result<(), String> {
+    let before = on_the_team(&held, &id);
+    held.store
+        .leave_team(&id, &agent)
+        .map_err(|e| e.to_string())?;
+    tell_the_team(&held, before, &id);
+    Ok(())
+}
+
+/// Break a team up. Its teammates stay.
+#[tauri::command]
+async fn break_up_team(held: State<'_, Held>, id: String) -> Result<(), String> {
+    let before = on_the_team(&held, &id);
+    held.store.break_up_team(&id).map_err(|e| e.to_string())?;
+    tell_the_team(&held, before, &id);
+    Ok(())
+}
+
 /// Every teammate's app that starts at login, for Settings.
 #[tauri::command]
 async fn teammates_at_login() -> Result<Vec<(String, String)>, String> {
@@ -5171,11 +5278,16 @@ async fn run_skill(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Strin
     said
 }
 
-/// Everybody else there is, and what each handles.
+/// Everybody else it can hand work to, and what each handles: its team, if
+/// it is on one, and otherwise everybody there is.
 fn who_else(app: &AppHandle, from: &str) -> anyhow::Result<String> {
     let held: State<Held> = app.state();
     let mine = held.store.conversation(from)?.map(|c| c.agent);
     let everybody = held.store.agents()?;
+    let reach = match mine.as_deref() {
+        Some(me) => held.store.who_it_works_with(me)?,
+        None => None,
+    };
     // Told apart by number where two share a name, and the numbers are what
     // `ask` takes, so the name an agent is shown here is one that reaches it.
     let labels = team::told_apart(&everybody);
@@ -5183,6 +5295,7 @@ fn who_else(app: &AppHandle, from: &str) -> anyhow::Result<String> {
         .into_iter()
         .zip(labels)
         .filter(|(a, _)| Some(&a.id) != mine.as_ref() && a.name != NOT_YET_NAMED)
+        .filter(|(a, _)| reach.as_ref().is_none_or(|r| r.contains(&a.id)))
         .map(|(a, label)| {
             format!(
                 "  {} ({}) -- {}",
@@ -5194,9 +5307,16 @@ fn who_else(app: &AppHandle, from: &str) -> anyhow::Result<String> {
         })
         .collect();
 
-    Ok(match others.is_empty() {
-        true => "There is nobody else yet.".to_string(),
-        false => format!("You can hand work to:\n{}", others.join("\n")),
+    Ok(match (others.is_empty(), reach.is_some()) {
+        (true, false) => "There is nobody else yet.".to_string(),
+        (true, true) => "There is nobody else on your team yet. If the work needs somebody, \
+                         say so: the person puts teammates on a team on the Teams page."
+            .to_string(),
+        (false, false) => format!("You can hand work to:\n{}", others.join("\n")),
+        (false, true) => format!(
+            "Your team, the only ones you hand work to:\n{}",
+            others.join("\n")
+        ),
     })
 }
 
@@ -5234,6 +5354,23 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
         Some(&them.id) != mine.as_ref(),
         "that is you; ask somebody else or do it yourself"
     );
+    // A teammate on a team hands work to its team and nobody else, whatever
+    // name it has heard elsewhere. The person draws that line on the Teams
+    // page, and an agent stepping over it would make the page a suggestion.
+    if let Some(me) = mine.as_deref() {
+        let held: State<Held> = app.state();
+        if let Some(reach) = held.store.who_it_works_with(me)? {
+            if !reach.contains(&them.id) {
+                anyhow::bail!(
+                    "{} is not on your team, and you hand work only to your team. Call who_else \
+                     to see who is. If {} is needed, say so to the person: they put teammates on \
+                     a team on the Teams page.",
+                    them.name,
+                    them.name
+                );
+            }
+        }
+    }
 
     // Not just you: anybody already waiting further up the chain. Two agents
     // that each think the other should handle a job will hand it back and forth
@@ -6663,8 +6800,10 @@ fn tell_them_who_it_is(held: &Held, agent: &str) {
     let Ok(Some(who)) = held.store.agent(agent) else {
         return;
     };
-    let identity =
-        errand_core::memory::who_you_are(&who.name, who.title.as_deref(), who.about.as_deref());
+    let identity = errand_core::memory::with_its_team(
+        errand_core::memory::who_you_are(&who.name, who.title.as_deref(), who.about.as_deref()),
+        &errand_core::memory::your_team(&held.store, agent).unwrap_or_default(),
+    );
     let open: Vec<String> = held.live.lock().unwrap().keys().cloned().collect();
     for id in open {
         let theirs = matches!(held.store.conversation(&id), Ok(Some(c)) if c.agent == agent);
@@ -8779,6 +8918,13 @@ pub fn run() {
             what_is_new_in_tasks,
             teammates_at_login,
             stop_teammate_at_login,
+            teams,
+            make_team,
+            rename_team,
+            lead_team,
+            join_team,
+            leave_team,
+            break_up_team,
             seen,
             connect,
             seen_what_changed,

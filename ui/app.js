@@ -229,6 +229,13 @@ const el = {
   setup: document.getElementById("setup"),
   models: document.getElementById("models"),
   modelsDone: document.getElementById("models-done"),
+  teams: document.getElementById("teams"),
+  teamsOpen: document.getElementById("teams-open"),
+  teamsNew: document.getElementById("teams-new"),
+  teamsDone: document.getElementById("teams-done"),
+  teamsList: document.getElementById("teams-list"),
+  teamsFree: document.getElementById("teams-free"),
+  teamsFreeList: document.getElementById("teams-free-list"),
   overview: document.getElementById("overview"),
   overviewOpen: document.getElementById("overview-open"),
   nowCount: document.getElementById("now-count"),
@@ -631,7 +638,8 @@ function lookedAt() {
     document.visibilityState === "visible" &&
     document.hasFocus() &&
     el.overview.hidden &&
-    el.models.hidden
+    el.models.hidden &&
+    el.teams.hidden
   );
 }
 
@@ -3614,8 +3622,9 @@ listen("go_to", async ({ payload }) => {
     }
   }
   if (talks.has(id)) {
-    // Out from under Now, which the window may have opened on.
+    // Out from under Now or Teams, which the window may have opened on.
     if (!el.overview.hidden) closeOverview();
+    if (!el.teams.hidden) closeTeams();
     await show(id);
   }
 });
@@ -6014,6 +6023,7 @@ function whatCouldBeDone() {
   add("What it has cost", "today and this month", () => whatItCost(), true);
   add("Everything that runs on its own", "every agent's routines and watches", () => whatRunsOnItsOwn(), true);
   add("Check this setup", "what is wrong, and what to do", () => checkup());
+  add("Teams", "who leads, and who they hand work to", () => showTeams());
   add(
     whose()?.paused ? "Start this agent again" : "Pause this agent",
     "nothing runs on its own until you start it again",
@@ -8076,6 +8086,286 @@ async function searchTheOverview() {
   overviewFound = { ids, hits };
   drawOverview();
 }
+
+/* ------------------------------------------------------------- teams -- */
+
+/**
+ * Teams: a lead and the teammates it hands work to.
+ *
+ * The one place a crew is put together and the one place it can be seen.
+ * Before it, the only way to know who a lead would ask was to watch it ask,
+ * and every teammate could ask every other, so "the crew" was a word in a
+ * job description rather than anything the app knew.
+ */
+let teamsKnown = [];
+
+async function showTeams() {
+  if (!el.overview.hidden) closeOverview();
+  el.teams.hidden = false;
+  await drawTeams();
+}
+
+function closeTeams() {
+  el.teams.hidden = true;
+}
+
+/** The teammates a team can be made of: named ones, in the order of the list. */
+function teammatesToChoose() {
+  return [...agents.values()].filter((a) => a.name && a.name !== NOT_YET_NAMED);
+}
+
+/** One teammate as a team shows it: mark, name, role, and its job on one line. */
+function personRow(a, more) {
+  const row = document.createElement("div");
+  row.className = "person";
+  row.dataset.agent = a.id;
+  const who = document.createElement("div");
+  who.className = "who";
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = a.name;
+  if (a.title) {
+    const role = document.createElement("span");
+    role.className = "role";
+    role.textContent = a.title;
+    name.append(role);
+  }
+  const does = document.createElement("span");
+  does.className = "does";
+  does.textContent = a.about || "Has not said what it handles";
+  does.title = a.about || "";
+  who.append(name, does);
+  row.append(tile(kindFor(a), busy(a.id), a.hue), who, more || document.createElement("span"));
+  return row;
+}
+
+/** A select that reads as a quiet button, with a first line that says what it does. */
+function chooser(label, options, onChoose) {
+  const select = document.createElement("select");
+  select.setAttribute("aria-label", label);
+  const first = document.createElement("option");
+  first.value = "";
+  first.textContent = label;
+  select.append(first);
+  for (const [value, text] of options) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = text;
+    select.append(option);
+  }
+  select.addEventListener("change", async () => {
+    const value = select.value;
+    if (!value) return;
+    select.disabled = true;
+    try {
+      await onChoose(value);
+    } finally {
+      await drawTeams();
+    }
+  });
+  return select;
+}
+
+async function drawTeams() {
+  try {
+    teamsKnown = (await invoke("teams")) || [];
+  } catch {
+    teamsKnown = [];
+  }
+  const everybody = teammatesToChoose();
+  const byId = new Map([...agents.values()].map((a) => [a.id, a]));
+  const named = (id) => byId.get(id);
+  const label = (a) => (a.title ? `${a.name} (${a.title})` : a.name);
+
+  const cards = teamsKnown.map((team) => {
+    const card = document.createElement("article");
+    card.className = "team";
+    card.dataset.team = team.id;
+
+    const header = document.createElement("header");
+    const name = document.createElement("input");
+    name.className = "team-name";
+    name.type = "text";
+    name.value = team.name;
+    name.setAttribute("aria-label", "What the team is called");
+    // Kept on Enter and when the box is left, once: the name is taken as
+    // kept before the app answers, so leaving the box after Enter asks nothing.
+    const keep = async () => {
+      const now = name.value.trim();
+      const was = team.name;
+      if (!now || now === was) {
+        name.value = was;
+        return;
+      }
+      team.name = now;
+      try {
+        await invoke("rename_team", { id: team.id, name: now });
+      } catch {
+        team.name = was;
+        name.value = was;
+      }
+    };
+    name.addEventListener("blur", keep);
+    name.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        keep();
+        name.blur();
+      }
+      if (e.key === "Escape") {
+        name.value = team.name;
+        name.blur();
+        e.stopPropagation();
+      }
+    });
+    const count = document.createElement("span");
+    count.className = "team-count";
+    const size = team.members.length + (team.lead ? 1 : 0);
+    count.textContent = size === 1 ? "1 teammate" : `${size} teammates`;
+    header.append(name, count);
+
+    const lead = document.createElement("div");
+    lead.className = "lead";
+    const leader = team.lead && named(team.lead);
+    if (leader) {
+      const row = personRow(leader);
+      const badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = "Lead";
+      row.querySelector(".name").prepend(badge);
+      lead.append(row);
+    } else {
+      const none = document.createElement("p");
+      none.className = "no-lead";
+      none.textContent = "No lead yet. Choose one below: it is the teammate you give the work to.";
+      lead.append(none);
+    }
+
+    const crew = document.createElement("ul");
+    crew.className = "crew";
+    for (const id of team.members) {
+      const a = named(id);
+      if (!a) continue;
+      const li = document.createElement("li");
+      const off = document.createElement("button");
+      off.type = "button";
+      off.className = "take-off";
+      off.textContent = "Take off";
+      off.title = `Take ${a.name} off ${team.name}`;
+      off.addEventListener("click", async () => {
+        off.disabled = true;
+        try {
+          await invoke("leave_team", { id: team.id, agent: a.id });
+        } finally {
+          await drawTeams();
+        }
+      });
+      li.append(personRow(a, off));
+      crew.append(li);
+    }
+    if (!crew.children.length) {
+      const li = document.createElement("li");
+      li.className = "nobody";
+      li.textContent = leader
+        ? `Nobody on it yet, so ${leader.name} has nobody to hand work to.`
+        : "Nobody on it yet.";
+      crew.append(li);
+    }
+
+    const changes = document.createElement("div");
+    changes.className = "changes";
+    const onIt = new Set([team.lead, ...team.members]);
+    const addable = everybody.filter((a) => !onIt.has(a.id)).map((a) => [a.id, label(a)]);
+    if (addable.length) {
+      const add = chooser("Put a teammate on it…", addable, (agent) =>
+        invoke("join_team", { id: team.id, agent }),
+      );
+      add.className = "team-add";
+      changes.append(add);
+    }
+    const leaders = everybody.filter((a) => a.id !== team.lead).map((a) => [a.id, label(a)]);
+    if (leaders.length) {
+      const choose = chooser(team.lead ? "Change the lead…" : "Choose the lead…", leaders, (agent) =>
+        invoke("lead_team", { id: team.id, lead: agent }),
+      );
+      choose.className = "team-lead";
+      changes.append(choose);
+    }
+    const breakUp = document.createElement("button");
+    breakUp.type = "button";
+    breakUp.className = "team-break";
+    breakUp.textContent = "Break up";
+    breakUp.title = "The teammates stay; only the team goes";
+    // Asked twice, the way Delete is: the second press answers the question
+    // the first one put on the button.
+    breakUp.dataset.sure = "false";
+    breakUp.addEventListener("click", async () => {
+      if (breakUp.dataset.sure !== "true") {
+        breakUp.dataset.sure = "true";
+        breakUp.textContent = `Break up ${team.name}? Its teammates stay`;
+        return;
+      }
+      try {
+        await invoke("break_up_team", { id: team.id });
+      } finally {
+        await drawTeams();
+      }
+    });
+    changes.append(breakUp);
+
+    card.append(header, lead, crew, changes);
+    return card;
+  });
+
+  if (!cards.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent =
+      "No teams yet. Make one, choose its lead, and put on it the teammates the lead should hand work to.";
+    cards.push(empty);
+  }
+  el.teamsList.replaceChildren(...cards);
+
+  // Who is on no team: they can still ask anybody, and anybody can be put on one.
+  const onATeam = new Set(teamsKnown.flatMap((t) => [t.lead, ...t.members]).filter(Boolean));
+  const free = everybody.filter((a) => !onATeam.has(a.id));
+  el.teamsFree.hidden = !free.length;
+  el.teamsFreeList.replaceChildren(
+    ...free.map((a) => {
+      const li = document.createElement("li");
+      li.dataset.agent = a.id;
+      const name = document.createElement("span");
+      name.textContent = a.name;
+      li.append(tile(kindFor(a), busy(a.id), a.hue), name);
+      if (a.title) {
+        const role = document.createElement("span");
+        role.className = "role";
+        role.textContent = a.title;
+        li.append(role);
+      }
+      return li;
+    }),
+  );
+}
+
+async function newTeam() {
+  const n = teamsKnown.length + 1;
+  try {
+    const id = await invoke("make_team", { name: n === 1 ? "A team" : `Team ${n}`, lead: null });
+    await drawTeams();
+    const name = el.teamsList.querySelector(`.team[data-team="${id}"] .team-name`);
+    name?.focus();
+    name?.select();
+  } catch {
+    await drawTeams();
+  }
+}
+
+el.teamsOpen.addEventListener("click", showTeams);
+el.teamsDone.addEventListener("click", closeTeams);
+el.teamsNew.addEventListener("click", newTeam);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !el.teams.hidden && !e.target.closest?.(".team-name")) closeTeams();
+});
 
 el.overviewOpen.addEventListener("click", showOverview);
 el.overviewDone.addEventListener("click", closeOverview);

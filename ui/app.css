@@ -3416,3 +3416,213 @@ a.on-disk {
 }
 #teammate-logins li button:hover { color: var(--wrong); border-color: var(--wrong); }
 #teammate-logins li button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* -------------------------------------------------------------- teams -- */
+
+/* Down the side, beside Settings: said in words, like Now. */
+#teams-open {
+  margin-left: auto;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+#teams-open:hover { color: var(--ink); border-color: var(--rule); }
+#teams-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Over the whole window, like Now. */
+#teams {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: var(--bg);
+  overflow-y: auto;
+  padding: 26px 28px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+#teams[hidden] { display: none; }
+#teams > header { display: flex; align-items: center; gap: 12px; }
+#teams h1 { margin: 0 auto 0 0; font-size: 21px; letter-spacing: -.01em; }
+#teams h2 {
+  margin: 0 0 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+#teams-rule { margin: -6px 0 0; max-width: 68ch; font-size: 13px; line-height: 1.5; color: var(--ink-soft); }
+#teams-new, #teams-done, #teams .team-break, #teams .take-off {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+#teams-new { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 500; }
+#teams-new:hover { background: var(--accent-lit); border-color: var(--accent-lit); }
+#teams-done:hover, #teams .team-break:hover, #teams .take-off:hover { color: var(--ink); border-color: var(--edge); }
+#teams button:focus-visible, #teams select:focus-visible, #teams .team-name:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+#teams-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+#teams .empty {
+  border: 1px dashed var(--rule);
+  border-radius: 12px;
+  padding: 22px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* One team: its name, its lead, and the line down to who it hands work to. */
+#teams .team {
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: var(--side);
+  padding: 14px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+#teams .team > header { display: flex; align-items: center; gap: 10px; }
+#teams .team-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  margin-left: -8px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 15.5px;
+  font-weight: 600;
+}
+#teams .team-name:hover { border-color: var(--rule); }
+#teams .team-name:focus { outline: none; border-color: var(--edge); background: var(--bg); }
+#teams .team-count { flex: none; font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
+
+/* A teammate: its mark, its name and role, and its job on one line. */
+#teams .person {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 10px;
+  min-height: 34px;
+}
+#teams .person .tile { width: 28px; height: 28px; }
+#teams .person .who { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+#teams .person .name { font-size: 13.5px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#teams .person .role {
+  margin-left: 6px;
+  font-weight: 400;
+  font-size: 10.5px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+#teams .person .does { font-size: 12.5px; color: var(--ink-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+#teams .lead { padding: 8px 10px; margin: 0 -2px; border-radius: 9px; background: var(--card); border: 1px solid var(--rule); }
+#teams .lead .badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+}
+#teams .no-lead { font-size: 13px; color: var(--ink-soft); }
+
+/* The line from the lead down to each member, so it reads as who answers to whom. */
+#teams .crew {
+  list-style: none;
+  margin: -4px 0 0 22px;
+  padding: 0 0 0 16px;
+  border-left: 1px solid var(--edge);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#teams .crew li { position: relative; padding-top: 4px; }
+#teams .crew li::before {
+  content: "";
+  position: absolute;
+  left: -16px;
+  top: 21px;
+  width: 12px;
+  border-top: 1px solid var(--edge);
+}
+#teams .crew .nobody { font-size: 12.5px; color: var(--faint); padding: 6px 0 2px; }
+#teams .crew li:last-child:not(.nobody)::after {
+  /* The line stops at the last member rather than running on below it. */
+  content: "";
+  position: absolute;
+  left: -17px;
+  top: 22px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--side);
+}
+#teams .take-off { height: 26px; padding: 0 9px; font-size: 12px; }
+
+/* What can be changed: who leads, and who else is on it. */
+#teams .changes { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--rule); padding-top: 12px; }
+#teams .changes select {
+  flex: 1 1 150px;
+  min-width: 0;
+  height: 30px;
+  max-width: 220px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+}
+#teams .changes .team-break { margin-left: auto; }
+#teams .team-break:hover { color: var(--wrong); border-color: var(--wrong); }
+
+/* Who is on no team, at a glance. */
+#teams-free[hidden] { display: none; }
+#teams-free-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+#teams-free-list li {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px 5px 6px;
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  background: var(--side);
+  font-size: 13px;
+  color: var(--ink);
+}
+#teams-free-list .tile { width: 22px; height: 22px; }
+#teams-free-list .role { font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-soft); }

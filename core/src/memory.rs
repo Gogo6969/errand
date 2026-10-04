@@ -360,12 +360,99 @@ impl Knowing {
     }
 }
 
-/// Everything an agent opens a conversation knowing: who it is, and its notes.
+/// Everything an agent opens a conversation knowing: who it is, its team,
+/// and its notes.
 pub fn opening_as(store: &Store, agent: &Agent) -> Result<Knowing> {
     Ok(Knowing {
-        identity: who_you_are(&agent.name, agent.title.as_deref(), agent.about.as_deref()),
+        identity: with_its_team(
+            who_you_are(&agent.name, agent.title.as_deref(), agent.about.as_deref()),
+            &your_team(store, &agent.id)?,
+        ),
         notes: opening(store, &agent.id)?,
     })
+}
+
+/// Who it is, and then its team, under a heading of its own.
+pub fn with_its_team(identity: String, team: &str) -> String {
+    match (identity.is_empty(), team.is_empty()) {
+        (_, true) => identity,
+        (true, false) => format!("YOUR TEAM\n\n{team}"),
+        (false, false) => format!("{identity}\n\nYOUR TEAM\n\n{team}"),
+    }
+}
+
+/// The teams an agent leads or is on, said so it works as one: a lead that
+/// was never told it had a team did the work itself, and a member never knew
+/// who it answered to. Empty for an agent on no team.
+pub fn your_team(store: &Store, agent: &str) -> Result<String> {
+    let teams: Vec<_> = store
+        .teams()?
+        .into_iter()
+        .filter(|t| t.lead.as_deref() == Some(agent) || t.members.iter().any(|m| m == agent))
+        .collect();
+    if teams.is_empty() {
+        return Ok(String::new());
+    }
+    let called = |id: &str| -> String {
+        match store.agent(id) {
+            Ok(Some(a)) if a.name != NOT_YET_NAMED => match a.title.as_deref().map(str::trim) {
+                Some(title) if !title.is_empty() => format!("{} ({title})", a.name),
+                _ => a.name,
+            },
+            _ => "a teammate not yet named".to_string(),
+        }
+    };
+    let mut said = Vec::new();
+    for team in &teams {
+        if team.lead.as_deref() == Some(agent) {
+            let others: Vec<String> = team
+                .members
+                .iter()
+                .filter(|m| m.as_str() != agent)
+                .map(|m| called(m))
+                .collect();
+            said.push(match others.is_empty() {
+                true => format!(
+                    "You lead the team \"{}\", which has nobody on it yet. If the work needs \
+                     somebody, say so: the person puts teammates on a team on the Teams page.",
+                    team.name
+                ),
+                false => format!(
+                    "You lead the team \"{}\": {}. Hand each of them the part of the work that \
+                     fits what they do, with ask, and check what they send back before you call \
+                     it done. who_else says what each one does.",
+                    team.name,
+                    others.join(", ")
+                ),
+            });
+        } else {
+            let lead = team
+                .lead
+                .as_deref()
+                .map(|l| format!(", led by {}", called(l)))
+                .unwrap_or_default();
+            let others: Vec<String> = team
+                .members
+                .iter()
+                .filter(|m| m.as_str() != agent)
+                .map(|m| called(m))
+                .collect();
+            let with = match others.is_empty() {
+                true => String::new(),
+                false => format!(", with {}", others.join(", ")),
+            };
+            said.push(format!(
+                "You are on the team \"{}\"{lead}{with}.",
+                team.name
+            ));
+        }
+    }
+    said.push(
+        "You hand work only to your team. If somebody else is needed, say so to the person \
+         rather than doing their part yourself."
+            .to_string(),
+    );
+    Ok(said.join("\n\n"))
 }
 
 /// What a search hands back, as the model will read it.
@@ -537,6 +624,51 @@ mod tests {
         let said = opening(&store, "a1").unwrap();
         assert!(said.contains("your own notes"), "{said}");
         assert!(said.contains("where it goes: Telegram"), "{said}");
+    }
+
+    #[test]
+    fn a_lead_opens_knowing_its_team_and_a_member_who_it_answers_to() {
+        let store = Store::in_memory().unwrap();
+        for (id, name, title) in [
+            ("lead", "Ship Lead", "Code"),
+            ("w", "Page Smith", "Writer"),
+            ("t", "Bug Hunter", "QA"),
+            ("o", "Mail Sorter", "Storage"),
+        ] {
+            store
+                .begin(id, NOT_YET_NAMED, std::path::Path::new("/tmp/x"))
+                .unwrap();
+            store.rename(id, name, title, "").unwrap();
+        }
+        let knows = |id: &str| opening_as(&store, &store.agent(id).unwrap().unwrap()).unwrap();
+        // On no team, nothing about teams at all.
+        assert!(!knows("lead").identity.contains("YOUR TEAM"));
+
+        store
+            .make_team("crew", "Build crew", Some("lead"), 1)
+            .unwrap();
+        let alone = knows("lead").identity;
+        assert!(alone.contains("nobody on it yet"), "{alone}");
+        store.join_team("crew", "w", 2).unwrap();
+        store.join_team("crew", "t", 3).unwrap();
+
+        let lead = knows("lead").identity;
+        assert!(lead.starts_with("WHO YOU ARE"), "{lead}");
+        assert!(lead.contains("YOUR TEAM"), "{lead}");
+        assert!(
+            lead.contains(
+                "You lead the team \"Build crew\": Page Smith (Writer), Bug Hunter (QA)."
+            ),
+            "{lead}"
+        );
+        assert!(lead.contains("with ask"), "{lead}");
+        let member = knows("w").identity;
+        assert!(
+            member.contains("You are on the team \"Build crew\", led by Ship Lead (Code), with Bug Hunter (QA)."),
+            "{member}"
+        );
+        assert!(member.contains("only to your team"), "{member}");
+        assert!(!knows("o").identity.contains("YOUR TEAM"));
     }
 
     #[test]

@@ -7498,3 +7498,116 @@ export async function askingToOpenOutside() {
   await wait(150);
   return found;
 }
+
+/**
+ * Teams: a lead and the teammates it hands work to, seen and changed in one
+ * place. Before it every teammate could ask every other, and the only way to
+ * know who a lead would use was to watch it.
+ */
+export async function teamsOfTeammates() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Three teammates of its own, met the way the window meets any new one.
+  const crew = [
+    ["agent-ship", "Ship Lead", "Code", "Turns an app idea into a build by handing it round"],
+    ["agent-page", "Page Smith", "Writer", "Writes what the app says"],
+    ["agent-bug", "Bug Hunter", "QA", "Tries to break what was built"],
+  ];
+  for (const [id, name, title, about] of crew) {
+    FIXTURE.agents.push({ ...FIXTURE.agents[0], id, name, title, about, pinned: false, hidden: false, paused_at: null, spoke_at: Date.now() });
+    FIXTURE.conversations[id] = [{ id: `talk-${id}`, agent: id, name: "First", opened: true }];
+    tell("happened", { conversation: `talk-${id}`, seq: 9700 + crew.length, kind: "done" });
+  }
+  FIXTURE.teams = [];
+  await wait(500);
+
+  const open = document.getElementById("teams-open");
+  check("a Teams button sits down the side, beside Settings", open && open.closest("#who") && /Teams/.test(open.textContent), open?.outerHTML.slice(0, 80));
+  if (beingDrawn()) {
+    const middle = (e) => { const r = e.getBoundingClientRect(); return Math.round(r.top + r.height / 2); };
+    check("on the same line as the Settings gear", middle(open) === middle(document.getElementById("setup")), `${middle(open)} / ${middle(document.getElementById("setup"))}`);
+  }
+  open.click();
+  await wait(300);
+  const page = document.getElementById("teams");
+  check("it opens a page of its own over the window", !page.hidden && getComputedStyle(page).position === "fixed", String(page.hidden));
+  check("with no teams, it says what a team is for", /No teams yet/.test(page.textContent), document.getElementById("teams-list").textContent.slice(0, 120));
+  check("and the rule a team makes, in words", /hands work only to\s+its own team/.test(document.getElementById("teams-rule").textContent), document.getElementById("teams-rule").textContent.trim().slice(0, 140));
+  const free = () => [...document.querySelectorAll("#teams-free-list li")].map((li) => li.dataset.agent);
+  check("everybody named is listed as on no team", ["agent-ship", "agent-page", "agent-bug"].every((id) => free().includes(id)), free().join(", "));
+
+  // A new team, named, and its lead chosen.
+  document.getElementById("teams-new").click();
+  await wait(300);
+  const card = () => document.querySelector("#teams .team");
+  const nameBox = card()?.querySelector(".team-name");
+  check("New team makes one and puts the cursor in its name", nameBox && document.activeElement === nameBox, document.activeElement?.className);
+  nameBox.value = "Build crew";
+  nameBox.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await wait(200);
+  nameBox.dispatchEvent(new Event("blur"));
+  await wait(150);
+  const renames = asked.filter((a) => a.name === "rename_team");
+  check("its name is kept on Enter, and asked for once", renames.length === 1 && renames[0].args?.name === "Build crew", JSON.stringify(renames.map((a) => a.args)));
+  check("a team without a lead says to choose one", /No lead yet/.test(card().textContent), card().querySelector(".lead")?.textContent);
+  const pick = async (cls, id) => {
+    const select = card().querySelector(cls);
+    select.value = id;
+    select.dispatchEvent(new Event("change"));
+    await wait(300);
+  };
+  await pick(".team-lead", "agent-ship");
+  const lead = card().querySelector(".lead .person");
+  check("the lead is shown first, marked Lead, with its role and job", lead?.dataset.agent === "agent-ship" && /Lead/.test(lead.querySelector(".badge")?.textContent || "") && /Code/.test(lead.textContent) && /handing it round/.test(lead.textContent), lead?.textContent);
+  check("a lead with nobody on its team is told it has nobody to hand work to", /nobody to hand work to/.test(card().querySelector(".crew").textContent), card().querySelector(".crew").textContent);
+
+  // Two put on it, and they hang off the lead.
+  await pick(".team-add", "agent-page");
+  await pick(".team-add", "agent-bug");
+  const members = () => [...card().querySelectorAll(".crew .person")].map((p) => p.dataset.agent);
+  check("teammates put on it are listed under the lead, in the order they joined", members().join(",") === "agent-page,agent-bug", members().join(","));
+  check("and the count says how many are on it, lead included", /3 teammates/.test(card().querySelector(".team-count").textContent), card().querySelector(".team-count").textContent);
+  const offered = [...card().querySelector(".team-add")?.options || []].map((o) => o.value).filter(Boolean);
+  check("nobody already on it is offered again", !offered.includes("agent-ship") && !offered.includes("agent-page") && !offered.includes("agent-bug"), offered.join(","));
+  check("and those on it are no longer listed as on no team", !free().includes("agent-page") && !free().includes("agent-ship"), free().join(", "));
+
+  // Drawn as a structure: the line runs from the lead down to each member.
+  if (beingDrawn()) {
+    const line = getComputedStyle(card().querySelector(".crew"));
+    const leadBox = card().querySelector(".lead .tile").getBoundingClientRect();
+    const crewBox = card().querySelector(".crew").getBoundingClientRect();
+    check(
+      "a line runs down from under the lead's mark to its members",
+      line.borderLeftStyle === "solid" && Math.abs(crewBox.left - (leadBox.left + leadBox.width / 2)) <= 3,
+      `line at ${Math.round(crewBox.left)}, lead mark middle ${Math.round(leadBox.left + leadBox.width / 2)}`,
+    );
+    const take = card().querySelector(".crew .take-off").getBoundingClientRect();
+    const row = card().querySelector(".crew .person").getBoundingClientRect();
+    check("each member's Take off sits in the middle of its row", Math.abs(take.top + take.height / 2 - (row.top + row.height / 2)) <= 1, `${Math.round(take.top + take.height / 2)} / ${Math.round(row.top + row.height / 2)}`);
+    const changes = [...card().querySelectorAll(".changes select, .changes button")].map((e) => Math.round(e.getBoundingClientRect().height));
+    check("what changes a team is one height in one row", new Set(changes).size === 1, changes.join(","));
+  }
+
+  // Taken off, and the lead changed.
+  card().querySelector('.crew li .take-off').click();
+  await wait(300);
+  check("Take off takes that one off and nobody else", members().join(",") === "agent-bug" && asked.some((a) => a.name === "leave_team" && a.args?.agent === "agent-page"), members().join(","));
+  await pick(".team-lead", "agent-bug");
+  check("a member made lead leads it and is no longer also a member", card().querySelector(".lead .person")?.dataset.agent === "agent-bug" && !members().includes("agent-bug"), `${card().querySelector(".lead .person")?.dataset.agent} / ${members().join(",")}`);
+
+  // Broken up only on a second press.
+  const breakUp = card().querySelector(".team-break");
+  breakUp.click();
+  await wait(150);
+  check("Break up asks on the button first, and breaks nothing yet", /Its teammates stay/.test(breakUp.textContent) && !asked.some((a) => a.name === "break_up_team"), breakUp.textContent);
+  breakUp.click();
+  await wait(300);
+  check("the second press breaks it up, and the teammates stay", !document.querySelector("#teams .team") && asked.some((a) => a.name === "break_up_team") && free().includes("agent-ship"), free().join(", "));
+
+  // Escape and Back both leave it.
+  document.getElementById("teams-done").click();
+  await wait(150);
+  check("Back closes it", page.hidden, String(page.hidden));
+  return found;
+}

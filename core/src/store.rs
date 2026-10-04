@@ -443,6 +443,18 @@ pub struct Member {
     pub talk: Option<String>,
 }
 
+/// A lead and the teammates it hands work to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Team {
+    pub id: String,
+    pub name: String,
+    /// Which agent leads it, or nothing while it has none.
+    pub lead: Option<String>,
+    /// The other agents on it, in the order they joined. Never the lead.
+    pub members: Vec<String>,
+    pub made_at: i64,
+}
+
 /// A task taught once, to be done again by name.
 ///
 /// The agent is not on it because a skill is only ever read through its
@@ -1102,6 +1114,23 @@ const CHANGES: &[&str] = &[
     // on exactly that and nothing that was already off: 1 its routine, 2 its
     // watch. Last, as every change is.
     "ALTER TABLE conversations ADD COLUMN off_when_finished INTEGER NOT NULL DEFAULT 0;",
+    // Teams: a lead and the teammates it hands work to. A teammate on a team
+    // asks only its own team; one on no team can ask anybody, as before. The
+    // lead is kept apart from the members because it is a different job, and
+    // lets go rather than cascades: a team whose lead is deleted is still a
+    // team, waiting for another. Last, as every change is.
+    "CREATE TABLE IF NOT EXISTS teams (
+         id      TEXT PRIMARY KEY,
+         name    TEXT NOT NULL,
+         lead    TEXT REFERENCES agents(id) ON DELETE SET NULL,
+         made_at INTEGER NOT NULL
+     );
+     CREATE TABLE IF NOT EXISTS team_members (
+         team      TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+         agent     TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+         joined_at INTEGER NOT NULL,
+         PRIMARY KEY (team, agent)
+     );",
 ];
 
 /// What finishing a task switched off, or reopening it switched back on.
@@ -3392,6 +3421,126 @@ impl Store {
         Ok(())
     }
 
+    /// Every team, oldest first, each with its lead and members.
+    pub fn teams(&self) -> Result<Vec<Team>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q =
+            conn.prepare("SELECT id, name, lead, made_at FROM teams ORDER BY made_at, id")?;
+        let mut teams = q
+            .query_map([], |r| {
+                Ok(Team {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    lead: r.get(2)?,
+                    members: Vec::new(),
+                    made_at: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut q = conn
+            .prepare("SELECT agent FROM team_members WHERE team = ? ORDER BY joined_at, agent")?;
+        for team in &mut teams {
+            team.members = q
+                .query_map([&team.id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+        }
+        Ok(teams)
+    }
+
+    /// A new team, with a lead or none yet.
+    pub fn make_team(&self, id: &str, name: &str, lead: Option<&str>, now: i64) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO teams (id, name, lead, made_at) VALUES (?, ?, ?, ?)",
+            params![id, name.trim(), lead, now],
+        )?;
+        Ok(())
+    }
+
+    /// Call a team something else.
+    pub fn rename_team(&self, id: &str, name: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE teams SET name = ? WHERE id = ?",
+            params![name.trim(), id],
+        )?;
+        Self::only_if_it_is_there(changed, "team")
+    }
+
+    /// Who leads a team, or nobody. A member made lead stops being a member:
+    /// leading it and being handed work by itself are not two jobs.
+    pub fn lead_team(&self, id: &str, lead: Option<&str>) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let changed = tx.execute("UPDATE teams SET lead = ? WHERE id = ?", params![lead, id])?;
+        Self::only_if_it_is_there(changed, "team")?;
+        if let Some(lead) = lead {
+            tx.execute(
+                "DELETE FROM team_members WHERE team = ? AND agent = ?",
+                params![id, lead],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Put an agent on a team. Its lead is on it already, as the lead.
+    pub fn join_team(&self, id: &str, agent: &str, now: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let lead: Option<Option<String>> = conn
+            .query_row("SELECT lead FROM teams WHERE id = ?", [id], |r| r.get(0))
+            .optional()?;
+        match lead {
+            None => Self::only_if_it_is_there(0, "team"),
+            Some(Some(lead)) if lead == agent => Ok(()),
+            Some(_) => {
+                conn.execute(
+                    "INSERT OR IGNORE INTO team_members (team, agent, joined_at) VALUES (?, ?, ?)",
+                    params![id, agent, now],
+                )?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Take an agent off a team, as a member.
+    pub fn leave_team(&self, id: &str, agent: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM team_members WHERE team = ? AND agent = ?",
+            params![id, agent],
+        )?;
+        Ok(())
+    }
+
+    /// Break a team up. The agents on it stay, on no team or their others.
+    pub fn break_up_team(&self, id: &str) -> Result<()> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM teams WHERE id = ?", [id])?;
+        Ok(())
+    }
+
+    /// Who an agent may hand work to, because of its teams: its leads and
+    /// everybody on them, not itself. Nothing for an agent on no team, which
+    /// may ask anybody, as every agent could before there were teams.
+    pub fn who_it_works_with(&self, agent: &str) -> Result<Option<HashSet<String>>> {
+        let teams: Vec<Team> = self
+            .teams()?
+            .into_iter()
+            .filter(|t| t.lead.as_deref() == Some(agent) || t.members.iter().any(|m| m == agent))
+            .collect();
+        if teams.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(
+            teams
+                .into_iter()
+                .flat_map(|t| t.lead.into_iter().chain(t.members))
+                .filter(|a| a != agent)
+                .collect(),
+        ))
+    }
+
     /// Forget one conversation, and everything said in it.
     ///
     /// Never the last one an agent has. A conversation is where an engine
@@ -4026,6 +4175,70 @@ mod tests {
             tool: "Bash".into(),
             call: call.into(),
         })
+    }
+
+    #[test]
+    fn a_team_is_a_lead_and_members_and_draws_the_line_round_who_asks_whom() {
+        let s = Store::in_memory().unwrap();
+        for (id, at) in [
+            ("lead", "/tmp/l"),
+            ("w", "/tmp/w"),
+            ("t", "/tmp/t"),
+            ("loner", "/tmp/o"),
+        ] {
+            one(&s, id, at);
+        }
+        // Before there are teams, nobody is limited.
+        assert_eq!(s.who_it_works_with("lead").unwrap(), None);
+
+        s.make_team("crew", "Build crew", Some("lead"), 10).unwrap();
+        s.join_team("crew", "w", 11).unwrap();
+        s.join_team("crew", "t", 12).unwrap();
+        // The lead is on it as the lead, never a second time as a member.
+        s.join_team("crew", "lead", 13).unwrap();
+        let teams = s.teams().unwrap();
+        assert_eq!(teams.len(), 1);
+        assert_eq!(teams[0].lead.as_deref(), Some("lead"));
+        assert_eq!(teams[0].members, vec!["w".to_string(), "t".to_string()]);
+
+        // The lead hands work to its members, a member to its lead and the
+        // others, and one on no team to anybody.
+        let reach = |a: &str| {
+            let mut v: Vec<String> = s.who_it_works_with(a).unwrap()?.into_iter().collect();
+            v.sort();
+            Some(v)
+        };
+        assert_eq!(reach("lead"), Some(vec!["t".to_string(), "w".to_string()]));
+        assert_eq!(reach("w"), Some(vec!["lead".to_string(), "t".to_string()]));
+        assert_eq!(reach("loner"), None);
+
+        // A member made lead is no longer also a member.
+        s.lead_team("crew", Some("w")).unwrap();
+        let team = &s.teams().unwrap()[0];
+        assert_eq!(team.lead.as_deref(), Some("w"));
+        assert_eq!(team.members, vec!["t".to_string()]);
+        s.lead_team("crew", Some("lead")).unwrap();
+        s.join_team("crew", "w", 14).unwrap();
+
+        // Deleting the lead leaves the team, waiting for another.
+        s.forget("lead").unwrap();
+        let team = &s.teams().unwrap()[0];
+        assert_eq!(team.lead, None);
+        assert_eq!(team.members.len(), 2);
+        // Deleting a member takes it off.
+        s.forget("t").unwrap();
+        assert_eq!(s.teams().unwrap()[0].members, vec!["w".to_string()]);
+
+        s.rename_team("crew", "  Ship crew ").unwrap();
+        assert_eq!(s.teams().unwrap()[0].name, "Ship crew");
+        assert!(s.rename_team("nothing", "x").is_err());
+        assert!(s.join_team("nothing", "w", 15).is_err());
+        s.leave_team("crew", "w").unwrap();
+        assert!(s.teams().unwrap()[0].members.is_empty());
+        // Broken up, the agents stay.
+        s.break_up_team("crew").unwrap();
+        assert!(s.teams().unwrap().is_empty());
+        assert!(s.agent("w").unwrap().is_some());
     }
 
     #[test]
