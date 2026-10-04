@@ -360,6 +360,50 @@ pub fn declarations() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "suggest_learning",
+                "description":
+                    "Suggest keeping something you learned, so you do it better next time. \
+                     Use it when the person had to correct you on something a point of your \
+                     checklist would have caught (kind `checklist`, with that point), or when \
+                     the task just done is worth keeping as a skill, or worth keeping in place \
+                     of a skill you have by that name (kind `skill`, with its name). It puts a \
+                     card in front of the person and returns at once: nothing is kept unless \
+                     they agree. Carry on with the task; do not wait for it, and do not suggest \
+                     the same thing twice.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["checklist", "skill"],
+                            "description":
+                                "`checklist` for a point to check every time, `skill` to keep \
+                                 the task just done in this conversation by name."
+                        },
+                        "point": {
+                            "type": "string",
+                            "description":
+                                "For `checklist`: the point, as one short line you can check \
+                                 yourself, like `I ran it and looked at the result`."
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "For `skill`: what to call it, like `weekly report`."
+                        },
+                        "why": {
+                            "type": "string",
+                            "description":
+                                "What happened that makes it worth keeping, in one line, so \
+                                 they can judge."
+                        }
+                    },
+                    "required": ["kind", "why"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "who_else",
                 "description":
                     "List the other agents you can hand work to, with what each one handles. \
@@ -515,6 +559,7 @@ pub enum Ours {
     KeepAnEyeOn,
     OverToYou,
     OpenOutside,
+    SuggestLearning,
     SaveSkill,
     RunSkill,
     Skills,
@@ -535,6 +580,7 @@ impl Ours {
             Ours::KeepAnEyeOn => "keep_an_eye_on",
             Ours::OverToYou => "over_to_you",
             Ours::OpenOutside => "open_outside",
+            Ours::SuggestLearning => "suggest_learning",
             Ours::SaveSkill => "save_skill",
             Ours::RunSkill => "run_skill",
             Ours::Skills => "skills",
@@ -556,6 +602,7 @@ pub fn ours(tool: &str) -> Option<Ours> {
         "keep_an_eye_on" => Some(Ours::KeepAnEyeOn),
         "over_to_you" => Some(Ours::OverToYou),
         "open_outside" => Some(Ours::OpenOutside),
+        "suggest_learning" => Some(Ours::SuggestLearning),
         "save_skill" => Some(Ours::SaveSkill),
         "run_skill" => Some(Ours::RunSkill),
         "skills" => Some(Ours::Skills),
@@ -619,6 +666,13 @@ pub fn in_plain_words(tool: Ours, args: &Value) -> String {
             None => "Asking you to open something outside its wall".to_string(),
             Some(name) => format!("Asking you to open {name} outside its wall"),
         },
+        Ours::SuggestLearning => match get("kind") {
+            "skill" => match get("name") {
+                "" => "Suggesting it keeps this as a skill".to_string(),
+                name => format!("Suggesting it keeps this as the skill {name}"),
+            },
+            _ => "Suggesting a point for how it checks its work".to_string(),
+        },
         Ours::Remember => match get("about") {
             "" => "Making a note".to_string(),
             about => format!("Making a note about {}", about.replace('_', " ")),
@@ -681,6 +735,9 @@ pub fn the_thing_itself(tool: Ours, args: &Value) -> String {
         Ours::OverToYou => String::new(),
         // Nor here: what was agreed to opening once is never agreed to again.
         Ours::OpenOutside => String::new(),
+        // Nor a suggestion: it keeps nothing, and the card it raises is the
+        // person's to answer each time.
+        Ours::SuggestLearning => String::new(),
         Ours::EveryDay => args
             .get("when")
             .and_then(|v| v.as_str())
@@ -791,6 +848,9 @@ pub fn asks_first(tool: Ours) -> bool {
         // Nor this, for the same reason: the tool is a question, answered on
         // the app's own card, which nothing stored can answer for them.
         Ours::OpenOutside => false,
+        // A suggestion keeps nothing by itself: the card it raises is where
+        // the person says yes, and a card in front of that card asks twice.
+        Ours::SuggestLearning => false,
         // Saving and listing reach this agent's own records and nothing else.
         // Running one is not delegation: it opens a conversation for the same
         // agent on the same posture, and every step the run takes goes
@@ -829,6 +889,10 @@ pub fn without_the_app(tool: Ours) -> &'static str {
         Ours::OpenOutside => {
             "There is nobody at a window here to open anything for. Say what would have to \
              be opened, and stop there."
+        }
+        Ours::SuggestLearning => {
+            "There is nobody at a window here to agree to keeping anything. Say what you \
+             would keep, and why, in your answer."
         }
         Ours::SaveSkill | Ours::RunSkill | Ours::Skills => {
             "There is nowhere to keep skills here. This is an engine with no app behind it, \
@@ -1324,6 +1388,7 @@ mod tests {
                 "keep_an_eye_on",
                 "over_to_you",
                 "open_outside",
+                "suggest_learning",
                 "who_else",
                 "save_skill",
                 "run_skill",

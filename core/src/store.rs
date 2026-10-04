@@ -3969,6 +3969,19 @@ impl Store {
         Ok(())
     }
 
+    /// Write down what the person said to a teammate's suggestion, onto the
+    /// suggestion itself, once. Says whether it was still open: a second
+    /// answer, from a second window or a double click, changes nothing.
+    pub fn settle_learning(&self, conversation: &str, seq: i64, outcome: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE lines SET outcome = ?1
+              WHERE conversation = ?2 AND seq = ?3 AND kind = 'learning' AND outcome IS NULL",
+            params![outcome, conversation, seq],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// Write down what somebody said to a question.
     ///
     /// Onto the question rather than under it, the same way an outcome goes
@@ -4289,6 +4302,33 @@ mod tests {
         s.break_up_team("crew").unwrap();
         assert!(s.teams().unwrap().is_empty());
         assert!(s.agent("w").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_suggestion_is_answered_once_and_keeps_its_answer() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a", "/tmp/a");
+        let line = s
+            .the_app_says_about(
+                "a",
+                "learning",
+                r#"{"kind":"checklist","point":"x","why":"y"}"#,
+                "",
+            )
+            .unwrap();
+        assert!(s.settle_learning("a", line.seq, "Added").unwrap());
+        // A second answer, from a double click or a second window, changes nothing.
+        assert!(!s.settle_learning("a", line.seq, "Not kept.").unwrap());
+        let read = s
+            .lines("a")
+            .unwrap()
+            .into_iter()
+            .find(|l| l.seq == line.seq)
+            .unwrap();
+        assert_eq!(read.outcome.as_deref(), Some("Added"));
+        // Only a suggestion is answered this way.
+        let note = s.the_app_says_about("a", "note", "hello", "").unwrap();
+        assert!(!s.settle_learning("a", note.seq, "Added").unwrap());
     }
 
     #[test]

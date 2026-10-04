@@ -229,6 +229,15 @@ const el = {
   setup: document.getElementById("setup"),
   models: document.getElementById("models"),
   modelsDone: document.getElementById("models-done"),
+  taskLearn: document.getElementById("task-learn"),
+  learnAsks: document.getElementById("learn-asks"),
+  learnSkill: document.getElementById("learn-skill"),
+  learnSkillSays: document.getElementById("learn-skill-says"),
+  learnSkillName: document.getElementById("learn-skill-name"),
+  learnNote: document.getElementById("learn-note"),
+  learnNoteText: document.getElementById("learn-note-text"),
+  learnSays: document.getElementById("learn-says"),
+  learnDone: document.getElementById("learn-done"),
   checklist: document.getElementById("checklist"),
   checklistSummary: document.getElementById("checklist-summary"),
   checklistStarter: document.getElementById("checklist-starter"),
@@ -1008,6 +1017,8 @@ function meet(conversation) {
 async function show(id) {
   const t = talks.get(id);
   if (!t) return;
+  // What to keep from a finished task belongs to that task, not the next one.
+  if (el.taskLearn.dataset.task !== id) el.taskLearn.hidden = true;
   // Half a sentence belongs to the conversation it was being written into. It
   // used to follow whoever switched, which this app encourages constantly: the
   // sidebar row, the conversation picker and "New conversation with this agent"
@@ -2195,6 +2206,17 @@ function fromStoreLine(line, live = false) {
         stillThere: still,
       };
     }
+    // A teammate suggesting it keeps something it learned, and what the
+    // person said to it, if anything yet.
+    case "learning": {
+      let card = {};
+      try {
+        card = JSON.parse(line.text) || {};
+      } catch {
+        card = {};
+      }
+      return { kind: "learning", seq: line.seq, card, answered: line.outcome || null };
+    }
     // An email left to be checked: its words as they were last kept, and how
     // it ended if it has. "sending" on disk is a send the app did not see
     // finish, which is not a send anybody should be invited to repeat.
@@ -3056,6 +3078,8 @@ function draw(m) {
       return handItOver(m);
     case "open_outside":
       return openItOutside(m);
+    case "learning":
+      return aSuggestion(m);
     case "draft":
       return aDraft(m);
     case "ended": {
@@ -3341,6 +3365,72 @@ function handItOver(m) {
  * as a handover does: "I opened it" said to a teammate that has stopped waiting
  * would be a teammate told something happened that did not.
  */
+/**
+ * A teammate suggesting it keeps something it learned: a point for how it
+ * checks its work, or the task just done as a skill. Nothing is kept until
+ * the person says so here, and the teammate does not wait for them.
+ */
+function aSuggestion(m) {
+  const card = document.createElement("li");
+  card.className = m.answered ? "handover learning done" : "handover learning";
+  card.dataset.seq = String(m.seq);
+  const t = talks.get(showing);
+  const who = agents.get(t?.agent)?.name || "This teammate";
+  const c = m.card || {};
+  const words = document.createElement("div");
+  words.className = "question";
+  const aSkill = c.kind === "skill";
+  const steps = Array.isArray(c.steps) ? c.steps.length : 0;
+  words.append(
+    note(
+      "p",
+      aSkill
+        ? `${who} suggests keeping this task as a skill${c.replaces ? ", in place of the one it has by that name" : ""}`
+        : `${who} suggests a point for how it checks its work`,
+      "wants",
+    ),
+  );
+  const what = note("p", "", "what");
+  if (aSkill) {
+    what.append(note("q", c.name || "a skill"), ` \u00b7 ${steps} ${steps === 1 ? "step" : "steps"}`);
+  } else {
+    what.append(note("q", c.point || ""));
+  }
+  words.append(what);
+  if (c.why) {
+    const why = note("p", "", "why");
+    why.append(note("span", "Because: ", "label"), note("span", c.why));
+    words.append(why);
+  }
+  if (m.answered) {
+    words.append(note("p", m.answered, "answered"));
+  } else {
+    const choices = document.createElement("div");
+    choices.className = "choices";
+    const press = (label, keep, primary = false) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      if (primary) b.className = "yes";
+      b.onclick = async () => {
+        for (const one of choices.querySelectorAll("button")) one.disabled = true;
+        try {
+          m.answered = await invoke("take_learning", { conversation: t?.id || showing, seq: m.seq, keep });
+        } catch (why) {
+          m.answered = `Not kept: ${why}`;
+        }
+        drawMessages();
+        if (keep && !el.whois.hidden) drawChecklist();
+      };
+      return b;
+    };
+    choices.append(press(aSkill ? "Keep it" : "Add it", true, true), press("Not now", false));
+    words.append(choices);
+  }
+  card.append(tile("spark", false), words);
+  return card;
+}
+
 function openItOutside(m) {
   const card = document.createElement("li");
   card.className = m.answered ? "handover open-outside done" : "handover open-outside";
@@ -3755,6 +3845,16 @@ listen("repeats", async ({ payload }) => {
   el.routineSays.textContent = sayWhen(mine);
   el.routinePause.textContent = mine?.off ? "Start again" : "Pause";
   el.routinePause.hidden = !mine;
+});
+
+// A suggestion arrives mid-turn and the teammate carries on, so the task is
+// left working: the card waits without stopping anything.
+listen("learning_suggested", async ({ payload }) => {
+  const t = talks.get(payload.conversation) || (await meet(payload.conversation));
+  if (!t) return;
+  t.messages.push({ kind: "learning", seq: payload.seq, card: payload.card || {}, answered: null });
+  if (showing === payload.conversation) drawMessages();
+  drawThreads();
 });
 
 listen("asking_to_open", async ({ payload }) => {
@@ -7862,8 +7962,72 @@ async function markTaskFinished(t, finished) {
   } catch (why) {
     set(was);
     complain(String(why));
+    return;
   }
+  if (finished && showing === t.id) await offerToKeep(t);
+  else if (!finished && showing === t.id) el.taskLearn.hidden = true;
 }
+
+/**
+ * Finished: is there anything for the teammate to keep from it? How it was
+ * done, as a skill it can do again by name, and something to remember. Asked
+ * here, once, because this is the moment somebody knows whether it went the
+ * way they wanted; nothing is kept unless they say so.
+ */
+async function offerToKeep(t) {
+  const a = agents.get(t.agent);
+  if (!a) return;
+  let could = null;
+  try {
+    could = await invoke("could_keep", { conversation: t.id });
+  } catch {
+    could = null;
+  }
+  if (showing !== t.id) return;
+  el.taskLearn.dataset.task = t.id;
+  el.learnAsks.textContent = `Finished. Anything for ${a.name} to keep from it?`;
+  el.learnSkill.hidden = !could;
+  if (could) {
+    const [, steps] = could;
+    el.learnSkillName.value = t.name && t.name !== "First" && t.name !== "New task" ? t.name : "";
+    el.learnSkillSays.textContent = `How it was done, ${steps} ${steps === 1 ? "step" : "steps"}, as a skill to do again by name`;
+  }
+  el.learnNoteText.value = "";
+  el.learnSays.textContent = "";
+  el.taskLearn.hidden = false;
+}
+
+el.learnSkill.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const id = el.taskLearn.dataset.task;
+  const name = el.learnSkillName.value.trim();
+  if (!id || !name) return;
+  try {
+    el.learnSays.textContent = await invoke("keep_as_skill", { conversation: id, name });
+    el.learnSkill.hidden = true;
+  } catch (why) {
+    el.learnSays.textContent = String(why);
+  }
+});
+el.learnNote.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const t = talks.get(el.taskLearn.dataset.task);
+  const text = el.learnNoteText.value.trim();
+  if (!t || !text) return;
+  // About its first few words: a note needs something to be about, and the
+  // person reads it back under What it remembers.
+  const about = text.split(/\s+/).slice(0, 4).join(" ");
+  try {
+    await invoke("note_down", { agent: t.agent, about, note: text });
+    el.learnNoteText.value = "";
+    el.learnSays.textContent = `Remembered: ${text}`;
+  } catch (why) {
+    el.learnSays.textContent = String(why);
+  }
+});
+el.learnDone.addEventListener("click", () => {
+  el.taskLearn.hidden = true;
+});
 
 /** Every task, read again, and the list down the side drawn with it. */
 async function readTasks() {

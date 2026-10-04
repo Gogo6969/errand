@@ -687,6 +687,14 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             (fixture.checklists ||= {})[args.agent] = kept;
             return Promise.resolve(kept);
           }
+          // Learning: what a finished task could be kept as, keeping it, and
+          // the answer to a teammate's suggestion.
+          case "could_keep":
+            return Promise.resolve(fixture.couldKeep === undefined ? ["Show me the latest Bitcoin news", 3] : fixture.couldKeep);
+          case "keep_as_skill":
+            return Promise.resolve(`Kept as the skill ${args.name}.`);
+          case "take_learning":
+            return Promise.resolve(args.keep ? "Added to how it checks its work." : "Not kept.");
           case "what_they_bring":
             return Promise.resolve(
               fixture.agents.map((a) => [a.id, (fixture.skills?.[a.id] || []).map((k) => k.name), (fixture.checklists?.[a.id] || []).length]),

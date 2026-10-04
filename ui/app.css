@@ -1445,6 +1445,11 @@ main > aside, main > #title, main > #composer { flex: none; }
 .handover.open-outside .facts code { font-size: 12px; overflow-wrap: anywhere; }
 .handover.open-outside .why { margin: 6px 0 0; font-size: 13px; color: var(--ink-soft); }
 .handover.open-outside .why .label { color: var(--faint); }
+/* A suggestion of a teammate's: what it would keep, and why. */
+.handover.learning .what { margin: 6px 0 0; font-size: 13.5px; color: var(--ink-soft); }
+.handover.learning .what q { color: var(--ink); font-weight: 600; }
+.handover.learning .why { margin: 4px 0 0; font-size: 13px; color: var(--ink-soft); }
+.handover.learning .why .label { color: var(--faint); }
 .handover .tile { margin-top: 1px; }
 .handover a.detail {
   display: block;
@@ -3661,3 +3666,54 @@ a.on-disk {
 }
 #teams-free-list .tile { width: 22px; height: 22px; }
 #teams-free-list .role { font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-soft); }
+
+/* ------------------------------------------------- keeping from a task -- */
+
+/* Under the task's card once it is finished: what the teammate could keep. */
+#task-learn {
+  flex: none;
+  margin: 8px 18px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--side);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px 14px;
+  font-size: 13px;
+}
+#task-learn[hidden] { display: none; }
+#learn-asks { flex: 1 1 100%; margin: 0; font-weight: 600; color: var(--ink); }
+#task-learn form { flex: 1 1 300px; display: flex; align-items: end; gap: 8px; min-width: 0; }
+#task-learn form[hidden] { display: none; }
+#task-learn label { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-soft); }
+#task-learn input {
+  box-sizing: border-box;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+#task-learn input:focus { outline: none; border-color: var(--edge); }
+#task-learn button {
+  flex: none;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+#task-learn button:hover { border-color: var(--edge); }
+#task-learn button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#task-learn #learn-done { color: var(--ink-soft); }
+#learn-says { flex: 1 1 100%; margin: 0; color: var(--good); }
+#learn-says:empty { display: none; }

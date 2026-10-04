@@ -164,7 +164,9 @@ pub fn in_the_prompt(points: &[String]) -> String {
     format!(
         "Before you say a task is done, go through each of these and say in a line how it \
          went. If one does not apply, say why. If one fails, the task is not done yet: fix \
-         it, or say plainly what is still wrong.\n{}",
+         it, or say plainly what is still wrong. When the person has to correct you on \
+         something these points did not catch, suggest one that would have, with \
+         suggest_learning.\n{}",
         listed.join("\n")
     )
 }

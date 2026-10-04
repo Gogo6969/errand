@@ -7681,3 +7681,88 @@ export async function howATeammateChecksItsWork() {
   await wait(150);
   return found;
 }
+
+/**
+ * Learning: a teammate suggests keeping what it learned, and nothing is kept
+ * until the person says so; and a finished task asks once whether there is
+ * anything to keep from it.
+ */
+export async function learningFromATask() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  await openTalk("talk-2");
+
+  // A point for its checklist, suggested mid-task.
+  const heard = tell("learning_suggested", {
+    conversation: "talk-2", seq: 9910,
+    card: { kind: "checklist", point: "I checked the price against a second source", why: "You had to correct a price that was an hour old" },
+  });
+  await wait(250);
+  check("the window is listening for a teammate's suggestion", heard > 0, `${heard} listener(s)`);
+  const card = (seq) => document.querySelector(`#messages .learning[data-seq="${seq}"]`);
+  const said = card(9910)?.textContent || "";
+  check("a suggestion says who suggests what, in its own words", /suggests a point for how it checks its work/.test(said) && /second source/.test(card(9910)?.querySelector("q")?.textContent || ""), said.slice(0, 160));
+  check("and why, so it can be judged", /Because: You had to correct a price/.test(said), said);
+  const buttons = (seq) => [...(card(seq)?.querySelectorAll(".choices button") || [])].map((b) => b.textContent).join(" | ");
+  check("two answers: add it, or not now", buttons(9910) === "Add it | Not now", buttons(9910));
+  const before = asked.length;
+  card(9910).querySelector(".choices .yes").click();
+  await wait(250);
+  check("adding it is the person's answer, sent once", asked.slice(before).filter((a) => a.name === "take_learning" && a.args?.seq === 9910 && a.args?.keep === true).length === 1, JSON.stringify(asked.slice(before).map((a) => a.name)));
+  check("and the card says what was done, with nothing left to press", /Added/.test(card(9910)?.textContent || "") && !card(9910)?.querySelector(".choices"), card(9910)?.textContent.slice(-60));
+
+  // A skill, in place of one it has.
+  tell("learning_suggested", {
+    conversation: "talk-2", seq: 9911,
+    card: { kind: "skill", name: "morning prices", why: "This is how you wanted it every morning", replaces: true, steps: [{}, {}, {}] },
+  });
+  await wait(250);
+  const skill = card(9911)?.textContent || "";
+  check("a skill suggestion names it, its steps, and that it replaces the one it has", /keeping this task as a skill, in place of the one it has/.test(skill) && /morning prices/.test(skill) && /3 steps/.test(skill), skill.slice(0, 200));
+  check("and is answered Keep it or Not now", buttons(9911) === "Keep it | Not now", buttons(9911));
+  [...card(9911).querySelectorAll(".choices button")][1].click();
+  await wait(250);
+  check("Not now keeps nothing, and says so", asked.some((a) => a.name === "take_learning" && a.args?.seq === 9911 && a.args?.keep === false) && /Not kept/.test(card(9911)?.textContent || ""), card(9911)?.textContent.slice(-40));
+
+  // Finishing a task asks once whether there is anything to keep.
+  const panel = document.getElementById("task-learn");
+  check("nothing is offered before the task is finished", panel.hidden, String(panel.hidden));
+  document.getElementById("task-done").click();
+  await wait(400);
+  check("marking it finished asks whether there is anything to keep from it", !panel.hidden && /Finished\. Anything for Bitcoin Desk to keep from it\?/.test(document.getElementById("learn-asks").textContent), document.getElementById("learn-asks").textContent);
+  const skillForm = document.getElementById("learn-skill");
+  check("with how it was done as a skill, saying how many steps", !skillForm.hidden && /3 steps/.test(document.getElementById("learn-skill-says").textContent), document.getElementById("learn-skill-says").textContent);
+  if (beingDrawn()) {
+    const rows = [...panel.querySelectorAll("form")].map((f) => {
+      const [i, b] = [f.querySelector("input"), f.querySelector("button")].map((e) => e.getBoundingClientRect());
+      return Math.round(i.height) === Math.round(b.height) && Math.round(i.bottom) === Math.round(b.bottom);
+    });
+    check("each box and its button are one height on one line", rows.every(Boolean), rows.join(","));
+  }
+  document.getElementById("learn-skill-name").value = "morning prices";
+  skillForm.requestSubmit();
+  await wait(250);
+  check("Keep as a skill keeps it by the name given", asked.some((a) => a.name === "keep_as_skill" && a.args?.name === "morning prices") && /Kept as the skill morning prices/.test(document.getElementById("learn-says").textContent), document.getElementById("learn-says").textContent);
+  document.getElementById("learn-note-text").value = "Prices are in euros unless asked";
+  document.getElementById("learn-note").requestSubmit();
+  await wait(250);
+  const noted = asked.find((a) => a.name === "note_down" && a.args?.note === "Prices are in euros unless asked");
+  check("and something to remember is written down as one of its notes", noted && noted.args.about === "Prices are in euros", JSON.stringify(noted?.args));
+  document.getElementById("learn-done").click();
+  await wait(100);
+  check("Done puts it away", panel.hidden, String(panel.hidden));
+
+  // Reopened, and finished again where there is nothing to keep as a skill.
+  document.getElementById("task-done").click();
+  await wait(300);
+  FIXTURE.couldKeep = null;
+  document.getElementById("task-done").click();
+  await wait(400);
+  check("a task that only talked is not offered as a skill, only a note", !panel.hidden && skillForm.hidden && !document.getElementById("learn-note").hidden, `${panel.hidden}/${skillForm.hidden}`);
+  document.getElementById("task-done").click();
+  await wait(300);
+  check("reopening it puts the question away", panel.hidden, String(panel.hidden));
+  delete FIXTURE.couldKeep;
+  return found;
+}

@@ -3421,6 +3421,7 @@ fn answer_what_engines_cannot(
                     Some(team::Ours::KeepAnEyeOn) => keep_an_eye_on(&app, &asked),
                     Some(team::Ours::OverToYou) => over_to_you(&app, &asked).await,
                     Some(team::Ours::OpenOutside) => open_outside(&app, &asked).await,
+                    Some(team::Ours::SuggestLearning) => suggest_learning(&app, &asked),
                     Some(team::Ours::SaveSkill) => save_skill(&app, &asked),
                     Some(team::Ours::RunSkill) => run_skill(&app, &asked).await,
                     Some(team::Ours::Skills) => list_skills(&app, &asked),
@@ -5260,10 +5261,245 @@ fn save_skill(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
     let Some(taught) = skill::from_lines(&lines) else {
         return Ok(skill::NOTHING_TO_KEEP.to_string());
     };
+    // A skill it has is changed only with the person's yes: what it does
+    // every time it is run by that name is theirs to agree to.
+    if held.store.skill(&agent, &name)?.is_some() {
+        return Ok(format!(
+            "There is already a skill called `{name}`. To keep this in its place, suggest it \
+             with suggest_learning (kind `skill`, name `{name}`): it is replaced only if they \
+             agree."
+        ));
+    }
     let replaced = held
         .store
         .keep_skill(&agent, &name, &taught.request, &taught.steps)?;
     Ok(skill::kept(&name, &taught, replaced))
+}
+
+/// A teammate suggesting it keeps something it learned: a point for how it
+/// checks its work, or the task just done as a skill, new or in place of one
+/// it has. A card in the task, and nothing kept until the person agrees. It
+/// returns at once, so the teammate carries on rather than waiting on a
+/// question that is not urgent.
+fn suggest_learning(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let said = |k: &str| {
+        asked
+            .args
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let (kind, why) = (said("kind"), said("why"));
+    anyhow::ensure!(
+        !asked.from.is_empty(),
+        "there is no task here to suggest anything from"
+    );
+    anyhow::ensure!(
+        !why.is_empty(),
+        "say what happened that makes it worth keeping, so they can judge"
+    );
+    let agent = whose_notebook(app, &asked.from)?;
+    let held: State<Held> = app.state();
+    let lines = held.store.lines(&asked.from)?;
+    let card = match kind.as_str() {
+        "checklist" => {
+            let Some(point) = errand_core::checklist::cleaned(&[said("point")]).pop() else {
+                anyhow::bail!("say the point, as one short line you can check yourself");
+            };
+            let had = held.store.checklist(&agent)?;
+            if had.iter().any(|p| p.eq_ignore_ascii_case(&point)) {
+                return Ok("That point is already on your checklist.".to_string());
+            }
+            if had.len() >= errand_core::checklist::AT_MOST {
+                return Ok(format!(
+                    "Your checklist has {} points, which is all it holds. Say which one this \
+                     should replace, in your answer, and they can change it on your card.",
+                    had.len()
+                ));
+            }
+            serde_json::json!({ "kind": "checklist", "point": point, "why": why })
+        }
+        "skill" => {
+            let name = skill::a_name(&said("name"))?;
+            if let Some(running) = held
+                .store
+                .conversation(&asked.from)?
+                .and_then(|c| skill::is_a_run(&c.name).map(str::to_string))
+            {
+                return Ok(skill::a_run_cannot_teach_itself(&running));
+            }
+            let Some(taught) = skill::from_lines(&lines) else {
+                return Ok(skill::NOTHING_TO_KEEP.to_string());
+            };
+            // The steps as they are now, so what is kept on a yes is what the
+            // card described, whatever this conversation does next.
+            serde_json::json!({
+                "kind": "skill",
+                "name": name,
+                "why": why,
+                "replaces": held.store.skill(&agent, &name)?.is_some(),
+                "request": taught.request,
+                "steps": taught.steps,
+            })
+        }
+        _ => anyhow::bail!("kind is `checklist` or `skill`"),
+    };
+    // The same suggestion still waiting on its card is not made twice.
+    let waiting = lines.iter().any(|l| {
+        l.kind == "learning"
+            && l.outcome.is_none()
+            && serde_json::from_str::<serde_json::Value>(&l.text).is_ok_and(|was| {
+                was.get("kind") == card.get("kind")
+                    && was.get("point") == card.get("point")
+                    && was.get("name") == card.get("name")
+            })
+    });
+    if waiting {
+        return Ok("That is already on a card waiting for them. Carry on with the task.".into());
+    }
+    let line = held
+        .store
+        .the_app_says_about(&asked.from, "learning", &card.to_string(), "")?;
+    let _ = app.emit(
+        "learning_suggested",
+        LearningSuggested {
+            conversation: asked.from.clone(),
+            seq: line.seq,
+            card,
+        },
+    );
+    Ok(
+        "Suggested on a card in this task. Nothing is kept unless they agree; carry on with \
+         the task."
+            .to_string(),
+    )
+}
+
+/// A suggestion of a teammate's, for the window to draw as it arrives.
+#[derive(Clone, Serialize)]
+struct LearningSuggested {
+    conversation: String,
+    seq: i64,
+    card: serde_json::Value,
+}
+
+/// The person's answer to a teammate's suggestion: kept, or not. Written onto
+/// the suggestion, so it reads the same when the task is opened again.
+#[tauri::command]
+async fn take_learning(
+    held: State<'_, Held>,
+    conversation: String,
+    seq: i64,
+    keep: bool,
+) -> Result<String, String> {
+    let fail = |e: anyhow::Error| e.to_string();
+    let line = held
+        .store
+        .lines(&conversation)
+        .map_err(fail)?
+        .into_iter()
+        .find(|l| l.seq == seq && l.kind == "learning")
+        .ok_or("there is no such suggestion here")?;
+    if let Some(already) = line.outcome {
+        return Ok(already);
+    }
+    let card: serde_json::Value = serde_json::from_str(&line.text).map_err(|e| e.to_string())?;
+    let agent = held
+        .store
+        .conversation(&conversation)
+        .map_err(fail)?
+        .map(|c| c.agent)
+        .ok_or("this task has no teammate")?;
+    let text = |k: &str| {
+        card.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let said = match (keep, card.get("kind").and_then(|v| v.as_str())) {
+        (false, _) => "Not kept.".to_string(),
+        (true, Some("checklist")) => {
+            let point = text("point");
+            let mut points = held.store.checklist(&agent).map_err(fail)?;
+            points.push(point.clone());
+            let now = chrono::Local::now().timestamp_millis();
+            held.store
+                .set_checklist(&agent, &points, now)
+                .map_err(fail)?;
+            tell_them_who_it_is(&held, &agent);
+            format!("Added to how it checks its work: {point}")
+        }
+        (true, Some("skill")) => {
+            let name = skill::a_name(&text("name")).map_err(fail)?;
+            let steps: Vec<skill::Step> =
+                serde_json::from_value(card.get("steps").cloned().unwrap_or_default())
+                    .map_err(|e| e.to_string())?;
+            let replaced = held
+                .store
+                .keep_skill(&agent, &name, &text("request"), &steps)
+                .map_err(fail)?;
+            match replaced {
+                true => format!("Kept as the skill {name}, in place of the one before."),
+                false => format!("Kept as the skill {name}."),
+            }
+        }
+        (true, _) => return Err("that is not a suggestion this app can keep".into()),
+    };
+    held.store
+        .settle_learning(&conversation, seq, &said)
+        .map_err(fail)?;
+    Ok(said)
+}
+
+/// Whether the task in this conversation could be kept as a skill: what was
+/// asked, and how many steps answered it. Nothing for a task that only
+/// talked, or for a run of a skill, which is a use of one and not a lesson.
+#[tauri::command]
+async fn could_keep(
+    held: State<'_, Held>,
+    conversation: String,
+) -> Result<Option<(String, usize)>, String> {
+    let fail = |e: anyhow::Error| e.to_string();
+    let runs_a_skill = held
+        .store
+        .conversation(&conversation)
+        .map_err(fail)?
+        .is_some_and(|c| skill::is_a_run(&c.name).is_some());
+    if runs_a_skill {
+        return Ok(None);
+    }
+    let lines = held.store.lines(&conversation).map_err(fail)?;
+    Ok(skill::from_lines(&lines).map(|t| (t.request, t.steps.len())))
+}
+
+/// Keep the task in this conversation as a skill, because the person said
+/// so. Their click is the yes, so a skill by that name is replaced.
+#[tauri::command]
+async fn keep_as_skill(
+    held: State<'_, Held>,
+    conversation: String,
+    name: String,
+) -> Result<String, String> {
+    let fail = |e: anyhow::Error| e.to_string();
+    let name = skill::a_name(&name).map_err(fail)?;
+    let agent = held
+        .store
+        .conversation(&conversation)
+        .map_err(fail)?
+        .map(|c| c.agent)
+        .ok_or("this task has no teammate")?;
+    let lines = held.store.lines(&conversation).map_err(fail)?;
+    let taught = skill::from_lines(&lines).ok_or(skill::NOTHING_TO_KEEP)?;
+    let replaced = held
+        .store
+        .keep_skill(&agent, &name, &taught.request, &taught.steps)
+        .map_err(fail)?;
+    Ok(match replaced {
+        true => format!("Kept as the skill {name}, in place of the one before."),
+        false => format!("Kept as the skill {name}. It can be run again from its card, or by typing / in the box."),
+    })
 }
 
 /// Everything this agent has been taught.
@@ -9012,6 +9248,9 @@ pub fn run() {
             checklist_of,
             set_checklist,
             what_they_bring,
+            take_learning,
+            could_keep,
+            keep_as_skill,
             seen,
             connect,
             seen_what_changed,

@@ -1289,6 +1289,8 @@ fn must_ask(asks: &str, name: &str, mine: Option<team::Ours>, worth_stopping_for
         // permission card in front of it, the one plan used to raise for every
         // team tool, offered exactly that "always".
         _ if mine == Some(team::Ours::OpenOutside) => false,
+        // Nor a suggestion: it keeps nothing, and its own card is the question.
+        _ if mine == Some(team::Ours::SuggestLearning) => false,
         // `auto` next, or it would not mean never: handing work to another
         // agent had its own default and quietly outranked the posture somebody
         // had chosen for this agent.

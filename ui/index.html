@@ -407,6 +407,26 @@
       </section>
 
       <!--
+        Finished: anything for the teammate to keep from it. Asked once, at the
+        moment somebody knows whether it went the way they wanted.
+      -->
+      <section id="task-learn" aria-label="Anything to keep" hidden>
+        <p id="learn-asks"></p>
+        <form id="learn-skill">
+          <label><span id="learn-skill-says">How it was done, as a skill to do again by name</span>
+            <input id="learn-skill-name" type="text" placeholder="weekly report" autocomplete="off" /></label>
+          <button type="submit">Keep as a skill</button>
+        </form>
+        <form id="learn-note">
+          <label>Something it should remember
+            <input id="learn-note-text" type="text" placeholder="The report goes to the shared folder, not by mail" autocomplete="off" /></label>
+          <button type="submit">Remember it</button>
+        </form>
+        <p id="learn-says"></p>
+        <button id="learn-done" type="button">Done</button>
+      </section>
+
+      <!--
         What the thread can reach, opened rather than always on screen: finding
         out means starting the servers to ask them, which takes seconds.
       -->

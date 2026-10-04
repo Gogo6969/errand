@@ -1048,6 +1048,7 @@ mod tests {
                 "keep_an_eye_on",
                 "over_to_you",
                 "open_outside",
+                "suggest_learning",
                 "who_else",
                 "save_skill",
                 "run_skill",
