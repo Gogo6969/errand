@@ -298,6 +298,47 @@ body { display: grid; grid-template-columns: 232px 1fr; }
 .job-group[data-state="working"] { --lane: var(--ink); }
 .job-group[data-state="stopped"] { --lane: var(--wrong); }
 .job-group[data-state="finished"] { --lane: var(--good); }
+/* Folded until somebody opens them: answered for someone else, and answered
+   but quiet for over a week. Their tiles are drawn but not shown. */
+.job-group.folds { padding-top: 10px; padding-bottom: 10px; }
+.job-group.folds:not(.open) .jobs { display: none; }
+#overview .job-group.folds h2 { gap: 10px; }
+#overview .job-group.folds h2::before { display: none; }
+.job-group .fold-group {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 2px 6px 2px 2px;
+  margin-left: -2px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  cursor: pointer;
+}
+.job-group .fold-group:hover { color: var(--ink); background: var(--hover); }
+.job-group .fold-group:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.job-group .fold-group svg { flex: none; color: var(--faint); transition: transform .12s ease; }
+.job-group.open .fold-group svg { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) { .job-group .fold-group svg { transition: none; } }
+.job-group .finish-all {
+  margin-left: auto;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.job-group .finish-all:hover { color: var(--ink); border-color: var(--edge); }
+.job-group .finish-all:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.job-group .finish-all[data-sure="true"] { color: var(--good); border-color: var(--good); }
 #overview .job-group h2 {
   display: flex;
   align-items: center;
@@ -1936,6 +1977,9 @@ body.catching #what { border-color: var(--accent); }
 }
 /* What it does, under its chip rather than under the fold. */
 #task-card .task-row dl { margin-left: 28px; }
+/* What to do with an answered task, under what it says, quietly. */
+#task-card .task-row .hint { margin: 0 0 0 28px; font-size: 12px; color: var(--ink-soft); }
+#task-card .task-row:not(.open) .hint { display: none; }
 /* Its name, which is somebody's to change: a control that reads as the name
    it is until the pointer is on it, and then as something to type into. */
 #task-card .name,

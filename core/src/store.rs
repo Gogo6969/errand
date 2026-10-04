@@ -2946,18 +2946,23 @@ impl Store {
         self.every_conversation()
     }
 
-    /// The first thing the person said in each task, by task.
+    /// The first thing asked in each task, by task.
     ///
     /// What a task is called when nobody named it: most first conversations are
-    /// called "First", which says nothing about what was asked in them.
+    /// called "First", which says nothing about what was asked in them. Asked
+    /// in the window, or from a terminal or by another teammate, which come in
+    /// marked as asked by an agent: a task asked from a terminal said "Nothing
+    /// asked yet" over the very request it was answering. Not the clock's or a
+    /// watch's: those repeat a job, they do not ask one.
     pub fn first_things_said(&self) -> Result<HashMap<String, String>> {
         let conn = self.conn.lock().unwrap();
         let mut q = conn.prepare(
             "SELECT l.conversation, l.text FROM lines AS l
-              WHERE l.kind = 'mine' AND l.said_by IS NULL
+              WHERE l.kind = 'mine' AND (l.said_by IS NULL OR l.said_by = 'agent')
                 AND l.seq = (SELECT min(seq) FROM lines AS m
                               WHERE m.conversation = l.conversation
-                                AND m.kind = 'mine' AND m.said_by IS NULL)",
+                                AND m.kind = 'mine'
+                                AND (m.said_by IS NULL OR m.said_by = 'agent'))",
         )?;
         let rows = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -4160,6 +4165,23 @@ mod tests {
             Some("Check the drive every hour")
         );
         assert!(s.tasks_with_words().unwrap().contains(&task.id));
+
+        // Asked from a terminal or by another teammate: what was asked is
+        // still what it is called by. The clock repeating a job is not asking.
+        s.begin_conversation("from-outside", &task.agent, "Asked from the terminal")
+            .unwrap();
+        s.asked_by("from-outside", "Check the disk space now", Some("agent"))
+            .unwrap();
+        s.begin_conversation("on-the-clock", &task.agent, "Morning")
+            .unwrap();
+        s.asked_by("on-the-clock", "Write the pulse file", Some("clock"))
+            .unwrap();
+        let first = s.first_things_said().unwrap();
+        assert_eq!(
+            first.get("from-outside").map(String::as_str),
+            Some("Check the disk space now")
+        );
+        assert!(!first.contains_key("on-the-clock"), "{first:?}");
     }
 
     #[test]

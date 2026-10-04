@@ -22,7 +22,7 @@ export const STATES = [
   // Its errand is done and nothing of it is running, waiting or due: answered,
   // by its own account. Finished is the person's word, and is its own group:
   // answered is what the agent says, finished what they do.
-  ["idle", "Answered, not marked finished"],
+  ["idle", "Answered, yours to check"],
   ["paused", "Paused"],
   ["finished", "Finished"],
 ];
@@ -259,4 +259,35 @@ export function setsUpAJob(asked) {
  */
 export function aNameFrom(first, job) {
   return headline(job && setsUpAJob(first) ? job : first);
+}
+
+/** How long an answered task of the person's waits before it is called quiet. */
+export const QUIET_AFTER_DAYS = 7;
+
+/**
+ * Whether somebody other than the person asked for a task: another teammate,
+ * a script, or something outside. It has had its answer, and nothing is
+ * waiting on the person to finish it. Words typed at a terminal are the
+ * person's own.
+ *
+ * @param t the task: its name, the first thing asked in it, and askedBy, the
+ *   task that asked for it when another teammate did
+ */
+export function askedForByOthers(t) {
+  if (t.askedBy) return true;
+  const by = askedBy(t.name);
+  if (by) return by !== "the terminal";
+  return /^[^:\n]{1,40} asks: /.test(t.first || "");
+}
+
+/**
+ * Where an answered task goes in Now: the person's to check, somebody else's,
+ * or the person's but quiet for over a week. "Answered, not marked finished"
+ * held all three, and thirty-odd leftovers from other teammates and from
+ * weeks ago buried the few the person had asked for themselves.
+ */
+export function answeredAs(t, now) {
+  if (askedForByOthers(t)) return "others";
+  if (now - (t.spoke || 0) > QUIET_AFTER_DAYS * 86_400_000) return "quiet";
+  return "yours";
 }

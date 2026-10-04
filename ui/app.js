@@ -18,7 +18,7 @@ window.addEventListener("error", (e) => complain(e.message));
 window.addEventListener("unhandledrejection", (e) => complain(String(e.reason)));
 
 import { tile, forTool, kindOf } from "./icons.js";
-import { STATES, SHOWING, shown, stateOf, chipOf, byState as inStateOrder, stillInTheList, inOrder, byTeammate, aMadeUpName, askedBy, aNameFrom } from "./jobs.js";
+import { STATES, SHOWING, shown, stateOf, chipOf, byState as inStateOrder, stillInTheList, inOrder, byTeammate, aMadeUpName, askedBy, aNameFrom, answeredAs, askedForByOthers } from "./jobs.js";
 import { render, reachTheAppWith } from "./markdown.js";
 import { toSay, worthSaying } from "./speech.js";
 
@@ -1524,6 +1524,19 @@ function taskRow(t, { here = false, going, alone }) {
     facts.append(...saidAtLength("Last", lastWords));
   }
   row.append(head, facts);
+  // Answered, with nothing running from it: what to do with it, said. A card
+  // that only said "Answered" left somebody asking whether anything still
+  // relied on it.
+  // Not while it works toward a goal: something does run from that.
+  if (state.kind === "idle" && !t.aim) {
+    let hint = "Nothing runs from this task, and nothing waits on it. Mark it finished once you have what you needed.";
+    if (askedForByOthers({ ...task, name: t.name })) {
+      const who = askedBy(t.name);
+      const asker = who ? who[0].toUpperCase() + who.slice(1) : "Another teammate";
+      hint = `${asker} asked for this and has had its answer. Nothing waits on it: mark it finished whenever you like.`;
+    }
+    row.append(note("p", hint, "hint"));
+  }
   return row;
 }
 
@@ -7607,6 +7620,8 @@ function asTask(c) {
     priority: c.priority || 2,
     finished: c.finished_at || null,
     spoke: c.spoke_at || 0,
+    // The task that asked for this one, when another teammate did.
+    askedBy: c.asked_by || null,
   };
 }
 
@@ -7986,11 +8001,26 @@ function drawOverview() {
   if (el.overviewGroup.value !== "state") {
     groups = byTeammate(everyone).map(([who, list]) => [null, who, list]);
   } else {
-    groups = STATES.map(([state, label]) => [
-      state,
-      label,
-      everyone.filter((t) => doing.get(t.id)[0] === state),
-    ]);
+    // Answered is three groups: the person's to check, somebody else's, and
+    // the person's but quiet for over a week. The last two are folded away
+    // above Finished, each with a way to mark the lot finished.
+    const now = Date.now();
+    const answered = (as) =>
+      everyone.filter((t) => doing.get(t.id)[0] === "idle" && answeredAs(t, now) === as);
+    groups = [];
+    for (const [state, label] of STATES) {
+      if (state === "idle") {
+        groups.push([state, label, answered("yours")]);
+        continue;
+      }
+      if (state === "finished") {
+        groups.push(
+          ["idle-others", "Answered for someone else", answered("others")],
+          ["idle-quiet", "Answered, quiet for over a week", answered("quiet")],
+        );
+      }
+      groups.push([state, label, everyone.filter((t) => doing.get(t.id)[0] === state)]);
+    }
   }
 
   const drawn = groups
@@ -8002,7 +8032,29 @@ function drawOverview() {
       const head = document.createElement("h2");
       const count = note("span", String(list.length), "count");
       count.title = `${list.length} ${list.length === 1 ? "task" : "tasks"}`;
-      head.append(note("span", label, "label"), count);
+      if (FOLDED_IN_NOW.has(state)) {
+        // Folded until somebody opens it: its name and how many, and the one
+        // thing anybody does with a pile like this.
+        const open = nowGroupsOpen.has(state);
+        group.classList.add("folds");
+        if (open) group.classList.add("open");
+        const fold = document.createElement("button");
+        fold.type = "button";
+        fold.className = "fold-group";
+        fold.setAttribute("aria-expanded", String(open));
+        fold.title = open ? "Fold these away" : "Show them";
+        fold.innerHTML =
+          '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        fold.append(note("span", label, "label"), count);
+        fold.onclick = () => {
+          if (open) nowGroupsOpen.delete(state);
+          else nowGroupsOpen.add(state);
+          drawOverview();
+        };
+        head.append(fold, finishingAll(state, list));
+      } else {
+        head.append(note("span", label, "label"), count);
+      }
       const tiles = document.createElement("div");
       tiles.className = "jobs";
       // What is next, soonest first: it is the one order a list of what is
@@ -8019,6 +8071,66 @@ function drawOverview() {
       ? "No tasks like that just now."
       : "No tasks yet. Give a teammate something to do.";
   el.overviewTiles.replaceChildren(...(drawn.length ? drawn : [note("p", nothing, "quiet")]));
+}
+
+/** The groups in Now that start folded, and which of them somebody opened. */
+const FOLDED_IN_NOW = new Set(["idle-others", "idle-quiet"]);
+const nowGroupsOpen = new Set();
+
+/** Which group's Mark all finished was pressed once, and when: it asks first. */
+let sureAboutAll = null;
+
+/**
+ * Mark all finished, for a folded group: asked once on the button itself, the
+ * way deleting is, because it is thirty tasks at a time. Each can be opened
+ * again from Finished.
+ */
+function finishingAll(state, list) {
+  const sure = sureAboutAll?.state === state && Date.now() - sureAboutAll.at < 8000;
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "finish-all";
+  b.dataset.sure = String(sure);
+  b.textContent = sure ? `Mark ${list.length} finished?` : "Mark all finished";
+  b.title = sure
+    ? "Press again to mark every one of them finished. Each can be opened again from Finished."
+    : `Mark all ${list.length} finished: they move to Finished, and each can be opened again`;
+  b.onclick = async () => {
+    if (!sure) {
+      sureAboutAll = { state, at: Date.now() };
+      drawOverview();
+      return;
+    }
+    sureAboutAll = null;
+    await finishThemAll(list);
+  };
+  return b;
+}
+
+/** Mark several tasks finished at once, here and in the app. */
+async function finishThemAll(list) {
+  const at = Date.now();
+  const set = (t, when) => {
+    t.finished = when;
+    const held = talks.get(t.id);
+    if (held) held.finished = when;
+    for (const one of tasksNow) if (one.id === t.id) one.finished = when;
+  };
+  for (const t of list) set(t, at);
+  drawTalks();
+  drawThreads();
+  if (!el.overview.hidden) drawOverview();
+  const failed = [];
+  await Promise.all(
+    list.map((t) => invoke("finish_task", { id: t.id, finished: true }).catch(() => failed.push(t))),
+  );
+  if (failed.length) {
+    for (const t of failed) set(t, null);
+    drawTalks();
+    drawThreads();
+    if (!el.overview.hidden) drawOverview();
+    complain(`${failed.length} of them could not be marked finished.`);
+  }
 }
 
 /** One task, as a tile, with its teammate on it. */

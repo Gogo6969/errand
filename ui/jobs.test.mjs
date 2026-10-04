@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { STATES, SHOWING, shown, stateOf, chipOf, byState, stillInTheList, inOrder, byTeammate, headline, aMadeUpName, askedBy, setsUpAJob, aNameFrom } from "./jobs.js";
+import { STATES, SHOWING, shown, stateOf, chipOf, byState, stillInTheList, inOrder, byTeammate, headline, aMadeUpName, askedBy, setsUpAJob, aNameFrom, askedForByOthers, answeredAs } from "./jobs.js";
 
 const day = 86_400_000;
 const job = (id, more = {}) => ({ id, name: id, title: "", priority: 2, spoke: 0, finished: null, paused: false, ...more });
@@ -208,4 +208,22 @@ test("a name does not end on a dash left hanging", () => {
   );
   assert.equal(headline("Check the drive -"), "Check the drive");
   assert.equal(headline("Clean up the downloads folder \u2013 keep anything from this week"), "Clean up the downloads folder");
+});
+
+test("an answered task is the person's to check, somebody else's, or quiet", () => {
+  const now = 100 * day;
+  // Another teammate asked for it: theirs, whatever it was renamed to.
+  assert.equal(answeredAs({ name: "Weekly copy", askedBy: "talk-9", spoke: now }, now), "others");
+  assert.equal(answeredAs({ name: "Asked by Crew Chief", spoke: now }, now), "others");
+  // A script, or something outside: theirs too, by its name or its first words.
+  assert.equal(answeredAs({ name: "Asked by something outside", spoke: now }, now), "others");
+  assert.equal(answeredAs({ name: "First", first: "something outside asks: list the files", spoke: now }, now), "others");
+  // Typed at a terminal is the person's own.
+  assert.equal(answeredAs({ name: "Asked from the terminal", spoke: now - day }, now), "yours");
+  assert.equal(askedForByOthers({ name: "Asked from the terminal" }), false);
+  // The person's own: to check, until it has been quiet for over a week.
+  assert.equal(answeredAs({ name: "Plan the trip", spoke: now - 2 * day }, now), "yours");
+  assert.equal(answeredAs({ name: "Plan the trip", spoke: now - 8 * day }, now), "quiet");
+  // Somebody else's stays theirs however old.
+  assert.equal(answeredAs({ name: "Asked by Clip Scribe", spoke: now - 30 * day }, now), "others");
 });

@@ -7292,3 +7292,102 @@ export async function aTaskSaysAllOfWhatItDoes() {
   }
   return found;
 }
+
+/**
+ * Answered, in Now, is three groups: the person's to check, somebody else's,
+ * and the person's but quiet for over a week. One group held all three, and
+ * leftovers from other teammates and from weeks ago buried the few the person
+ * had asked for themselves.
+ */
+export async function answeredIsThreeGroups() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const kept = { room: FIXTURE.tasks["talk-room"], cut: FIXTURE.tasks["talk-cut-off"] };
+  // One the person asked an hour ago, and one another teammate asked for.
+  FIXTURE.tasks["talk-room"] = { ...(kept.room || {}), spoke_at: Date.now() - 3600000, finished_at: null };
+  FIXTURE.tasks["talk-cut-off"] = { ...(kept.cut || {}), asked_by: "talk-2", spoke_at: Date.now() - 3600000, finished_at: null };
+  ["talk-room", "talk-cut-off"].forEach((id, n) => tell("happened", { conversation: id, seq: 9890 + n, kind: "done" }));
+  // Read again, as the window does when the app says what changed.
+  tell("task_made", { conversation: "talk-room", agent: "agent-bitcoin", name: "Bitcoin room" });
+  await wait(250);
+  // On its card: what to do with an answered task, and whether anything waits on it.
+  const hint = () => document.querySelector("#task-card .task-row.here .hint")?.textContent || "";
+  await openTalk("talk-room");
+  check("an answered task of yours says nothing waits on it, and to mark it finished", /nothing waits on it/i.test(hint()) && /Mark it finished/.test(hint()), hint() || "no hint");
+  // talk-cut-off is the fixture's one task with a goal: that runs from it.
+  await openTalk("talk-cut-off");
+  check("one working toward a goal says nothing waits on it", !hint(), hint() || "no hint");
+  const goalWas = FIXTURE.goalIn;
+  FIXTURE.goalIn = "nobody";
+  await openTalk("talk-room");
+  await openTalk("talk-cut-off");
+  check("one another teammate asked for says it has had its answer", /asked for this and has had its answer/.test(hint()), hint() || "no hint");
+  FIXTURE.goalIn = goalWas;
+  await openTalk("talk-2");
+  check("and one that runs on its own says nothing of the kind", !hint(), hint() || "no hint");
+  document.getElementById("overview-open").click();
+  await wait(700);
+  const groupOf = (id) => document.querySelector(`#overview-tiles .job[data-task="${id}"]`)?.closest(".job-group")?.dataset.state;
+  const group = (state) => document.querySelector(`#overview-tiles .job-group[data-state="${state}"]`);
+  check("one you asked for, answered lately, is yours to check", groupOf("talk-room") === "idle", groupOf("talk-room"));
+  check(
+    "called that, rather than 'not marked finished'",
+    /^Answered, yours to check/.test(group("idle")?.querySelector("h2")?.textContent || ""),
+    group("idle")?.querySelector("h2")?.textContent,
+  );
+  check("one another teammate asked for is answered for someone else", groupOf("talk-cut-off") === "idle-others", groupOf("talk-cut-off"));
+  const quiet = group("idle-quiet");
+  check("and old ones of yours are quiet for over a week", quiet && quiet.querySelectorAll(".job").length >= 1, quiet ? `${quiet.querySelectorAll(".job").length} quiet` : "no group");
+  const states = [...document.querySelectorAll("#overview-tiles .job-group")].map((g) => g.dataset.state);
+  check(
+    "those two come after the others, just above Finished",
+    states.indexOf("idle-others") > states.indexOf("idle") && states.indexOf("idle-quiet") > states.indexOf("idle-others") &&
+      (states.indexOf("finished") < 0 || states.indexOf("finished") > states.indexOf("idle-quiet")),
+    states.join(", "),
+  );
+  const others = group("idle-others");
+  const fold = () => others.querySelector(".fold-group");
+  if (beingDrawn()) {
+    check(
+      "folded until somebody opens them, saying how many",
+      fold()?.getAttribute("aria-expanded") === "false" && getComputedStyle(others.querySelector(".jobs")).display === "none" && Number(others.querySelector(".count")?.textContent) >= 1,
+      `${fold()?.getAttribute("aria-expanded")} ${others.querySelector(".count")?.textContent}`,
+    );
+  }
+  fold().click();
+  await wait(200);
+  check(
+    "and opening one shows its tasks",
+    group("idle-others")?.classList.contains("open") && group("idle-others").querySelector(".fold-group")?.getAttribute("aria-expanded") === "true",
+    group("idle-others")?.className,
+  );
+  group("idle-others").querySelector(".fold-group").click();
+  await wait(200);
+
+  // Mark all finished: asked once, then every one of them.
+  const quietIds = [...group("idle-quiet").querySelectorAll(".job")].map((j) => j.dataset.task);
+  const finishes = () => asked.filter((a) => a.name === "finish_task" && a.args?.finished === true).length;
+  const before = finishes();
+  group("idle-quiet").querySelector(".finish-all").click();
+  await wait(200);
+  const all = group("idle-quiet")?.querySelector(".finish-all");
+  check(
+    "Mark all finished asks first, on the button",
+    all?.dataset.sure === "true" && /^Mark \d+ finished\?$/.test(all.textContent) && finishes() === before,
+    all?.textContent || "no button",
+  );
+  all.click();
+  await wait(500);
+  check(
+    "and the second press finishes every one of them",
+    finishes() - before === quietIds.length && !group("idle-quiet") &&
+      quietIds.every((id) => group("finished")?.querySelector(`.job[data-task="${id}"]`)),
+    `${finishes() - before} of ${quietIds.length} finished`,
+  );
+  document.getElementById("overview-done").click();
+  await wait(200);
+  FIXTURE.tasks["talk-room"] = kept.room;
+  FIXTURE.tasks["talk-cut-off"] = kept.cut;
+  return found;
+}
