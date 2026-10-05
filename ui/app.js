@@ -392,6 +392,7 @@ const el = {
   whoisSave: document.getElementById("whois-save"),
   whoisNew: document.getElementById("whois-new"),
   whoisLocal: document.getElementById("whois-local"),
+  whoisModel: document.getElementById("whois-model"),
   wordsGo: document.getElementById("words-go"),
   localModel: document.getElementById("local-model"),
   notificationsSays: document.getElementById("notifications-says"),
@@ -2036,6 +2037,9 @@ function asAgent(a, keeping) {
     spoke: a.spoke_at || 0,
     // Its words stay on this network: it runs only on a model served here.
     keepLocal: !!a.keep_local,
+    // A model of its own, a line of the picker, over Errand's. Nothing to
+    // follow Errand's.
+    ownModel: a.own_model || null,
   };
 }
 
@@ -4568,7 +4572,7 @@ el.engine.addEventListener("change", async () => {
     errandModel = choice.id;
     drawWordsGo();
     // When it takes effect, said plainly: nobody is cut off mid-task by it.
-    el.errandModelSays.textContent = `Every teammate now works on ${choice.name}. One in the middle of something finishes on the model it started with.`;
+    el.errandModelSays.textContent = `Every teammate now works on ${choice.name}, except one given a model of its own. One in the middle of something finishes on the model it started with.`;
   } catch (why) {
     el.errandModelSays.textContent = String(why);
   }
@@ -4779,7 +4783,7 @@ async function drawTheServers() {
   // Said rather than left blank: a section that is silently absent looks like
   // an engine that brought nothing, which for Claude Code is untrue by about
   // sixty skills.
-  const engine = whose()?.on || "claude";
+  const engine = whose()?.runsOn || whose()?.on || "claude";
   const nothingYet =
     engine !== "local" && lists.every(([which]) => !(kit[which] || []).length);
 
@@ -4921,6 +4925,7 @@ el.name.addEventListener("click", () => {
   el.whoisAbout.value = t.about;
   el.whoisNew.hidden = t.name !== NOT_YET_NAMED;
   el.whoisLocal.checked = !!t.keepLocal;
+  drawOwnModel();
   el.whois.hidden = false;
   el.whoisName.focus();
   drawHome();
@@ -5135,7 +5140,11 @@ async function drawLimit() {
     el.limitSays.textContent = String(why);
     return;
   }
-  const inDollars = a.on === "claude";
+  // By the model it actually runs on, which its own or Errand's may have
+  // chosen, rather than the engine it was first put on.
+  const where = await invoke("where_words_go", { id: a.id }).catch(() => null);
+  if (where?.engine) a.runsOn = where.engine;
+  const inDollars = (a.runsOn || a.on) === "claude";
   const set = inDollars ? seen.dollars : seen.tokens;
   const said = set == null ? "none" : inDollars ? `$${set}` : tokensSaid(set);
   el.limitSummary.textContent = `Monthly limit: ${said}`;
@@ -5159,7 +5168,7 @@ el.limitForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const a = whose();
   if (!a) return;
-  const inDollars = a.on === "claude";
+  const inDollars = (a.runsOn || a.on) === "claude";
   const amount = anAmount(el.limitValue.value);
   if (Number.isNaN(amount)) {
     el.limitSays.textContent = inDollars ? "Say it in dollars, like 20." : "Say it in tokens, like 5M or 500k.";
@@ -7869,22 +7878,87 @@ async function drawWordsGo() {
   // Somebody went on to another teammate while this was being asked.
   if (whose() !== a || !where) return;
   const kept = a.keepLocal ? "Kept local: " : "";
+  // Whose choice the model is: its own, Errand's for everybody, or the local
+  // one standing in because the other would send its words away.
+  const why = {
+    itself: " (its own)",
+    errand: "",
+    local: " (the Local model, since it is kept local)",
+    before: "",
+  }[where.by] ?? "";
+  a.runsOn = where.engine || a.on;
   if (where.refused) {
     el.wordsGo.dataset.state = "refused";
-    el.wordsGo.textContent = "Kept local, and there is nothing local to run it on. Choose a Local model in Settings.";
+    el.wordsGo.textContent =
+      "Kept local, and there is nothing local to run it on. Choose a local model for it under Who this is, or a Local model in Settings.";
     el.wordsGo.title = where.refused;
   } else if (where.stays) {
     el.wordsGo.dataset.state = "here";
-    el.wordsGo.textContent = `${kept}its words stay on your network \u00b7 ${where.model}`;
+    el.wordsGo.textContent = `${kept}its words stay on your network \u00b7 ${where.model}${why}`;
     el.wordsGo.title = "What it is told, and everything it reads for you, stays on this Mac and your network.";
   } else {
     el.wordsGo.dataset.state = "away";
-    el.wordsGo.textContent = `Its words leave your network \u00b7 ${where.model}`;
+    el.wordsGo.textContent = `Its words leave your network \u00b7 ${where.model}${why}`;
     el.wordsGo.title =
       "What it is told, and everything it reads for you, goes to this model's servers. Keep it local under Who this is.";
   }
   el.wordsGo.hidden = false;
 }
+
+/**
+ * The model the teammate on screen works on: Errand's, unless it has one of
+ * its own. The same answering models Settings offers, and for one kept local
+ * only those served here, because the app refuses the rest for it anyway.
+ */
+async function drawOwnModel() {
+  const a = whose();
+  if (!a) return;
+  const choices = await whatCouldAnswer().catch(() => []);
+  // Errand's model as it is now, asked rather than remembered: it may have
+  // been chosen since this window last read it.
+  const errandNow = (await invoke("setting", { key: "errand_model" }).catch(() => null)) || errandModel;
+  if (whose() !== a) return;
+  const mine = a.ownModel;
+  const errands = choices.find((c) => c.id === errandNow);
+  const follow = document.createElement("option");
+  follow.value = "";
+  follow.textContent = errands ? `Errand's model \u00b7 ${errands.name}` : "Errand's model";
+  follow.selected = !mine;
+  const offered = choices
+    .filter((c) => c.id === mine || answersLately(c.id))
+    .filter((c) => c.id === mine || !a.keepLocal || c.here);
+  const own = offered.map((c) => {
+    const option = document.createElement("option");
+    option.value = c.id;
+    option.textContent =
+      c.id === mine && answeredLast.get(c.id) === false ? `${c.name} \u00b7 not answering` : c.name;
+    option.selected = c.id === mine;
+    return option;
+  });
+  el.whoisModel.replaceChildren(follow, ...own);
+  if (mine && !choices.some((c) => c.id === mine)) {
+    const gone = document.createElement("option");
+    gone.value = mine;
+    gone.selected = true;
+    gone.textContent = "Its model \u00b7 not in the list";
+    el.whoisModel.append(gone);
+  }
+}
+
+el.whoisModel.addEventListener("change", async () => {
+  const a = whose();
+  if (!a) return;
+  const now = el.whoisModel.value || null;
+  try {
+    await invoke("own_model", { id: a.id, model: now });
+    a.ownModel = now;
+  } catch (why) {
+    complain(String(why));
+  }
+  drawOwnModel();
+  drawWordsGo();
+  drawLimit();
+});
 
 el.whoisLocal.addEventListener("change", async () => {
   const a = whose();
@@ -7898,6 +7972,7 @@ el.whoisLocal.addEventListener("change", async () => {
     complain(String(why));
   }
   drawWordsGo();
+  drawOwnModel();
 });
 
 /** Whether macOS lets Errand say when an errand finishes, and the way to its switch. */
@@ -8570,6 +8645,8 @@ function personRow(a, more) {
   const brought = bringsNow.get(a.id);
   if (brought) {
     const said = [];
+    // A model of its own, which is part of what it brings to a team.
+    if (brought.own) said.push(`On ${brought.own}`);
     if (brought.skills.length) said.push(`Skills: ${brought.skills.join(", ")}`);
     if (brought.checks) said.push(`checks its work against ${brought.checks} ${brought.checks === 1 ? "point" : "points"}`);
     const brings = document.createElement("span");
@@ -8618,7 +8695,9 @@ async function drawTeams() {
   }
   try {
     const brought = (await invoke("what_they_bring")) || [];
-    bringsNow = new Map(brought.map(([id, skills, checks]) => [id, { skills: skills || [], checks: checks || 0 }]));
+    bringsNow = new Map(
+      brought.map(([id, skills, checks, own]) => [id, { skills: skills || [], checks: checks || 0, own: own || null }]),
+    );
   } catch {
     bringsNow = new Map();
   }
@@ -9359,7 +9438,8 @@ async function drawChosen() {
       const out = document.createElement("button");
       out.type = "button";
       out.textContent = "Remove";
-      out.title = "Take it out of the picker. Anything already set to it goes on using it.";
+      out.title =
+        "Take it out of the picker. A teammate given it as its own model goes back to Errand's model; if it is Errand's model, choose another.";
       out.onclick = async () => {
         await invoke("stop_offering", { id: one.id });
         thePickerHasChanged();

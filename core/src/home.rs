@@ -182,9 +182,24 @@ pub fn render(store: &Store, agent: &Agent, team: &str) -> Result<BTreeMap<Strin
     if !team.is_empty() {
         card.push_str(&format!("Team: {team}\n"));
     }
+    // The model chosen for it, or Errand's, said as the choice it is: which
+    // model that is today is the app's to work out, and the card is written
+    // when the teammate changes, not when Settings do.
+    let model = agent
+        .own_model
+        .as_deref()
+        .and_then(|id| {
+            store
+                .offered()
+                .ok()?
+                .into_iter()
+                .find(|o| o.id == id)
+                .map(|o| format!("{} (its own)", o.label))
+        })
+        .unwrap_or_else(|| "Errand's model".to_string());
     card.push_str(&format!(
-        "Runs on: {}\nAsks: {}\nWorks in: {}\n",
-        agent.engine, agent.asks, agent.cwd
+        "Model: {model}\nAsks: {}\nWorks in: {}\n",
+        agent.asks, agent.cwd
     ));
     files.insert(CARD.to_string(), card);
 

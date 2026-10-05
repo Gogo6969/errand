@@ -645,11 +645,14 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         }
         _ => {
             let asks = known.as_ref().map_or("ask", |a| a.asks.as_str());
-            // The store's flag, or the transcript itself, whichever says yes.
-            // They disagree after an engine change, which clears the flag but
-            // cannot clear the file, and starting as new against a session that
-            // exists is a failure the agent never recovers from.
-            let again = again || errand_core::claude::already_going(&id, &home);
+            // Whether Claude Code has a session to pick up, from the
+            // transcript itself. The store's flag says the conversation ran,
+            // not that it ran here: one that ran on a local model has no
+            // session, and resuming one that does not exist failed its first
+            // turn and lost what was said. Starting as new against one that
+            // does exist fails the other way, so the file decides.
+            let ran_elsewhere = again && !errand_core::claude::already_going(&id, &home);
+            let again = errand_core::claude::already_going(&id, &home);
             // Three ways in, and the third only ever happens once. A
             // conversation that carries on from another is forked from it on
             // its first launch and is an ordinary conversation for ever after.
@@ -669,8 +672,15 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             // from. Appended to the steering rather than said as a first
             // message, so it never appears in the window as something somebody
             // typed.
+            // And for one that ran on another model until now, what was said
+            // there, the way a local model is handed what it missed.
             let carried = match carrying {
                 Some(c) if c.carries_on_at.is_some() => held
+                    .store
+                    .lines(&id)
+                    .map(|lines| keeping::as_a_reminder(&lines))
+                    .unwrap_or_default(),
+                _ if ran_elsewhere => held
                     .store
                     .lines(&id)
                     .map(|lines| keeping::as_a_reminder(&lines))
@@ -678,13 +688,12 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 _ => String::new(),
             };
             let knows = knows.clone().carrying(&carried);
-            // Which model, if this agent was put on one. Held in the same
-            // column a local engine keeps its whole settings blob in, because
-            // for Claude the entire setting is one word.
-            let model: Option<String> = known
-                .as_ref()
-                .and_then(|a| a.engine_settings.clone())
-                .filter(|m| !m.trim().is_empty());
+            // Which model: the one chosen, as the picker line has it, one
+            // word for Claude. Taken from the agent's own old column until
+            // now, so "Claude - Opus" chosen in Settings ran the default.
+            let model: Option<String> = settings
+                .clone()
+                .filter(|m| !m.trim().is_empty() && !m.trim_start().starts_with('{'));
             // A socket of this conversation's own, so that the two tools the
             // local engine gets in process are reachable by an engine that
             // runs outside it. Which conversation is asking is the socket,
@@ -1346,27 +1355,7 @@ async fn say_as(
     // Refused here too, before a word of it is written down, when a teammate
     // kept local has nothing local to run on.
     let for_it = the_model_for(&held, whose.as_ref(), fallback)?;
-    if the_model_now(&held).is_some() || whose.as_ref().is_some_and(|a| a.keep_local) {
-        let (engine, settings) = for_it;
-        let now = model_key(&engine, settings.as_deref());
-        let stale = held
-            .opened_with
-            .lock()
-            .unwrap()
-            .get(&id)
-            .is_some_and(|was| *was != now);
-        if stale && !mid_turn(&held, &id) {
-            // The old engine's last events are not this turn's: without this
-            // its reader, still current, read the closing as this turn dying.
-            *held.opening.lock().unwrap().entry(id.clone()).or_insert(0) += 1;
-            held.opened_with.lock().unwrap().remove(&id);
-            held.doorways.lock().unwrap().remove(&id);
-            let was = held.live.lock().unwrap().remove(&id);
-            if let Some(mut was) = was {
-                let _ = was.stop();
-            }
-        }
-    }
+    close_if_on_another_model(&held, &id, &for_it);
     if !held.live.lock().unwrap().contains_key(&id) {
         open_thread(app.clone(), held.clone(), id.clone()).await?;
     }
@@ -1395,6 +1384,38 @@ async fn say_as(
         .ok_or_else(|| "that conversation is not open".to_string())?;
     thread.say(&text, &pictures).map_err(|e| e.to_string())?;
     Ok(Some(written.seq))
+}
+
+/// Close an idle engine opened on another model than the one chosen now, so
+/// the next thing said opens it on this one.
+///
+/// Whatever changed: Errand's model, the teammate's own, its keeping local,
+/// or the picker line itself. Only between tasks: one in the middle of
+/// something finishes on the model it began on.
+fn close_if_on_another_model(held: &Held, id: &str, now: &Model) {
+    let now = model_key(&now.0, now.1.as_deref());
+    let stale = held
+        .opened_with
+        .lock()
+        .unwrap()
+        .get(id)
+        .is_some_and(|was| *was != now);
+    if stale && !mid_turn(held, id) {
+        // The old engine's last events are not this turn's: without this its
+        // reader, still current, read the closing as this turn dying.
+        *held
+            .opening
+            .lock()
+            .unwrap()
+            .entry(id.to_string())
+            .or_insert(0) += 1;
+        held.opened_with.lock().unwrap().remove(id);
+        held.doorways.lock().unwrap().remove(id);
+        let was = held.live.lock().unwrap().remove(id);
+        if let Some(mut was) = was {
+            let _ = was.stop();
+        }
+    }
 }
 
 /// What the lead is told about a task given to its team.
@@ -4179,13 +4200,22 @@ fn nobody_would_be_asked(app: &AppHandle, job: &str, from: &str, args: &serde_js
     // the same way and can have been set by the agent itself.
     let they_said =
         errand_core::connectors::what_they_typed(&held.store.lines(from).unwrap_or_default());
-    errand_core::connectors::refused_without_asking(
-        &agent.engine,
-        &agent.asks,
-        job,
-        args,
-        &they_said,
-    )
+    // The engine actually running this turn, not the column it was put on
+    // before: a teammate moved onto Claude by Errand's model, or by a model
+    // of its own, is a Claude errand whatever that column says.
+    let engine = held
+        .opened_with
+        .lock()
+        .unwrap()
+        .get(from)
+        .and_then(|key| key.split('|').next().map(str::to_string))
+        .unwrap_or_else(|| {
+            let before = (agent.engine.clone(), agent.engine_settings.clone());
+            the_model_for(&held, Some(&agent), before)
+                .map(|(engine, _)| engine)
+                .unwrap_or_else(|_| agent.engine.clone())
+        });
+    errand_core::connectors::refused_without_asking(&engine, &agent.asks, job, args, &they_said)
 }
 
 /// Where some words were actually found, line by line.
@@ -5216,13 +5246,17 @@ async fn set_checklist(
 /// What each teammate brings, for the Teams page: the skills it has been
 /// taught, by name, and how many points it checks its work against.
 #[tauri::command]
-async fn what_they_bring(
-    held: State<'_, Held>,
-) -> Result<Vec<(String, Vec<String>, usize)>, String> {
+async fn what_they_bring(held: State<'_, Held>) -> Result<Vec<Brings>, String> {
     let everybody = held.store.agents().map_err(|e| e.to_string())?;
+    let offered = held.store.offered().unwrap_or_default();
     Ok(everybody
         .into_iter()
         .map(|a| {
+            // Its own model, by the picker's name for it, when it has one.
+            let own = a
+                .own_model
+                .as_deref()
+                .and_then(|id| offered.iter().find(|o| o.id == id).map(|o| o.label.clone()));
             let skills = held
                 .store
                 .skills(&a.id)
@@ -5231,10 +5265,14 @@ async fn what_they_bring(
                 .map(|s| s.name)
                 .collect();
             let checks = held.store.checklist(&a.id).unwrap_or_default().len();
-            (a.id, skills, checks)
+            (a.id, skills, checks, own)
         })
         .collect())
 }
+
+/// What one teammate brings to a team: its id, the skills it was taught, how
+/// many points it checks its work against, and its own model, by name.
+type Brings = (String, Vec<String>, usize, Option<String>);
 
 /// Every teammate's app that starts at login, for Settings.
 #[tauri::command]
@@ -6525,6 +6563,24 @@ async fn answer_from(
     words: String,
     attached: Option<Vec<String>>,
 ) -> anyhow::Result<Came> {
+    // An idle engine kept from an earlier round, on a model since changed, is
+    // closed first: opening returns the one already there, and the busy mark
+    // below would keep `say_as` from swapping it.
+    {
+        let held: State<Held> = app.state();
+        let agent = held
+            .store
+            .conversation(talk)
+            .ok()
+            .flatten()
+            .and_then(|c| held.store.agent(&c.agent).ok().flatten());
+        if let Some(agent) = agent {
+            let before = (agent.engine.clone(), agent.engine_settings.clone());
+            if let Ok(now) = the_model_for(&held, Some(&agent), before) {
+                close_if_on_another_model(&held, talk, &now);
+            }
+        }
+    }
     open_thread(app.clone(), app.state(), talk.to_string())
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -7240,7 +7296,13 @@ async fn also_allowed(held: State<'_, Held>, agent: String) -> Result<AlsoAllowe
     // this machine reads none of them, and showing somebody a list of rules
     // that decide nothing about the agent they are looking at is the same fault
     // as not showing them at all, pointing the other way.
-    if known.as_ref().is_some_and(|a| a.engine != "claude") {
+    let on = known.as_ref().map(|a| {
+        let before = (a.engine.clone(), a.engine_settings.clone());
+        the_model_for(&held, Some(a), before)
+            .map(|(engine, _)| engine)
+            .unwrap_or_else(|_| a.engine.clone())
+    });
+    if on.is_some_and(|engine| engine != "claude") {
         return Ok(AlsoAllowed::default());
     }
 
@@ -8884,72 +8946,122 @@ async fn finish(held: State<'_, Held>, id: String, finished: bool) -> Result<(),
 /// The settings the window may read and write, and nothing else.
 const SETTINGS: &[&str] = &["errand_model", "local_model", "ssh_keys_at_start"];
 
-/// The model every teammate works on, when one has been chosen in Settings:
-/// the line of the picker it names, as the engine and its settings.
-///
-/// One model for the whole app rather than one per agent. A teammate is a
-/// job, and which model does the job is the app's business: somebody choosing
-/// per agent was choosing, one agent at a time, how good each errand would be.
-fn the_model_now(held: &Held) -> Option<(String, Option<String>)> {
-    let chosen = held.store.setting("errand_model").ok().flatten()?;
-    let one = held
-        .store
-        .offered()
-        .ok()?
-        .into_iter()
-        .find(|o| o.id == chosen)?;
-    Some((one.engine, one.settings))
+/// A model as the engines take it: which engine, and its settings.
+type Model = (String, Option<String>);
+
+/// Why a teammate runs on the model it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ChosenBy {
+    /// A model of its own, chosen for it.
+    Itself,
+    /// Errand's model, which every teammate without one of its own works on.
+    Errand,
+    /// What it was put on before a model could be chosen for every teammate.
+    Before,
+    /// The local model: it keeps its words here and the other one would not.
+    Local,
 }
 
-/// The model a teammate runs on now: Errand's, or what it was put on before
-/// there was one, and for a teammate kept local, a model served here or
-/// nothing.
+/// The model a teammate runs on, why, and what the picker calls it.
+#[derive(Debug, Clone)]
+struct Chosen {
+    engine: String,
+    settings: Option<String>,
+    by: ChosenBy,
+    /// The picker line's name, where it is one.
+    named: Option<String>,
+}
+
+/// The model a teammate runs on now: its own when it has one, Errand's when
+/// one is chosen, what it was put on before otherwise, and for a teammate
+/// kept local, a model served here or nothing.
+///
+/// Its own first, because a team is specialists: the one who checks the work
+/// on the strongest model and the one who writes the notes on a small local
+/// one is the person's call, made once on the teammate's card. Everybody else
+/// follows Errand's model, which is still the one place to move them all.
 ///
 /// Nothing rather than something, for one kept local: a teammate somebody said
 /// keeps its words at home that quietly sent them to a server in another
 /// country, because the local one was not chosen or not in the list, would be
 /// the one failure the switch exists to prevent. So it says so and does not run.
-fn the_model_for(
+fn the_model_chosen_for(
     held: &Held,
     agent: Option<&Agent>,
-    before: (String, Option<String>),
-) -> Result<(String, Option<String>), String> {
-    let local = held
-        .store
-        .setting("local_model")
-        .ok()
-        .flatten()
-        .and_then(|id| held.store.offered().ok()?.into_iter().find(|o| o.id == id))
-        .map(|o| (o.engine, o.settings));
-    model_for(
-        the_model_now(held),
+    before: Model,
+) -> Result<Chosen, String> {
+    let offered = held.store.offered().unwrap_or_default();
+    let line = |id: Option<String>| id.and_then(|id| offered.iter().find(|o| o.id == id).cloned());
+    let own = line(agent.and_then(|a| a.own_model.clone()));
+    let errands = line(held.store.setting("errand_model").ok().flatten());
+    let local = line(held.store.setting("local_model").ok().flatten());
+    let as_model = |o: &errand_core::store::Offered| (o.engine.clone(), o.settings.clone());
+    let ((engine, settings), by) = model_for(
+        own.as_ref().map(as_model),
+        errands.as_ref().map(as_model),
         before,
         agent.is_some_and(|a| a.keep_local),
-        local,
-    )
+        local.as_ref().map(as_model),
+    )?;
+    let named = match by {
+        ChosenBy::Itself => own.map(|o| o.label),
+        ChosenBy::Errand => errands.map(|o| o.label),
+        ChosenBy::Local => local.map(|o| o.label),
+        ChosenBy::Before => offered
+            .into_iter()
+            .find(|o| o.engine == engine && o.settings == settings)
+            .map(|o| o.label),
+    };
+    Ok(Chosen {
+        engine,
+        settings,
+        by,
+        named,
+    })
+}
+
+/// The same, as the engines take it.
+fn the_model_for(held: &Held, agent: Option<&Agent>, before: Model) -> Result<Model, String> {
+    the_model_chosen_for(held, agent, before).map(|c| (c.engine, c.settings))
 }
 
 /// The same decision, from what it is made of.
 fn model_for(
-    errands: Option<(String, Option<String>)>,
-    before: (String, Option<String>),
+    own: Option<Model>,
+    errands: Option<Model>,
+    before: Model,
     keep_local: bool,
-    local: Option<(String, Option<String>)>,
-) -> Result<(String, Option<String>), String> {
-    let chosen = errands.unwrap_or(before);
+    local: Option<Model>,
+) -> Result<(Model, ChosenBy), String> {
+    let (chosen, by) = match (own, errands) {
+        (Some(own), _) => (own, ChosenBy::Itself),
+        (None, Some(errands)) => (errands, ChosenBy::Errand),
+        (None, None) => (before, ChosenBy::Before),
+    };
     if !keep_local || stays_here(&chosen.0, chosen.1.as_deref()) {
-        return Ok(chosen);
+        return Ok((chosen, by));
     }
     match local.filter(|(engine, settings)| stays_here(engine, settings.as_deref())) {
-        Some(here) => Ok(here),
-        None => Err(NOTHING_LOCAL.to_string()),
+        Some(here) => Ok((here, ChosenBy::Local)),
+        None => Err(nothing_local(by)),
     }
 }
 
-/// What a teammate kept local says when there is nothing local to run it on.
-const NOTHING_LOCAL: &str = "This teammate keeps its words on your network, and Errand's model \
-    sends them elsewhere. Choose a model served on this Mac or your network under Settings, \
-    Local model, and it will run on that. Nothing was sent.";
+/// What a teammate kept local says when there is nothing local to run it on,
+/// naming the model that would have sent its words away.
+fn nothing_local(by: ChosenBy) -> String {
+    let which = match by {
+        ChosenBy::Itself => "the model chosen for it",
+        ChosenBy::Before => "the model it was put on before",
+        ChosenBy::Errand | ChosenBy::Local => "Errand's model",
+    };
+    format!(
+        "This teammate keeps its words on your network, and {which} sends them elsewhere. \
+         Choose a model served on this Mac or your network for it on its card, or under \
+         Settings, Local model, and it will run on that. Nothing was sent."
+    )
+}
 
 /// Whether a model is served on this Mac or this network, so what is said to
 /// it stays here. Claude is never: it is Anthropic's, wherever the app runs.
@@ -8977,6 +9089,13 @@ struct WhereWordsGo {
     model: String,
     /// Why it will not run, for a teammate kept local with nothing local.
     refused: Option<String>,
+    /// Why it runs on that one: its own, Errand's, what it was on before, or
+    /// the local model standing in. Nothing when it will not run.
+    by: Option<ChosenBy>,
+    /// `claude` or `local`, for what the window shows by engine.
+    engine: Option<String>,
+    /// The picker line chosen for it, when it has a model of its own.
+    own: Option<String>,
 }
 
 #[tauri::command]
@@ -8986,31 +9105,28 @@ async fn where_words_go(held: State<'_, Held>, id: String) -> Result<WhereWordsG
         || ("claude".to_string(), None),
         |a| (a.engine.clone(), a.engine_settings.clone()),
     );
-    match the_model_for(&held, agent.as_ref(), before) {
-        Ok((engine, settings)) => {
-            let named = held
-                .store
-                .offered()
-                .ok()
-                .and_then(|all| {
-                    all.into_iter()
-                        .find(|o| o.engine == engine && o.settings == settings)
-                        .map(|o| o.label)
-                })
-                .unwrap_or_else(|| match engine.as_str() {
+    let own = agent.as_ref().and_then(|a| a.own_model.clone());
+    match the_model_chosen_for(&held, agent.as_ref(), before) {
+        Ok(chosen) => Ok(WhereWordsGo {
+            stays: stays_here(&chosen.engine, chosen.settings.as_deref()),
+            model: chosen
+                .named
+                .unwrap_or_else(|| match chosen.engine.as_str() {
                     "claude" => "Claude".to_string(),
-                    _ => "a model of its own".to_string(),
-                });
-            Ok(WhereWordsGo {
-                stays: stays_here(&engine, settings.as_deref()),
-                model: named,
-                refused: None,
-            })
-        }
+                    _ => "the model it was put on before".to_string(),
+                }),
+            refused: None,
+            by: Some(chosen.by),
+            engine: Some(chosen.engine),
+            own,
+        }),
         Err(why) => Ok(WhereWordsGo {
             stays: true,
             model: String::new(),
             refused: Some(why),
+            by: None,
+            engine: None,
+            own,
         }),
     }
 }
@@ -9026,6 +9142,44 @@ async fn keep_local(
 ) -> Result<(), String> {
     write_it_down_if_new(&app, &held, &id)?;
     held.store.keep_local(&id, on).map_err(|e| e.to_string())
+}
+
+/// Give a teammate a model of its own, a line of the picker, or nothing to
+/// follow Errand's model again. Takes effect the next time it is given
+/// something: one in the middle of a task finishes on the model it began on.
+#[tauri::command]
+async fn own_model(
+    app: AppHandle,
+    held: State<'_, Held>,
+    id: String,
+    model: Option<String>,
+) -> Result<(), String> {
+    write_it_down_if_new(&app, &held, &id)?;
+    let agent = held
+        .store
+        .agent(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or("there is no such teammate")?;
+    let model = model.filter(|m| !m.trim().is_empty());
+    if let Some(chosen) = &model {
+        let line = held
+            .store
+            .offered()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|o| &o.id == chosen)
+            .ok_or("That model is not in the list any more. Choose another.")?;
+        if agent.keep_local && !stays_here(&line.engine, line.settings.as_deref()) {
+            return Err(format!(
+                "{} keeps its words on your network, and {} sends them elsewhere. Choose a \
+                 model served on this Mac or your network.",
+                agent.name, line.label
+            ));
+        }
+    }
+    held.store
+        .own_model(&id, model.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 /// How an engine's model is compared with the one chosen now.
@@ -9962,6 +10116,7 @@ pub fn run() {
             set_task_priority,
             finish_task,
             keep_local,
+            own_model,
             where_words_go,
             notifications,
             discard_draft,
@@ -10498,42 +10653,93 @@ mod tests {
         );
         assert!(!stays_here("local", None));
 
+        use ChosenBy::*;
         // Not kept local: Errand's model, whatever it is.
         assert_eq!(
-            model_for(Some(hosted.clone()), m5.clone(), false, None),
-            Ok(hosted.clone())
+            model_for(None, Some(hosted.clone()), m5.clone(), false, None),
+            Ok((hosted.clone(), Errand))
         );
         // Kept local, and Errand's model is here already: that one.
         assert_eq!(
-            model_for(Some(m5.clone()), claude.clone(), true, None),
-            Ok(m5.clone())
+            model_for(None, Some(m5.clone()), claude.clone(), true, None),
+            Ok((m5.clone(), Errand))
         );
         // Kept local, Errand's model is out there: the local one.
         assert_eq!(
             model_for(
+                None,
                 Some(hosted.clone()),
                 claude.clone(),
                 true,
                 Some(this_mac.clone())
             ),
-            Ok(this_mac.clone())
+            Ok((this_mac.clone(), Local))
         );
         // And with no local one chosen, or one that is not local after all:
-        // nothing, rather than out there.
+        // nothing, rather than out there, naming what would have sent it.
         assert_eq!(
-            model_for(Some(hosted.clone()), m5.clone(), true, None),
-            Err(NOTHING_LOCAL.to_string())
+            model_for(None, Some(hosted.clone()), m5.clone(), true, None),
+            Err(nothing_local(Errand))
         );
         assert_eq!(
-            model_for(Some(claude.clone()), m5.clone(), true, Some(hosted.clone())),
-            Err(NOTHING_LOCAL.to_string())
+            model_for(
+                None,
+                Some(claude.clone()),
+                m5.clone(),
+                true,
+                Some(hosted.clone())
+            ),
+            Err(nothing_local(Errand))
         );
         // No Errand model: what it was put on, held to the same rule.
-        assert_eq!(model_for(None, m5.clone(), true, None), Ok(m5));
         assert_eq!(
-            model_for(None, claude, true, Some(this_mac.clone())),
-            Ok(this_mac)
+            model_for(None, None, m5.clone(), true, None),
+            Ok((m5.clone(), Before))
         );
+        assert_eq!(
+            model_for(None, None, claude.clone(), true, Some(this_mac.clone())),
+            Ok((this_mac.clone(), Local))
+        );
+
+        // A model of its own wins over Errand's, and over what it was on.
+        assert_eq!(
+            model_for(
+                Some(claude.clone()),
+                Some(m5.clone()),
+                hosted.clone(),
+                false,
+                None
+            ),
+            Ok((claude.clone(), Itself))
+        );
+        assert_eq!(
+            model_for(
+                Some(this_mac.clone()),
+                Some(hosted.clone()),
+                m5.clone(),
+                true,
+                None
+            ),
+            Ok((this_mac.clone(), Itself))
+        );
+        // But never past keeping it local: its own, out there, gives way to
+        // the local model, or to nothing, said as its own model's doing.
+        assert_eq!(
+            model_for(
+                Some(hosted.clone()),
+                Some(m5.clone()),
+                claude.clone(),
+                true,
+                Some(this_mac.clone())
+            ),
+            Ok((this_mac, Local))
+        );
+        assert_eq!(
+            model_for(Some(hosted), Some(m5), claude, true, None),
+            Err(nothing_local(Itself))
+        );
+        assert!(nothing_local(Itself).contains("the model chosen for it"));
+        assert!(nothing_local(Errand).contains("Errand's model"));
     }
 
     #[test]

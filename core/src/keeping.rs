@@ -400,6 +400,7 @@ mod tests {
             priority: crate::store::NORMALLY,
             finished_at: None,
             keep_local: false,
+            own_model: None,
         }
     }
 

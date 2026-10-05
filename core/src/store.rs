@@ -282,6 +282,11 @@ pub struct Blueprint {
     /// How it checks its work.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checklist: Vec<String>,
+    /// The model of its own, by what makes a picker line the same line
+    /// (`what_makes_it_the_same`), so it finds that model again in another
+    /// Errand whatever the line is called there. Nothing to follow Errand's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_model: Option<String>,
 }
 
 /// One conversation's schedule and watch, as a blueprint carries it.
@@ -395,6 +400,10 @@ pub struct Agent {
     /// than send them anywhere else.
     #[serde(default)]
     pub keep_local: bool,
+    /// The model it works on, as a line of the picker, when it has one of
+    /// its own. Nothing means Errand's model, whatever that is now.
+    #[serde(default)]
+    pub own_model: Option<String>,
 }
 
 /// A run as seen afterwards: which, when, how it ended, and what it said.
@@ -1170,6 +1179,11 @@ const CHANGES: &[&str] = &[
          team         TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
          told         INTEGER NOT NULL DEFAULT 0
      );",
+    // A teammate's own model, a line of the picker, over Errand's. Gone with
+    // the line, so a teammate whose model was taken out of the list follows
+    // Errand's model again rather than pointing at nothing. Last, as every
+    // change is.
+    "ALTER TABLE agents ADD COLUMN own_model TEXT REFERENCES offered(id) ON DELETE SET NULL;",
 ];
 
 /// What finishing a task switched off, or reopening it switched back on.
@@ -1758,6 +1772,13 @@ impl Store {
             standing,
             keep_local: found.keep_local,
             checklist: self.checklist(agent)?,
+            own_model: found.own_model.as_deref().and_then(|id| {
+                self.offered()
+                    .ok()?
+                    .into_iter()
+                    .find(|o| o.id == id)
+                    .map(|o| o.mark)
+            }),
         })
     }
 
@@ -1797,6 +1818,15 @@ impl Store {
              VALUES (?1, ?1, 'First', 0, ?2, ?2)",
             params![to, now],
         )?;
+        // Its own model, where this Errand has the same line. Where it has
+        // not, it follows Errand's model rather than a model nobody chose here.
+        if let Some(mark) = plan.own_model.as_deref() {
+            tx.execute(
+                "UPDATE agents SET own_model = (SELECT id FROM offered WHERE mark = ?1)
+                  WHERE id = ?2",
+                params![mark, to],
+            )?;
+        }
         for one in &plan.notes {
             tx.execute(
                 "INSERT INTO memories (id, agent, about, note, told, noted_at, told_at)
@@ -2140,9 +2170,10 @@ impl Store {
 
     /// Take something out of the picker.
     ///
-    /// Only out of the picker. An agent already set to it goes on using it,
-    /// because taking away what something is running on is not what "do not
-    /// show me this any more" means.
+    /// A teammate given it as its own model follows Errand's model again,
+    /// rather than pointing at a line that is gone: the column lets go of it
+    /// by itself. Errand's model, if this was it, is the person's to choose
+    /// again, and until they do every teammate is on what it was put on before.
     pub fn stop_offering(&self, id: &str) -> Result<()> {
         self.conn
             .lock()
@@ -3080,6 +3111,16 @@ impl Store {
         Self::only_if_it_is_there(changed, "agent")
     }
 
+    /// Give an agent a model of its own, a line of the picker by its id, or
+    /// take it away so it follows Errand's model again.
+    pub fn own_model(&self, agent: &str, model: Option<&str>) -> Result<()> {
+        let changed = self.conn.lock().unwrap().execute(
+            "UPDATE agents SET own_model = ? WHERE id = ?",
+            params![model, agent],
+        )?;
+        Self::only_if_it_is_there(changed, "agent")
+    }
+
     /// Say an agent's job is finished, as of this moment, or that it is not
     /// finished after all.
     pub fn finish(&self, agent: &str, at: Option<i64>) -> Result<()> {
@@ -3149,7 +3190,7 @@ impl Store {
         let mut q = conn.prepare(
             "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
                     cwd, model, started_at, spoke_at, engine, engine_settings,
-                    paused_at, priority, finished_at, keep_local
+                    paused_at, priority, finished_at, keep_local, own_model
                FROM agents ORDER BY pinned DESC, spoke_at DESC",
         )?;
         let rows = q.query_map([], |r| {
@@ -3173,6 +3214,7 @@ impl Store {
                 priority: r.get(16)?,
                 finished_at: r.get(17)?,
                 keep_local: r.get(18)?,
+                own_model: r.get(19)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -3185,7 +3227,7 @@ impl Store {
         let mut q = conn.prepare_cached(
             "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
                     cwd, model, started_at, spoke_at, engine, engine_settings,
-                    paused_at, priority, finished_at, keep_local
+                    paused_at, priority, finished_at, keep_local, own_model
                FROM agents WHERE id = ?",
         )?;
         let mut rows = q.query_map([id], |r| {
@@ -3209,6 +3251,7 @@ impl Store {
                 priority: r.get(16)?,
                 finished_at: r.get(17)?,
                 keep_local: r.get(18)?,
+                own_model: r.get(19)?,
             })
         })?;
         rows.next().transpose().map_err(Into::into)
@@ -3995,7 +4038,7 @@ impl Store {
         let mut q = conn.prepare(
             "SELECT id, name, title, about, mark, hue, asks, pinned, hidden,
                     cwd, model, started_at, spoke_at, engine, engine_settings,
-                    paused_at, priority, finished_at, keep_local
+                    paused_at, priority, finished_at, keep_local, own_model
                FROM agents
               WHERE name LIKE ?1 ESCAPE '\\'
                  OR COALESCE(about, '') LIKE ?1 ESCAPE '\\'
@@ -4030,6 +4073,7 @@ impl Store {
                 priority: r.get(16)?,
                 finished_at: r.get(17)?,
                 keep_local: r.get(18)?,
+                own_model: r.get(19)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -4529,6 +4573,62 @@ mod tests {
         assert!(s.checklist("a").unwrap().is_empty());
         s.forget("b").unwrap();
         assert!(s.checklist("b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_model_of_its_own_is_kept_carried_in_a_copy_and_let_go_with_its_line() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a", "/tmp/a");
+        assert_eq!(
+            s.agent("a").unwrap().unwrap().own_model,
+            None,
+            "Errand's model until chosen"
+        );
+        let line = |id: &str, alias: &str| Offered {
+            id: id.to_string(),
+            engine: "claude".to_string(),
+            label: format!("Claude - {alias}"),
+            settings: Some(alias.to_string()),
+            backend: None,
+            sort: 9,
+            mark: what_makes_it_the_same("claude", Some(alias)),
+        };
+        s.offer(&line("line-big", "bigmodel")).unwrap();
+        s.own_model("a", Some("line-big")).unwrap();
+        assert_eq!(
+            s.agent("a").unwrap().unwrap().own_model.as_deref(),
+            Some("line-big")
+        );
+        assert_eq!(
+            s.agents().unwrap()[0].own_model.as_deref(),
+            Some("line-big")
+        );
+        // A copy carries it by what the line is, not its id, and finds it.
+        let plan = s.blueprint("a").unwrap();
+        assert_eq!(plan.own_model.as_deref(), Some("claude|bigmodel"));
+        s.from_blueprint(&plan, "b", Path::new("/tmp/b")).unwrap();
+        assert_eq!(
+            s.agent("b").unwrap().unwrap().own_model.as_deref(),
+            Some("line-big")
+        );
+        // Where the line is not there, the copy follows Errand's model.
+        let mut elsewhere = plan.clone();
+        elsewhere.own_model = Some("claude|notheremodel".to_string());
+        s.from_blueprint(&elsewhere, "c", Path::new("/tmp/c"))
+            .unwrap();
+        assert_eq!(s.agent("c").unwrap().unwrap().own_model, None);
+        // Taken out of the picker, every teammate on it lets go of it.
+        s.stop_offering("line-big").unwrap();
+        assert_eq!(s.agent("a").unwrap().unwrap().own_model, None);
+        assert_eq!(s.agent("b").unwrap().unwrap().own_model, None);
+        // Pointing at nothing is refused rather than kept.
+        assert!(s.own_model("a", Some("no-such-line")).is_err());
+        // And back to Errand's model by choosing nothing.
+        s.offer(&line("line-small", "smallmodel")).unwrap();
+        s.own_model("a", Some("line-small")).unwrap();
+        s.own_model("a", None).unwrap();
+        assert_eq!(s.agent("a").unwrap().unwrap().own_model, None);
+        assert!(s.own_model("nobody", None).is_err());
     }
 
     #[test]

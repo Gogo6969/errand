@@ -2247,6 +2247,23 @@ body.catching #what { border-color: var(--accent); }
   letter-spacing: 0;
 }
 #whois input:focus { outline: none; border-color: var(--edge); }
+/* Its own model: a field like the others, as tall, read as a choice. */
+#whois .own-model { flex: 1 1 200px; }
+#whois-model {
+  box-sizing: border-box;
+  height: var(--whois-field);
+  padding: 0 9px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+#whois-model:focus { outline: none; border-color: var(--edge); }
+#whois-model:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 #whois > label > input:not([type="checkbox"]) { box-sizing: border-box; height: var(--whois-field); }
 #whois-save {
   box-sizing: border-box;

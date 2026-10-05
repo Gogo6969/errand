@@ -554,25 +554,61 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(
               fixture.offered.map((o) => ({ id: o.id, engine: o.engine, name: o.label, settings: o.settings, here: servedHere(o) })),
             );
-          // Decided the way the app decides it: Errand's model, or what the
-          // teammate was put on; and for one kept local, a model served here
-          // or nothing at all.
+          // Decided the way the app decides it: its own model, then
+          // Errand's, then what the teammate was put on (Claude here); and for
+          // one kept local, a model served here or nothing at all.
           case "where_words_go": {
             const a = fixture.agents.find((x) => x.id === args.id);
-            const chosen = fixture.offered.find((o) => o.id === fixture.settings.errand_model);
-            if (!a?.keep_local || !chosen || servedHere(chosen)) {
+            const own = fixture.offered.find((o) => o.id === a?.own_model);
+            const errands = fixture.offered.find((o) => o.id === fixture.settings.errand_model);
+            // What it was put on before, as the app keeps it: its own engine
+            // and settings, named by the picker line that matches, if any.
+            const before = {
+              engine: a?.engine || "claude",
+              settings: a?.engine_settings ?? null,
+              label: null,
+            };
+            before.label =
+              fixture.offered.find((o) => o.engine === before.engine && (o.settings ?? null) === before.settings)?.label ||
+              (before.engine === "claude" ? "Claude" : "the model it was put on before");
+            const chosen = own || errands || before;
+            const by = own ? "itself" : errands ? "errand" : "before";
+            const ownId = a?.own_model || null;
+            if (!a?.keep_local || servedHere(chosen)) {
               return Promise.resolve({
-                stays: chosen ? servedHere(chosen) : false,
-                model: chosen ? chosen.label : "Claude",
+                stays: servedHere(chosen),
+                model: chosen.label,
                 refused: null,
+                by,
+                engine: chosen.engine,
+                own: ownId,
               });
             }
             const local = fixture.offered.find((o) => o.id === fixture.settings.local_model && servedHere(o));
             return Promise.resolve(
               local
-                ? { stays: true, model: local.label, refused: null }
-                : { stays: true, model: "", refused: "This teammate keeps its words on your network, and Errand's model sends them elsewhere." },
+                ? { stays: true, model: local.label, refused: null, by: "local", engine: local.engine, own: ownId }
+                : {
+                    stays: true,
+                    model: "",
+                    refused: `This teammate keeps its words on your network, and ${own ? "the model chosen for it" : "Errand's model"} sends them elsewhere.`,
+                    by: null,
+                    engine: null,
+                    own: ownId,
+                  },
             );
+          }
+          // A model of its own, refused for one kept local when it is not
+          // served here, as the app refuses it.
+          case "own_model": {
+            const a = fixture.agents.find((x) => x.id === args.id);
+            const line = fixture.offered.find((o) => o.id === args.model);
+            if (args.model && !line) return Promise.reject("That model is not in the list any more. Choose another.");
+            if (line && a?.keep_local && !servedHere(line)) {
+              return Promise.reject(`${a.name} keeps its words on your network, and ${line.label} sends them elsewhere. Choose a model served on this Mac or your network.`);
+            }
+            if (a) a.own_model = args.model || null;
+            return Promise.resolve(null);
           }
           case "notifications":
             return Promise.resolve({
@@ -732,7 +768,12 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             return Promise.resolve(args.keep ? "Added to how it checks its work." : "Not kept.");
           case "what_they_bring":
             return Promise.resolve(
-              fixture.agents.map((a) => [a.id, (fixture.skills?.[a.id] || []).map((k) => k.name), (fixture.checklists?.[a.id] || []).length]),
+              fixture.agents.map((a) => [
+                a.id,
+                (fixture.skills?.[a.id] || []).map((k) => k.name),
+                (fixture.checklists?.[a.id] || []).length,
+                fixture.offered.find((o) => o.id === a.own_model)?.label || null,
+              ]),
             );
           // Which handovers are still being waited on. A line on disk cannot
           // say, so the window asks.

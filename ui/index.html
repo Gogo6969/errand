@@ -83,7 +83,7 @@
         <div class="card-head">
           <div>
             <h2>Errand's model</h2>
-            <p id="errand-model-says">Every teammate works on this one. Only models that are answering are offered.</p>
+            <p id="errand-model-says">Every teammate works on this one, unless it was given a model of its own on its card. Only models that are answering are offered.</p>
           </div>
           <div class="doing">
             <select id="engine" title="The model every teammate works on"></select>
@@ -444,6 +444,12 @@
         <label>Name <input id="whois-name" type="text" autocomplete="off" placeholder="Disk Watch" /></label>
         <label>Role <input id="whois-title" type="text" autocomplete="off" placeholder="Storage" /></label>
         <label>Job <input id="whois-about" type="text" autocomplete="off" placeholder="Keeps an eye on the external SSD" /></label>
+        <!--
+          Its own model, over Errand's: a team is specialists, and the one
+          who checks the work may want a stronger model than the one who
+          writes the notes. Taken at once, like the switch beside it.
+        -->
+        <label class="own-model" title="The model this teammate works on. Errand's model unless you choose one of its own. Takes effect the next time it is given something.">Model <select id="whois-model"></select></label>
         <label class="keep-local" title="Its words stay on this Mac and your network: it runs only on a model served here, and refuses rather than send them anywhere else. Takes effect the next time it is given something.">
           <input id="whois-local" type="checkbox" /> Keep it local
         </label>

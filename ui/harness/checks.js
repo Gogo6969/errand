@@ -4541,11 +4541,17 @@ export async function aMonthlyLimit() {
   document.getElementById("thread-name").click();
   await settle(100);
 
-  // A hosted one, counted in tokens.
+  // A hosted one, counted in tokens: on a hosted model of its own, since a
+  // teammate with none works on Errand's model, which may well be Claude.
+  FIXTURE.offered.push({
+    id: "o-hosted-limit", engine: "local", label: "deepseek-flash \u00b7 DeepSeek", backend: null, sort: 9, mark: "local|hosted-limit",
+    settings: '{"provider":"openai-compat","base_url":"https://api.deepseek.com/v1","model":"deepseek-flash"}',
+  });
   FIXTURE.agents.push({
     ...FIXTURE.agents[0],
     id: "agent-hosted",
     name: "Hosted Scout",
+    own_model: "o-hosted-limit",
     engine: "local",
     pinned: false,
     hidden: false,
@@ -4570,6 +4576,7 @@ export async function aMonthlyLimit() {
   check("and something that is not an amount is refused, saying how to write one", /like 5M or 500k/.test(document.getElementById("limit-says").textContent), document.getElementById("limit-says").textContent);
   document.getElementById("thread-name").click();
   await settle(100);
+  FIXTURE.offered = FIXTURE.offered.filter((o) => o.id !== "o-hosted-limit");
   return found;
 }
 
@@ -5203,7 +5210,7 @@ export async function keepingItLocal() {
   await open(desk);
   check(
     "kept local with Errand's model elsewhere and nothing local chosen, it says it will not run",
-    words.dataset.state === "refused" && /Choose a Local model in Settings/.test(words.textContent),
+    words.dataset.state === "refused" && /a Local model in Settings/.test(words.textContent),
     `${words.dataset.state}: ${words.textContent}`,
   );
 
@@ -5283,6 +5290,91 @@ export async function keepingItLocal() {
   delete FIXTURE.settings.local_model;
   const agent = FIXTURE.agents.find((a) => a.id === desk);
   if (agent) delete agent.keep_local;
+  return found;
+}
+
+export async function aModelOfItsOwn() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  const words = document.getElementById("words-go");
+  const desk = "agent-bitcoin";
+  const open = async (id) => {
+    const at = FIXTURE.agents.findIndex((a) => a.id === id);
+    [...document.querySelectorAll("#threads li")][at]?.click();
+    await settle(300);
+  };
+  FIXTURE.settings.errand_model = "o-local";
+  await open(desk);
+  document.getElementById("thread-name").click();
+  await settle(250);
+  const pick = document.getElementById("whois-model");
+  const options = () => [...pick.options].map((o) => `${o.value}=${o.textContent}`);
+  check(
+    "a teammate's card offers a model of its own, Errand's first and chosen until another is",
+    pick && pick.value === "" && /Errand's model · qwen2\.5:7b/.test(pick.options[0]?.textContent) && options().some((o) => o.startsWith("o-opus=")),
+    options().join(" | "),
+  );
+  if (beingDrawn()) {
+    const box = (e) => e.getBoundingClientRect();
+    const [field, model] = [document.getElementById("whois-name"), pick].map(box);
+    check("the model sits on the line of the fields, as tall as they are", Math.round(field.height) === Math.round(model.height) && Math.abs(field.bottom - model.bottom) <= 1, `${Math.round(field.height)}/${Math.round(model.height)}`);
+  }
+  pick.value = "o-opus";
+  pick.dispatchEvent(new Event("change"));
+  await settle(300);
+  check(
+    "choosing one is kept, and the line under the name says it is its own",
+    asked.some((a) => a.name === "own_model" && a.args?.id === desk && a.args?.model === "o-opus") &&
+      words.dataset.state === "away" && /Claude - Opus \(its own\)/.test(words.textContent),
+    words.textContent,
+  );
+  // On the Teams page, as part of what it brings.
+  FIXTURE.teams = [{ id: "team-m", name: "M-TEAM", lead: desk, members: [], made_at: 0 }];
+  document.getElementById("thread-name").click();
+  await settle(100);
+  document.getElementById("teams-open").click();
+  await settle(400);
+  const brings = document.querySelector('#teams .team[data-team="team-m"] .person .brings');
+  check("the Teams page says a teammate's own model", brings && /^On Claude - Opus/.test(brings.textContent), brings?.textContent);
+  document.getElementById("teams-done").click();
+  await settle(150);
+  // Back to Errand's model.
+  await open(desk);
+  document.getElementById("thread-name").click();
+  await settle(250);
+  pick.value = "";
+  pick.dispatchEvent(new Event("change"));
+  await settle(300);
+  check(
+    "and back to Errand's model, said without its own",
+    asked.some((a) => a.name === "own_model" && a.args?.id === desk && a.args?.model === null) &&
+      words.dataset.state === "here" && /qwen2\.5:7b/.test(words.textContent) && !/its own/.test(words.textContent),
+    words.textContent,
+  );
+  // Kept local: only models served here are offered for it.
+  const local = document.getElementById("whois-local");
+  local.checked = true;
+  local.dispatchEvent(new Event("change"));
+  await settle(300);
+  check(
+    "a teammate kept local is offered only models served here",
+    !options().some((o) => o.startsWith("o-opus=") || o.startsWith("o-default=")) && options().some((o) => o.startsWith("o-local=")),
+    options().join(" | "),
+  );
+  local.checked = false;
+  local.dispatchEvent(new Event("change"));
+  await settle(200);
+  document.getElementById("thread-name").click();
+  await settle(100);
+  // As it was.
+  FIXTURE.teams = [];
+  delete FIXTURE.settings.errand_model;
+  const agent = FIXTURE.agents.find((a) => a.id === desk);
+  if (agent) {
+    delete agent.keep_local;
+    delete agent.own_model;
+  }
   return found;
 }
 

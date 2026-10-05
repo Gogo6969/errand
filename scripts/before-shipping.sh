@@ -81,6 +81,19 @@ sqlite3 "$STORE" "
   echo "could not make the agent to test with"
   exit 2
 }
+# The engine above as its own model, the picker line with exactly these
+# settings, because Errand's model is the choice for every teammate without
+# one of its own: without this, the six errands ran on Errand's model while
+# this printed another.
+sqlite3 "$STORE" "
+  UPDATE agents SET own_model = (
+    SELECT id FROM offered WHERE engine = '$ENGINE'
+       AND coalesce(settings, '') = $([ -n "$MODEL" ] && printf "'%s'" "$MODEL" || printf "''")
+     LIMIT 1)
+   WHERE id = '$AGENT';"
+if [ -z "$(sqlite3 "$STORE" "SELECT own_model FROM agents WHERE id = '$AGENT';")" ]; then
+  echo "  (no picker line has exactly these settings, so the errands run on Errand's model)"
+fi
 
 # ---------------------------------------------------------------- one --
 # A turn that completes at all. Everything else is built on this, and it is
