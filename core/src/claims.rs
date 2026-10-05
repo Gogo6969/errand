@@ -68,8 +68,10 @@ const READS_AS_A_COMMAND: &[&str] = &[
     ">", "<", "|", ";", "&&", "$(", "`", " -", " /", " ~/", " ./", " ../",
 ];
 
-/// Characters that make a path a placeholder rather than a place.
-const A_PLACEHOLDER: &[char] = &['<', '>', '{', '}', '*', '?', '$', '|'];
+/// Characters that make a path a placeholder rather than a place. The
+/// ellipsis too: `teams/…/csvstats/` is a path shortened for reading, and
+/// looked for as written it was reported missing while it sat right there.
+const A_PLACEHOLDER: &[char] = &['<', '>', '{', '}', '*', '?', '$', '|', '\u{2026}'];
 
 /// Endings that make a dotted name a website rather than a file.
 ///
@@ -869,6 +871,8 @@ fn looks_like_a_path(said: &str, in_quotes: bool) -> bool {
     if said.is_empty()
         || said.contains(char::is_control)
         || said.contains(A_PLACEHOLDER)
+        // Three dots for a part left out, the same as the ellipsis.
+        || said.split('/').any(|part| part == "...")
         || said.contains("://")
         || said.contains('@')
     {
@@ -1473,6 +1477,9 @@ mod tests {
             "Exported to example.com/x.",
             "Wrote to `x`.",
             "Saved `README`.",
+            // A path shortened for reading, as a teammate reported its work.
+            "I've written it in `teams/\u{2026}/csvstats/` and touched nothing else.",
+            "Wrote `teams/.../csvstats/README.md`.",
         ] {
             let claims = claimed_written(said, &may(own, &[]));
             assert!(claims.is_empty(), "{said:?} gave {claims:?}");
