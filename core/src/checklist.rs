@@ -24,6 +24,12 @@ pub const AT_MOST: usize = 12;
 /// The longest a point may be, in characters.
 pub const LONGEST: usize = 200;
 
+/// Said in every list for work that can borrow from somebody else's: whose
+/// it was and where it came from, so what a teammate makes can be checked and
+/// passed on with the credit it owes.
+pub const CREDITS_ITS_SOURCES: &str =
+    "Anything taken from someone else's work credits its author and links where it came from";
+
 /// Starter lists, each with the words in a role that ask for it. Checked in
 /// this order, so "QA engineer" is a tester before it is a builder.
 const STARTERS: &[(&[&str], Starter)] = &[
@@ -50,6 +56,7 @@ const STARTERS: &[(&[&str], Starter)] = &[
                 "Its tests pass, and there is a test for what changed",
                 "I ran it and looked at the result myself",
                 "Nothing in it is a secret or a real person's details",
+                CREDITS_ITS_SOURCES,
             ],
         },
     ),
@@ -62,6 +69,7 @@ const STARTERS: &[(&[&str], Starter)] = &[
                 "Names, dates and numbers are right",
                 "It says what it means in plain words, with no filler",
                 "It is the length that was asked for",
+                CREDITS_ITS_SOURCES,
             ],
         },
     ),
@@ -74,6 +82,7 @@ const STARTERS: &[(&[&str], Starter)] = &[
                 "The sources are recent enough for the question",
                 "Where sources disagree, I say so",
                 "I say how sure I am",
+                CREDITS_ITS_SOURCES,
             ],
         },
     ),
@@ -199,6 +208,20 @@ mod tests {
         assert_eq!(starter_for("Guitar"), None);
         assert_eq!(starter_for(""), None);
         assert_eq!(starter_for("Travel"), None);
+    }
+
+    #[test]
+    fn work_that_can_borrow_credits_where_it_came_from() {
+        for role in ["Code", "Writer", "Research"] {
+            let starter = starter_for(role).expect("a starter list");
+            assert!(
+                starter.points.contains(&CREDITS_ITS_SOURCES),
+                "{role}: {:?}",
+                starter.points
+            );
+            assert!(starter.points.len() <= AT_MOST);
+        }
+        assert!(CREDITS_ITS_SOURCES.chars().count() <= LONGEST);
     }
 
     #[test]
