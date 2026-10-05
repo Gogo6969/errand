@@ -692,6 +692,10 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             fixture.lines[id] = [{ seq: 1, at: Date.now(), kind: "note", text: `A task for ${team.name}. It is told this is the team's task.` }];
             return Promise.resolve(id);
           }
+          case "show_team_folder":
+            return (fixture.teams || []).some((t) => t.id === args.id)
+              ? Promise.resolve(null)
+              : Promise.reject("that team is gone");
           // A teammate's home, and what the person changed in it.
           case "home_of":
             return Promise.resolve(structuredClone((fixture.homes || {})[args.agent] || { path: `/x/Errand/Teammates/${args.agent}`, edits: [] }));

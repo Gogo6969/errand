@@ -656,6 +656,13 @@ impl Claude {
                 Some(named) => vec!["--model", named],
                 None => vec![],
             })
+            // The folders it was allowed besides its own, a team's among them,
+            // so writing there is the same to Claude Code as writing at home.
+            .args(
+                crate::wall::also_allowed(cwd)
+                    .iter()
+                    .flat_map(|f| [std::ffi::OsString::from("--add-dir"), f.into()]),
+            )
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

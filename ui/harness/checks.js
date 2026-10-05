@@ -7875,9 +7875,24 @@ export async function aHomeAndATeamTask() {
   await wait(400);
   const give = document.querySelector('#teams .team[data-team="team-a"] .team-task');
   check("each team with a lead offers to give it a task, by its name", give && give.textContent === "Give A-TEAM a task" && !give.disabled, give?.outerHTML.slice(0, 120));
+  const card = () => document.querySelector('#teams .team[data-team="team-a"]');
+  const folder = card()?.querySelector("header .team-folder");
+  check("each team offers its folder, saying everybody on it can write there", folder && folder.textContent === "Team folder" && /A-TEAM keeps its work/.test(folder.title) && /Everybody on the team can write/.test(folder.title), folder?.title);
+  folder?.click();
+  await wait(200);
+  check("and Team folder opens that team's folder", asked.some((a) => a.name === "show_team_folder" && a.args?.id === "team-a"), "");
+  if (beingDrawn()) {
+    const [box, button] = [card().querySelector(".team-name"), folder].map((e) => e.getBoundingClientRect());
+    check("the folder button sits on the name's line, inside the card", Math.abs(box.top + box.height / 2 - (button.top + button.height / 2)) <= 1 && button.right <= card().getBoundingClientRect().right - 8, `${Math.round(box.top + box.height / 2)}/${Math.round(button.top + button.height / 2)}`);
+  }
+  const renamed = card().querySelector(".team-name");
+  renamed.value = "A-SQUAD";
+  renamed.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await wait(300);
+  check("a new name is said at once on the task and folder buttons", give.textContent === "Give A-SQUAD a task" && /A-SQUAD keeps its work/.test(folder.title), `${give.textContent} | ${folder.title.slice(0, 40)}`);
   give.click();
   await wait(700);
-  check("which starts a task with the lead, named after the team, and opens it", asked.some((a) => a.name === "a_task_for_the_team" && a.args?.team === "team-a") && document.getElementById("teams").hidden && /A task for A-TEAM/.test(document.getElementById("messages").textContent), document.getElementById("messages").textContent.slice(-120));
+  check("which starts a task with the lead, named after the team, and opens it", asked.some((a) => a.name === "a_task_for_the_team" && a.args?.team === "team-a") && document.getElementById("teams").hidden && /A task for A-SQUAD/.test(document.getElementById("messages").textContent), document.getElementById("messages").textContent.slice(-120));
   check("ready for the person to say what it is", document.activeElement === document.getElementById("what"), document.activeElement?.id);
   FIXTURE.teams = [{ id: "team-b", name: "B-TEAM", lead: null, members: [], made_at: 0 }];
   document.getElementById("teams-open").click();

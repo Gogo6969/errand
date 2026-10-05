@@ -42,6 +42,68 @@ pub const SKILLS: &str = "skills";
 /// on purpose has said what they meant.
 pub const THE_PERSONS_NOTE_CHARS: usize = 2_000;
 
+/// Where each team keeps what it makes together, inside Errand's folder.
+pub const TEAMS: &str = "teams";
+
+/// A team's shared folder: where its lead and members put what they build,
+/// so each can use what the others made. Every one of them may write it; no
+/// other teammate may.
+pub fn team_folder(errand: &Path, team: &str) -> PathBuf {
+    errand.join(TEAMS).join(team)
+}
+
+/// Make a team's folder, with a line saying what it is for.
+pub fn make_team_folder(errand: &Path, team: &str, name: &str) -> Result<PathBuf> {
+    anyhow::ensure!(
+        !team.is_empty() && team.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+        "{team} is not a team's id"
+    );
+    let at = team_folder(errand, team);
+    let new = std::fs::symlink_metadata(&at).is_err();
+    make_a_folder(&errand.join(TEAMS))?;
+    make_a_folder(&at)?;
+    // Only into a folder just made, and never through anything already there:
+    // the members write this folder, and the app writing after them would
+    // write wherever a link they left pointed, outside every wall.
+    if new {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(at.join("ABOUT-THIS-FOLDER.md"))?
+            .write_all(
+                format!(
+                    "# {name}\n\nThe team's shared folder: what its lead and members build \
+                     together goes here, so each can use what the others made. Every one of \
+                     them may write here, and no other teammate may.\n"
+                )
+                .as_bytes(),
+            )?;
+    }
+    Ok(at)
+}
+
+/// Every folder an agent may write in beyond its own: those the person
+/// allowed it, and the folder of each team it leads or is on, made if it is
+/// not there yet. What the wall is told, and what its claims are checked by.
+pub fn folders_it_may_write(store: &Store, agent: &str) -> Vec<PathBuf> {
+    let mut folders = store.folders_allowed(agent).unwrap_or_default();
+    let Some(errand) = crate::where_errand_lives() else {
+        return folders;
+    };
+    for team in store.teams().unwrap_or_default() {
+        let on_it = team.lead.as_deref() == Some(agent) || team.members.iter().any(|m| m == agent);
+        if on_it {
+            if let Ok(at) = make_team_folder(&errand, &team.id, &team.name) {
+                folders.push(at);
+            }
+        }
+    }
+    folders
+}
+
 /// A teammate's home.
 pub fn of(errand: &Path, agent: &str) -> PathBuf {
     errand.join(HOMES).join(agent)
@@ -572,6 +634,36 @@ fn write_plain(at: &Path, text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_team_folder_is_made_once_and_only_for_a_teams_id() {
+        let errand =
+            std::env::temp_dir().join(format!("errand-team-folder-{}", std::process::id()));
+        std::fs::remove_dir_all(&errand).ok();
+        let at = make_team_folder(&errand, "d920e678-7edf", "Ship Crew").unwrap();
+        assert_eq!(at, team_folder(&errand, "d920e678-7edf"));
+        let about = at.join("ABOUT-THIS-FOLDER.md");
+        assert!(std::fs::read_to_string(&about)
+            .unwrap()
+            .contains("Ship Crew"));
+        // Made again, what the members put there is left alone, and nothing
+        // is written through a link one of them left.
+        std::fs::remove_file(&about).unwrap();
+        let elsewhere = errand.join("the-persons-file");
+        std::fs::write(&elsewhere, "theirs").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &about).unwrap();
+        make_team_folder(&errand, "d920e678-7edf", "Renamed").unwrap();
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "theirs");
+        // Nothing but a team's id names a folder.
+        for not_an_id in ["", "../agents", "a/b", ".", ".."] {
+            assert!(
+                make_team_folder(&errand, not_an_id, "x").is_err(),
+                "{not_an_id}"
+            );
+        }
+        assert!(!errand.join("agents").exists());
+        std::fs::remove_dir_all(&errand).ok();
+    }
 
     fn a_store() -> (Store, Agent) {
         let store = Store::in_memory().unwrap();

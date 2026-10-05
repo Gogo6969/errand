@@ -292,6 +292,13 @@ fn profile_keeping_out(
         allowed.join("\n")
     );
     profile.push_str(&its_own_settings_kept(home));
+    // The same for every folder it was allowed besides its own, a team's
+    // shared one among them: the person opens those as projects, and an
+    // engine started there reads the settings at their top as the person's.
+    // Kept whole as well, so a member cannot move a team's folder away.
+    for place in also_allowed(home) {
+        profile.push_str(&its_own_settings_kept(&place));
+    }
     // Claude Code's own memory beside its record, which it would read into
     // every later session in this folder: switched off, and kept unwritable
     // for a version that ignores the switch.
@@ -948,7 +955,8 @@ pub fn what_the_wall_means(home: &Path) -> String {
          the person sees a card and decides, and an app can also be started at every \
          login if they agree. A bare program or script has to go in a .app bundle first. \
          For a web page they should see, use over_to_you with `where`.\n\n\
-         At the top of your folder, .claude, .mcp.json, CLAUDE.md and CLAUDE.local.md are \
+         At the top of your folder, and of every other folder you may write in, .claude, \
+         .mcp.json, CLAUDE.md and CLAUDE.local.md are \
          not yours to write: they would be the settings an engine reads, and you change what \
          you are only through suggest_learning. Clone or unpack a project into a subfolder, \
          never into your folder itself. Other programs' local sockets are closed to you \
@@ -1848,6 +1856,59 @@ mod tests {
                 String::from_utf8_lossy(&out.stderr)
             ),
         )
+    }
+
+    #[test]
+    fn a_team_folder_is_written_by_its_members_only_and_kept_whole() {
+        if !possible() {
+            return;
+        }
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("errand-team-wall-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let member = root.join("member");
+        let other = root.join("other");
+        let team = root.join("teams").join("t1");
+        for place in [&member, &other, &team] {
+            std::fs::create_dir_all(place).unwrap();
+        }
+        also_allow(&member, vec![team.clone()]);
+        let at = |name: &str| quoted(&team.join(name));
+        // A member writes there, a folder down as well, and keeps a repository.
+        let (ok, said) = walled(
+            &member,
+            &format!(
+                "echo hi > {} && mkdir -p {} && echo x > {} && git init -q {}",
+                at("plan.md"),
+                at("src"),
+                at("src/a.txt"),
+                at("repo")
+            ),
+        );
+        assert!(ok, "a member could not write the team's folder: {said}");
+        // Somebody not on the team cannot.
+        let (ok, said) = walled(&other, &format!("echo hi > {}", at("theirs.md")));
+        assert!(!ok, "a teammate not on the team wrote there: {said}");
+        assert!(!team.join("theirs.md").exists());
+        // No member plants an engine's settings at its top, or moves it away.
+        for attempt in [
+            format!(
+                "mkdir -p {} && echo '{{}}' > {}",
+                at(".claude"),
+                at(".claude/settings.json")
+            ),
+            format!("echo x > {}", at("CLAUDE.md")),
+            format!("echo '{{}}' > {}", at(".mcp.json")),
+            format!("mv {} {}", quoted(&team), quoted(&member.join("away"))),
+        ] {
+            let (ok, said) = walled(&member, &attempt);
+            assert!(!ok, "{attempt} went through: {said}");
+        }
+        assert!(team.join("plan.md").exists() && !member.join("away").exists());
+        also_allow(&member, vec![]);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

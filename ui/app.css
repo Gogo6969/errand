@@ -3571,7 +3571,7 @@ a.on-disk {
   color: var(--ink-soft);
 }
 #teams-rule { margin: -6px 0 0; max-width: 68ch; font-size: 13px; line-height: 1.5; color: var(--ink-soft); }
-#teams-new, #teams-done, #teams .team-break, #teams .take-off {
+#teams-new, #teams-done, #teams .team-break, #teams .take-off, #teams .team-folder {
   height: 30px;
   padding: 0 12px;
   border-radius: 8px;
@@ -3584,7 +3584,7 @@ a.on-disk {
 }
 #teams-new { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 500; }
 #teams-new:hover { background: var(--accent-lit); border-color: var(--accent-lit); }
-#teams-done:hover, #teams .team-break:hover, #teams .take-off:hover { color: var(--ink); border-color: var(--edge); }
+#teams-done:hover, #teams .team-break:hover, #teams .take-off:hover, #teams .team-folder:hover { color: var(--ink); border-color: var(--edge); }
 #teams button:focus-visible, #teams select:focus-visible, #teams .team-name:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
@@ -3704,7 +3704,8 @@ a.on-disk {
   width: 2px;
   background: var(--side);
 }
-#teams .take-off { height: 26px; padding: 0 9px; font-size: 12px; }
+#teams .take-off, #teams .team-folder { height: 26px; padding: 0 9px; font-size: 12px; }
+#teams .team-folder { flex: none; }
 
 /* What can be changed: who leads, and who else is on it. */
 #teams .changes { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--rule); padding-top: 12px; }

@@ -529,7 +529,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
     // before an engine is started behind it. A sandbox profile is fixed at
     // the moment the process starts, so this has to come first.
     if let Some(a) = &known {
-        let folders = held.store.folders_allowed(&a.id).unwrap_or_default();
+        let folders = errand_core::home::folders_it_may_write(&held.store, &a.id);
         errand_core::wall::also_allow(&home, folders);
     }
 
@@ -1397,11 +1397,20 @@ fn a_task_for_the_team_in_words(held: &Held, team: &errand_core::store::Team) ->
             _ => a.name,
         })
         .collect();
+    let folder = errand_core::where_errand_lives()
+        .map(|errand| {
+            format!(
+                " Have the parts and the result put in the team's folder, {}, which every member \
+                 can read and write, and tell each member that is where its part goes.",
+                errand_core::home::team_folder(&errand, &team.id).display()
+            )
+        })
+        .unwrap_or_default();
     format!(
         "[This task is for your team, {}. You lead it. Break it into parts, hand each part to \
          the member it fits with ask ({}), do yourself what fits nobody, check what comes \
-         back against the task and your checklist, and put the result together. What the \
-         person wants done follows.]",
+         back against the task and your checklist, and put the result together.{folder} What \
+         the person wants done follows.]",
         team.name,
         match named.is_empty() {
             true => "nobody is on it yet, so say so and do it yourself".to_string(),
@@ -5038,15 +5047,37 @@ fn on_the_team(held: &Held, id: &str) -> Vec<String> {
 
 /// After a team changed: everybody who was on it or is on it now is told
 /// what their team is, in a conversation that is open, or the next time one
-/// opens. Everybody else is left alone.
+/// opens, and the wall where the team's folder now is or is not theirs.
+/// Everybody else is left alone.
 fn tell_the_team(held: &Held, before: Vec<String>, id: &str) {
     let mut everyone = before;
     everyone.extend(on_the_team(held, id));
     everyone.sort();
     everyone.dedup();
     for agent in everyone {
+        let_the_wall_know(held, &agent);
         tell_them_who_it_is(held, &agent);
     }
+}
+
+/// Open a team's shared folder in the Finder, made first if it is not there.
+#[tauri::command]
+async fn show_team_folder(held: State<'_, Held>, id: String) -> Result<(), String> {
+    let team = held
+        .store
+        .teams()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|t| t.id == id)
+        .ok_or("that team is gone")?;
+    let errand = errand_core::where_errand_lives().ok_or("there is no Errand folder")?;
+    let at = errand_core::home::make_team_folder(&errand, &team.id, &team.name)
+        .map_err(|e| e.to_string())?;
+    std::process::Command::new("/usr/bin/open")
+        .arg(&at)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// A new team, with a lead or none yet. Says the id it was given.
@@ -5065,6 +5096,9 @@ async fn make_team(
     held.store
         .make_team(&id, &name, lead.as_deref(), now)
         .map_err(|e| e.to_string())?;
+    if let Some(errand) = errand_core::where_errand_lives() {
+        errand_core::home::make_team_folder(&errand, &id, &name).ok();
+    }
     tell_the_team(&held, Vec::new(), &id);
     Ok(id)
 }
@@ -7435,7 +7469,7 @@ fn let_the_wall_know(held: &Held, agent: &str) {
     let Ok(Some(a)) = held.store.agent(agent) else {
         return;
     };
-    let folders = held.store.folders_allowed(agent).unwrap_or_default();
+    let folders = errand_core::home::folders_it_may_write(&held.store, agent);
     errand_core::wall::also_allow(std::path::Path::new(&a.cwd), folders);
     close_what_is_idle_behind(held, agent, |thread| !thread.walls_each_command());
 }
@@ -9652,6 +9686,7 @@ pub fn run() {
             choose_a_folder,
             suggest_next,
             also_allowed,
+            show_team_folder,
             revoke,
             asks,
             outside,

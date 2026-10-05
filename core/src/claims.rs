@@ -572,9 +572,7 @@ pub fn what_is_not_so(store: &Store, conversation: &str, said: &str) -> Vec<Stri
     if !own.is_absolute() {
         return Vec::new();
     }
-    let also: Vec<PathBuf> = store
-        .folders_allowed(&agent.id)
-        .unwrap_or_default()
+    let also: Vec<PathBuf> = crate::home::folders_it_may_write(store, &agent.id)
         .into_iter()
         .filter(|folder| folder.is_absolute())
         .collect();

@@ -8635,6 +8635,9 @@ async function drawTeams() {
     name.type = "text";
     name.value = team.name;
     name.setAttribute("aria-label", "What the team is called");
+    // What the card's buttons say with the team's name in it, said again
+    // once a new name is kept. Set once the buttons are made.
+    let retitle = () => {};
     // Kept on Enter and when the box is left, once: the name is taken as
     // kept before the app answers, so leaving the box after Enter asks nothing.
     const keep = async () => {
@@ -8651,6 +8654,7 @@ async function drawTeams() {
         team.name = was;
         name.value = was;
       }
+      retitle();
     };
     name.addEventListener("blur", keep);
     name.addEventListener("keydown", (e) => {
@@ -8668,7 +8672,19 @@ async function drawTeams() {
     count.className = "team-count";
     const size = team.members.length + (team.lead ? 1 : 0);
     count.textContent = size === 1 ? "1 teammate" : `${size} teammates`;
-    header.append(name, count);
+    // Where the team keeps what it makes: every member writes there.
+    const folder = document.createElement("button");
+    folder.type = "button";
+    folder.className = "team-folder";
+    folder.textContent = "Team folder";
+    folder.addEventListener("click", async () => {
+      try {
+        await invoke("show_team_folder", { id: team.id });
+      } catch (why) {
+        folder.title = String(why);
+      }
+    });
+    header.append(name, count, folder);
 
     const lead = document.createElement("div");
     lead.className = "lead";
@@ -8725,11 +8741,15 @@ async function drawTeams() {
     const give = document.createElement("button");
     give.type = "button";
     give.className = "team-task";
-    give.textContent = `Give ${team.name} a task`;
     give.disabled = !leader;
-    give.title = leader
-      ? `A new task for ${team.name}: ${leader.name} hands each part to whoever on the team fits`
-      : "Choose a lead first: it is the one the team's tasks go to";
+    retitle = () => {
+      give.textContent = `Give ${team.name} a task`;
+      give.title = leader
+        ? `A new task for ${team.name}: ${leader.name} hands each part to whoever on the team fits`
+        : "Choose a lead first: it is the one the team's tasks go to";
+      folder.title = `Open the folder where ${team.name} keeps its work. Everybody on the team can write in it.`;
+    };
+    retitle();
     give.addEventListener("click", async () => {
       give.disabled = true;
       let id;
