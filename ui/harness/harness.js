@@ -615,9 +615,16 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
               state: fixture.notifying || "refused",
               settings: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.errandai.errand",
             });
+          // Kept local, its own model let go of when it would send its words
+          // away, and said, as the app does.
           case "keep_local": {
             const a = fixture.agents.find((x) => x.id === args.id);
             if (a) a.keep_local = args.on;
+            const own = fixture.offered.find((o) => o.id === a?.own_model);
+            if (args.on && own && !servedHere(own)) {
+              a.own_model = null;
+              return Promise.resolve(`Its own model, ${own.label}, sends its words elsewhere, so it now works on Errand's model where that is served here, or on the Local model.`);
+            }
             return Promise.resolve(null);
           }
           case "outside":

@@ -1184,6 +1184,11 @@ const CHANGES: &[&str] = &[
     // Errand's model again rather than pointing at nothing. Last, as every
     // change is.
     "ALTER TABLE agents ADD COLUMN own_model TEXT REFERENCES offered(id) ON DELETE SET NULL;",
+    // How far a conversation's Claude Code session has seen: the last line
+    // there when a turn of Claude's ended. Lines after it were answered by
+    // another model, and a Claude session picked up again is told them.
+    // Nothing for one that has never had a Claude turn since there was this.
+    "ALTER TABLE conversations ADD COLUMN claude_through INTEGER;",
 ];
 
 /// What finishing a task switched off, or reopening it switched back on.
@@ -2534,6 +2539,46 @@ impl Store {
 
     pub fn points_at_nothing(&self) -> Result<i64> {
         points_at_nothing(&self.conn.lock().unwrap())
+    }
+
+    /// How far a conversation's Claude session has seen, as a line's seq.
+    pub fn claude_through(&self, conversation: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT claude_through FROM conversations WHERE id = ?",
+                [conversation],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Say a conversation's Claude session has seen every line in it so far.
+    pub fn claude_has_seen_it_all(&self, conversation: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE conversations SET claude_through =
+                 (SELECT max(seq) FROM lines WHERE conversation = ?1)
+              WHERE id = ?1",
+            [conversation],
+        )?;
+        Ok(())
+    }
+
+    /// The teammates whose own model is one of these picker lines, by name:
+    /// who goes back to Errand's model if they are taken out.
+    pub fn on_these_lines(&self, lines: &[String]) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare("SELECT name FROM agents WHERE own_model = ? ORDER BY name")?;
+        let mut names = Vec::new();
+        for line in lines {
+            for name in q.query_map([line], |r| r.get::<_, String>(0))? {
+                names.push(name?);
+            }
+        }
+        Ok(names)
     }
 
     /// The conversations this one handed work to, oldest first.
@@ -4576,6 +4621,30 @@ mod tests {
     }
 
     #[test]
+    fn how_far_claude_has_seen_is_kept_per_conversation() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a", "/tmp/a");
+        assert_eq!(
+            s.claude_through("a").unwrap(),
+            None,
+            "nothing until a turn of Claude's"
+        );
+        s.asked_by("a", "Check the disk", None).unwrap();
+        s.the_app_says("a", "note", "A note").unwrap();
+        s.claude_has_seen_it_all("a").unwrap();
+        let seen = s.claude_through("a").unwrap().expect("seen up to here");
+        let last = s.lines("a").unwrap().last().unwrap().seq;
+        assert_eq!(seen, last);
+        s.asked_by("a", "And now?", None).unwrap();
+        assert_eq!(
+            s.claude_through("a").unwrap(),
+            Some(seen),
+            "not moved by a later line"
+        );
+        assert_eq!(s.claude_through("nobody").unwrap(), None);
+    }
+
+    #[test]
     fn a_model_of_its_own_is_kept_carried_in_a_copy_and_let_go_with_its_line() {
         let s = Store::in_memory().unwrap();
         one(&s, "a", "/tmp/a");
@@ -4595,6 +4664,16 @@ mod tests {
         };
         s.offer(&line("line-big", "bigmodel")).unwrap();
         s.own_model("a", Some("line-big")).unwrap();
+        // Who loses it if the line goes, by name.
+        let named = s.agent("a").unwrap().unwrap().name;
+        assert_eq!(
+            s.on_these_lines(&["line-big".to_string()]).unwrap(),
+            vec![named]
+        );
+        assert!(s
+            .on_these_lines(&["no-line".to_string()])
+            .unwrap()
+            .is_empty());
         assert_eq!(
             s.agent("a").unwrap().unwrap().own_model.as_deref(),
             Some("line-big")

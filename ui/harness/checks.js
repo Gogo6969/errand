@@ -4576,6 +4576,18 @@ export async function aMonthlyLimit() {
   check("and something that is not an amount is refused, saying how to write one", /like 5M or 500k/.test(document.getElementById("limit-says").textContent), document.getElementById("limit-says").textContent);
   document.getElementById("thread-name").click();
   await settle(100);
+  // The other way round: put on a local model once, now on Errand's Claude,
+  // it is counted in dollars, because Claude is what it runs on.
+  const hosted = FIXTURE.agents.find((x) => x.id === "agent-hosted");
+  const errandWas = FIXTURE.settings.errand_model;
+  hosted.own_model = null;
+  FIXTURE.settings.errand_model = "o-opus";
+  await openWho("agent-hosted");
+  check("a teammate first put on a local model, now on Claude, is counted in dollars", document.getElementById("limit-unit").textContent === "Dollars a month", document.getElementById("limit-unit").textContent);
+  document.getElementById("thread-name").click();
+  await settle(100);
+  if (errandWas === undefined) delete FIXTURE.settings.errand_model;
+  else FIXTURE.settings.errand_model = errandWas;
   FIXTURE.offered = FIXTURE.offered.filter((o) => o.id !== "o-hosted-limit");
   return found;
 }
@@ -5352,11 +5364,20 @@ export async function aModelOfItsOwn() {
       words.dataset.state === "here" && /qwen2\.5:7b/.test(words.textContent) && !/its own/.test(words.textContent),
     words.textContent,
   );
-  // Kept local: only models served here are offered for it.
+  // Kept local with a model of its own out there: that model is let go of,
+  // and it says so, rather than a card claiming one model while another runs.
+  pick.value = "o-opus";
+  pick.dispatchEvent(new Event("change"));
+  await settle(300);
   const local = document.getElementById("whois-local");
   local.checked = true;
   local.dispatchEvent(new Event("change"));
-  await settle(300);
+  await settle(400);
+  check(
+    "keeping it local lets go of a model of its own that sends its words away, and says so",
+    pick.value === "" && /sends its words elsewhere/.test(document.getElementById("messages").textContent) && !/its own/.test(words.textContent),
+    `${pick.value} | ${words.textContent}`,
+  );
   check(
     "a teammate kept local is offered only models served here",
     !options().some((o) => o.startsWith("o-opus=") || o.startsWith("o-default=")) && options().some((o) => o.startsWith("o-local=")),

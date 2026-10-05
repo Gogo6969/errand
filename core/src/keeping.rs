@@ -334,6 +334,64 @@ pub fn as_a_reminder(lines: &[Line]) -> String {
     out
 }
 
+/// What was said in a conversation while another model answered it, for a
+/// Claude session that did not see it: the person's words, the answers and
+/// the steps, oldest first, without Errand's own housekeeping, and only the
+/// most recent `budget` characters' worth, saying how much was left out.
+///
+/// Said as what happened here before this moment, so it is read as the
+/// conversation's past and never as something being asked now.
+pub fn as_what_it_missed(lines: &[Line], budget: usize) -> String {
+    let mut said: Vec<String> = Vec::new();
+    for line in lines {
+        match line.kind.as_str() {
+            "mine" => said.push(format!("They said: {}\n", line.text.trim())),
+            "doing" if line.tool.as_deref().is_some_and(errands_own) => {}
+            "doing" => said.push(match line.outcome.as_deref().map(str::trim) {
+                Some(got) if !got.is_empty() => {
+                    format!("It did: {} and got: {}\n", line.text.trim(), one_line(got))
+                }
+                _ => format!("It did: {}\n", line.text.trim()),
+            }),
+            "said" if an_engine_error(&line.text) => {}
+            "said" if copies_errands_record(&line.text) => {}
+            "said" if line.text.trim().is_empty() => {}
+            "said" => said.push(format!("The answer: {}\n", line.text.trim())),
+            _ => {}
+        }
+    }
+    if said.is_empty() {
+        return String::new();
+    }
+    // The most recent first into the budget, then put back in order.
+    let mut kept: Vec<&String> = Vec::new();
+    let mut used = 0usize;
+    for one in said.iter().rev() {
+        if used + one.len() > budget && !kept.is_empty() {
+            break;
+        }
+        used += one.len();
+        kept.push(one);
+    }
+    let dropped = said.len() - kept.len();
+    kept.reverse();
+    let mut out = String::from(
+        "WHAT WAS SAID HERE WHILE ANOTHER MODEL ANSWERED\n\nThis conversation went on for a \
+         while with another model answering it, and you have not seen that part. This is what \
+         was said then, oldest first. Read it as what already happened here, not as something \
+         said to you now.\n\n",
+    );
+    if dropped > 0 {
+        out.push_str(&format!("({dropped} earlier lines are left out.)\n\n"));
+    }
+    for one in kept {
+        out.push_str(one);
+        out.push('\n');
+    }
+    out.push_str("That is everything up to now. What you are asked now follows.\n");
+    out
+}
+
 /// Where a fork or a rewind stops.
 ///
 /// Given inclusively: everything up to and including this line is kept, which
@@ -359,6 +417,57 @@ mod tests {
             pictures: Vec::new(),
             said_by: None,
         }
+    }
+
+    #[test]
+    fn what_claude_missed_is_the_conversation_without_errands_own_and_the_newest_kept() {
+        let lines = vec![
+            line(1, "mine", "Check the disk", None),
+            line(2, "doing", "Run df", Some("81% free")),
+            line(3, "said", "It is 81% free.", None),
+            line(4, "note", "Errand's own note", None),
+            line(5, "said", "[Errand's record of the steps taken: ...]", None),
+            line(6, "mine", "And the other one?", None),
+            line(7, "said", "   ", None),
+        ];
+        let missed = as_what_it_missed(&lines, 10_000);
+        assert!(
+            missed.starts_with("WHAT WAS SAID HERE WHILE ANOTHER MODEL ANSWERED"),
+            "{missed}"
+        );
+        assert!(missed.contains("They said: Check the disk"), "{missed}");
+        assert!(
+            missed.contains("It did: Run df and got: 81% free"),
+            "{missed}"
+        );
+        assert!(missed.contains("The answer: It is 81% free."), "{missed}");
+        assert!(missed.contains("They said: And the other one?"), "{missed}");
+        assert!(
+            !missed.contains("Errand's own note") && !missed.contains("record of the steps"),
+            "{missed}"
+        );
+        // In order, oldest first.
+        assert!(missed.find("Check the disk") < missed.find("And the other one?"));
+        // Nothing to tell, nothing said.
+        assert!(as_what_it_missed(&[line(1, "note", "only a note", None)], 10_000).is_empty());
+        // Too much: the newest kept, and how much was left out said.
+        let many: Vec<Line> = (1..=200)
+            .map(|n| {
+                line(
+                    n,
+                    "mine",
+                    &format!("message number {n} {}", "x".repeat(40)),
+                    None,
+                )
+            })
+            .collect();
+        let cut = as_what_it_missed(&many, 2_000);
+        assert!(cut.len() < 3_000, "{}", cut.len());
+        assert!(
+            cut.contains("message number 200") && !cut.contains("message number 1 "),
+            "{cut}"
+        );
+        assert!(cut.contains("earlier lines are left out"), "{cut}");
     }
 
     #[test]

@@ -4577,6 +4577,10 @@ el.engine.addEventListener("change", async () => {
     el.errandModelSays.textContent = String(why);
   }
   drawEngines();
+  if (!el.whois.hidden) {
+    drawOwnModel();
+    drawLimit();
+  }
 });
 
 // One handler for every link in every thread, rather than one per link: the
@@ -5145,6 +5149,10 @@ async function drawLimit() {
   const where = await invoke("where_words_go", { id: a.id }).catch(() => null);
   if (where?.engine) a.runsOn = where.engine;
   const inDollars = (a.runsOn || a.on) === "claude";
+  // The unit the form shows, kept with the form: Save reads it from here, not
+  // from the teammate, which is rebuilt whenever the list is read again.
+  el.limitForm.dataset.agent = a.id;
+  el.limitForm.dataset.unit = inDollars ? "dollars" : "tokens";
   const set = inDollars ? seen.dollars : seen.tokens;
   const said = set == null ? "none" : inDollars ? `$${set}` : tokensSaid(set);
   el.limitSummary.textContent = `Monthly limit: ${said}`;
@@ -5168,7 +5176,8 @@ el.limitForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const a = whose();
   if (!a) return;
-  const inDollars = (a.runsOn || a.on) === "claude";
+  const inDollars =
+    el.limitForm.dataset.agent === a.id ? el.limitForm.dataset.unit === "dollars" : (a.runsOn || a.on) === "claude";
   const amount = anAmount(el.limitValue.value);
   if (Number.isNaN(amount)) {
     el.limitSays.textContent = inDollars ? "Say it in dollars, like 20." : "Say it in tokens, like 5M or 500k.";
@@ -7965,8 +7974,13 @@ el.whoisLocal.addEventListener("change", async () => {
   if (!a) return;
   const on = el.whoisLocal.checked;
   try {
-    await invoke("keep_local", { id: a.id, on });
+    const letGo = await invoke("keep_local", { id: a.id, on });
     a.keepLocal = on;
+    // A model of its own that would send its words away, let go of.
+    if (letGo) {
+      a.ownModel = null;
+      tellHere(letGo);
+    }
   } catch (why) {
     el.whoisLocal.checked = !on;
     complain(String(why));
@@ -9340,7 +9354,26 @@ async function drawAway() {
 }
 el.modelsDone.addEventListener("click", () => {
   el.models.hidden = true;
+  // Whatever changed in there, the teammate on screen says it now.
+  drawWordsGo();
+  if (!el.whois.hidden) {
+    drawOwnModel();
+    drawLimit();
+  }
 });
+
+/**
+ * Teammates whose own model was just taken out of the picker: they follow
+ * Errand's model again, and Settings says who.
+ */
+function theyLostTheirModel(names) {
+  if (!names?.length) return;
+  for (const one of agents.values()) {
+    if (names.includes(one.name)) one.ownModel = null;
+  }
+  const who = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  el.errandModelSays.textContent = `${who} ${names.length === 1 ? "goes" : "go"} back to Errand's model, since ${names.length === 1 ? "its" : "their"} own was taken out.`;
+}
 
 /** Everything in the picker, with a way to take each one out. */
 async function drawChosen() {
@@ -9441,7 +9474,7 @@ async function drawChosen() {
       out.title =
         "Take it out of the picker. A teammate given it as its own model goes back to Errand's model; if it is Errand's model, choose another.";
       out.onclick = async () => {
-        await invoke("stop_offering", { id: one.id });
+        theyLostTheirModel(await invoke("stop_offering", { id: one.id }));
         thePickerHasChanged();
         await drawChosen();
         const a = whose();
@@ -9550,9 +9583,10 @@ function drawPlaces(places, { kept = false } = {}) {
         const drop = document.createElement("button");
         drop.type = "button";
         drop.textContent = "Forget";
-        drop.title = "Forget the address and its key, and take its models out of the picker.";
+        drop.title =
+          "Forget the address and its key, and take its models out of the picker. A teammate given one of them as its own model goes back to Errand's model.";
         drop.onclick = async () => {
-          await invoke("forget_backend", { id: place.id });
+          theyLostTheirModel(await invoke("forget_backend", { id: place.id }));
           thePickerHasChanged();
           await Promise.all([drawKept(), drawChosen()]);
           const a = whose();
