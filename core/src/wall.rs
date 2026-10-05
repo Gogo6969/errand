@@ -85,6 +85,10 @@ pub fn kept_in_its_own_folder(home: &Path) -> Vec<(String, String)> {
     let temporary = its_own_temporary_folder(home);
     set.push(("TMPDIR".into(), format!("{}/", temporary.display())));
     set.push(("CLAUDE_CODE_TMPDIR".into(), temporary.display().to_string()));
+    // zsh keeps a here-document in a file named by this, not by TMPDIR, and
+    // its own default is in /tmp, which the wall keeps: every `cat <<EOF` a
+    // teammate's commands ran failed with "can't create temp file".
+    set.push(("TMPPREFIX".into(), format!("{}/zsh", temporary.display())));
     // Claude Code's own memory, which it keeps beside its record and reads
     // into every later session in the folder: a teammate could write its own
     // instructions there, around the rule that it changes only through the
@@ -1257,6 +1261,10 @@ mod tests {
             set.get("TMPDIR"),
             Some(&format!("{}/", temporary.display()))
         );
+        assert_eq!(
+            set.get("TMPPREFIX"),
+            Some(&format!("{}/zsh", temporary.display()))
+        );
         assert!(set
             .get("CARGO_HOME")
             .is_some_and(|c| c.contains("/.cache/cargo")));
@@ -1856,6 +1864,30 @@ mod tests {
                 String::from_utf8_lossy(&out.stderr)
             ),
         )
+    }
+
+    #[tokio::test]
+    async fn a_here_document_works_in_zsh_inside_the_wall() {
+        if !possible() {
+            return;
+        }
+        let home = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("errand-heredoc-wall-{}", std::process::id()));
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(&home).unwrap();
+        // How Claude Code's commands write a file, through the person's zsh.
+        let out = shell(&home, "/bin/zsh -fc 'cat <<END\nhere\nEND'")
+            .output()
+            .await
+            .expect("it runs");
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "here",
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]

@@ -260,6 +260,17 @@ pub fn not_borne_out(claims: &[Claim], began_at: Option<i64>) -> Vec<Wrong> {
             .could_be
             .iter()
             .find_map(|place| std::fs::metadata(place).ok());
+        let found = match found {
+            Some(meta) => Some(meta),
+            None if claim.is_a_bare_name() => match somewhere_below(claim) {
+                Below::Found(meta) => Some(meta),
+                Below::NotThere => None,
+                // Too much to look through: said nothing about rather than
+                // said to be missing.
+                Below::GaveUp => continue,
+            },
+            None => None,
+        };
         match found {
             // A word cut off at a space, with the rest of the name sitting
             // right there in the folder, is not a missing file. It is the
@@ -312,6 +323,89 @@ fn cut_off_at_a_space(places: &[PathBuf]) -> bool {
                 .any(|entry| entry.file_name().to_string_lossy().starts_with(&front))
         })
     })
+}
+
+/// How far down a bare name is looked for, and in how many entries at most,
+/// before the check gives up and says nothing.
+const LOOKED_FOR_BELOW: usize = 4;
+const AT_MOST_LOOKED_AT: usize = 5_000;
+
+/// Folders nobody means when they name a file they made.
+const NOT_LOOKED_IN: &[&str] = &[
+    ".git",
+    ".cache",
+    "node_modules",
+    "target",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".next",
+    "dist",
+    "build",
+];
+
+/// What looking further down found.
+enum Below {
+    Found(std::fs::Metadata),
+    NotThere,
+    GaveUp,
+}
+
+/// A bare name, looked for further down every folder it was looked for in at
+/// the top. A team names a file the way people do, "Coder wrote
+/// `wordfreq.py`", about `wordfreq/wordfreq.py` in the team's folder, with the
+/// project's own folder said once somewhere else; looked for at the top only,
+/// the note told the person a file was missing that was sitting right there.
+/// The newest of the files found, for the time to be checked against. Links
+/// are never followed down.
+fn somewhere_below(claim: &Claim) -> Below {
+    let Some(name) = tidy(Path::new(&claim.as_said)) else {
+        return Below::NotThere;
+    };
+    let parts = name.components().count();
+    let mut tops: Vec<PathBuf> = Vec::new();
+    for place in &claim.could_be {
+        if let Some(folder) = place.ancestors().nth(parts) {
+            if !tops.iter().any(|f| f == folder) {
+                tops.push(folder.to_path_buf());
+            }
+        }
+    }
+    let mut newest: Option<std::fs::Metadata> = None;
+    let mut looked_at = 0usize;
+    let mut now: Vec<PathBuf> = tops;
+    for _ in 0..LOOKED_FOR_BELOW {
+        let mut next = Vec::new();
+        for folder in &now {
+            let Ok(entries) = std::fs::read_dir(folder) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                looked_at += 1;
+                if looked_at > AT_MOST_LOOKED_AT {
+                    return Below::GaveUp;
+                }
+                let is_a_folder = entry.file_type().is_ok_and(|t| t.is_dir());
+                let called = entry.file_name().to_string_lossy().to_string();
+                if !is_a_folder || NOT_LOOKED_IN.contains(&called.as_str()) {
+                    continue;
+                }
+                let below = entry.path();
+                if let Ok(meta) = std::fs::symlink_metadata(below.join(&name)) {
+                    let later = |m: &std::fs::Metadata| m.modified().ok();
+                    if newest.as_ref().is_none_or(|n| later(&meta) > later(n)) {
+                        newest = Some(meta);
+                    }
+                }
+                next.push(below);
+            }
+        }
+        now = next;
+    }
+    match newest {
+        Some(meta) => Below::Found(meta),
+        None => Below::NotThere,
+    }
 }
 
 /// The folders a bare name was looked for in, besides the agent's own.
@@ -1495,6 +1589,40 @@ mod tests {
         assert_eq!(claims.len(), 1, "{claims:?}");
         assert!(not_borne_out(&claims, Some(began_at)).is_empty());
         let _ = std::fs::remove_dir_all(&own);
+    }
+
+    #[test]
+    fn a_bare_name_in_a_folder_further_down_is_not_missing() {
+        // What a team's lead said after the drill: the file is the team's,
+        // one folder down, and was reported missing.
+        let own = scratch("lead");
+        let team = scratch("team");
+        std::fs::create_dir_all(team.join("wordfreq")).unwrap();
+        std::fs::write(team.join("wordfreq/wordfreq.py"), "x").unwrap();
+        let also = vec![team.clone()];
+        let claims = claimed_written(
+            "- **Drill Coder:** wrote `wordfreq.py`, using only the standard library.",
+            &may(&own, &also),
+        );
+        assert_eq!(claims.len(), 1, "{claims:?}");
+        assert!(not_borne_out(&claims, None).is_empty());
+        // In a folder nobody means, it is not found, and a name that is
+        // nowhere is still missing.
+        std::fs::create_dir_all(team.join("node_modules/x")).unwrap();
+        std::fs::write(team.join("node_modules/x/kept.js"), "x").unwrap();
+        let claims = claimed_written("Wrote `kept.js` and `gone.txt`.", &may(&own, &also));
+        let wrong = not_borne_out(&claims, None);
+        assert_eq!(wrong.len(), 2, "{wrong:?}");
+        // Found further down, its time is still checked.
+        set_the_time(&team.join("wordfreq/wordfreq.py"), 1_000_000_000_000);
+        let claims = claimed_written("Wrote `wordfreq.py`.", &may(&own, &also));
+        assert!(matches!(
+            not_borne_out(&claims, Some(1_800_000_000_000)).as_slice(),
+            [Wrong::Older { .. }]
+        ));
+        for at in [own, team] {
+            let _ = std::fs::remove_dir_all(at);
+        }
     }
 
     #[test]
