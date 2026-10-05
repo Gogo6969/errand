@@ -1243,7 +1243,12 @@ async function catchUp() {
     // Now is home: what needs you, what is running and what is next, before
     // any one teammate. The teammate opened under it is where Back goes. Not
     // under the window harness, whose checks start from a conversation.
-    if (!window.__ERRAND_UNDER_TEST__) showMission();
+    if (!window.__ERRAND_UNDER_TEST__) {
+      showMission({ focus: false });
+      // Nor in the box behind it, where typing would go to a conversation
+      // nobody can see.
+      el.what.blur();
+    }
   } else {
     await start();
     // Nothing has ever been done in this copy, so there is nothing on screen
@@ -8860,7 +8865,7 @@ function lookedNow() {
   }
 }
 
-async function showOverview() {
+async function showOverview({ focus = true } = {}) {
   // How it was last grouped and ordered, which is somebody's habit rather
   // than anything the app needs to know.
   try {
@@ -8885,7 +8890,8 @@ async function showOverview() {
   tabShown("tasks");
   el.overview.hidden = false;
   // The keys go to Mission Control, not to the conversation hidden under it.
-  el.missionTasks.focus();
+  // Not at launch, where nothing had them and a ring round a tab is noise.
+  if (focus) el.missionTasks.focus();
   awaySeen = false;
   await readTheOverview();
   drawOverview();
@@ -8956,14 +8962,14 @@ function tabShown(which) {
 }
 
 /** Mission Control on the tab it was last left on, Tasks the first time. */
-function showMission() {
+function showMission({ focus = true } = {}) {
   let last = "tasks";
   try {
     last = localStorage.getItem("errand-mission-tab") || "tasks";
   } catch {
     // Tasks.
   }
-  return last === "teams" ? showTeams() : showOverview();
+  return last === "teams" ? showTeams({ focus }) : showOverview({ focus });
 }
 
 async function readTheOverview() {
@@ -9037,13 +9043,13 @@ let teamsKnown = [];
 /** What each teammate brings, by id: its skills by name, and its checklist's length. */
 let bringsNow = new Map();
 
-async function showTeams() {
+async function showTeams({ focus = true } = {}) {
   if (!el.overview.hidden) leaveTasks();
   cameFrom();
   el.mission.hidden = false;
   tabShown("teams");
   el.teams.hidden = false;
-  el.missionTeams.focus();
+  if (focus) el.missionTeams.focus();
   await drawTeams();
 }
 
@@ -9379,7 +9385,7 @@ el.teamsNewTeammate.addEventListener("click", () => {
   start({ introduce: true });
 });
 
-el.missionOpen.addEventListener("click", showMission);
+el.missionOpen.addEventListener("click", () => showMission());
 el.missionDone.addEventListener("click", closeMission);
 el.missionTasks.addEventListener("click", () => {
   if (el.overview.hidden) showOverview();
