@@ -164,6 +164,7 @@ body { display: grid; grid-template-columns: 232px 1fr; }
 }
 
 #new {
+  flex: none;
   width: 28px;
   height: 28px;
   border-radius: 7px;
@@ -176,7 +177,9 @@ body { display: grid; grid-template-columns: 232px 1fr; }
 #new:hover { background: var(--card); color: var(--ink); border-color: var(--rule); }
 /* Mission Control: drawn and said, with how many tasks need you beside it. */
 #mission-open {
-  flex: 1 1 auto;
+  /* From nothing, so a long count shortens the words and never pushes + to
+     a line of its own. */
+  flex: 1 1 0;
   min-width: 0;
   justify-content: flex-start;
   height: 28px;
@@ -768,9 +771,11 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   border: 1px solid transparent;
   background: none;
   color: var(--ink-soft);
-  font-size: 15px;
+  /* Big enough to find at a glance: at 15px the gear was a speck beside the
+     word Errand. */
+  font-size: 20px;
   line-height: 1;
-  padding: 4px 7px;
+  padding: 3px 6px;
   border-radius: 7px;
   cursor: pointer;
 }
@@ -3878,7 +3883,8 @@ a.on-disk {
   justify-content: center;
   align-items: flex-start;
   padding-top: 11vh;
-  z-index: 100;
+  /* Above the palette, which it closes, and everything else. */
+  z-index: 110;
 }
 #task-chooser-box {
   width: min(600px, calc(100vw - 40px));
@@ -3915,6 +3921,7 @@ a.on-disk {
 }
 #task-chooser-what:focus { outline: none; border-color: var(--edge); }
 #task-chooser-say { margin: 14px 16px 4px; font-size: 12.5px; color: var(--ink-soft); }
+#task-chooser-say[data-wrong="true"] { color: var(--wrong); }
 #task-chooser-who {
   list-style: none;
   margin: 0;
@@ -3928,7 +3935,7 @@ a.on-disk {
   font-weight: 600;
   letter-spacing: .08em;
   text-transform: uppercase;
-  color: var(--faint, var(--ink-soft));
+  color: var(--ink-soft);
 }
 #task-chooser-who .who {
   display: grid;

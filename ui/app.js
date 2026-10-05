@@ -267,6 +267,7 @@ const el = {
   nowCount: document.getElementById("now-count"),
   newTask: document.getElementById("task-chooser"),
   newTaskWhat: document.getElementById("task-chooser-what"),
+  newTaskSay: document.getElementById("task-chooser-say"),
   newTaskWho: document.getElementById("task-chooser-who"),
   overviewGroup: document.getElementById("overview-group"),
   overviewOrder: document.getElementById("overview-order"),
@@ -908,33 +909,43 @@ let newTaskFor = { teams: [], people: [], brings: new Map() };
 
 /** Words too common to say anything about who should do a task. */
 const TOO_COMMON = new Set(
-  "that this with from have what which will would should could about into them they their there then than when where your make made need needs does done some more most very just also only each every please want like".split(" "),
+  ("that this with from have what which will would should could about into them they their there then than when where your make made need needs does done some more most very just also only each every please want like " +
+    "the and for you are but not all any can has its our out new get now one two use way who why how see let put say too was his her him may own team")
+    .split(" "),
 );
 
 /** The usual words for a kind of role, so a role of two letters still matches. */
 const ROLE_WORDS = [
-  [/\bqa\b|test|review|check|verif/i, "test tests testing check checks verify review bugs break"],
-  [/code|coder|dev|engineer|build|program|\bapp\b/i, "code build program script tool function implement python rust javascript fix"],
-  [/writ|copy|editor|docs|text|content/i, "write writing readme docs documentation text explain article"],
-  [/research|analys|scout|news|market|finance/i, "research find sources search news compare analyse report"],
-  [/design|visual|pixel/i, "design layout visual image icon style colour"],
+  [/\b(qa|test\w*|review\w*|check\w*|verif\w*)\b/i, "test tests testing check checks verify review bug bugs break"],
+  [/\b(code\w*|coder|dev|developer|engineer\w*|build\w*|program\w*|app)\b/i, "code build program script tool function implement python rust javascript fix bug"],
+  [/\b(writ\w*|copy\w*|editor|docs|text|content)\b/i, "write writing readme docs documentation text explain article"],
+  [/\b(research\w*|analys\w*|scout|news|market\w*|finance)\b/i, "research find sources search news compare analyse report"],
+  [/\b(design\w*|visual\w*|pixel)\b/i, "design layout visual image icon style colour"],
 ];
 
 function wordsOf(text) {
   return (String(text || "").toLowerCase().match(/[a-z0-9]+/g) || []).filter(
-    (w) => w.length >= 4 && !TOO_COMMON.has(w),
+    (w) => w.length >= 3 && !TOO_COMMON.has(w),
   );
 }
 
-/** A word by its start, so tests, tester and testing are one word. */
-const stemOf = (w) => w.slice(0, 5);
+/** A word without its ending, so test, tests, tester and testing are one. */
+function stemOf(w) {
+  for (const end of ["ing", "ers", "er", "ed", "es", "s"]) {
+    if (w.length > end.length + 2 && w.endsWith(end)) {
+      w = w.slice(0, -end.length);
+      break;
+    }
+  }
+  return w.length > 3 && w.endsWith("e") ? w.slice(0, -1) : w;
+}
 
-/** What a teammate is about, as words to match a task against. */
+/** What a teammate is about, as words to match a task against. Its role
+ * brings the usual words for that kind of role, matched as a whole word. */
 function profileOf(a) {
   const brought = newTaskFor.brings.get(a.id);
-  const role = `${a.title || ""} ${a.about || ""}`;
-  const usual = ROLE_WORDS.filter(([asks]) => asks.test(role)).map(([, words]) => words);
-  return [a.name, role, ...(brought?.skills || []), ...usual].join(" ");
+  const usual = ROLE_WORDS.filter(([asks]) => asks.test(a.title || "")).map(([, words]) => words);
+  return [a.name, a.title || "", a.about || "", ...(brought?.skills || []), ...usual].join(" ");
 }
 
 /** How many words a task shares with a profile, by their starts. */
@@ -953,14 +964,26 @@ async function openNewTask() {
     people: teammatesToChoose(),
     brings: new Map((brought || []).map(([id, skills, checks, own]) => [id, { skills: skills || [], checks, own }])),
   };
+  focusBeforeNewTask = document.activeElement;
   el.newTaskWhat.value = "";
+  el.newTaskSay.textContent = "Who should do it?";
+  el.newTaskSay.dataset.wrong = "false";
   el.newTask.hidden = false;
   drawNewTask();
   el.newTaskWhat.focus();
 }
 
-function closeNewTask() {
+/** What had the keyboard before the chooser opened. */
+let focusBeforeNewTask = null;
+
+/** Put the chooser away; dismissed, focus goes back where it was. */
+function closeNewTask({ refocus = false } = {}) {
   el.newTask.hidden = true;
+  const back = focusBeforeNewTask;
+  focusBeforeNewTask = null;
+  if (!refocus) return;
+  if (back?.isConnected && back.offsetParent !== null && back !== document.body) back.focus();
+  else if (el.mission.hidden) el.what.focus();
 }
 
 /** The rows that can be chosen, in the order they are shown. */
@@ -971,19 +994,28 @@ function newTaskRows() {
 function drawNewTask() {
   const text = el.newTaskWhat.value;
   const byId = new Map([...agents.values()].map((a) => [a.id, a]));
+  const people = newTaskFor.people.map((a, at) => ({ a, at, fit: fitOf(text, profileOf(a)) }));
+  const fitOfPerson = new Map(people.map((x) => [x.a.id, x.fit]));
+  // A team fits by its best member, and better only when several of its
+  // people each fit a part: one member's words alone are that member's.
   const team = newTaskFor.teams.map((t) => {
     const lead = t.lead && byId.get(t.lead);
     const crew = [lead, ...t.members.map((m) => byId.get(m))].filter(Boolean);
-    return { t, lead, crew, fit: lead ? fitOf(text, [t.name, ...crew.map(profileOf)].join(" ")) : 0 };
+    const fits = crew.map((a) => fitOfPerson.get(a.id) ?? fitOf(text, profileOf(a)));
+    const several = fits.filter((f) => f > 0).length;
+    const fit = lead ? Math.max(0, ...fits) + (several >= 2 ? several - 1 : 0) : 0;
+    return { t, lead, crew, fit };
   });
-  const people = newTaskFor.people.map((a, at) => ({ a, at, fit: fitOf(text, profileOf(a)) }));
   // With something written, the closest first; otherwise in the list's order.
   if (wordsOf(text).length) people.sort((x, y) => y.fit - x.fit || x.at - y.at);
-  const best = Math.max(0, ...team.map((x) => x.fit), ...people.map((x) => x.fit));
-  let marked = false;
-  const mark = (fit) => {
-    if (marked || !best || fit !== best) return null;
-    marked = true;
+  // The single best, a teammate before a team that only ties with it.
+  const ranked = [
+    ...people.map((x) => ({ key: `person:${x.a.id}`, fit: x.fit, team: 0 })),
+    ...team.filter((x) => x.lead).map((x) => ({ key: `team:${x.t.id}`, fit: x.fit, team: 1 })),
+  ].sort((x, y) => y.fit - x.fit || x.team - y.team);
+  const bestKey = ranked[0]?.fit > 0 ? ranked[0].key : null;
+  const mark = (key) => {
+    if (key !== bestKey) return null;
     const pill = document.createElement("span");
     pill.className = "fit";
     pill.textContent = "Best fit";
@@ -1015,7 +1047,7 @@ function drawNewTask() {
       const r = document.createElement("span");
       r.className = "role";
       r.textContent = role;
-      n.append(r);
+      n.append(" ", r);
     }
     const d = document.createElement("span");
     d.className = "who-line";
@@ -1040,7 +1072,7 @@ function drawNewTask() {
     for (const { t, lead, crew } of team.filter((x) => x.lead)) {
       const others = crew.length - 1;
       items.push(
-        row("team", t.id, teamMark(), t.name, "", `Led by ${lead.name} · ${others} ${others === 1 ? "member" : "members"}`, mark(team.find((x) => x.t === t).fit)),
+        row("team", t.id, teamMark(), t.name, "", `Led by ${lead.name} · ${others} ${others === 1 ? "member" : "members"}`, mark(`team:${t.id}`)),
       );
     }
     for (const { t } of team.filter((x) => !x.lead)) {
@@ -1049,7 +1081,7 @@ function drawNewTask() {
   }
   if (people.length) {
     items.push(heading("Teammates"));
-    for (const { a, fit } of people) {
+    for (const { a } of people) {
       const brought = newTaskFor.brings.get(a.id);
       const detail = [
         a.about,
@@ -1058,7 +1090,7 @@ function drawNewTask() {
       ]
         .filter(Boolean)
         .join(" · ");
-      items.push(row("person", a.id, tile(kindFor(a), busy(a.id), a.hue), a.name, a.title, detail || "Has not said what it handles", mark(fit)));
+      items.push(row("person", a.id, tile(kindFor(a), busy(a.id), a.hue), a.name, a.title, detail || "Has not said what it handles", mark(`person:${a.id}`)));
     }
   }
   const plus = document.createElement("span");
@@ -1077,11 +1109,18 @@ function pickNewTaskRow(li) {
   li?.scrollIntoView({ block: "nearest" });
 }
 
+/** Full-window things a new task would otherwise start out of sight behind. */
+function outOfTheWay() {
+  if (!el.mission.hidden) closeMission({ refocus: false });
+  if (!el.models.hidden) el.modelsDone.click();
+  document.querySelector(".closer")?.remove();
+}
+
 async function chooseWhoDoesIt(kind, id) {
   const text = el.newTaskWhat.value.trim();
-  closeNewTask();
   if (kind === "new") {
-    if (!el.mission.hidden) closeMission();
+    closeNewTask();
+    outOfTheWay();
     await start({ introduce: true });
     // What was written waits in the box, to send once it has a name.
     if (text) {
@@ -1102,21 +1141,32 @@ async function chooseWhoDoesIt(kind, id) {
       talks.set(talk, asTalk({ id: talk, agent: id, name: "New task" }, { loaded: true }));
     }
   } catch (why) {
-    complain(String(why));
+    // Kept open, with what was written: said where it was asked.
+    el.newTaskSay.textContent = `That could not be started: ${why}`;
+    el.newTaskSay.dataset.wrong = "true";
     return;
   }
-  if (!el.mission.hidden) closeMission();
+  closeNewTask();
+  outOfTheWay();
   await show(talk);
-  // Said for them, when it was written; otherwise the box is ready for it.
-  if (text) await sayIt(text);
+  // Said in that task only. If something else was opened meanwhile, the
+  // words wait in that task's box rather than going to whoever is on screen.
+  if (text && showing === talk) await sayIt(text);
+  else if (text) halfTyped.set(talk, text);
   else el.what.focus();
 }
 
 el.newTaskWhat.addEventListener("input", () => drawNewTask());
 el.newTaskWhat.addEventListener("keydown", (e) => {
-  // Down, or Enter, to the list: to the best fit when there is one. Enter
-  // never sends from here, so nothing goes to somebody not chosen.
-  if (e.key === "ArrowDown" || (e.key === "Enter" && !e.shiftKey)) {
+  // A word still being composed takes its own Enter.
+  if (e.isComposing || e.keyCode === 229) return;
+  // Down at the very end, or Enter, to the list: to the best fit when there
+  // is one. Down anywhere else moves the caret. Enter never sends from here,
+  // so nothing goes to somebody not chosen.
+  const atTheEnd =
+    el.newTaskWhat.selectionStart === el.newTaskWhat.selectionEnd &&
+    el.newTaskWhat.selectionEnd === el.newTaskWhat.value.length;
+  if ((e.key === "ArrowDown" && atTheEnd) || (e.key === "Enter" && !e.shiftKey)) {
     e.preventDefault();
     const rows = newTaskRows();
     pickNewTaskRow(rows.find((r) => r.querySelector(".fit")) || rows[0]);
@@ -1132,21 +1182,39 @@ el.newTaskWho.addEventListener("keydown", (e) => {
       pickNewTaskRow(null);
       el.newTaskWhat.focus();
     } else pickNewTaskRow(rows[Math.min(next, rows.length - 1)]);
-  } else if (e.key === "Enter" && at >= 0) {
+  } else if (e.key === "Enter" && !e.repeat && at >= 0) {
+    // Not a held key's repeat: the Enter that came to the list is not the
+    // one that chooses.
     e.preventDefault();
     chooseWhoDoesIt(rows[at].dataset.kind, rows[at].dataset.id);
   }
 });
-el.newTask.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") {
-    e.preventDefault();
-    e.stopPropagation();
-    closeNewTask();
-  }
-});
-// A click beside the box puts it away, the way the palette goes.
-el.newTask.addEventListener("click", (e) => {
-  if (e.target === el.newTask) closeNewTask();
+// Escape puts it away wherever focus is, and only it; Tab goes round inside
+// it, between what needs doing and who, never out to what is behind.
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if (el.newTask.hidden) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeNewTask({ refocus: true });
+    } else if (e.key === "Tab") {
+      e.preventDefault();
+      const rows = newTaskRows();
+      const onAList = rows.includes(document.activeElement);
+      if (onAList) {
+        pickNewTaskRow(null);
+        el.newTaskWhat.focus();
+      } else pickNewTaskRow(rows.find((r) => r.getAttribute("aria-selected") === "true") || rows.find((r) => r.querySelector(".fit")) || rows[0]);
+    }
+  },
+  true,
+);
+// A press beside the box puts it away, the way the palette goes: on the
+// press, so a drag that ends out there is not taken for one.
+el.newTask.addEventListener("mousedown", (e) => {
+  if (e.target === el.newTask) closeNewTask({ refocus: true });
 });
 
 /**
@@ -1175,7 +1243,7 @@ async function catchUp() {
     // Now is home: what needs you, what is running and what is next, before
     // any one teammate. The teammate opened under it is where Back goes. Not
     // under the window harness, whose checks start from a conversation.
-    if (!window.__ERRAND_UNDER_TEST__) showOverview();
+    if (!window.__ERRAND_UNDER_TEST__) showMission();
   } else {
     await start();
     // Nothing has ever been done in this copy, so there is nothing on screen
@@ -6851,15 +6919,26 @@ el.findingWhat.addEventListener("keydown", (e) => {
 });
 
 window.addEventListener("keydown", (e) => {
-  // Mission Control, and a new task, from anywhere.
-  if ((e.metaKey || e.ctrlKey) && e.key === "1") {
+  // While a new task is being given, it has the keyboard: nothing behind it
+  // opens, closes or acts on a key meant for it.
+  if (!el.newTask.hidden) {
+    if (e.metaKey && ["1", "n", "f", "k"].includes(e.key.toLowerCase())) e.preventDefault();
+    return;
+  }
+  // Mission Control, and a new task, from anywhere. Command only: Control-N
+  // is the next line in every text box on a Mac.
+  if (e.metaKey && e.key === "1") {
     e.preventDefault();
     el.mission.hidden ? showMission() : closeMission();
     return;
   }
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
+  if (e.metaKey && e.key.toLowerCase() === "n") {
     e.preventDefault();
-    if (el.newTask.hidden) openNewTask();
+    // Over the palette or the finder, which would otherwise go on taking
+    // the keys the new task is typed with.
+    el.palette.hidden = true;
+    el.finding.hidden = true;
+    openNewTask();
     return;
   }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
@@ -8800,13 +8879,18 @@ async function showOverview() {
   ]) {
     if (!select.value) select.value = first;
   }
+  cameFrom();
   el.mission.hidden = false;
   el.teams.hidden = true;
   tabShown("tasks");
   el.overview.hidden = false;
+  // The keys go to Mission Control, not to the conversation hidden under it.
+  el.missionTasks.focus();
+  awaySeen = false;
   await readTheOverview();
   drawOverview();
   await drawAway();
+  if (!el.overview.hidden && !el.mission.hidden) awaySeen = true;
   // Live while it is open: a turn ending or a routine firing behind it would
   // otherwise leave it describing a state that is over.
   clearInterval(overviewTicking);
@@ -8820,18 +8904,39 @@ async function showOverview() {
   }, 10_000);
 }
 
-/** Leave the Tasks tab: it stops reading itself again, and what it showed counts as seen. */
+/** Leave the Tasks tab: it stops reading itself again. */
 function leaveTasks() {
   el.overview.hidden = true;
   clearInterval(overviewTicking);
-  lookedNow();
 }
 
-/** Close Mission Control, whichever tab was open. */
-function closeMission() {
+/** Whether "Since you last looked" was on screen in this opening of Mission Control. */
+let awaySeen = false;
+/** What had the keyboard before Mission Control opened, to have it back after. */
+let focusBeforeMission = null;
+
+/** Where focus was, the first time Mission Control opens over it. */
+function cameFrom() {
+  if (el.mission.hidden) focusBeforeMission = document.activeElement;
+}
+
+/**
+ * Close Mission Control, whichever tab was open. What it said had happened
+ * since you last looked counts as seen only if it was shown, and focus goes
+ * back where it was, or to the box to type in.
+ */
+function closeMission({ refocus = true } = {}) {
+  if (el.mission.hidden) return;
   if (!el.overview.hidden) leaveTasks();
+  if (awaySeen) lookedNow();
+  awaySeen = false;
   el.teams.hidden = true;
   el.mission.hidden = true;
+  if (!refocus) return;
+  const back = focusBeforeMission;
+  focusBeforeMission = null;
+  if (back?.isConnected && back.offsetParent !== null && back !== document.body) back.focus();
+  else el.what.focus();
 }
 
 /** Everything that left the Tasks or Teams tab for somewhere else leaves Mission Control. */
@@ -8934,9 +9039,11 @@ let bringsNow = new Map();
 
 async function showTeams() {
   if (!el.overview.hidden) leaveTasks();
+  cameFrom();
   el.mission.hidden = false;
   tabShown("teams");
   el.teams.hidden = false;
+  el.missionTeams.focus();
   await drawTeams();
 }
 
@@ -9281,8 +9388,18 @@ el.missionTeams.addEventListener("click", () => {
   if (el.teams.hidden) showTeams();
 });
 document.addEventListener("keydown", (e) => {
-  // Not while a team's name is being typed, where Escape puts the old one back.
-  if (e.key === "Escape" && !el.mission.hidden && el.newTask.hidden && !e.target.closest?.(".team-name")) closeMission();
+  // Not while a team's name is being typed, where Escape puts the old one
+  // back, nor while the palette or the chooser is over it: Escape closes
+  // that alone.
+  if (e.key !== "Escape" || el.mission.hidden || !el.newTask.hidden || !el.palette.hidden) return;
+  if (e.target.closest?.(".team-name")) return;
+  // A search on the Tasks tab is let go of first; the next Escape leaves.
+  if (e.target === el.overviewFind && el.overviewFind.value) {
+    el.overviewFind.value = "";
+    el.overviewFind.dispatchEvent(new Event("input"));
+    return;
+  }
+  closeMission();
 });
 for (const [value, label] of SHOWING) {
   const option = document.createElement("option");

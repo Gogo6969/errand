@@ -15,8 +15,12 @@ const { asked, FIXTURE, tell } = await import(
 /** Mission Control on one of its tabs, the way somebody gets there: its button, then the tab. */
 function openTheTab(which) {
   document.getElementById("mission-open").click();
-  document.getElementById(which === "teams" ? "mission-teams" : "mission-tasks").click();
+  const tab = document.getElementById(which === "teams" ? "mission-teams" : "mission-tasks");
+  if (tab.getAttribute("aria-selected") !== "true") tab.click();
 }
+
+/** Whether Mission Control, the overlay itself, is closed. */
+const missionClosed = () => document.getElementById("mission").hidden;
 
 /**
  * Open one of the fixture's conversations, the way somebody would.
@@ -4846,7 +4850,7 @@ export async function theOverview() {
   await settle(150);
   openTheTab("tasks");
   await settle(300);
-  check("the overview opens over the window", !overview.hidden && getComputedStyle(overview).display !== "none", `hidden=${overview.hidden}`);
+  check("the overview opens over the window", !overview.hidden && !document.getElementById("mission").hidden && getComputedStyle(document.getElementById("mission")).display !== "none", `hidden=${overview.hidden}`);
   check(
     "a grouping kept from before that is no longer offered falls back to what each is doing",
     document.getElementById("overview-group").value === "state",
@@ -5031,8 +5035,8 @@ export async function theOverview() {
   const talks = document.getElementById("talks");
   check(
     "Open on a tile goes to its teammate, at that task",
-    overview.hidden && talks.value === "talk-overnight",
-    `hidden=${overview.hidden}, on ${talks.value}`,
+    overview.hidden && missionClosed() && talks.value === "talk-overnight",
+    `hidden=${overview.hidden}, mission closed=${missionClosed()}, on ${talks.value}`,
   );
   check(
     "and the task menu offers a new task, not a new conversation",
@@ -5445,6 +5449,89 @@ export async function aModelOfItsOwn() {
     delete agent.keep_local;
     delete agent.own_model;
   }
+  return found;
+}
+
+export async function missionControlKeepsItsPlace() {
+  const found = [];
+  const check = (what, ok, saw) => found.push({ what, ok: !!ok, saw });
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const key = (k, extra = {}, target = document.activeElement || document.body) =>
+    target.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...extra }));
+  const mission = document.getElementById("mission");
+  const selected = () => (document.getElementById("mission-teams").getAttribute("aria-selected") === "true" ? "teams" : "tasks");
+  try {
+    localStorage.removeItem("errand-mission-tab");
+  } catch {}
+  if (!mission.hidden) document.getElementById("mission-done").click();
+  await wait(150);
+  // The button alone: Tasks the first time, then whichever tab it was left on.
+  document.getElementById("mission-open").click();
+  await wait(400);
+  check("Mission Control opens on Tasks the first time", !mission.hidden && selected() === "tasks", selected());
+  check("and the keyboard is in it, not in the conversation behind", mission.contains(document.activeElement), document.activeElement?.id);
+  document.getElementById("mission-teams").click();
+  await wait(300);
+  document.getElementById("mission-done").click();
+  await wait(150);
+  document.getElementById("mission-open").click();
+  await wait(400);
+  check("and on the tab it was left on after that", !mission.hidden && selected() === "teams", selected());
+  // Escape over the palette closes the palette, not Mission Control too.
+  key("k", { metaKey: true });
+  await wait(150);
+  key("Escape");
+  await wait(150);
+  check("Escape over the palette closes the palette alone", document.getElementById("palette").hidden && !mission.hidden, `palette hidden=${document.getElementById("palette").hidden}, mission hidden=${mission.hidden}`);
+  // Command-N over Mission Control: the chooser, on top, with the keyboard.
+  key("n", { metaKey: true });
+  await wait(400);
+  const chooser = document.getElementById("task-chooser");
+  check("Command-N opens a new task over Mission Control, with the keyboard in it", !chooser.hidden && document.activeElement?.id === "task-chooser-what", document.activeElement?.id);
+  key("n", { ctrlKey: true }, document.getElementById("task-chooser-what"));
+  await wait(100);
+  check("Control-N is left to the text box", !chooser.hidden && document.activeElement?.id === "task-chooser-what", document.activeElement?.id);
+  // Tab goes round inside it.
+  key("Tab");
+  await wait(100);
+  const inside = chooser.contains(document.activeElement) && document.activeElement?.classList.contains("who");
+  key("Tab");
+  await wait(100);
+  check("Tab goes between what needs doing and who, never out to what is behind", inside && document.activeElement?.id === "task-chooser-what", document.activeElement?.id || document.activeElement?.className);
+  // Command-K and Command-1 do nothing under it.
+  key("k", { metaKey: true });
+  key("1", { metaKey: true });
+  await wait(150);
+  check("the palette and Mission Control's shortcut wait while it is open", document.getElementById("palette").hidden && !mission.hidden && !chooser.hidden, `palette ${document.getElementById("palette").hidden}`);
+  // Escape puts away the chooser alone, even with focus on nothing in it.
+  document.activeElement?.blur();
+  key("Escape", {}, document.body);
+  await wait(150);
+  check("Escape puts the new task away, and only it", chooser.hidden && !mission.hidden, `chooser hidden=${chooser.hidden}, mission hidden=${mission.hidden}`);
+  // A press that ends a drag beside the box does not put it away.
+  key("n", { metaKey: true });
+  await wait(300);
+  const what = document.getElementById("task-chooser-what");
+  what.value = "Something half written";
+  what.dispatchEvent(new Event("input"));
+  chooser.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await wait(100);
+  check("a drag ending beside the box keeps it and what was written", !chooser.hidden && what.value === "Something half written", String(chooser.hidden));
+  chooser.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  await wait(100);
+  check("a press beside it puts it away", chooser.hidden, String(chooser.hidden));
+  document.getElementById("mission-done").click();
+  await wait(150);
+  check("Back closes Mission Control", missionClosed(), String(mission.hidden));
+  // The Settings gear, big enough to find, and still a part of its row.
+  const setup = document.getElementById("setup");
+  const row = document.getElementById("who").getBoundingClientRect();
+  const gear = setup.getBoundingClientRect();
+  check(
+    "the Settings gear is big enough to find, inside the bottom row",
+    parseFloat(getComputedStyle(setup).fontSize) >= 18 && (!beingDrawn() || (gear.top >= row.top && gear.bottom <= row.bottom)),
+    `${getComputedStyle(setup).fontSize}, ${Math.round(gear.height)}px in a ${Math.round(row.height)}px row`,
+  );
   return found;
 }
 
@@ -6892,8 +6979,8 @@ export async function tasksDownTheSideAndNow() {
   await wait(500);
   check(
     "a notification opens its task from under Now",
-    overview.hidden && document.getElementById("talks").value === "talk-2",
-    `hidden=${overview.hidden} ${document.getElementById("talks").value}`,
+    overview.hidden && missionClosed() && document.getElementById("talks").value === "talk-2",
+    `hidden=${overview.hidden} mission closed=${missionClosed()} ${document.getElementById("talks").value}`,
   );
   FIXTURE.standing = FIXTURE.standing.filter((s) => !["daily 21:00", "daily 23:00"].includes(s.at));
   return found;
@@ -7708,7 +7795,7 @@ export async function teamsOfTeammates() {
   const page = document.getElementById("teams");
   check(
     "Teams opens as the second tab of Mission Control, over the window",
-    !page.hidden && getComputedStyle(document.getElementById("mission")).position === "fixed" &&
+    !page.hidden && !document.getElementById("mission").hidden && getComputedStyle(document.getElementById("mission")).position === "fixed" &&
       document.getElementById("mission-teams").getAttribute("aria-selected") === "true" && document.getElementById("overview").hidden,
     String(page.hidden),
   );
@@ -7788,7 +7875,7 @@ export async function teamsOfTeammates() {
   // Escape and Back both leave it.
   document.getElementById("mission-done").click();
   await wait(150);
-  check("Back closes it", page.hidden, String(page.hidden));
+  check("Back closes it", page.hidden && missionClosed(), `${page.hidden} ${missionClosed()}`);
   return found;
 }
 
@@ -8072,7 +8159,7 @@ export async function aHomeAndATeamTask() {
   check("a new name is said at once on the task and folder buttons", give.textContent === "Give A-SQUAD a task" && /A-SQUAD keeps its work/.test(folder.title), `${give.textContent} | ${folder.title.slice(0, 40)}`);
   give.click();
   await wait(700);
-  check("which starts a task with the lead, named after the team, and opens it", asked.some((a) => a.name === "a_task_for_the_team" && a.args?.team === "team-a") && document.getElementById("teams").hidden && /A task for A-SQUAD/.test(document.getElementById("messages").textContent), document.getElementById("messages").textContent.slice(-120));
+  check("which starts a task with the lead, named after the team, and opens it", asked.some((a) => a.name === "a_task_for_the_team" && a.args?.team === "team-a") && document.getElementById("teams").hidden && missionClosed() && /A task for A-SQUAD/.test(document.getElementById("messages").textContent), document.getElementById("messages").textContent.slice(-120));
   check("ready for the person to say what it is", document.activeElement === document.getElementById("what"), document.activeElement?.id);
   // The lead hands parts out at once: one step, marked as handing to helpers,
   // with how many finished once they are all back.
