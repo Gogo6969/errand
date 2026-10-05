@@ -158,6 +158,9 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   padding: 30px 12px 8px;
   display: flex;
   justify-content: flex-end;
+  /* Mission Control and + on the first line, the search on its own below. */
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 
 #new {
@@ -171,8 +174,11 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   cursor: pointer;
 }
 #new:hover { background: var(--card); color: var(--ink); border-color: var(--rule); }
-/* Now: said in words, with how many tasks need you beside it. */
-#overview-open {
+/* Mission Control: drawn and said, with how many tasks need you beside it. */
+#mission-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-start;
   height: 28px;
   padding: 0 9px;
   border-radius: 7px;
@@ -185,10 +191,20 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  flex: none;
+  gap: 7px;
 }
-#overview-open:hover { background: var(--card); border-color: var(--edge); }
+#mission-open:hover { background: var(--card); border-color: var(--edge); }
+#mission-open .mission-word { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#mission-open .now-count { margin-left: auto; }
+.mission-mark {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  color: var(--accent);
+}
 .now-count {
   min-width: 17px;
   height: 17px;
@@ -203,12 +219,13 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   font-variant-numeric: tabular-nums;
 }
 .now-count[hidden] { display: none; }
-#overview-open:focus-visible, #new:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#mission-open:focus-visible, #new:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* ----------------------------------------------------------- overview -- */
 
-/* Over the whole window, like Settings. */
-#overview {
+/* Mission Control: over the whole window, like Settings, with its two tabs
+   as panels below one header. */
+#mission {
   position: fixed;
   inset: 0;
   z-index: 40;
@@ -219,9 +236,63 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   flex-direction: column;
   gap: 20px;
 }
+#mission[hidden] { display: none; }
+#mission-head { display: flex; align-items: center; gap: 12px 18px; flex-wrap: wrap; }
+#mission-head h1 { margin: 0; font-size: 21px; letter-spacing: -.01em; }
+/* Two tabs as one control: the one shown is a raised card, the other quiet. */
+#mission-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  margin-right: auto;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--side);
+}
+#mission-tabs button {
+  height: 28px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+#mission-tabs button:hover { color: var(--ink); }
+#mission-tabs button[aria-selected="true"] {
+  background: var(--card);
+  border-color: var(--rule);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgb(0 0 0 / .08);
+}
+#mission-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#mission-done {
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+#mission-done:hover { color: var(--ink); border-color: var(--edge); }
+#mission-done:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* The Tasks tab. */
+#overview {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
 #overview[hidden] { display: none; }
 #overview > header { display: flex; align-items: center; gap: 14px 18px; flex-wrap: wrap; }
-#overview h1 { margin: 0 auto 0 0; font-size: 21px; letter-spacing: -.01em; }
 #overview > header label { display: flex; align-items: center; gap: 6px; color: var(--ink-soft); font-size: 12.5px; }
 #overview select {
   font: inherit;
@@ -232,17 +303,7 @@ body { display: grid; grid-template-columns: 232px 1fr; }
   border-radius: 7px;
   padding: 4px 6px;
 }
-#overview-done {
-  border: 1px solid var(--rule);
-  background: transparent;
-  color: var(--ink-soft);
-  font: inherit;
-  font-size: 12.5px;
-  padding: 5px 12px;
-  border-radius: 8px;
-  cursor: pointer;
-}
-#overview-done:hover { color: var(--ink); border-color: var(--edge); }
+
 #overview h2 {
   margin: 0;
   font-size: 11.5px;
@@ -1751,7 +1812,9 @@ main > aside, main > #title, main > #composer { flex: none; }
 #side header { gap: 8px; justify-content: space-between; align-items: center; }
 
 #find {
-  flex: 1;
+  /* A line of its own, under Mission Control and +. */
+  flex: 1 1 100%;
+  order: 3;
   min-width: 0;
   width: 0;
   appearance: none;
@@ -3548,37 +3611,14 @@ a.on-disk {
 
 /* -------------------------------------------------------------- teams -- */
 
-/* Down the side, beside Settings: said in words, like Now. */
-#teams-open {
-  margin-left: auto;
-  height: 26px;
-  padding: 0 9px;
-  border-radius: 7px;
-  border: 1px solid transparent;
-  background: none;
-  color: var(--ink-soft);
-  font: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-#teams-open:hover { color: var(--ink); border-color: var(--rule); }
-#teams-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-
-/* Over the whole window, like Now. */
+/* The Teams tab: the rule a team makes, then a new teammate or team. */
 #teams {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  background: var(--bg);
-  overflow-y: auto;
-  padding: 26px 28px 60px;
   display: flex;
   flex-direction: column;
   gap: 18px;
 }
 #teams[hidden] { display: none; }
-#teams > header { display: flex; align-items: center; gap: 12px; }
-#teams h1 { margin: 0 auto 0 0; font-size: 21px; letter-spacing: -.01em; }
+#teams > header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 #teams h2 {
   margin: 0 0 10px;
   font-size: 11.5px;
@@ -3587,8 +3627,8 @@ a.on-disk {
   text-transform: uppercase;
   color: var(--ink-soft);
 }
-#teams-rule { margin: -6px 0 0; max-width: 68ch; font-size: 13px; line-height: 1.5; color: var(--ink-soft); }
-#teams-new, #teams-done, #teams .team-break, #teams .take-off, #teams .team-folder {
+#teams-rule { margin: 0 auto 0 0; flex: 1 1 320px; max-width: 68ch; font-size: 13px; line-height: 1.5; color: var(--ink-soft); }
+#teams-new, #teams-new-teammate, #teams .team-break, #teams .take-off, #teams .team-folder {
   height: 30px;
   padding: 0 12px;
   border-radius: 8px;
@@ -3601,7 +3641,7 @@ a.on-disk {
 }
 #teams-new { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 500; }
 #teams-new:hover { background: var(--accent-lit); border-color: var(--accent-lit); }
-#teams-done:hover, #teams .team-break:hover, #teams .take-off:hover, #teams .team-folder:hover { color: var(--ink); border-color: var(--edge); }
+#teams-new-teammate:hover, #teams .team-break:hover, #teams .take-off:hover, #teams .team-folder:hover { color: var(--ink); border-color: var(--edge); }
 #teams button:focus-visible, #teams select:focus-visible, #teams .team-name:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
@@ -3824,3 +3864,115 @@ a.on-disk {
 #task-learn #learn-done { color: var(--ink-soft); }
 #learn-says { flex: 1 1 100%; margin: 0; color: var(--good); }
 #learn-says:empty { display: none; }
+
+/* ----------------------------------------------------------- new task -- */
+
+/* What needs doing, then who: over the window like the palette, because it
+   is a moment's question, not a place. */
+#task-chooser[hidden] { display: none; }
+#task-chooser {
+  position: fixed;
+  inset: 0;
+  background: var(--behind);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 11vh;
+  z-index: 100;
+}
+#task-chooser-box {
+  width: min(600px, calc(100vw - 40px));
+  max-height: 78vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+  box-shadow: var(--cast);
+  overflow: hidden;
+}
+#task-chooser-title {
+  margin: 0;
+  padding: 14px 16px 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+#task-chooser-what {
+  margin: 8px 16px 0;
+  min-height: 64px;
+  resize: none;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14.5px;
+  line-height: 1.45;
+  padding: 10px 12px;
+}
+#task-chooser-what:focus { outline: none; border-color: var(--edge); }
+#task-chooser-say { margin: 14px 16px 4px; font-size: 12.5px; color: var(--ink-soft); }
+#task-chooser-who {
+  list-style: none;
+  margin: 0;
+  padding: 4px 8px 10px;
+  overflow-y: auto;
+  min-height: 0;
+}
+#task-chooser-who .heading {
+  padding: 10px 8px 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--faint, var(--ink-soft));
+}
+#task-chooser-who .who {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 10px;
+  padding: 7px 8px;
+  border-radius: 9px;
+  cursor: pointer;
+}
+#task-chooser-who .who:hover { background: var(--side); }
+#task-chooser-who .who[aria-selected="true"] { background: var(--mine); }
+#task-chooser-who .who[aria-disabled="true"] { cursor: default; opacity: .55; }
+#task-chooser-who .who .tile { width: 28px; height: 28px; }
+#task-chooser-who .lines { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+#task-chooser-who .name { font-size: 13.5px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#task-chooser-who .role {
+  margin-left: 6px;
+  font-weight: 400;
+  font-size: 10.5px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+#task-chooser-who .who-line { font-size: 12px; color: var(--ink-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#task-chooser-who .fit {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+#task-chooser-who .team-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: var(--side);
+  border: 1px solid var(--rule);
+  color: var(--accent);
+}
+#task-chooser-who .team-mark svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.4; }
+#task-chooser-who .someone-new .team-mark { color: var(--ink-soft); font-size: 16px; }

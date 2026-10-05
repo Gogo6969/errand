@@ -252,16 +252,22 @@ const el = {
   checklistPoint: document.getElementById("checklist-point"),
   checklistSays: document.getElementById("checklist-says"),
   teams: document.getElementById("teams"),
-  teamsOpen: document.getElementById("teams-open"),
   teamsNew: document.getElementById("teams-new"),
-  teamsDone: document.getElementById("teams-done"),
+  teamsNewTeammate: document.getElementById("teams-new-teammate"),
   teamsList: document.getElementById("teams-list"),
   teamsFree: document.getElementById("teams-free"),
   teamsFreeList: document.getElementById("teams-free-list"),
   overview: document.getElementById("overview"),
-  overviewOpen: document.getElementById("overview-open"),
+  mission: document.getElementById("mission"),
+  missionOpen: document.getElementById("mission-open"),
+  missionTasks: document.getElementById("mission-tasks"),
+  missionTeams: document.getElementById("mission-teams"),
+  missionTasksCount: document.getElementById("mission-tasks-count"),
+  missionDone: document.getElementById("mission-done"),
   nowCount: document.getElementById("now-count"),
-  overviewDone: document.getElementById("overview-done"),
+  newTask: document.getElementById("task-chooser"),
+  newTaskWhat: document.getElementById("task-chooser-what"),
+  newTaskWho: document.getElementById("task-chooser-who"),
   overviewGroup: document.getElementById("overview-group"),
   overviewOrder: document.getElementById("overview-order"),
   overviewAway: document.getElementById("overview-away"),
@@ -887,6 +893,261 @@ async function alsoAsk() {
   await show(id);
   el.what.focus();
 }
+
+/* ------------------------------------------------------------ new task -- */
+
+/**
+ * A new task: what needs doing, then who does it, a team or one teammate.
+ *
+ * Who is chosen by the person, with the one whose role, job and skills share
+ * the most words with what was written marked as the best fit. Marked and not
+ * chosen: matching words is a hint, and a wrong guess sent on its own would
+ * be a task in the wrong hands.
+ */
+let newTaskFor = { teams: [], people: [], brings: new Map() };
+
+/** Words too common to say anything about who should do a task. */
+const TOO_COMMON = new Set(
+  "that this with from have what which will would should could about into them they their there then than when where your make made need needs does done some more most very just also only each every please want like".split(" "),
+);
+
+/** The usual words for a kind of role, so a role of two letters still matches. */
+const ROLE_WORDS = [
+  [/\bqa\b|test|review|check|verif/i, "test tests testing check checks verify review bugs break"],
+  [/code|coder|dev|engineer|build|program|\bapp\b/i, "code build program script tool function implement python rust javascript fix"],
+  [/writ|copy|editor|docs|text|content/i, "write writing readme docs documentation text explain article"],
+  [/research|analys|scout|news|market|finance/i, "research find sources search news compare analyse report"],
+  [/design|visual|pixel/i, "design layout visual image icon style colour"],
+];
+
+function wordsOf(text) {
+  return (String(text || "").toLowerCase().match(/[a-z0-9]+/g) || []).filter(
+    (w) => w.length >= 4 && !TOO_COMMON.has(w),
+  );
+}
+
+/** A word by its start, so tests, tester and testing are one word. */
+const stemOf = (w) => w.slice(0, 5);
+
+/** What a teammate is about, as words to match a task against. */
+function profileOf(a) {
+  const brought = newTaskFor.brings.get(a.id);
+  const role = `${a.title || ""} ${a.about || ""}`;
+  const usual = ROLE_WORDS.filter(([asks]) => asks.test(role)).map(([, words]) => words);
+  return [a.name, role, ...(brought?.skills || []), ...usual].join(" ");
+}
+
+/** How many words a task shares with a profile, by their starts. */
+function fitOf(text, profile) {
+  const theirs = new Set(wordsOf(profile).map(stemOf));
+  return new Set(wordsOf(text).map(stemOf).filter((w) => theirs.has(w))).size;
+}
+
+async function openNewTask() {
+  const [teams, brought] = await Promise.all([
+    invoke("teams").catch(() => []),
+    invoke("what_they_bring").catch(() => []),
+  ]);
+  newTaskFor = {
+    teams: teams || [],
+    people: teammatesToChoose(),
+    brings: new Map((brought || []).map(([id, skills, checks, own]) => [id, { skills: skills || [], checks, own }])),
+  };
+  el.newTaskWhat.value = "";
+  el.newTask.hidden = false;
+  drawNewTask();
+  el.newTaskWhat.focus();
+}
+
+function closeNewTask() {
+  el.newTask.hidden = true;
+}
+
+/** The rows that can be chosen, in the order they are shown. */
+function newTaskRows() {
+  return [...el.newTaskWho.querySelectorAll('.who:not([aria-disabled="true"])')];
+}
+
+function drawNewTask() {
+  const text = el.newTaskWhat.value;
+  const byId = new Map([...agents.values()].map((a) => [a.id, a]));
+  const team = newTaskFor.teams.map((t) => {
+    const lead = t.lead && byId.get(t.lead);
+    const crew = [lead, ...t.members.map((m) => byId.get(m))].filter(Boolean);
+    return { t, lead, crew, fit: lead ? fitOf(text, [t.name, ...crew.map(profileOf)].join(" ")) : 0 };
+  });
+  const people = newTaskFor.people.map((a, at) => ({ a, at, fit: fitOf(text, profileOf(a)) }));
+  // With something written, the closest first; otherwise in the list's order.
+  if (wordsOf(text).length) people.sort((x, y) => y.fit - x.fit || x.at - y.at);
+  const best = Math.max(0, ...team.map((x) => x.fit), ...people.map((x) => x.fit));
+  let marked = false;
+  const mark = (fit) => {
+    if (marked || !best || fit !== best) return null;
+    marked = true;
+    const pill = document.createElement("span");
+    pill.className = "fit";
+    pill.textContent = "Best fit";
+    return pill;
+  };
+
+  const heading = (words) => {
+    const li = document.createElement("li");
+    li.className = "heading";
+    li.setAttribute("role", "presentation");
+    li.textContent = words;
+    return li;
+  };
+  const row = (kind, id, markEl, name, role, detail, pill, disabled) => {
+    const li = document.createElement("li");
+    li.className = "who";
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", "false");
+    li.tabIndex = -1;
+    li.dataset.kind = kind;
+    if (id) li.dataset.id = id;
+    if (disabled) li.setAttribute("aria-disabled", "true");
+    const lines = document.createElement("div");
+    lines.className = "lines";
+    const n = document.createElement("span");
+    n.className = "name";
+    n.textContent = name;
+    if (role) {
+      const r = document.createElement("span");
+      r.className = "role";
+      r.textContent = role;
+      n.append(r);
+    }
+    const d = document.createElement("span");
+    d.className = "who-line";
+    d.textContent = detail;
+    d.title = detail;
+    lines.append(n, d);
+    li.append(markEl, lines, pill || document.createElement("span"));
+    if (!disabled) li.addEventListener("click", () => chooseWhoDoesIt(kind, id));
+    return li;
+  };
+  const teamMark = () => {
+    const m = document.createElement("span");
+    m.className = "team-mark";
+    m.innerHTML =
+      '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5.6" cy="6" r="2.2"/><circle cx="10.8" cy="6.8" r="1.7"/><path d="M1.8 13c0-2 1.7-3.2 3.8-3.2S9.4 11 9.4 13"/><path d="M10.6 10c1.9 0 3.6.9 3.6 3"/></svg>';
+    return m;
+  };
+
+  const items = [];
+  if (team.length) {
+    items.push(heading("Teams"));
+    for (const { t, lead, crew } of team.filter((x) => x.lead)) {
+      const others = crew.length - 1;
+      items.push(
+        row("team", t.id, teamMark(), t.name, "", `Led by ${lead.name} · ${others} ${others === 1 ? "member" : "members"}`, mark(team.find((x) => x.t === t).fit)),
+      );
+    }
+    for (const { t } of team.filter((x) => !x.lead)) {
+      items.push(row("team", t.id, teamMark(), t.name, "", "No lead yet: choose one on the Teams tab of Mission Control", null, true));
+    }
+  }
+  if (people.length) {
+    items.push(heading("Teammates"));
+    for (const { a, fit } of people) {
+      const brought = newTaskFor.brings.get(a.id);
+      const detail = [
+        a.about,
+        brought?.own ? `On ${brought.own}` : "",
+        brought?.skills?.length ? `Skills: ${brought.skills.join(", ")}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      items.push(row("person", a.id, tile(kindFor(a), busy(a.id), a.hue), a.name, a.title, detail || "Has not said what it handles", mark(fit)));
+    }
+  }
+  const plus = document.createElement("span");
+  plus.className = "team-mark";
+  plus.textContent = "+";
+  const someone = row("new", "", plus, "New teammate", "", "Somebody new for this: you name it and give it a job first");
+  someone.classList.add("someone-new");
+  items.push(someone);
+  el.newTaskWho.replaceChildren(...items);
+}
+
+/** Show a row as the one Enter would choose. */
+function pickNewTaskRow(li) {
+  for (const one of el.newTaskWho.querySelectorAll(".who")) one.setAttribute("aria-selected", String(one === li));
+  li?.focus();
+  li?.scrollIntoView({ block: "nearest" });
+}
+
+async function chooseWhoDoesIt(kind, id) {
+  const text = el.newTaskWhat.value.trim();
+  closeNewTask();
+  if (kind === "new") {
+    if (!el.mission.hidden) closeMission();
+    await start({ introduce: true });
+    // What was written waits in the box, to send once it has a name.
+    if (text) {
+      el.what.value = text;
+      el.what.dispatchEvent(new Event("input"));
+    }
+    return;
+  }
+  let talk;
+  try {
+    if (kind === "team") {
+      const team = newTaskFor.teams.find((t) => t.id === id);
+      talk = await invoke("a_task_for_the_team", { team: id });
+      talks.set(talk, asTalk({ id: talk, agent: team.lead, name: team.name }, { loaded: false }));
+    } else {
+      talk = uuid();
+      await invoke("start_conversation", { id: talk, agent: id, name: "New task" });
+      talks.set(talk, asTalk({ id: talk, agent: id, name: "New task" }, { loaded: true }));
+    }
+  } catch (why) {
+    complain(String(why));
+    return;
+  }
+  if (!el.mission.hidden) closeMission();
+  await show(talk);
+  // Said for them, when it was written; otherwise the box is ready for it.
+  if (text) await sayIt(text);
+  else el.what.focus();
+}
+
+el.newTaskWhat.addEventListener("input", () => drawNewTask());
+el.newTaskWhat.addEventListener("keydown", (e) => {
+  // Down, or Enter, to the list: to the best fit when there is one. Enter
+  // never sends from here, so nothing goes to somebody not chosen.
+  if (e.key === "ArrowDown" || (e.key === "Enter" && !e.shiftKey)) {
+    e.preventDefault();
+    const rows = newTaskRows();
+    pickNewTaskRow(rows.find((r) => r.querySelector(".fit")) || rows[0]);
+  }
+});
+el.newTaskWho.addEventListener("keydown", (e) => {
+  const rows = newTaskRows();
+  const at = rows.indexOf(document.activeElement);
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    const next = at + (e.key === "ArrowDown" ? 1 : -1);
+    if (next < 0) {
+      pickNewTaskRow(null);
+      el.newTaskWhat.focus();
+    } else pickNewTaskRow(rows[Math.min(next, rows.length - 1)]);
+  } else if (e.key === "Enter" && at >= 0) {
+    e.preventDefault();
+    chooseWhoDoesIt(rows[at].dataset.kind, rows[at].dataset.id);
+  }
+});
+el.newTask.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    closeNewTask();
+  }
+});
+// A click beside the box puts it away, the way the palette goes.
+el.newTask.addEventListener("click", (e) => {
+  if (e.target === el.newTask) closeNewTask();
+});
 
 /**
  * What was here before.
@@ -2623,11 +2884,13 @@ function drawThreads() {
   const needing = [...talks.values()].filter(
     (t) => agents.has(t.agent) && whereItStands(t.id, t.agent, going).state === "waiting",
   ).length;
-  el.nowCount.textContent = String(needing);
-  el.nowCount.hidden = !needing;
-  el.overviewOpen.title = needing
-    ? `Now: ${needing} ${needing === 1 ? "task needs" : "tasks need"} you, and what is running and what is next`
-    : "Now: what needs you, what is running and what is next";
+  for (const count of [el.nowCount, el.missionTasksCount]) {
+    count.textContent = String(needing);
+    count.hidden = !needing;
+  }
+  el.missionOpen.title = needing
+    ? `Mission Control: ${needing} ${needing === 1 ? "task needs" : "tasks need"} you, and every task and every team`
+    : "Mission Control: every task and every team";
   // Now is read the same way, so it moves when this does rather than on its
   // next tick: up to ten seconds of a finished task still under Running now.
   if (!el.overview.hidden && statesAt(going) !== nowDrawnAt) drawOverview();
@@ -3742,9 +4005,8 @@ listen("go_to", async ({ payload }) => {
     }
   }
   if (talks.has(id)) {
-    // Out from under Now or Teams, which the window may have opened on.
-    if (!el.overview.hidden) closeOverview();
-    if (!el.teams.hidden) closeTeams();
+    // Out from under Mission Control, which the window may have opened on.
+    if (!el.mission.hidden) closeMission();
     await show(id);
   }
 });
@@ -6360,7 +6622,7 @@ el.asks.addEventListener("change", async () => {
   await drawAllowing(a);
 });
 
-el.new.addEventListener("click", () => start({ introduce: true }));
+el.new.addEventListener("click", () => openNewTask());
 
 // What was here before, and something to type into if there was nothing.
 catchUp();
@@ -6406,6 +6668,8 @@ function whatCouldBeDone() {
   add("What it has cost", "today and this month", () => whatItCost(), true);
   add("Everything that runs on its own", "every agent's routines and watches", () => whatRunsOnItsOwn(), true);
   add("Check this setup", "what is wrong, and what to do", () => checkup());
+  add("Mission Control", "every task and every team", () => showMission(), true);
+  add("New task", "for a team or one teammate", () => openNewTask(), true);
   add("Teams", "who leads, and who they hand work to", () => showTeams());
   add(
     whose()?.paused ? "Start this agent again" : "Pause this agent",
@@ -6587,6 +6851,17 @@ el.findingWhat.addEventListener("keydown", (e) => {
 });
 
 window.addEventListener("keydown", (e) => {
+  // Mission Control, and a new task, from anywhere.
+  if ((e.metaKey || e.ctrlKey) && e.key === "1") {
+    e.preventDefault();
+    el.mission.hidden ? showMission() : closeMission();
+    return;
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
+    e.preventDefault();
+    if (el.newTask.hidden) openNewTask();
+    return;
+  }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
     e.preventDefault();
     el.finding.hidden ? openFinding() : closeFinding();
@@ -8525,6 +8800,9 @@ async function showOverview() {
   ]) {
     if (!select.value) select.value = first;
   }
+  el.mission.hidden = false;
+  el.teams.hidden = true;
+  tabShown("tasks");
   el.overview.hidden = false;
   await readTheOverview();
   drawOverview();
@@ -8542,10 +8820,45 @@ async function showOverview() {
   }, 10_000);
 }
 
-function closeOverview() {
+/** Leave the Tasks tab: it stops reading itself again, and what it showed counts as seen. */
+function leaveTasks() {
   el.overview.hidden = true;
   clearInterval(overviewTicking);
   lookedNow();
+}
+
+/** Close Mission Control, whichever tab was open. */
+function closeMission() {
+  if (!el.overview.hidden) leaveTasks();
+  el.teams.hidden = true;
+  el.mission.hidden = true;
+}
+
+/** Everything that left the Tasks or Teams tab for somewhere else leaves Mission Control. */
+function closeOverview() {
+  closeMission();
+}
+
+/** Mark which tab is shown, and remember it for the next time Mission Control opens. */
+function tabShown(which) {
+  el.missionTasks.setAttribute("aria-selected", String(which === "tasks"));
+  el.missionTeams.setAttribute("aria-selected", String(which === "teams"));
+  try {
+    localStorage.setItem("errand-mission-tab", which);
+  } catch {
+    // Opens on Tasks next time instead.
+  }
+}
+
+/** Mission Control on the tab it was last left on, Tasks the first time. */
+function showMission() {
+  let last = "tasks";
+  try {
+    last = localStorage.getItem("errand-mission-tab") || "tasks";
+  } catch {
+    // Tasks.
+  }
+  return last === "teams" ? showTeams() : showOverview();
 }
 
 async function readTheOverview() {
@@ -8620,13 +8933,16 @@ let teamsKnown = [];
 let bringsNow = new Map();
 
 async function showTeams() {
-  if (!el.overview.hidden) closeOverview();
+  if (!el.overview.hidden) leaveTasks();
+  el.mission.hidden = false;
+  tabShown("teams");
   el.teams.hidden = false;
   await drawTeams();
 }
 
+/** Everything that left the Teams tab for somewhere else leaves Mission Control. */
 function closeTeams() {
-  el.teams.hidden = true;
+  closeMission();
 }
 
 /** The teammates a team can be made of: named ones, in the order of the list. */
@@ -8949,17 +9265,24 @@ async function newTeam() {
   }
 }
 
-el.teamsOpen.addEventListener("click", showTeams);
-el.teamsDone.addEventListener("click", closeTeams);
 el.teamsNew.addEventListener("click", newTeam);
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !el.teams.hidden && !e.target.closest?.(".team-name")) closeTeams();
+// A teammate made from here is asked who it is first, as + used to ask.
+el.teamsNewTeammate.addEventListener("click", () => {
+  closeMission();
+  start({ introduce: true });
 });
 
-el.overviewOpen.addEventListener("click", showOverview);
-el.overviewDone.addEventListener("click", closeOverview);
+el.missionOpen.addEventListener("click", showMission);
+el.missionDone.addEventListener("click", closeMission);
+el.missionTasks.addEventListener("click", () => {
+  if (el.overview.hidden) showOverview();
+});
+el.missionTeams.addEventListener("click", () => {
+  if (el.teams.hidden) showTeams();
+});
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !el.overview.hidden) closeOverview();
+  // Not while a team's name is being typed, where Escape puts the old one back.
+  if (e.key === "Escape" && !el.mission.hidden && el.newTask.hidden && !e.target.closest?.(".team-name")) closeMission();
 });
 for (const [value, label] of SHOWING) {
   const option = document.createElement("option");

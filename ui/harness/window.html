@@ -215,6 +215,13 @@
   await import(`../app.js${fresh}`);
   // The page starts itself; give its opening round of awaits a moment to land.
   await new Promise((r) => setTimeout(r, 400));
+  // `?look` is the window on the fixture with nothing run against it, to be
+  // looked at: a page the checks are driving changes under whoever is looking.
+  if (new URLSearchParams(location.search).has("look")) {
+    report.textContent = "Looking only: no checks run.";
+    // Waits for ever rather than throwing, which the window would show.
+    await new Promise(() => {});
+  }
 
   const { checks, headerFitsOnOneRow, palette, setupCheck, themes, carryingOn, running, stopping, postures, aiming, whichModels, questionsStillOpen, everythingLinesUp, alreadyRunning, whatItCost, whatItCanReach, dictation, watching, writingItOut, aCall, stepsDoNotOverlap, openingAtLogin, sayingWhatThisIs, repeatingWhatWasAsked, whatElseIsAllowed, whatChangedInThisOne, theMenuOnAnAgent, settingAWatchExplainsItself, handingItOver, whatAgentsCanReach, whenThingsHappened, somethingYouHaveNotRead, whatYouTypedStaysPut, namingAndDeletingAConversation, aNotificationThatLeadsSomewhere, pausingARoutineAndSeeingHowItWent, findingWhereTheWordsAre, whatALongCommandIsPrinting, picturesYouCanSee, theQuestionBeforeDeletingIsReadable, aTurnTheAppWasClosedDuring, aPictureAnAgentMade, allowingSomethingOnce, seeingItBeforeYouSendIt, aRoomOfSeveral, madeOutsideTheWindow, pausingAnAgent, aHandoverThatStopsWaiting, anAgentThatStopsItsOwnSchedule, aTurnSomethingElseStarted, whatAnAgentRemembers, skillsInTheWindow, everythingThatRunsOnItsOwn, aLongConversation, copyingAnAgent, aMonthlyLimit, changingARoom, anOpenQuestion, whatItIsForAndWhereItWent, onlyModelsThatAnswer, aStepThatPrintedNothing, aDraftToCheck, listeningToAnAnswer, theOverview, aNewTeammate, keepingItLocal, choosingWhatToAllow, takingTheSuggestion, aKeyTheAgentForgot, whenEachThingWasSaid, whatRunsOnItsOwnStandsOut, aTaskSaysWhatItIs, tasksDownTheSideAndNow, theHeaderAndTheCard, anOrangeDotUntilItIsRead, theTasksAboveTheChat, finishedTasksFoldAway, roomUnderTheHeader, aTaskSaysAllOfWhatItDoes, answeredIsThreeGroups, askingToOpenOutside, teamsOfTeammates, howATeammateChecksItsWork, learningFromATask, allowingAServer, aHomeAndATeamTask, aModelOfItsOwn, firstRun } =
     await import(`./checks.js${fresh}`);

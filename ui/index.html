@@ -15,6 +15,22 @@
     -->
     <aside id="side">
       <header>
+        <!--
+          Mission Control: every task and every team, in one place, with how
+          many tasks need you beside it. Said in words as well as drawn: four
+          squares on their own said nothing.
+        -->
+        <button id="mission-open" type="button" title="Mission Control: every task and every team">
+          <svg class="mission-mark" viewBox="0 0 16 16" aria-hidden="true">
+            <rect x="1.75" y="1.75" width="5.25" height="5.25" rx="1.4" />
+            <rect x="9" y="1.75" width="5.25" height="5.25" rx="1.4" />
+            <rect x="1.75" y="9" width="5.25" height="5.25" rx="1.4" />
+            <rect x="9" y="9" width="5.25" height="5.25" rx="1.4" />
+          </svg>
+          <span class="mission-word">Mission Control</span><span id="now-count" class="now-count" hidden></span>
+        </button>
+        <!-- A new task: what needs doing, and for a team or for one teammate. -->
+        <button id="new" type="button" title="New task: say what needs doing and who should do it">+</button>
         <input
           id="find"
           type="search"
@@ -22,16 +38,6 @@
           autocomplete="off"
           aria-label="Search every errand"
         />
-        <!--
-          Every task at once, rather than one teammate at a time: what needs
-          you, what is running and what is next. Called Now and said in words,
-          with how many tasks need you beside it; it was a grid of four squares
-          that said nothing.
-        -->
-        <button id="overview-open" type="button" title="Now: what needs you, what is running and what is next">
-          <span>Now</span><span id="now-count" class="now-count" hidden></span>
-        </button>
-        <button id="new" title="A new teammate">+</button>
       </header>
       <ol id="threads"></ol>
 
@@ -49,11 +55,6 @@
           header because it is not about the agent that happens to be open: it
           is about the app, and it is the same list whichever agent you are on.
         -->
-        <!--
-          Who leads, and who each lead hands work to. Down here with Settings
-          because it is about the whole crew, not the teammate that is open.
-        -->
-        <button id="teams-open" type="button" title="Teams: who leads, and who they hand work to">Teams</button>
         <button id="setup" type="button" title="Which models show in the picker">
           <span aria-hidden="true">&#9881;</span>
           <span class="sr">Models</span>
@@ -311,9 +312,24 @@
       were away. Over the whole window, like Settings, because it is somewhere
       you go rather than something beside a conversation.
     -->
-    <section id="overview" hidden>
+    <!--
+      Mission Control: every task, and every team, as two tabs of one page.
+      Over the whole window, because it is somewhere you go rather than
+      something beside a conversation, and the app opens on it.
+    -->
+    <section id="mission" hidden aria-label="Mission Control">
+      <header id="mission-head">
+        <h1>Mission Control</h1>
+        <nav id="mission-tabs" role="tablist" aria-label="What Mission Control shows">
+          <button id="mission-tasks" type="button" role="tab" aria-controls="overview" aria-selected="true">
+            Tasks<span id="mission-tasks-count" class="now-count" hidden></span>
+          </button>
+          <button id="mission-teams" type="button" role="tab" aria-controls="teams" aria-selected="false">Teams</button>
+        </nav>
+        <button id="mission-done" type="button">&#8592; Back</button>
+      </header>
+    <section id="overview" role="tabpanel" aria-labelledby="mission-tasks" hidden>
       <header>
-        <h1>Now</h1>
         <input id="overview-find" type="search" placeholder="Search every task and everything said in it"
                autocomplete="off" aria-label="Search every task" />
         <label>Show
@@ -331,7 +347,6 @@
             <option value="recent">Most recent</option>
           </select>
         </label>
-        <button id="overview-done" type="button">&#8592; Back</button>
       </header>
       <div id="overview-away" class="away"></div>
       <div id="overview-tiles"></div>
@@ -342,21 +357,36 @@
       like Now, because it is somewhere you go to see how the crew is put
       together, and the one place that changes it.
     -->
-    <section id="teams" hidden>
+    <section id="teams" role="tabpanel" aria-labelledby="mission-teams" hidden>
       <header>
-        <h1>Teams</h1>
+        <p id="teams-rule" class="quiet">
+          A lead hands work to the teammates on its team. A teammate on a team hands work only to
+          its own team; one on no team can still ask anybody.
+        </p>
+        <button id="teams-new-teammate" type="button">New teammate</button>
         <button id="teams-new" type="button">New team</button>
-        <button id="teams-done" type="button">&#8592; Back</button>
       </header>
-      <p id="teams-rule" class="quiet">
-        A lead hands work to the teammates on its team. A teammate on a team hands work only to
-        its own team; one on no team can still ask anybody.
-      </p>
       <div id="teams-list"></div>
       <section id="teams-free" hidden>
         <h2>On no team</h2>
         <ul id="teams-free-list"></ul>
       </section>
+    </section>
+    </section>
+
+    <!--
+      A new task: what needs doing, then who does it, a team or one teammate,
+      with the one whose role and skills fit what was written marked. Or
+      somebody new, made for it.
+    -->
+    <section id="task-chooser" hidden role="dialog" aria-modal="true" aria-labelledby="task-chooser-title">
+      <div id="task-chooser-box">
+        <h2 id="task-chooser-title">New task</h2>
+        <textarea id="task-chooser-what" rows="3" autocomplete="off"
+                  placeholder="What needs doing? Or choose who first, and say it to them."></textarea>
+        <p id="task-chooser-say">Who should do it?</p>
+        <ul id="task-chooser-who" role="listbox" aria-labelledby="task-chooser-say"></ul>
+      </div>
     </section>
 
     <main>

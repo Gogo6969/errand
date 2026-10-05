@@ -12,6 +12,12 @@ const { asked, FIXTURE, tell } = await import(
   `./harness.js${new URL(import.meta.url).search}`
 );
 
+/** Mission Control on one of its tabs, the way somebody gets there: its button, then the tab. */
+function openTheTab(which) {
+  document.getElementById("mission-open").click();
+  document.getElementById(which === "teams" ? "mission-teams" : "mission-tasks").click();
+}
+
 /**
  * Open one of the fixture's conversations, the way somebody would.
  *
@@ -4838,7 +4844,7 @@ export async function theOverview() {
   });
   tell("happened", { conversation: "talk-2", seq: 9802, kind: "doing", what: "Looking something up on the web", tool: "WebSearch", call: "ov-s" });
   await settle(150);
-  document.getElementById("overview-open").click();
+  openTheTab("tasks");
   await settle(300);
   check("the overview opens over the window", !overview.hidden && getComputedStyle(overview).display !== "none", `hidden=${overview.hidden}`);
   check(
@@ -5095,7 +5101,50 @@ export async function aNewTeammate() {
   const hint = document.getElementById("whois-new");
   const before = asked.length;
 
+  // + is a new task: what needs doing, then who, with the best fit marked.
   document.getElementById("new").click();
+  await settle(300);
+  const chooser = document.getElementById("task-chooser");
+  const what = document.getElementById("task-chooser-what");
+  const rows = () => [...document.querySelectorAll("#task-chooser-who .who")];
+  check(
+    "+ asks what needs doing, then who should do it: teammates, and somebody new",
+    !chooser.hidden && document.activeElement === what && rows().some((r) => r.dataset.kind === "person") && rows().at(-1)?.dataset.kind === "new",
+    rows().map((r) => `${r.dataset.kind}:${r.querySelector(".name")?.textContent}`).join(" | "),
+  );
+  what.value = "Prepare tomorrow's morning crypto briefing";
+  what.dispatchEvent(new Event("input"));
+  await settle(100);
+  const fits = [...document.querySelectorAll("#task-chooser-who .fit")].map((f) => f.closest(".who"));
+  check(
+    "the teammate whose role and job fit what was written is marked the best fit, and only one",
+    fits.length === 1 && fits[0].dataset.id === "agent-bitcoin",
+    fits.map((r) => r.querySelector(".name")?.textContent).join(", ") || "none",
+  );
+  what.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await settle(100);
+  check(
+    "Enter goes to the best fit rather than sending to anybody",
+    document.activeElement === fits[0] && fits[0].getAttribute("aria-selected") === "true" && !chooser.hidden,
+    document.activeElement?.className,
+  );
+  const sent = asked.length;
+  fits[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  await settle(400);
+  const begun = asked.slice(sent).find((a) => a.name === "start_conversation");
+  // That turn ends, as one would, so nothing after this sees it running.
+  if (begun) tell("happened", { conversation: begun.args.id, seq: 9601, kind: "done" });
+  await settle(150);
+  check(
+    "and Enter on it starts a task for that teammate, and says what was written",
+    chooser.hidden && begun?.args?.agent === "agent-bitcoin" &&
+      asked.slice(sent).some((a) => a.name === "say" && a.args?.id === begun?.args?.id && /morning crypto briefing/.test(a.args?.text || "")),
+    JSON.stringify(asked.slice(sent).map((a) => a.name)),
+  );
+  // Somebody new, from the same +.
+  document.getElementById("new").click();
+  await settle(300);
+  rows().find((r) => r.dataset.kind === "new")?.click();
   await settle(300);
   check(
     "+ asks who the new teammate is first, with a word on what to do",
@@ -5345,11 +5394,11 @@ export async function aModelOfItsOwn() {
   FIXTURE.teams = [{ id: "team-m", name: "M-TEAM", lead: desk, members: [], made_at: 0 }];
   document.getElementById("thread-name").click();
   await settle(100);
-  document.getElementById("teams-open").click();
+  openTheTab("teams");
   await settle(400);
   const brings = document.querySelector('#teams .team[data-team="team-m"] .person .brings');
   check("the Teams page says a teammate's own model", brings && /^On Claude - Opus/.test(brings.textContent), brings?.textContent);
-  document.getElementById("teams-done").click();
+  document.getElementById("mission-done").click();
   await settle(150);
   // Back to Errand's model.
   await open(desk);
@@ -6791,9 +6840,9 @@ export async function tasksDownTheSideAndNow() {
     rows().map((r) => `${r.getAttribute("aria-current") === "true" ? "*" : ""}${r.querySelector(".task-name")?.textContent}`).join(" | "),
   );
 
-  // Now: said in words, with how many tasks need you.
-  const now = document.getElementById("overview-open");
-  check("the way to everything at once says Now", /^Now/.test(now.textContent.trim()), now.textContent.trim());
+  // Mission Control: drawn and said, with how many tasks need you.
+  const now = document.getElementById("mission-open");
+  check("the way to everything at once says Mission Control, with its mark", /^Mission Control/.test(now.textContent.trim()) && now.querySelector("svg.mission-mark"), now.textContent.trim());
   tell("happened", {
     conversation: "talk-overnight", seq: 9990, kind: "needs_you", asking: "Delete last night's notes",
     detail: "rm notes-old.md", tool: "Bash", call: "now-q", step: "now-q", can_remember: false, rule: "", allows: "",
@@ -6813,10 +6862,16 @@ export async function tasksDownTheSideAndNow() {
       kind: "routine", at: "daily 21:00", what: "The evening check", due: Date.now() + 600000, off: false, stopped: null, paused: false,
     },
   );
-  now.click();
+  openTheTab("tasks");
   await wait(600);
   const overview = document.getElementById("overview");
-  check("Now opens, called Now", !overview.hidden && overview.querySelector("h1")?.textContent === "Now", overview.querySelector("h1")?.textContent);
+  const mission = document.getElementById("mission");
+  check(
+    "Mission Control opens on its Tasks tab",
+    !mission.hidden && !overview.hidden && mission.querySelector("h1")?.textContent === "Mission Control" &&
+      document.getElementById("mission-tasks").getAttribute("aria-selected") === "true",
+    mission.querySelector("h1")?.textContent,
+  );
   const next = [...overview.querySelectorAll('.job-group[data-state="scheduled"] .job')].map((j) => j.dataset.task);
   const heading = overview.querySelector('.job-group[data-state="scheduled"] h2')?.textContent || "";
   const dueOf = (id) =>
@@ -7032,7 +7087,7 @@ export async function theHeaderAndTheCard() {
   await wait(200);
 
   // Now: no tile shouts. The one filled button in the window is Send.
-  document.getElementById("overview-open").click();
+  openTheTab("tasks");
   await wait(600);
   const open = document.querySelector("#overview-tiles .job-foot .open");
   const send = getComputedStyle(document.getElementById("send")).backgroundColor;
@@ -7041,7 +7096,7 @@ export async function theHeaderAndTheCard() {
     open && getComputedStyle(open).backgroundColor !== send,
     open ? `${getComputedStyle(open).backgroundColor} against ${send}` : "no tile",
   );
-  document.getElementById("overview-done").click();
+  document.getElementById("mission-done").click();
   await wait(200);
   return found;
 }
@@ -7452,7 +7507,7 @@ export async function answeredIsThreeGroups() {
   FIXTURE.goalIn = goalWas;
   await openTalk("talk-2");
   check("and one that runs on its own says nothing of the kind", !hint(), hint() || "no hint");
-  document.getElementById("overview-open").click();
+  openTheTab("tasks");
   await wait(700);
   const groupOf = (id) => document.querySelector(`#overview-tiles .job[data-task="${id}"]`)?.closest(".job-group")?.dataset.state;
   const group = (state) => document.querySelector(`#overview-tiles .job-group[data-state="${state}"]`);
@@ -7511,7 +7566,7 @@ export async function answeredIsThreeGroups() {
       quietIds.every((id) => group("finished")?.querySelector(`.job[data-task="${id}"]`)),
     `${finishes() - before} of ${quietIds.length} finished`,
   );
-  document.getElementById("overview-done").click();
+  document.getElementById("mission-done").click();
   await wait(200);
   FIXTURE.tasks["talk-room"] = kept.room;
   FIXTURE.tasks["talk-cut-off"] = kept.cut;
@@ -7635,16 +7690,28 @@ export async function teamsOfTeammates() {
   FIXTURE.teams = [];
   await wait(500);
 
-  const open = document.getElementById("teams-open");
-  check("a Teams button sits down the side, beside Settings", open && open.closest("#who") && /Teams/.test(open.textContent), open?.outerHTML.slice(0, 80));
+  // Teams is a tab of Mission Control now; the bottom of the side has only
+  // Errand and Settings.
+  const open = document.getElementById("mission-open");
+  check("nothing but Errand and Settings at the bottom of the side", !document.querySelector("#who #teams-open") && document.querySelectorAll("#who button").length === 1, document.getElementById("who").textContent.trim());
   if (beingDrawn()) {
-    const middle = (e) => { const r = e.getBoundingClientRect(); return Math.round(r.top + r.height / 2); };
-    check("on the same line as the Settings gear", middle(open) === middle(document.getElementById("setup")), `${middle(open)} / ${middle(document.getElementById("setup"))}`);
+    const box = (id) => document.getElementById(id).getBoundingClientRect();
+    const [mc, plus, find] = [box("mission-open"), box("new"), box("find")];
+    check(
+      "Mission Control and + share the top line, the search on a line of its own below",
+      Math.abs(mc.top - plus.top) <= 1 && find.top >= mc.bottom && find.width > mc.width,
+      `mc ${Math.round(mc.top)}, + ${Math.round(plus.top)}, search ${Math.round(find.top)} (${Math.round(find.width)}px)`,
+    );
   }
-  open.click();
+  openTheTab("teams");
   await wait(300);
   const page = document.getElementById("teams");
-  check("it opens a page of its own over the window", !page.hidden && getComputedStyle(page).position === "fixed", String(page.hidden));
+  check(
+    "Teams opens as the second tab of Mission Control, over the window",
+    !page.hidden && getComputedStyle(document.getElementById("mission")).position === "fixed" &&
+      document.getElementById("mission-teams").getAttribute("aria-selected") === "true" && document.getElementById("overview").hidden,
+    String(page.hidden),
+  );
   check("with no teams, it says what a team is for", /No teams yet/.test(page.textContent), document.getElementById("teams-list").textContent.slice(0, 120));
   check("and the rule a team makes, in words", /hands work only to\s+its own team/.test(document.getElementById("teams-rule").textContent), document.getElementById("teams-rule").textContent.trim().slice(0, 140));
   const free = () => [...document.querySelectorAll("#teams-free-list li")].map((li) => li.dataset.agent);
@@ -7719,7 +7786,7 @@ export async function teamsOfTeammates() {
   check("the second press breaks it up, and the teammates stay", !document.querySelector("#teams .team") && asked.some((a) => a.name === "break_up_team") && free().includes("agent-ship"), free().join(", "));
 
   // Escape and Back both leave it.
-  document.getElementById("teams-done").click();
+  document.getElementById("mission-done").click();
   await wait(150);
   check("Back closes it", page.hidden, String(page.hidden));
   return found;
@@ -7774,7 +7841,7 @@ export async function howATeammateChecksItsWork() {
   await wait(200);
 
   // On the Teams page, what each one brings.
-  document.getElementById("teams-open").click();
+  openTheTab("teams");
   await wait(300);
   document.getElementById("teams-new").click();
   await wait(400);
@@ -7790,7 +7857,7 @@ export async function howATeammateChecksItsWork() {
   const row = (id) => document.querySelector(`#teams .team[data-team="${card.dataset.team}"] .person[data-agent="${id}"] .brings`);
   check("a teammate with a checklist says how many points it checks its work against", /Checks its work against 2 points/.test(row("agent-ship")?.textContent || ""), row("agent-ship")?.textContent);
   check("one with neither says so, quietly", row("agent-page")?.classList.contains("none") && /No skills or checklist yet/.test(row("agent-page").textContent), row("agent-page")?.textContent);
-  document.getElementById("teams-done").click();
+  document.getElementById("mission-done").click();
   await wait(150);
   return found;
 }
@@ -7984,7 +8051,7 @@ export async function aHomeAndATeamTask() {
 
   // A task for a whole team.
   FIXTURE.teams = [{ id: "team-a", name: "A-TEAM", lead: "agent-bitcoin", members: [], made_at: 0 }];
-  document.getElementById("teams-open").click();
+  openTheTab("teams");
   await wait(400);
   const give = document.querySelector('#teams .team[data-team="team-a"] .team-task');
   check("each team with a lead offers to give it a task, by its name", give && give.textContent === "Give A-TEAM a task" && !give.disabled, give?.outerHTML.slice(0, 120));
@@ -8017,12 +8084,36 @@ export async function aHomeAndATeamTask() {
   await wait(250);
   check("and says how many finished once every part is back", handing() && !handing().classList.contains("running") && /All 3 finished\./.test(handing().textContent), handing()?.textContent);
   FIXTURE.teams = [{ id: "team-b", name: "B-TEAM", lead: null, members: [], made_at: 0 }];
-  document.getElementById("teams-open").click();
+  openTheTab("teams");
   await wait(400);
   const none = document.querySelector('#teams .team[data-team="team-b"] .team-task');
   check("a team with no lead cannot be given one yet, and says why", none?.disabled && /Choose a lead first/.test(none.title), none?.title);
-  document.getElementById("teams-done").click();
+  document.getElementById("mission-done").click();
   await wait(150);
+  // + offers the teams too: one with a lead first, saying who leads it, and
+  // one without as something that cannot be chosen yet.
+  FIXTURE.teams = [
+    { id: "team-c", name: "C-TEAM", lead: "agent-bitcoin", members: [], made_at: 0 },
+    { id: "team-b", name: "B-TEAM", lead: null, members: [], made_at: 0 },
+  ];
+  document.getElementById("new").click();
+  await wait(300);
+  const first = document.querySelector("#task-chooser-who .who");
+  const leaderless = document.querySelector('#task-chooser-who .who[data-id="team-b"]');
+  check(
+    "+ offers each team with a lead first, saying who leads it",
+    first?.dataset.kind === "team" && first?.dataset.id === "team-c" && /Led by Bitcoin Desk/.test(first.textContent) &&
+      leaderless?.getAttribute("aria-disabled") === "true",
+    first?.textContent,
+  );
+  const handed = asked.length;
+  first.click();
+  await wait(500);
+  check(
+    "choosing a team gives the team the task, through its lead",
+    document.getElementById("task-chooser").hidden && asked.slice(handed).some((a) => a.name === "a_task_for_the_team" && a.args?.team === "team-c"),
+    JSON.stringify(asked.slice(handed).map((a) => a.name)),
+  );
   FIXTURE.teams = [];
   return found;
 }
