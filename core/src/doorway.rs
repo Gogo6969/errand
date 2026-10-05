@@ -23,7 +23,7 @@
 //! reads that pipe as protocol, and one stray line of chat on it is a server
 //! that fails to start for reasons nobody can see.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -100,14 +100,35 @@ struct Along {
 
 /// Speak MCP on this process's own pipes until the far end goes away.
 ///
-/// Blocking and synchronous on purpose. This is a program whose whole job is to
-/// copy a line from one place to another, and starting an async runtime to do
-/// it would be more machinery than the thing being done.
+/// Threads rather than an async runtime: this is a program whose whole job is
+/// to copy a line from one place to another, and a runtime would be more
+/// machinery than the thing being done.
 pub fn serve_blocking(socket: &Path) -> ! {
-    let input = std::io::stdin();
-    let mut output = std::io::stdout();
+    let output: Shared = std::sync::Arc::new(std::sync::Mutex::new(Box::new(std::io::stdout())));
+    // Calls still being answered are left behind: stdin closing is the client
+    // saying it is finished, and nobody is left to read what they bring.
+    let _going = serve(std::io::stdin().lock(), output, socket);
+    std::process::exit(0)
+}
 
-    for line in BufReader::new(input.lock()).lines() {
+/// Where replies are written, by whichever thread has one.
+type Shared = std::sync::Arc<std::sync::Mutex<Box<dyn Write + Send>>>;
+
+/// Write one reply whole, as a line of its own. False when nobody is reading.
+fn reply_with(output: &Shared, reply: &Value) -> bool {
+    let mut out = output.lock().unwrap_or_else(|e| e.into_inner());
+    writeln!(out, "{reply}").is_ok() && out.flush().is_ok()
+}
+
+/// Read requests until `input` ends, answering each. A tool call is carried on
+/// a thread of its own, so the next request is read while it is out: one
+/// waiting ten minutes on a teammate held up every call behind it, and a
+/// lead's helpers each handing work on were answered one after another.
+/// Replies are matched by id, so they may go back in any order. Gives back
+/// the calls still going when the input ended.
+fn serve(input: impl BufRead, output: Shared, socket: &Path) -> Vec<std::thread::JoinHandle<()>> {
+    let mut going = Vec::new();
+    for line in input.lines() {
         let Ok(line) = line else { break };
         let line = line.trim();
         if line.is_empty() {
@@ -134,11 +155,24 @@ pub fn serve_blocking(socket: &Path) -> ! {
         // error would refuse a perfectly good `tools/list`.
         let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
 
+        if method == "tools/call" {
+            let (socket, output) = (socket.to_path_buf(), output.clone());
+            going.retain(|call: &std::thread::JoinHandle<()>| !call.is_finished());
+            going.push(std::thread::spawn(move || {
+                let reply =
+                    json!({ "jsonrpc": "2.0", "id": id, "result": called(&socket, &params) });
+                if !reply_with(&output, &reply) {
+                    // Nobody is reading any more: the client has gone.
+                    std::process::exit(0);
+                }
+            }));
+            continue;
+        }
+
         let answer = match method {
             "initialize" => Ok(hello(&params)),
             "tools/list" => Ok(json!({ "tools": offered() })),
             "ping" => Ok(json!({})),
-            "tools/call" => Ok(called(socket, &params)),
             other => Err((-32601, format!("there is no {other} here"))),
         };
 
@@ -151,14 +185,12 @@ pub fn serve_blocking(socket: &Path) -> ! {
                 json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
             }
         };
-        if writeln!(output, "{reply}").is_err() || output.flush().is_err() {
+        if !reply_with(&output, &reply) {
             break;
         }
     }
-
-    // Its stdin closed, which is how the client says it is finished. Leaving
-    // quietly is what keeps a force-quit from leaving this behind.
-    std::process::exit(0)
+    // Its stdin closed, which is how the client says it is finished.
+    going
 }
 
 /// The answer to `initialize`.
@@ -705,6 +737,87 @@ fn permit(what: &Path, mode: u32) {
 mod tests {
     use super::*;
 
+    /// Everything written, kept for reading back.
+    #[derive(Clone, Default)]
+    struct Kept(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl Write for Kept {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn two_calls_are_carried_at_once_and_answered_by_id() {
+        // An app that takes a while over each call, as one waiting on a
+        // teammate does.
+        let at = std::env::temp_dir().join(format!("errand-two-{}.sock", std::process::id()));
+        std::fs::remove_file(&at).ok();
+        let app = std::os::unix::net::UnixListener::bind(&at).expect("a socket");
+        std::thread::spawn(move || {
+            for link in app.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut link = link;
+                    let mut line = String::new();
+                    std::io::BufReader::new(&link).read_line(&mut line).ok();
+                    let passed: Passed = serde_json::from_str(line.trim()).expect("a call");
+                    std::thread::sleep(Duration::from_millis(600));
+                    let came = Came {
+                        said: format!("{} answered", passed.tool),
+                        went_wrong: false,
+                    };
+                    writeln!(link, "{}", serde_json::to_string(&came).unwrap()).ok();
+                });
+            }
+        });
+        let requests = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"first","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"second","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#,
+        ]
+        .join("\n");
+        let kept = Kept::default();
+        let output: Shared = std::sync::Arc::new(std::sync::Mutex::new(Box::new(kept.clone())));
+        let began = std::time::Instant::now();
+        let going = serve(std::io::Cursor::new(requests), output, &at);
+        // Not held up behind the calls that are out.
+        assert!(
+            began.elapsed() < Duration::from_millis(300),
+            "{:?}",
+            began.elapsed()
+        );
+        for call in going {
+            call.join().unwrap();
+        }
+        let took = began.elapsed();
+        assert!(
+            took < Duration::from_millis(1100),
+            "carried one after another: {took:?}"
+        );
+        let written = String::from_utf8(kept.0.lock().unwrap().clone()).unwrap();
+        let replies: Vec<Value> = written
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("each reply a whole line"))
+            .collect();
+        assert_eq!(replies.len(), 3, "{written}");
+        // The ping, answered while the calls were out, comes first.
+        assert_eq!(replies[0]["id"], 3);
+        for (id, tool) in [(1, "first"), (2, "second")] {
+            let reply = replies
+                .iter()
+                .find(|r| r["id"] == id)
+                .expect("an answer to each");
+            assert_eq!(
+                reply["result"]["content"][0]["text"],
+                format!("{tool} answered")
+            );
+        }
+        std::fs::remove_file(&at).ok();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_doorway_put_away_leaves_the_one_that_replaced_it_standing() {
         // A reopened conversation binds a new socket at the same path, and the
@@ -1041,6 +1154,7 @@ mod tests {
             named,
             [
                 "ask",
+                "hand_out",
                 "remember",
                 "recall",
                 "forget",

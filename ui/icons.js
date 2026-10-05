@@ -126,6 +126,9 @@ export function forTool(tool) {
     WebSearch: "search",
     WebFetch: "globe",
     Task: "helper",
+    // A teammate handed a part: helped, the way a helper is.
+    ask: "helper",
+    hand_out: "helper",
     Skill: "spark",
     TodoWrite: "list",
     ToolSearch: "search",

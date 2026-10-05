@@ -449,8 +449,10 @@ pub fn your_team(store: &Store, agent: &str) -> Result<String> {
                 ),
                 false => format!(
                     "You lead the team \"{}\": {}. Hand each of them the part of the work that \
-                     fits what they do, with ask, and check what they send back before you call \
-                     it done. who_else says what each one does.",
+                     fits what they do and check what they send back before you call it done. \
+                     Parts that do not depend on each other go out together with hand_out, so \
+                     they are worked on at the same time; ask hands out one part and waits for \
+                     it. who_else says what each one does.",
                     team.name,
                     others.join(", ")
                 ),
@@ -733,7 +735,7 @@ mod tests {
             ),
             "{lead}"
         );
-        assert!(lead.contains("with ask"), "{lead}");
+        assert!(lead.contains("together with hand_out"), "{lead}");
         let member = knows("w").identity;
         assert!(
             member.contains("You are on the team \"Build crew\", led by Ship Lead (Code), with Bug Hunter (QA)."),

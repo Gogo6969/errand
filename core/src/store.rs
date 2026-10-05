@@ -2505,6 +2505,17 @@ impl Store {
         points_at_nothing(&self.conn.lock().unwrap())
     }
 
+    /// The conversations this one handed work to, oldest first.
+    pub fn asked_from(&self, conversation: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn
+            .prepare("SELECT id FROM conversations WHERE asked_by = ? ORDER BY started_at, id")?;
+        let ids = q
+            .query_map([conversation], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
+    }
+
     pub fn who_is_waiting(&self, conversation: &str) -> Result<Vec<String>> {
         const DEEP_ENOUGH: usize = 12;
         let mut chain = Vec::new();
@@ -2641,7 +2652,10 @@ impl Store {
     /// rule for `Bash` answers a local model's `run_command`.
     pub fn already_allowed(&self, agent: &str, tool: &str, doing: &str) -> Result<bool> {
         Ok(self.allowances(agent)?.into_iter().any(|a| {
-            crate::allowing::same_thing(&a.tool, tool) && crate::allowing::covers(&a.rule, doing)
+            (crate::allowing::same_thing(&a.tool, tool) && crate::allowing::covers(&a.rule, doing))
+                // Only a yes to the whole tool: a rule written for one tool's
+                // words is not a rule about the other's.
+                || (a.rule.is_empty() && crate::allowing::both_hand_work_on(&a.tool, tool))
         }))
     }
 
@@ -6496,6 +6510,19 @@ mod tests {
                 .unwrap(),
             "the prefixed name reached the table, so there are now two of everything"
         );
+        // A yes to all of ask is a yes to handing parts out together, and the
+        // other way round; a rule narrower than the whole tool is neither.
+        assert!(s
+            .already_allowed("a1", "hand_out", "Scribe: Draft it\nChecker: Check it")
+            .unwrap());
+        one(&s, "a2", "/tmp/two");
+        s.allow("a2", "hand_out", "").unwrap();
+        assert!(s.already_allowed("a2", "ask", "Scribe: anything").unwrap());
+        one(&s, "a3", "/tmp/three");
+        s.allow("a3", "ask", "Scribe:").unwrap();
+        assert!(!s
+            .already_allowed("a3", "hand_out", "Scribe: Draft it\nChecker: Check it")
+            .unwrap());
     }
 
     #[test]

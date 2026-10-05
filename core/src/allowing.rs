@@ -358,6 +358,14 @@ pub fn same_thing(kept: &str, asked: &str) -> bool {
     kept == asked || matches!((Kind::of(kept), Kind::of(asked)), (Some(a), Some(b)) if a == b)
 }
 
+/// Whether a yes to the whole of one of these covers the other: handing one
+/// part to a teammate and handing several out at once are one permission,
+/// and a lead told to hand parts out together would otherwise stop at a card
+/// on the morning run that its "always" to ask was meant to spare.
+pub fn both_hand_work_on(kept: &str, asked: &str) -> bool {
+    matches!((kept, asked), ("ask", "hand_out") | ("hand_out", "ask"))
+}
+
 /// What is worth offering a teammate, and why some things are not.
 ///
 /// Only what it would ever ask about, or be walled from. One that never asks

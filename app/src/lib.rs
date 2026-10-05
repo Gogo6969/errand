@@ -84,6 +84,11 @@ struct Held {
     /// not depend on a window being open at all -- which matters, because a
     /// routine at seven in the morning may delegate.
     watching: Arc<Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<Event>>>>,
+    /// Who is working on something handed to it right now: the conversation it
+    /// was handed in, and the agent. Booked under one lock, so two hand-offs at
+    /// once cannot both find a teammate free and start two engines working in
+    /// its one folder.
+    handed: Arc<Mutex<HashMap<String, String>>>,
     /// Turns that have just ended, for whatever goal they belong to.
     goals: tokio::sync::mpsc::UnboundedSender<(String, String)>,
     /// What each conversation is doing, for the ones that are doing something.
@@ -758,8 +763,11 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 Err(_) => {
                     let going = {
                         let held: State<Held> = app.state();
+                        // Somebody waiting on it counts: an engine closed
+                        // before it said anything still owes them an ending.
                         let going = held.running.lock().unwrap().contains(&id)
-                            || held.doing.lock().unwrap().contains_key(&id);
+                            || held.doing.lock().unwrap().contains_key(&id)
+                            || held.watching.lock().unwrap().contains_key(&id);
                         going
                     };
                     if current() && going && !said_it_died {
@@ -1348,6 +1356,9 @@ async fn say_as(
             .get(&id)
             .is_some_and(|was| *was != now);
         if stale && !mid_turn(&held, &id) {
+            // The old engine's last events are not this turn's: without this
+            // its reader, still current, read the closing as this turn dying.
+            *held.opening.lock().unwrap().entry(id.clone()).or_insert(0) += 1;
             held.opened_with.lock().unwrap().remove(&id);
             held.doorways.lock().unwrap().remove(&id);
             let was = held.live.lock().unwrap().remove(&id);
@@ -1407,10 +1418,12 @@ fn a_task_for_the_team_in_words(held: &Held, team: &errand_core::store::Team) ->
         })
         .unwrap_or_default();
     format!(
-        "[This task is for your team, {}. You lead it. Break it into parts, hand each part to \
-         the member it fits with ask ({}), do yourself what fits nobody, check what comes \
-         back against the task and your checklist, and put the result together.{folder} What \
-         the person wants done follows.]",
+        "[This task is for your team, {}. You lead it. Break it into parts and give each part \
+         to the member it fits ({}): parts that do not depend on each other go out together \
+         with hand_out, so those members work at the same time, and a part that needs \
+         another's result goes with ask once that result is back. Do yourself what fits \
+         nobody, check what comes back against the task and your checklist, and put the \
+         result together.{folder} What the person wants done follows.]",
         team.name,
         match named.is_empty() {
             true => "nobody is on it yet, so say so and do it yourself".to_string(),
@@ -2622,6 +2635,7 @@ async fn use_engine(
                 "stopped because its engine was changed",
                 "Stopped, because what answers this agent was changed.",
             );
+            stop_what_it_handed_out(&app, &held, &conversation);
             continue;
         }
         // Both, and for the same reason: an agent moved onto a local model
@@ -3486,13 +3500,6 @@ fn know_which_servers_are_allowed(held: &Held) {
 /// The receiving end, held between setup and Ready.
 struct Waiting(Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<team::Wants>>>);
 
-/// Do the things an engine cannot do for itself.
-///
-/// One at a time on purpose. Two agents delegating at once is a thing that will
-/// happen and a thing nobody has thought through: it means two conversations
-/// running, either of which may delegate again. Serialising it makes the first
-/// version something whose behaviour can be predicted, and the queue is where
-/// that decision is written down rather than assumed.
 /// The receiving end of turns that have ended, parked until the app is up.
 ///
 /// Parked for the same reason the other one is: setup runs while the app is
@@ -3514,6 +3521,7 @@ fn carry_on_goals(
     });
 }
 
+/// Do the things an engine cannot do for itself.
 fn answer_what_engines_cannot(
     app: AppHandle,
     mut wants: tokio::sync::mpsc::UnboundedReceiver<team::Wants>,
@@ -3538,6 +3546,7 @@ fn answer_what_engines_cannot(
                 let said = match team::which_of_ours(&asked.tool) {
                     Some(team::Ours::WhoElse) => who_else(&app, &asked.from),
                     Some(team::Ours::Ask) => ask_teammate(&app, &asked).await,
+                    Some(team::Ours::HandOut) => hand_out(&app, &asked).await,
                     Some(team::Ours::Remember) => write_it_down(&app, &asked),
                     Some(team::Ours::Recall) => look_it_up(&app, &asked),
                     Some(team::Ours::Forget) => take_it_back(&app, &asked),
@@ -5815,10 +5824,125 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
         !request.trim().is_empty(),
         "there was no request to pass on"
     );
+    let (them, mine) = who_it_may_hand_to(app, &asked.from, named)?;
+    hand_to(
+        app,
+        &asked.from,
+        asked.as_owner,
+        asked.along_the_way.clone(),
+        &them,
+        mine.as_deref(),
+        request,
+    )
+    .await
+}
 
+/// Give several teammates a part each, all at once, and wait for every one.
+///
+/// One call rather than several asks, because asks made one after another
+/// are worked on one after another: Claude Code runs a tool that is not
+/// read-only only when nothing else is running, and a local model's calls are
+/// taken in turn. Every part is checked before any goes out, so a hand-out
+/// that cannot be done whole is not done half.
+async fn hand_out(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let parts = team::parts_of(&asked.args).map_err(anyhow::Error::msg)?;
+    let mut going: Vec<(errand_core::store::Agent, Option<String>, String)> = Vec::new();
+    for (named, request) in parts {
+        let (them, mine) = who_it_may_hand_to(app, &asked.from, &named)?;
+        // Two names for one agent are still one agent, and two engines for
+        // it would work in one folder at once.
+        if going.iter().any(|(already, _, _)| already.id == them.id) {
+            anyhow::bail!(
+                "{} is in this hand-out twice. Give {} one request with both parts in it.",
+                them.name,
+                them.name
+            );
+        }
+        going.push((them, mine, request));
+    }
+    let names: Vec<String> = going.iter().map(|(them, _, _)| them.name.clone()).collect();
+    let mut working = Vec::new();
+    for (them, mine, request) in going {
+        let (app, from) = (app.clone(), asked.from.clone());
+        let as_owner = asked.as_owner;
+        working.push(tauri::async_runtime::spawn(async move {
+            hand_to(
+                &app,
+                &from,
+                as_owner,
+                None,
+                &them,
+                mine.as_deref(),
+                &request,
+            )
+            .await
+        }));
+    }
+    let mut answers = Vec::new();
+    for (name, one) in names.iter().zip(working) {
+        let said = match one.await {
+            Ok(Ok(said)) => said,
+            Ok(Err(why)) => format!("It could not: {why}"),
+            Err(_) => "It could not: that stopped part way through".to_string(),
+        };
+        answers.push((name.clone(), said));
+    }
+    Ok(all_that_came_back(&answers))
+}
+
+/// Every answer a hand-out brought back, under the name of who gave it, with
+/// a first line saying how many finished: the step shows that line.
+///
+/// Each answer kept whole up to its share of what one tool result may hold,
+/// because Claude Code cuts a long result and the cut falls on the last
+/// answers, which are as much the work as the first.
+fn all_that_came_back(answers: &[(String, String)]) -> String {
+    const ALL_OF_THEM_AT_MOST: usize = 80_000;
+    let finished = |said: &str| {
+        !said.starts_with("It could not:")
+            && !STOPPED_PART_WAY.iter().any(|start| said.starts_with(start))
+    };
+    let not: Vec<String> = answers
+        .iter()
+        .filter(|(_, said)| !finished(said))
+        .map(|(name, _)| name.clone())
+        .collect();
+    let first = match (answers.len(), not.len()) {
+        (1, 0) => "The one part finished.".to_string(),
+        (all, 0) => format!("All {all} finished."),
+        (all, _) => format!(
+            "{} of {all} finished; {} did not: see below.",
+            all - not.len(),
+            team::and_list(&not)
+        ),
+    };
+    let share = ALL_OF_THEM_AT_MOST / answers.len().max(1);
+    let mut out = first;
+    for (name, said) in answers {
+        let said = said.trim();
+        let kept = match said.char_indices().nth(share) {
+            None => said.to_string(),
+            Some((cut, _)) => format!(
+                "{}\n[Cut here. The rest is in {name}'s own conversation.]",
+                &said[..cut]
+            ),
+        };
+        out.push_str(&format!("\n\n{name}:\n{kept}"));
+    }
+    out
+}
+
+/// Who `named` is, and whether the conversation `from` may hand it work: not
+/// itself, only its team when it is on one, and nobody already waiting on
+/// this job further up. With the asker's own agent, when there is one.
+fn who_it_may_hand_to(
+    app: &AppHandle,
+    from: &str,
+    named: &str,
+) -> anyhow::Result<(errand_core::store::Agent, Option<String>)> {
     let (them, mine) = {
         let held: State<Held> = app.state();
-        let mine = held.store.conversation(&asked.from)?.map(|c| c.agent);
+        let mine = held.store.conversation(from)?.map(|c| c.agent);
         let everybody = held.store.agents()?;
         let them = team::the_one_called(&everybody, named)
             .map_err(anyhow::Error::msg)?
@@ -5855,7 +5979,7 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
     // it into a real loop.
     {
         let held: State<Held> = app.state();
-        let waiting = held.store.who_is_waiting(&asked.from)?;
+        let waiting = held.store.who_is_waiting(from)?;
         if waiting.contains(&them.id) {
             anyhow::bail!(
                 "{} is already waiting on this job, so handing it back would go round in \
@@ -5863,11 +5987,87 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
                 them.name
             );
         }
+        if !from.is_empty() && busy_with_a_hand_off(&held, &them.id) {
+            anyhow::bail!("{}", busy(&them.name));
+        }
     }
+    Ok((them, mine))
+}
 
+/// Whether an agent is working on something handed to it right now.
+fn busy_with_a_hand_off(held: &Held, agent: &str) -> bool {
+    held.handed.lock().unwrap().values().any(|a| a == agent)
+}
+
+/// What a teammate asking is told about one that is busy.
+fn busy(name: &str) -> String {
+    format!(
+        "{name} is working on another part handed to it right now, and a second one at the \
+         same time would have two of it working in one folder. Wait until that part is back \
+         and hand this over then, or do it yourself."
+    )
+}
+
+/// One hand-off: a request to one teammate, in a conversation of its own,
+/// and what it said. `ask` makes one and `hand_out` several at once.
+async fn hand_to(
+    app: &AppHandle,
+    from: &str,
+    as_owner: bool,
+    along_the_way: Option<tokio::sync::mpsc::UnboundedSender<errand_core::team::Meanwhile>>,
+    them: &errand_core::store::Agent,
+    mine: Option<&str>,
+    request: &str,
+) -> anyhow::Result<String> {
     // Its own conversation, so the delegated work does not land in the middle
     // of whatever else that agent was doing.
     let talk = uuid::Uuid::new_v4().to_string();
+    {
+        let held: State<Held> = app.state();
+        // Stopped since it asked: nothing is waiting for this any more.
+        if !from.is_empty() && !held.live.lock().unwrap().contains_key(from) {
+            anyhow::bail!("the conversation that asked for this has been stopped");
+        }
+        let mut handed = held.handed.lock().unwrap();
+        // Checked and booked in one go. Only for a teammate asking: what the
+        // person asks from a terminal is theirs to decide, and is booked so
+        // a teammate asking after them finds the agent busy.
+        if !from.is_empty() && handed.values().any(|a| a == &them.id) {
+            anyhow::bail!("{}", busy(&them.name));
+        }
+        handed.insert(talk.clone(), them.id.clone());
+    }
+    let said = hand_to_now(
+        app,
+        from,
+        as_owner,
+        along_the_way,
+        them,
+        mine,
+        request,
+        &talk,
+    )
+    .await;
+    {
+        let held: State<Held> = app.state();
+        held.handed.lock().unwrap().remove(&talk);
+    }
+    said
+}
+
+/// The hand-off itself, once the teammate is booked for it.
+#[allow(clippy::too_many_arguments)]
+async fn hand_to_now(
+    app: &AppHandle,
+    from: &str,
+    as_owner: bool,
+    along_the_way: Option<tokio::sync::mpsc::UnboundedSender<errand_core::team::Meanwhile>>,
+    them: &errand_core::store::Agent,
+    mine: Option<&str>,
+    request: &str,
+    talk: &str,
+) -> anyhow::Result<String> {
+    let talk = talk.to_string();
     // In whose words. An agent's request carries the agent's name, so the one
     // asked knows it is a hand-off. The owner's own, from their terminal, is
     // said bare: prefixed "something outside asks:", a model has refused it
@@ -5875,10 +6075,9 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
     let heard = {
         let held: State<Held> = app.state();
         let who = mine
-            .as_deref()
             .and_then(|a| held.store.agent(a).ok().flatten())
             .map(|a| a.name);
-        let heard = team::heard(who.as_deref(), asked.as_owner, request);
+        let heard = team::heard(who.as_deref(), as_owner, request);
         held.store.begin_conversation_for(
             &talk,
             &them.id,
@@ -5888,21 +6087,47 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
             // outside the app: there is no conversation to point at, and
             // pointing at one that does not exist is the thing the store checks
             // for on every change to its shape.
-            Some(asked.from.as_str()).filter(|from| !from.is_empty()),
+            Some(from).filter(|from| !from.is_empty()),
         )?;
         heard
     };
 
-    open_thread(app.clone(), app.state(), talk.clone())
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    // Registered before it is asked, or a fast answer arrives before anybody
-    // is waiting for it.
-    let (finished, done) = tokio::sync::mpsc::unbounded_channel();
+    // Registered before its engine is opened, and so before it is asked: a
+    // fast answer must find somebody waiting, and a Stop on the asker while
+    // the engine is still opening must find this to stop.
+    let (finished, mut done) = tokio::sync::mpsc::unbounded_channel();
     {
         let held: State<Held> = app.state();
         held.watching.lock().unwrap().insert(talk.clone(), finished);
+        // Going from now, not from its first step. In between, nothing said
+        // it was busy, and anything that closes an agent's idle engines (a
+        // new name settled, a folder allowed) closed this one before it began,
+        // which left the asker waiting out the whole ten minutes.
+        held.doing
+            .lock()
+            .unwrap()
+            .insert(talk.clone(), "Reading what it was asked".to_string());
+    }
+
+    if let Err(why) = open_thread(app.clone(), app.state(), talk.clone()).await {
+        let held: State<Held> = app.state();
+        held.watching.lock().unwrap().remove(&talk);
+        held.doing.lock().unwrap().remove(&talk);
+        anyhow::bail!("{why}");
+    }
+    // Stopped while it was opening: Stop took the watcher and said why.
+    let stopped = {
+        let held: State<Held> = app.state();
+        let stopped = !held.watching.lock().unwrap().contains_key(&talk);
+        stopped
+    };
+    if stopped {
+        let said = match done.try_recv() {
+            Ok(Event::Failed { why }) => format!("It could not: {why}"),
+            _ => "It could not: it was stopped before it began.".to_string(),
+        };
+        put_away_when_done(app, &talk);
+        return Ok(said);
     }
 
     let said = match say_as(
@@ -5917,8 +6142,12 @@ async fn ask_teammate(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
     .await
     {
         // Where it landed is of no interest to a delegated errand.
-        Ok(_) => wait_for_the_answer(done, asked.along_the_way.clone()).await,
-        Err(why) => Err(anyhow::anyhow!("{why}")),
+        Ok(_) => wait_for_the_answer(done, along_the_way).await,
+        Err(why) => {
+            let held: State<Held> = app.state();
+            held.doing.lock().unwrap().remove(&talk);
+            Err(anyhow::anyhow!("{why}"))
+        }
     };
 
     {
@@ -6306,14 +6535,31 @@ async fn answer_from(
             .lock()
             .unwrap()
             .insert(talk.to_string(), finished);
+        // Busy from now, as a hand-off is: nothing closes it as idle before
+        // its first step, and a teammate asking for it meanwhile is told so.
+        held.doing
+            .lock()
+            .unwrap()
+            .insert(talk.to_string(), "Reading what it was asked".to_string());
+        if let Ok(Some(c)) = held.store.conversation(talk) {
+            held.handed
+                .lock()
+                .unwrap()
+                .insert(talk.to_string(), c.agent);
+        }
     }
     let came = match say_later(app.clone(), talk.to_string(), words, attached).await {
         Ok(_) => Ok(what_came_back(done, None).await),
-        Err(why) => Err(anyhow::anyhow!("{why}")),
+        Err(why) => {
+            let held: State<Held> = app.state();
+            held.doing.lock().unwrap().remove(talk);
+            Err(anyhow::anyhow!("{why}"))
+        }
     };
     {
         let held: State<Held> = app.state();
         held.watching.lock().unwrap().remove(talk);
+        held.handed.lock().unwrap().remove(talk);
     }
     put_away_when_done(app, talk);
     came
@@ -9147,7 +9393,47 @@ async fn stop(app: AppHandle, held: State<'_, Held>, id: String) -> Result<(), S
             }
         }
     }
-    stop_it(&app, &held, &id, "stopped by you")
+    // Itself first, so it is not handed its teammates' "stopped" and left a
+    // moment to act on it.
+    let stopped = stop_it(&app, &held, &id, "stopped by you");
+    // Then what it handed to others. Nobody is left to read their answers,
+    // and a lead that handed out six parts left six teammates working on,
+    // writing into the team's folder, for up to ten minutes after Stop.
+    stop_what_it_handed_out(&app, &held, &id);
+    stopped
+}
+
+/// Stop every conversation this one is waiting on right now, and what each
+/// of those is waiting on in turn.
+///
+/// Only what is being waited on. A conversation handed work in an earlier
+/// turn is the agent's own by now: the person may be talking in it, or it
+/// may be parked on a question the person is still to answer, and Stop on
+/// the lead's turn is not about either.
+fn stop_what_it_handed_out(app: &AppHandle, held: &Held, id: &str) {
+    fn down(app: &AppHandle, held: &Held, id: &str, depth: usize, seen: &mut Vec<String>) {
+        // As deep as the loop check follows a chain, and each once.
+        if depth > 12 || seen.iter().any(|s| s == id) {
+            return;
+        }
+        seen.push(id.to_string());
+        for asked in held.store.asked_from(id).unwrap_or_default() {
+            let waited_on = held.watching.lock().unwrap().contains_key(&asked);
+            if waited_on {
+                // Itself first and then what it handed on, the way the lead
+                // went first, so none is handed a "stopped" to act on.
+                stop_and_say(
+                    app,
+                    held,
+                    &asked,
+                    "stopped with the one that asked for it",
+                    "Stopped, because the conversation that handed this over was stopped.",
+                );
+                down(app, held, &asked, depth + 1, seen);
+            }
+        }
+    }
+    down(app, held, id, 0, &mut Vec::new());
 }
 
 /// Stop one conversation, whatever it is in the middle of, and leave nothing
@@ -9325,6 +9611,7 @@ async fn pause(
                 "paused by you",
                 "Paused. It will not run on its own until you start it again.",
             );
+            stop_what_it_handed_out(&app, &held, &c.id);
         }
     }
     Ok(())
@@ -9346,6 +9633,7 @@ async fn forget(app: AppHandle, held: State<'_, Held>, id: String) -> Result<(),
         .collect();
     for conversation in theirs {
         let _ = stop_it(&app, &held, &conversation, "deleted");
+        stop_what_it_handed_out(&app, &held, &conversation);
     }
     held.store.forget(&id).map_err(|e| e.to_string())?;
     // Its home goes with it: what it remembered, written out.
@@ -9591,6 +9879,7 @@ pub fn run() {
                 goals,
                 running: Arc::default(),
                 watching: Arc::default(),
+                handed: Arc::default(),
                 doing: Arc::default(),
                 looking: Arc::default(),
                 doorways: Mutex::new(HashMap::new()),
@@ -10069,6 +10358,49 @@ fn everything_that_waits_for_the_app(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_hand_out_says_how_many_finished_and_keeps_every_answer_in_its_share() {
+        use super::all_that_came_back;
+        let all = all_that_came_back(&[
+            ("Page Smith".to_string(), "README written.".to_string()),
+            ("Bug Hunter".to_string(), "39 tests, all pass.".to_string()),
+        ]);
+        assert!(
+            all.starts_with("All 2 finished.\n\nPage Smith:\nREADME written."),
+            "{all}"
+        );
+        assert!(all.ends_with("Bug Hunter:\n39 tests, all pass."), "{all}");
+        let some = all_that_came_back(&[
+            ("Page Smith".to_string(), "Done.".to_string()),
+            (
+                "Bug Hunter".to_string(),
+                "It stopped to ask permission to run a command and there was nobody to answer"
+                    .to_string(),
+            ),
+            (
+                "Ship Lead".to_string(),
+                "It could not: no such file".to_string(),
+            ),
+        ]);
+        assert!(
+            some.starts_with("1 of 3 finished; Bug Hunter and Ship Lead did not: see below."),
+            "{some}"
+        );
+        // A long answer is cut to its share, and says where the rest is.
+        let long = "x".repeat(100_000);
+        let cut = all_that_came_back(&[
+            ("Page Smith".to_string(), long.clone()),
+            ("Bug Hunter".to_string(), "short".to_string()),
+        ]);
+        assert!(cut.len() < 45_000, "{}", cut.len());
+        assert!(cut.contains("The rest is in Page Smith's own conversation"));
+        assert!(cut.ends_with("Bug Hunter:\nshort"));
+        assert_eq!(
+            all_that_came_back(&[("Page Smith".to_string(), "ok".to_string())]),
+            "The one part finished.\n\nPage Smith:\nok"
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -7894,6 +7894,15 @@ export async function aHomeAndATeamTask() {
   await wait(700);
   check("which starts a task with the lead, named after the team, and opens it", asked.some((a) => a.name === "a_task_for_the_team" && a.args?.team === "team-a") && document.getElementById("teams").hidden && /A task for A-SQUAD/.test(document.getElementById("messages").textContent), document.getElementById("messages").textContent.slice(-120));
   check("ready for the person to say what it is", document.activeElement === document.getElementById("what"), document.activeElement?.id);
+  // The lead hands parts out at once: one step, marked as handing to helpers,
+  // with how many finished once they are all back.
+  tell("happened", { conversation: "talk-team-team-a", seq: 50, kind: "doing", what: "Handing out parts to Page Smith, Bug Hunter and Ship Lead", tool: "hand_out", call: "ho-1" });
+  await wait(250);
+  const handing = () => [...document.querySelectorAll("#messages .doing")].find((n) => /Handing out parts to/.test(n.textContent));
+  check("handing out is one step, still going, marked as handing to helpers", handing()?.classList.contains("running") && /cx="5.6"/.test(handing()?.innerHTML || ""), handing()?.outerHTML.slice(0, 200));
+  tell("happened", { conversation: "talk-team-team-a", seq: 51, kind: "did", call: "ho-1", outcome: "All 3 finished." });
+  await wait(250);
+  check("and says how many finished once every part is back", handing() && !handing().classList.contains("running") && /All 3 finished\./.test(handing().textContent), handing()?.textContent);
   FIXTURE.teams = [{ id: "team-b", name: "B-TEAM", lead: null, members: [], made_at: 0 }];
   document.getElementById("teams-open").click();
   await wait(400);

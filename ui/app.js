@@ -3528,6 +3528,9 @@ function saidYesToThisBefore(m) {
     one.kind === "asking" && one.answered && one !== m && !/^You said no/i.test(one.answered);
   return (talking()?.messages || []).filter((one) => {
     if (!said(one)) return false;
+    // Never across two tools: "Page Smith: ..." to ask and to hand_out begin
+    // alike, and are two different things to have said yes to.
+    if (one.tool !== m.tool) return false;
     // The command where both have one, which is the sharper answer: `curl -s a`
     // and `curl -s b` are two questions and one decision.
     //

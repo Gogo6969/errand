@@ -22,6 +22,63 @@ use tokio::sync::oneshot;
 
 use crate::store::Conversation;
 
+/// How many agents one `hand_out` may set going at once. Each is an engine of
+/// its own, with its own tool servers, working and paid for at the same time.
+pub const MOST_AT_ONCE: usize = 6;
+
+/// The parts of a `hand_out`, each an agent's name and what it is asked, or a
+/// sentence saying what is wrong with them. The same name twice is refused
+/// here: two engines for one agent would work in one folder at once.
+pub fn parts_of(args: &Value) -> Result<Vec<(String, String)>, String> {
+    let Some(parts) = args.get("parts").and_then(|p| p.as_array()) else {
+        return Err("there were no parts to hand out".to_string());
+    };
+    if parts.is_empty() {
+        return Err("there were no parts to hand out".to_string());
+    }
+    if parts.len() > MOST_AT_ONCE {
+        return Err(format!(
+            "that is {} parts, and at most {MOST_AT_ONCE} go out at once. Hand out the first \
+             {MOST_AT_ONCE}, and the rest when they are back.",
+            parts.len()
+        ));
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    for part in parts {
+        let get = |k: &str| {
+            part.get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        let (agent, request) = (get("agent"), get("request"));
+        if agent.is_empty() {
+            return Err("a part says nobody to hand it to".to_string());
+        }
+        if request.is_empty() {
+            return Err(format!("the part for {agent} says nothing to do"));
+        }
+        if out.iter().any(|(a, _)| a.eq_ignore_ascii_case(&agent)) {
+            return Err(format!(
+                "{agent} is in this hand-out twice. Give {agent} one request with both parts in \
+                 it."
+            ));
+        }
+        out.push((agent, request));
+    }
+    Ok(out)
+}
+
+/// Names in a sentence: "A", "A and B", "A, B and C".
+pub fn and_list(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// What an engine wants the app to do on its behalf.
 ///
 /// Sent up rather than handled where it arrives, because an engine knows about
@@ -83,7 +140,9 @@ pub fn declarations() -> Vec<Value> {
                     "Hand part of this job to another agent and wait for its answer. Use this \
                      when the work belongs to somebody else's speciality rather than yours. \
                      The other agent has its own memory and tools and does not see this \
-                     conversation, so say everything it needs in the request.",
+                     conversation, so say everything it needs in the request. To give \
+                     several agents a part each at the same time, use hand_out instead: \
+                     asks made one after another are worked on one after another.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -94,6 +153,43 @@ pub fn declarations() -> Vec<Value> {
                         }
                     },
                     "required": ["agent", "request"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "hand_out",
+                "description":
+                    "Give several agents a part of this job each, all at once, and wait until \
+                     every one has answered. They work at the same time, so the parts must not \
+                     depend on each other: none may need what another is making, and no two may \
+                     change the same file. Agree what they share first (write it down where all \
+                     of them can read it) and then hand out. Each agent has its own memory and \
+                     tools and does not see this conversation, so say everything it needs in its \
+                     request. One part per agent; at most six.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "parts": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": MOST_AT_ONCE,
+                            "description": "One part for each agent",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "agent": { "type": "string", "description": "Which agent, by name" },
+                                    "request": {
+                                        "type": "string",
+                                        "description": "What you need from them, in full, as you would say it to a colleague"
+                                    }
+                                },
+                                "required": ["agent", "request"]
+                            }
+                        }
+                    },
+                    "required": ["parts"]
                 }
             }
         }),
@@ -553,6 +649,7 @@ pub fn declarations() -> Vec<Value> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ours {
     Ask,
+    HandOut,
     WhoElse,
     Remember,
     Recall,
@@ -574,6 +671,7 @@ impl Ours {
     pub fn name(self) -> &'static str {
         match self {
             Ours::Ask => "ask",
+            Ours::HandOut => "hand_out",
             Ours::WhoElse => "who_else",
             Ours::Remember => "remember",
             Ours::Recall => "recall",
@@ -596,6 +694,7 @@ impl Ours {
 pub fn ours(tool: &str) -> Option<Ours> {
     match tool {
         "ask" => Some(Ours::Ask),
+        "hand_out" => Some(Ours::HandOut),
         "who_else" => Some(Ours::WhoElse),
         "remember" => Some(Ours::Remember),
         "recall" => Some(Ours::Recall),
@@ -650,6 +749,13 @@ pub fn in_plain_words(tool: Ours, args: &Value) -> String {
         Ours::Ask => match get("agent") {
             "" => "Handing this to somebody else".to_string(),
             who => format!("Asking {who}"),
+        },
+        Ours::HandOut => match parts_of(args) {
+            Ok(parts) => format!(
+                "Handing out parts to {}",
+                and_list(&parts.into_iter().map(|(a, _)| a).collect::<Vec<_>>())
+            ),
+            Err(_) => "Handing out parts of this".to_string(),
         },
         Ours::WhoElse => "Looking for somebody to hand this to".to_string(),
         Ours::EveryDay => match get("when") {
@@ -715,6 +821,33 @@ pub fn the_thing_itself(tool: Ours, args: &Value) -> String {
             args.get("agent").and_then(|v| v.as_str()).unwrap_or("?"),
             args.get("request").and_then(|v| v.as_str()).unwrap_or("")
         ),
+        // Every part, as `ask` says one, a line each, so a card shows all of
+        // what is about to be set going.
+        Ours::HandOut => {
+            // Whatever parts can be read, as they were sent, even from a
+            // hand-out that will be refused: the card is about what is being
+            // asked, and the reason is a line of its own, not the whole card.
+            let sent = args
+                .get("parts")
+                .and_then(|p| p.as_array())
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .map(|part| {
+                            let get = |k: &str| part.get(k).and_then(|v| v.as_str()).unwrap_or("");
+                            format!("{}: {}", get("agent").trim(), get("request").trim())
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            match parts_of(args) {
+                Ok(_) => sent,
+                Err(why) => format!("{sent}\n(This cannot go out as it is: {why})")
+                    .trim_start()
+                    .to_string(),
+            }
+        }
         // Filled in even though none of these stops to ask, because an empty
         // string is what makes an "always" rule prefix-match everything, and
         // leaving that trap for the day somebody flips `asks_first` costs
@@ -819,7 +952,7 @@ pub fn heard(by: Option<&str>, as_owner: bool, request: &str) -> Heard {
 /// at the list of who exists does not.
 pub fn asks_first(tool: Ours) -> bool {
     match tool {
-        Ours::Ask => true,
+        Ours::Ask | Ours::HandOut => true,
         // Nothing that only reaches this app's own records stops to ask. Not
         // because writing is harmless, but because a note is written mid-errand
         // and half of these errands run at seven in the morning with nobody at
@@ -875,7 +1008,7 @@ pub fn asks_first(tool: Ours) -> bool {
 /// around and an error is something to give up on.
 pub fn without_the_app(tool: Ours) -> &'static str {
     match tool {
-        Ours::Ask | Ours::WhoElse => "There is nobody else here to ask.",
+        Ours::Ask | Ours::HandOut | Ours::WhoElse => "There is nobody else here to ask.",
         Ours::Remember | Ours::Recall | Ours::Forget => {
             "There is nowhere to keep notes here. This is an engine with no app behind it, \
              so anything you learn lasts as long as this conversation."
@@ -1192,6 +1325,82 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_hand_out_is_its_parts_once_each_and_never_too_many() {
+        let parts = |v: Value| parts_of(&json!({ "parts": v }));
+        assert_eq!(
+            parts(json!([
+                { "agent": " Page Smith ", "request": "Write the README" },
+                { "agent": "Bug Hunter", "request": "Write the tests" }
+            ])),
+            Ok(vec![
+                ("Page Smith".to_string(), "Write the README".to_string()),
+                ("Bug Hunter".to_string(), "Write the tests".to_string())
+            ])
+        );
+        // Each refused with a sentence the lead can act on.
+        assert!(parts_of(&json!({})).unwrap_err().contains("no parts"));
+        assert!(parts(json!([])).unwrap_err().contains("no parts"));
+        assert!(parts(json!([{ "agent": "", "request": "x" }]))
+            .unwrap_err()
+            .contains("nobody"));
+        assert!(parts(json!([{ "agent": "Bug Hunter", "request": " " }]))
+            .unwrap_err()
+            .contains("says nothing to do"));
+        let twice = parts(json!([
+            { "agent": "Bug Hunter", "request": "one" },
+            { "agent": "bug hunter", "request": "two" }
+        ]))
+        .unwrap_err();
+        assert!(
+            twice.contains("twice") && twice.contains("one request"),
+            "{twice}"
+        );
+        let seven: Vec<Value> = (0..7)
+            .map(|n| json!({ "agent": format!("A{n}"), "request": "x" }))
+            .collect();
+        assert!(parts(json!(seven)).unwrap_err().contains("at most 6"));
+        // The step and the card say it the way a person would.
+        let args = json!({ "parts": [
+            { "agent": "Page Smith", "request": "Write the README" },
+            { "agent": "Bug Hunter", "request": "Write the tests" },
+            { "agent": "Ship Lead", "request": "Check it" }
+        ]});
+        assert_eq!(
+            in_plain_words(Ours::HandOut, &args),
+            "Handing out parts to Page Smith, Bug Hunter and Ship Lead"
+        );
+        assert_eq!(
+            the_thing_itself(Ours::HandOut, &args),
+            "Page Smith: Write the README\nBug Hunter: Write the tests\nShip Lead: Check it"
+        );
+        assert!(asks_first(Ours::HandOut));
+        // A hand-out that will be refused still shows what was asked, with
+        // the reason on a line of its own.
+        let twice = json!({ "parts": [
+            { "agent": "Bug Hunter", "request": "one" },
+            { "agent": "bug hunter", "request": "two" }
+        ]});
+        let card = the_thing_itself(Ours::HandOut, &twice);
+        assert!(
+            card.starts_with("Bug Hunter: one\nbug hunter: two\n(This cannot go out as it is: "),
+            "{card}"
+        );
+        assert_eq!(which_of_ours("mcp__errand__hand_out"), Some(Ours::HandOut));
+        assert_eq!(and_list(&["A".to_string()]), "A");
+        assert_eq!(and_list(&["A".to_string(), "B".to_string()]), "A and B");
+        // Offered to both engines, with its limit in the schema.
+        let declared = declarations();
+        let hand_out = declared
+            .iter()
+            .find(|d| d["function"]["name"] == "hand_out")
+            .expect("declared");
+        assert_eq!(
+            hand_out["function"]["parameters"]["properties"]["parts"]["maxItems"],
+            MOST_AT_ONCE
+        );
+    }
+
+    #[test]
     fn a_request_from_the_owners_own_terminal_is_said_in_their_own_words() {
         // Checked on the line in the store, because that line is what the
         // agent reads. Prefixed "something outside asks:", a model twice
@@ -1383,6 +1592,7 @@ mod tests {
             named,
             [
                 "ask",
+                "hand_out",
                 "remember",
                 "recall",
                 "forget",
