@@ -1024,8 +1024,20 @@ pub fn read(line: &str) -> Vec<Event> {
                 .filter_map(|which| v.get(*which).and_then(|o| o.as_str()))
                 .map(str::trim)
                 .find(|o| !o.is_empty());
+            // A start-up hook of the person's own that never ran: Claude Code
+            // makes a folder for it in `~/.claude/session-env`, which the wall
+            // keeps closed, because a script left there runs before every
+            // command of that session, walled or not. That is the wall doing
+            // its job, not the hook refusing anything, and shown it read as
+            // "A hook stopped this" at the top of every teammate's turn.
+            let walled_out = at("hook_name").starts_with("SessionStart")
+                && said.is_some_and(|s| {
+                    s.contains("session-env")
+                        && (s.contains("EPERM") || s.contains("Operation not permitted"))
+                });
             match (failed, said) {
                 (false, None) => vec![],
+                _ if walled_out => vec![],
                 (failed, said) => {
                     let name = at("hook_name");
                     let call = format!("hook-{}", at("hook_id"));
@@ -1913,6 +1925,15 @@ mod tests {
             panic!("it did not say why");
         };
         assert_eq!(outcome, "not on this branch");
+    }
+
+    #[test]
+    fn a_start_up_hook_the_wall_kept_from_running_is_not_shown_as_stopping_anything() {
+        const WALLED: &str = r#"{"type":"system","subtype":"hook_response","hook_id":"h4","hook_name":"SessionStart:startup","exit_code":1,"output":"Failed to run: EPERM: operation not permitted, mkdir '/Users/someone/.claude/session-env/44444444-2222-4333-8444-555555555555'","stderr":"Failed to run: EPERM: operation not permitted, mkdir '/Users/someone/.claude/session-env/44444444-2222-4333-8444-555555555555'"}"#;
+        assert!(read(WALLED).is_empty(), "{:?}", read(WALLED));
+        // Any other start-up hook that failed still is.
+        const BROKEN: &str = r#"{"type":"system","subtype":"hook_response","hook_id":"h5","hook_name":"SessionStart:startup","exit_code":1,"output":"","stderr":"the tunnel would not come up"}"#;
+        assert_eq!(read(BROKEN).len(), 2);
     }
 
     #[test]
