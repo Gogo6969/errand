@@ -656,14 +656,31 @@ const NO_LINK_ANYWHERE: libc::c_int = libc::O_NOFOLLOW;
 /// starts. Lower case, compared without regard to case, as the disk does.
 pub const WHAT_AN_ENGINE_READS: &[&str] = &[".claude", ".mcp.json", "claude.md", "claude.local.md"];
 
-/// Whether a path is one of those, at the top of its working directory or of
-/// a team's folder. The wall keeps them in both, and the file tools, which run
-/// outside it, keep them the same.
+/// Whether a path is one of those, at the top of its working directory, of a
+/// team's folder, or of a task's own folder in a team's, where a team task's
+/// result lands and the person opens it. The wall keeps them in all three,
+/// and the file tools, which run outside it, keep them the same.
 fn an_engine_reads(home: &Path, at: &Path) -> bool {
     let own = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    let teams = also_its(home);
+    let tasks = teams.iter().filter_map(|team| {
+        let first = at.strip_prefix(team).ok()?.components().next()?;
+        let first = first.as_os_str().to_string_lossy();
+        a_task_folders_name(&first).then(|| team.join(first.as_ref()))
+    });
     std::iter::once(own)
-        .chain(also_its(home))
+        .chain(teams.iter().cloned())
+        .chain(tasks.collect::<Vec<_>>())
         .any(|folder| at_the_top_of(&folder, at))
+}
+
+/// Whether a name is one the app gives a team task's own folder: a day,
+/// "YYYY-MM-DD", then a space and words.
+fn a_task_folders_name(name: &str) -> bool {
+    name.len() > 11
+        && name.as_bytes()[10] == b' '
+        && name.is_char_boundary(10)
+        && chrono::NaiveDate::parse_from_str(&name[..10], "%Y-%m-%d").is_ok()
 }
 
 /// Whether a path is one of those at the top of this folder.
@@ -690,8 +707,8 @@ fn at_the_top_of(folder: &Path, at: &Path) -> bool {
 /// What to say when one of those was refused.
 fn not_its_own_settings(said: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "{said} is not yours to write: at the top of your folder, or of your team's folder, it \
-         would be the settings an engine reads, and you change what you are only \
+        "{said} is not yours to write: at the top of your folder, of your team's folder or of \
+         a task's folder in it, it would be the settings an engine reads, and you change what you are only \
          through suggest_learning, with the person's yes. Put project files in a subfolder \
          instead."
     )
@@ -1673,6 +1690,52 @@ mod tests {
             found.contains("notes.md") && !found.contains("one"),
             "{found}"
         );
+        put_away(&home);
+    }
+
+    #[tokio::test]
+    async fn the_settings_at_the_top_of_a_team_tasks_folder_are_not_its_to_write() {
+        // Where the result lands and the person opens it.
+        let (home, team) = a_home_and_its_teams_folder("task-settings");
+        let task = team.join("2026-10-05 Build a small website");
+        std::fs::create_dir_all(&task).unwrap();
+        for refused in [".claude/settings.json", "CLAUDE.md", ".MCP.json"] {
+            let said = run(
+                "write_file",
+                &json!({ "path": task.join(refused).display().to_string(), "contents": "hooks" }),
+                &home,
+                "c",
+            )
+            .await;
+            assert!(
+                said.as_ref()
+                    .is_err_and(|why| why.to_string().contains("suggest_learning")),
+                "{refused}: {said:?}"
+            );
+        }
+        // Its project's own files, and a folder of the team's not named for a
+        // task, are the project's.
+        for allowed in ["site/CLAUDE.md", "index.html"] {
+            run(
+                "write_file",
+                &json!({ "path": task.join(allowed).display().to_string(), "contents": "x" }),
+                &home,
+                "c",
+            )
+            .await
+            .unwrap_or_else(|why| panic!("{allowed}: {why}"));
+        }
+        run(
+            "write_file",
+            &json!({ "path": team.join("parts/CLAUDE.md").display().to_string(), "contents": "x" }),
+            &home,
+            "c",
+        )
+        .await
+        .expect("a folder of the team's that is not a task's");
+        assert!(a_task_folders_name("2026-10-05 Plan"));
+        assert!(!a_task_folders_name("2026-13-05 Plan") && !a_task_folders_name("parts"));
+        assert!(!a_task_folders_name("2026-10-05") && !a_task_folders_name("2026-10-05x Plan"));
         put_away(&home);
     }
 

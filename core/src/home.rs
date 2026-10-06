@@ -85,6 +85,87 @@ pub fn make_team_folder(errand: &Path, team: &str, name: &str) -> Result<PathBuf
     Ok(at)
 }
 
+/// Where one task of a team keeps its work: a folder of its own inside the
+/// team's, named for the day and the first words of what was asked, so the
+/// person finds it among the others and no task writes over another's
+/// README. Every task's used to go into the team's folder itself, and the
+/// second task's README.md was the first one's, gone.
+///
+/// Made with a name nothing has yet, never through something already there:
+/// the members write the team's folder, and a link one of them left under the
+/// name this would choose is passed over for the next name, not followed.
+pub fn make_task_folder(
+    errand: &Path,
+    team: &str,
+    name: &str,
+    asked: &str,
+    on: chrono::NaiveDate,
+) -> Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let theirs = make_team_folder(errand, team, name)?;
+    let called = format!("{} {}", on.format("%Y-%m-%d"), a_task_folders_words(asked));
+    for n in 1..=99 {
+        let at = theirs.join(match n {
+            1 => called.clone(),
+            n => format!("{called} {n}"),
+        });
+        // Made private as it is made: a separate change of permissions
+        // afterwards would follow a link a member swapped in meanwhile.
+        match std::fs::DirBuilder::new().mode(0o700).create(&at) {
+            Ok(()) => return Ok(at),
+            Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(why) => return Err(why.into()),
+        }
+    }
+    anyhow::bail!("there are already 99 folders called {called}")
+}
+
+/// The first words of what was asked, as a folder's name: letters, digits and
+/// hyphens, nothing a path would read as anything else, short enough to read
+/// in a window. "Task" when nothing is left.
+fn a_task_folders_words(asked: &str) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    // The first line with any words: a rule, a fence or emoji on the first
+    // line must not hide the request on the next.
+    let first = asked
+        .lines()
+        .find(|l| l.chars().any(char::is_alphanumeric))
+        .unwrap_or("");
+    // A letter whole, with the marks that belong to it: an accent typed
+    // apart from its letter, as macOS pastes it, is not a space.
+    let plain: String = first
+        .graphemes(true)
+        .map(|g| {
+            match g
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '-')
+            {
+                true => g,
+                false => " ",
+            }
+        })
+        .collect();
+    let mut words = String::new();
+    for word in plain.split_whitespace() {
+        let word = word.trim_matches('-');
+        if word.is_empty() {
+            continue;
+        }
+        if !words.is_empty() && words.chars().count() + 1 + word.chars().count() > 48 {
+            break;
+        }
+        if !words.is_empty() {
+            words.push(' ');
+        }
+        words.extend(word.graphemes(true).take(48));
+    }
+    match words.is_empty() {
+        true => "Task".to_string(),
+        false => words,
+    }
+}
+
 /// Every folder an agent may write in beyond its own: those the person
 /// allowed it, and the folder of each team it leads or is on, made if it is
 /// not there yet. What the wall is told, and what its claims are checked by.
@@ -649,6 +730,90 @@ fn write_plain(at: &Path, text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_task_of_a_team_gets_a_folder_of_its_own_named_for_its_day_and_words() {
+        let errand =
+            std::env::temp_dir().join(format!("errand-task-folder-{}", std::process::id()));
+        std::fs::remove_dir_all(&errand).ok();
+        let on = chrono::NaiveDate::from_ymd_opt(2026, 10, 5).unwrap();
+        let asked = "Write a small Python script that converts distances between kilometres and miles, with unit tests.";
+        let first = make_task_folder(&errand, "d920e678-7edf", "Drill", asked, on).unwrap();
+        assert_eq!(
+            first.parent().unwrap(),
+            team_folder(&errand, "d920e678-7edf")
+        );
+        let named = first.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(
+            named,
+            "2026-10-05 Write a small Python script that converts"
+        );
+        // The same words on the same day: another folder, not the same one.
+        let second = make_task_folder(&errand, "d920e678-7edf", "Drill", asked, on).unwrap();
+        assert_ne!(first, second);
+        assert!(second.ends_with("2026-10-05 Write a small Python script that converts 2"));
+        std::fs::remove_dir_all(&errand).ok();
+    }
+
+    #[test]
+    fn a_task_folders_name_is_only_ever_a_name() {
+        assert_eq!(a_task_folders_words("../../etc/passwd"), "etc passwd");
+        assert_eq!(
+            a_task_folders_words(".claude/settings.json: hooks"),
+            "claude settings json hooks"
+        );
+        assert_eq!(
+            a_task_folders_words("\n\n  Fix the README  \nand more"),
+            "Fix the README"
+        );
+        assert_eq!(a_task_folders_words("?!  ..."), "Task");
+        assert_eq!(a_task_folders_words("--rm -rf thing"), "rm rf thing");
+        assert_eq!(
+            a_task_folders_words("Prüfe die Übersicht"),
+            "Prüfe die Übersicht"
+        );
+        assert_eq!(
+            a_task_folders_words("---\nPlan the launch"),
+            "Plan the launch"
+        );
+        assert_eq!(
+            a_task_folders_words("\u{1F680}\u{1F680}\nShip the release notes"),
+            "Ship the release notes"
+        );
+        assert_eq!(
+            a_task_folders_words("Pru\u{308}fe die U\u{308}bersicht"),
+            "Pru\u{308}fe die U\u{308}bersicht"
+        );
+        assert_eq!(a_task_folders_words("a/\u{308}b"), "a b");
+        let long = a_task_folders_words(&"word ".repeat(40));
+        assert!(long.chars().count() <= 48, "{long}");
+        let one_long = a_task_folders_words(&"x".repeat(200));
+        assert_eq!(one_long.chars().count(), 48);
+    }
+
+    #[test]
+    fn a_link_a_member_left_under_the_name_is_passed_over_not_followed() {
+        let errand = std::env::temp_dir().join(format!("errand-task-link-{}", std::process::id()));
+        std::fs::remove_dir_all(&errand).ok();
+        let on = chrono::NaiveDate::from_ymd_opt(2026, 10, 5).unwrap();
+        let team = make_team_folder(&errand, "d920e678-7edf", "Drill").unwrap();
+        let elsewhere = errand.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, team.join("2026-10-05 Plan the launch")).unwrap();
+        let at =
+            make_task_folder(&errand, "d920e678-7edf", "Drill", "Plan the launch", on).unwrap();
+        assert!(
+            at.ends_with("2026-10-05 Plan the launch 2"),
+            "{}",
+            at.display()
+        );
+        assert!(std::fs::symlink_metadata(&at).unwrap().file_type().is_dir());
+        assert!(
+            std::fs::read_link(team.join("2026-10-05 Plan the launch")).is_ok(),
+            "the member's link was left as it was"
+        );
+        std::fs::remove_dir_all(&errand).ok();
+    }
 
     #[test]
     fn a_team_folder_is_made_once_and_only_for_a_teams_id() {

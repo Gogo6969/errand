@@ -302,6 +302,9 @@ fn profile_keeping_out(
     // Kept whole as well, so a member cannot move a team's folder away.
     for place in also_allowed(home) {
         profile.push_str(&its_own_settings_kept(&place));
+        if errand.is_some_and(|errand| a_teams_folder(errand, &place)) {
+            profile.push_str(&its_tasks_kept(&place));
+        }
     }
     // Claude Code's own memory beside its record, which it would read into
     // every later session in this folder: switched off, and kept unwritable
@@ -345,6 +348,33 @@ fn its_own_settings_kept(home: &Path) -> String {
         kept.push(format!("  (subpath {})", quoted(&home.join(name))));
     }
     format!("\n(deny file-write*\n{})", kept.join("\n"))
+}
+
+/// Whether a folder, by its real path, is a team's: one folder down from
+/// Errand's folder of teams.
+fn a_teams_folder(errand: &Path, place: &Path) -> bool {
+    let teams = errand.join(crate::home::TEAMS);
+    let teams = teams.canonicalize().unwrap_or(teams);
+    place.parent() == Some(teams.as_path())
+}
+
+/// A team task's own folder, which the app makes as "<team>/YYYY-MM-DD
+/// <words>", is where its result lands and what the person opens: the
+/// settings an engine reads at its top are kept as the team folder's are,
+/// and the folder itself, so it is not moved aside, written and moved back.
+/// By pattern, without regard to case as the disk is, since these folders
+/// come and go.
+fn its_tasks_kept(team: &Path) -> String {
+    let team = team.canonicalize().unwrap_or_else(|_| team.to_path_buf());
+    let Some(at) = as_a_pattern(&team) else {
+        return String::new();
+    };
+    // Spelled out: the wall's regular expressions take no counts, and
+    // "[0-9]{4}" there is a rule that matches nothing.
+    let day = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [^/]+";
+    let names = "(\\.[Cc][Ll][Aa][Uu][Dd][Ee](/|$)|\\.[Mm][Cc][Pp]\\.[Jj][Ss][Oo][Nn]$|\
+                 [Cc][Ll][Aa][Uu][Dd][Ee](\\.[Ll][Oo][Cc][Aa][Ll])?\\.[Mm][Dd]$)";
+    format!("\n(deny file-write*\n  (regex #\"^{at}/{day}$\")\n  (regex #\"^{at}/{day}/{names}\"))")
 }
 
 /// Where the system keeps the sockets of its own services: the one that
@@ -1244,6 +1274,93 @@ pub fn the_wall_refused(home: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_team_tasks_folder_keeps_its_settings_and_its_place_and_takes_the_work() {
+        if !possible() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("errand-task-wall-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let errand = root.join("Errand");
+        let home = errand.join("threads/a1");
+        let team = errand.join("teams/t1");
+        let task = team.join("2026-10-05 Build a small website");
+        let other = root.join("Allowed");
+        for folder in [&home, &task, &other.join("2026-10-05 Notes")] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        also_allow(&home, vec![team.clone(), other.clone()]);
+        let errand = errand.canonicalize().unwrap();
+        let profile = profile_keeping_out(&home, Inside::ACommand, Some(&errand), None);
+        also_allow(&home, vec![]);
+        let run = |command: &str| {
+            std::process::Command::new(THE_SANDBOX)
+                .arg("-p")
+                .arg(&profile)
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(command)
+                .output()
+                .expect("sandbox-exec runs")
+                .status
+                .success()
+        };
+        let task = task.canonicalize().unwrap();
+        let team = team.canonicalize().unwrap();
+        for refused in [
+            ".claude/settings.json",
+            "CLAUDE.md",
+            "claude.md",
+            ".mcp.json",
+            "CLAUDE.local.md",
+        ] {
+            let at = task.join(refused);
+            assert!(
+                !run(&format!(
+                    "mkdir -p {} && echo x > {}",
+                    quoted(at.parent().unwrap()),
+                    quoted(&at)
+                )),
+                "wrote {refused} at the top of a task's folder"
+            );
+        }
+        assert!(
+            !run(&format!(
+                "mv {} {}",
+                quoted(&task),
+                quoted(&team.join("aside"))
+            )),
+            "moved a task's folder aside"
+        );
+        // The work itself goes in, a project's own settings a folder down,
+        // and the team's other folders are as they were.
+        for written in ["index.html", "site/CLAUDE.md"] {
+            let at = task.join(written);
+            assert!(
+                run(&format!(
+                    "mkdir -p {} && echo x > {}",
+                    quoted(at.parent().unwrap()),
+                    quoted(&at)
+                )),
+                "could not write {written} in a task's folder"
+            );
+        }
+        assert!(run(&format!(
+            "mkdir -p {0}/parts && echo x > {0}/parts/CLAUDE.md",
+            quoted(&team)
+        )));
+        // A folder somebody allowed that is not a team's has no task folders.
+        let notes = other
+            .canonicalize()
+            .unwrap()
+            .join("2026-10-05 Notes/CLAUDE.md");
+        assert!(
+            run(&format!("echo x > {}", quoted(&notes))),
+            "kept a folder that is not a team's"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn a_process_inside_the_wall_is_known_to_be_and_one_outside_is_not() {

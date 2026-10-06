@@ -480,9 +480,10 @@ pub fn your_team(store: &Store, agent: &str) -> Result<String> {
         }
         if let Some(errand) = crate::where_errand_lives() {
             said.push(format!(
-                "The team \"{}\" keeps its work in {}: put what you make for it there, so the \
-                 others can use it, and look there for what they made. Everybody on the team \
-                 may write it.",
+                "The team \"{}\" keeps its work in {}: each of its tasks has a folder of its \
+                 own there, which the lead names, so put what you make for a task in that one, \
+                 where the others can use it, and look there for what they made. Everybody on \
+                 the team may write it.",
                 team.name,
                 crate::home::team_folder(&errand, &team.id).display()
             ));

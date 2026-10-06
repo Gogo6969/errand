@@ -329,7 +329,9 @@ fn cut_off_at_a_space(places: &[PathBuf]) -> bool {
 
 /// How far down a bare name is looked for, and in how many entries at most,
 /// before the check gives up and says nothing.
-const LOOKED_FOR_BELOW: usize = 4;
+// A team task's work sits a folder further down than it did, in the task's
+// own folder inside the team's, so that level is counted on top.
+const LOOKED_FOR_BELOW: usize = 5;
 const AT_MOST_LOOKED_AT: usize = 5_000;
 
 /// Folders nobody means when they name a file they made.

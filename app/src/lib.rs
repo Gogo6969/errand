@@ -1402,7 +1402,22 @@ async fn say_as(
     let text = match (by, held.store.team_task(&id)) {
         (None, Ok(Some((team, false)))) => {
             let _ = held.store.team_task_told(&id);
-            format!("{}\n\n{text}", a_task_for_the_team_in_words(&held, &team))
+            // A folder of its own for this task's work, in the team's, named
+            // from what was asked: made now, when that is known.
+            let own = errand_core::where_errand_lives().and_then(|errand| {
+                errand_core::home::make_task_folder(
+                    &errand,
+                    &team.id,
+                    &team.name,
+                    &text,
+                    chrono::Local::now().date_naive(),
+                )
+                .ok()
+            });
+            format!(
+                "{}\n\n{text}",
+                a_task_for_the_team_in_words(&held, &team, own.as_deref())
+            )
         }
         _ => text,
     };
@@ -1543,8 +1558,36 @@ fn close_if_on_another_model(held: &Held, id: &str, now: &Model) {
     }
 }
 
+/// Where a team task's parts and result go, as the lead is told it: this
+/// task's own folder when there is one, inside the team's, with earlier
+/// tasks' work beside it to read and leave alone; the team's folder when
+/// this task's could not be made.
+fn where_the_parts_go(team: Option<&std::path::Path>, own: Option<&std::path::Path>) -> String {
+    match (own, team) {
+        (Some(own), _) => format!(
+            " Have the parts and the result put in this task's own folder, {}, inside the \
+             team's folder, which every member can read and write, and tell each member that \
+             is where its part goes. Earlier tasks' work is in the team's folder too, at its \
+             top or in folders of their own: read it if it helps, and do not write over it, \
+             unless what the person wants done is to change it; then change it where it is and \
+             say so.",
+            own.display()
+        ),
+        (None, Some(team)) => format!(
+            " Have the parts and the result put in the team's folder, {}, which every member \
+             can read and write, and tell each member that is where its part goes.",
+            team.display()
+        ),
+        (None, None) => String::new(),
+    }
+}
+
 /// What the lead is told about a task given to its team.
-fn a_task_for_the_team_in_words(held: &Held, team: &errand_core::store::Team) -> String {
+fn a_task_for_the_team_in_words(
+    held: &Held,
+    team: &errand_core::store::Team,
+    own: Option<&std::path::Path>,
+) -> String {
     let named: Vec<String> = team
         .members
         .iter()
@@ -1554,15 +1597,12 @@ fn a_task_for_the_team_in_words(held: &Held, team: &errand_core::store::Team) ->
             _ => a.name,
         })
         .collect();
-    let folder = errand_core::where_errand_lives()
-        .map(|errand| {
-            format!(
-                " Have the parts and the result put in the team's folder, {}, which every member \
-                 can read and write, and tell each member that is where its part goes.",
-                errand_core::home::team_folder(&errand, &team.id).display()
-            )
-        })
-        .unwrap_or_default();
+    let folder = where_the_parts_go(
+        errand_core::where_errand_lives()
+            .map(|errand| errand_core::home::team_folder(&errand, &team.id))
+            .as_deref(),
+        own,
+    );
     format!(
         "[This task is for your team, {}. You lead it. Break it into parts and give each part \
          to the member it fits ({}): parts that do not depend on each other go out together \
@@ -10807,6 +10847,26 @@ fn everything_that_waits_for_the_app(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_team_tasks_lead_is_told_the_tasks_own_folder_and_to_leave_the_others() {
+        let team = std::path::Path::new("/x/Errand/teams/t1");
+        let own = team.join("2026-10-05 Plan the launch");
+        let told = where_the_parts_go(Some(team), Some(&own));
+        assert!(
+            told.contains("this task's own folder, /x/Errand/teams/t1/2026-10-05 Plan the launch,"),
+            "{told}"
+        );
+        assert!(told.contains("do not write over it"), "{told}");
+        assert!(told.contains("change it where it is"), "{told}");
+        // When it could not be made, the team's folder, as before.
+        let told = where_the_parts_go(Some(team), None);
+        assert!(
+            told.contains("the team's folder, /x/Errand/teams/t1,"),
+            "{told}"
+        );
+        assert_eq!(where_the_parts_go(None, None), "");
+    }
     #[test]
     fn a_hand_out_says_how_many_finished_and_keeps_every_answer_in_its_share() {
         use super::all_that_came_back;
