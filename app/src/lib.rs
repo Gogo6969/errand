@@ -5966,10 +5966,15 @@ fn who_else(app: &AppHandle, from: &str) -> anyhow::Result<String> {
             if checks > 0 {
                 brings.push_str(&format!(" Checks its work against {checks} points."));
             }
+            // An empty role is no role, said the way a name is read back.
             format!(
                 "  {} ({}) -- {}{brings}",
                 label,
-                a.title.unwrap_or_else(|| "no role".into()),
+                a.title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or("no role"),
                 a.about
                     .unwrap_or_else(|| "has not said what it handles".into())
             )

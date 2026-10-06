@@ -1262,11 +1262,88 @@ pub fn told_apart(agents: &[crate::store::Agent]) -> Vec<String> {
 
 /// The agent somebody means, by name or by the numbered name `who_else` gives
 /// when two share one, or a sentence saying why it cannot be told.
+///
+/// A name with its role after it in brackets is that name too. `who_else` and
+/// a team's task both list teammates as "Drill Coder (Code)", and a lead that
+/// copied that was told there was nobody of the name, twice, before it tried
+/// the name alone. Where two share the name, the role says which.
 pub fn the_one_called<'a>(
     agents: &'a [crate::store::Agent],
     named: &str,
 ) -> Result<&'a crate::store::Agent, String> {
     let named = named.trim();
+    let why = match by_name(agents, named) {
+        Ok(one) => return Ok(one),
+        Err(why) => why,
+    };
+    // A name somebody has in full is that name, brackets and all: when
+    // several share it, that is still the thing to say.
+    if agents.iter().any(|a| a.name.eq_ignore_ascii_case(named)) {
+        return Err(why);
+    }
+    // Exactly as who_else and a team's task print one, whatever brackets its
+    // role has of its own.
+    let labels = told_apart(agents);
+    let role_of = |a: &crate::store::Agent| -> String {
+        match a.title.as_deref().map(str::trim) {
+            Some(title) if !title.is_empty() => title.to_string(),
+            _ => "no role".to_string(),
+        }
+    };
+    let printed: Vec<&crate::store::Agent> = agents
+        .iter()
+        .zip(&labels)
+        .filter(|(a, label)| {
+            let role = role_of(a);
+            format!("{label} ({role})").eq_ignore_ascii_case(named)
+                || format!("{} ({role})", a.name).eq_ignore_ascii_case(named)
+        })
+        .map(|(a, _)| a)
+        .collect();
+    if let [only] = printed.as_slice() {
+        return Ok(*only);
+    }
+    // Typed more loosely: a name, then a role in brackets, split where what
+    // comes before is somebody's name.
+    let Some(rest) = named.strip_suffix(')') else {
+        return Err(why);
+    };
+    // The longest name first: with "Drill" and "Drill (beta)" both there,
+    // "Drill (beta) (Code)" is the second.
+    let Some((name, role)) = rest
+        .rmatch_indices(" (")
+        .map(|(at, _)| (rest[..at].trim(), rest[at + 2..].trim()))
+        .find(|(name, _)| {
+            agents.iter().zip(&labels).any(|(a, label)| {
+                a.name.eq_ignore_ascii_case(name) || label.eq_ignore_ascii_case(name)
+            })
+        })
+    else {
+        return Err(why);
+    };
+    match by_name(agents, name) {
+        Ok(one) => Ok(one),
+        // Several of that name: the role says which, when it is one of theirs.
+        Err(several) => {
+            let theirs: Vec<&crate::store::Agent> = agents
+                .iter()
+                .filter(|a| {
+                    a.name.eq_ignore_ascii_case(name) && role_of(a).eq_ignore_ascii_case(role)
+                })
+                .collect();
+            match theirs.as_slice() {
+                [only] => Ok(*only),
+                _ => Err(several),
+            }
+        }
+    }
+}
+
+/// The agent of exactly this name or numbered name, or why there is not one.
+fn by_name<'a>(
+    agents: &'a [crate::store::Agent],
+    named: &str,
+) -> Result<&'a crate::store::Agent, String> {
     let labels = told_apart(agents);
     let as_labelled = labels
         .iter()
@@ -1291,7 +1368,12 @@ pub fn the_one_called<'a>(
                     format!(
                         "{} ({}): {}",
                         labels[at],
-                        agents[at].title.as_deref().unwrap_or("no role"),
+                        agents[at]
+                            .title
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|t| !t.is_empty())
+                            .unwrap_or("no role"),
                         agents[at]
                             .about
                             .as_deref()
@@ -1872,6 +1954,103 @@ mod tests {
         assert_eq!(
             the_one_called(&all, "Scout").unwrap_err(),
             "there is nobody here called Scout"
+        );
+    }
+
+    #[test]
+    fn a_name_with_its_role_after_it_in_brackets_is_that_name() {
+        // As who_else and a team's task list them, and as a lead copies them.
+        let mut coder = an_agent("c", "Drill Coder", "Writes the code", 150);
+        coder.title = Some("Code".into());
+        let mut writer = an_agent("w", "Drill Writer", "Writes the docs", 120);
+        writer.title = None;
+        let all = vec![coder, writer];
+        assert_eq!(the_one_called(&all, "Drill Coder (Code)").unwrap().id, "c");
+        assert_eq!(
+            the_one_called(&all, " drill coder (code) ").unwrap().id,
+            "c"
+        );
+        assert_eq!(
+            the_one_called(&all, "Drill Writer (no role)").unwrap().id,
+            "w"
+        );
+        // The name is what counts: a role it does not have still reaches it.
+        assert_eq!(
+            the_one_called(&all, "Drill Coder (Tester)").unwrap().id,
+            "c"
+        );
+        // Nobody of the name is still nobody, said as it was asked.
+        assert_eq!(
+            the_one_called(&all, "Scout (Code)").unwrap_err(),
+            "there is nobody here called Scout (Code)"
+        );
+    }
+
+    #[test]
+    fn a_role_with_brackets_of_its_own_is_read_as_it_was_printed() {
+        // who_else prints "Tester (QA (web))"; the last bracket is not where
+        // the name ends.
+        let mut tester = an_agent("t", "Tester", "Breaks things", 150);
+        tester.title = Some("QA (web)".into());
+        let mut beta = an_agent("d", "Drill (beta)", "Writes the code", 120);
+        beta.title = Some("Code".into());
+        let all = vec![tester, beta];
+        assert_eq!(the_one_called(&all, "Tester (QA (web))").unwrap().id, "t");
+        assert_eq!(the_one_called(&all, "Drill (beta) (Code)").unwrap().id, "d");
+        assert_eq!(the_one_called(&all, "Drill (beta)").unwrap().id, "d");
+    }
+
+    #[test]
+    fn a_name_that_begins_another_does_not_take_its_tasks() {
+        let drill = an_agent("d", "Drill", "One", 100);
+        let mut beta = an_agent("b", "Drill (beta)", "Two", 200);
+        beta.title = Some("".into());
+        let all = vec![drill, beta];
+        assert_eq!(
+            the_one_called(&all, "Drill (beta) (no role)").unwrap().id,
+            "b"
+        );
+        assert_eq!(
+            the_one_called(&all, "Drill (beta) (Tester)").unwrap().id,
+            "b"
+        );
+        assert_eq!(the_one_called(&all, "Drill (Mail)").unwrap().id, "d");
+    }
+
+    #[test]
+    fn a_shared_name_with_brackets_in_it_stays_unclear_rather_than_reaching_a_third() {
+        let mut x = an_agent("x", "Scout (beta)", "One", 100);
+        x.title = Some("News".into());
+        let mut y = an_agent("y", "Scout (beta)", "Two", 200);
+        y.title = Some("News".into());
+        let z = an_agent("z", "Scout", "Three", 300);
+        let all = vec![x, y, z];
+        let why = the_one_called(&all, "Scout (beta)").unwrap_err();
+        assert!(
+            why.contains("there are 2 agents called Scout (beta)"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn where_two_share_a_name_the_role_in_brackets_says_which() {
+        let mut mail = an_agent("a", "Inbox Watch", "Reads the unread post", 100);
+        mail.title = Some("Mail".into());
+        let mut news = an_agent("b", "Inbox Watch", "Reads the news", 200);
+        news.title = Some("News".into());
+        let all = vec![news, mail];
+        assert_eq!(the_one_called(&all, "Inbox Watch (News)").unwrap().id, "b");
+        assert_eq!(the_one_called(&all, "inbox watch (mail)").unwrap().id, "a");
+        // A numbered name with its role is the numbered one.
+        assert_eq!(
+            the_one_called(&all, "Inbox Watch #1 (Mail)").unwrap().id,
+            "a"
+        );
+        // A role neither has leaves it unclear, and says which there are.
+        let why = the_one_called(&all, "Inbox Watch (Code)").unwrap_err();
+        assert!(
+            why.contains("there are 2 agents called Inbox Watch"),
+            "{why}"
         );
     }
 

@@ -1689,10 +1689,27 @@ pub(crate) fn opening_instructions_as(
         ),
     };
 
+    // A team's folder is named by its full path. Said here, because "the only
+    // place you write" sent a team's members round their own file tools to
+    // reach their team's folder. Other folders it was allowed are for its
+    // commands, which the wall stands in front of; the file tools are not.
+    let paths = match (
+        super::tools::also_its(home).is_empty(),
+        crate::wall::also_allowed(home).is_empty(),
+    ) {
+        (true, true) => "Paths are relative to it and it is the only place you write.",
+        (true, false) => {
+            "Paths are relative to it. The other folders you were allowed, named below, are \
+             reached with commands."
+        }
+        (false, _) => {
+            "Paths are relative to it. Your team's folder, named below, is reached by its \
+             full path, with the file tools as much as with commands."
+        }
+    };
     format!(
         "{who} {today}\n\n{how}\n\n\
-         Your working directory is {}. Paths are relative to it and it is the only \
-         place you write.\n\n\
+         Your working directory is {}. {paths}\n\n\
          {wall}\n\n\
          Finish on the result. Do not append an offer of further work.{more}{notes}{plan}",
         home.display(),
@@ -1719,6 +1736,35 @@ fn first_line(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_member_with_a_teams_folder_is_told_it_reaches_it_by_full_path() {
+        let base = std::env::temp_dir().join(format!("errand-opening-{}", std::process::id()));
+        let (home, team) = (base.join("home"), base.join("teams").join("t1"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&team).unwrap();
+        let nothing = mcp::Servers::default();
+        let nobody = crate::memory::Knowing::default();
+        let alone = opening_instructions(&home, &nothing, &nobody, "ask");
+        super::super::tools::TEAMS_FOR_A_TEST.with(|t| *t.borrow_mut() = Some(base.join("teams")));
+        crate::wall::also_allow(&home, vec![team.clone()]);
+        let teamed = opening_instructions(&home, &nothing, &nobody, "ask");
+        // On no team, with a folder the person allowed: that folder is for
+        // its commands.
+        crate::wall::also_allow(&home, vec![base.join("disk")]);
+        let allowed = opening_instructions(&home, &nothing, &nobody, "ask");
+        crate::wall::also_allow(&home, vec![]);
+        super::super::tools::TEAMS_FOR_A_TEST.with(|t| *t.borrow_mut() = None);
+        std::fs::remove_dir_all(&base).ok();
+        assert!(alone.contains("it is the only place you write"), "{alone}");
+        assert!(
+            teamed.contains("Your team's folder, named below, is reached by its full path"),
+            "{teamed}"
+        );
+        assert!(!teamed.contains("the only place you write"), "{teamed}");
+        assert!(allowed.contains("reached with commands"), "{allowed}");
+        assert!(!allowed.contains("the only place you write"), "{allowed}");
+    }
+
     use super::*;
 
     #[test]

@@ -427,39 +427,11 @@ fn keys_kept_out(theirs: &Path) -> String {
     let Ok(ssh) = theirs.join(SSH).canonicalize() else {
         return every_copy;
     };
-    let mut readable = vec![format!("  (literal {})", quoted(&ssh))];
-    let mut elsewhere: Vec<PathBuf> = Vec::new();
-    let mut folders = vec![(ssh.clone(), 0)];
-    while let Some((folder, deep)) = folders.pop() {
-        let Ok(inside) = std::fs::read_dir(&folder) else {
-            continue;
-        };
-        for one in inside.flatten() {
-            let path = one.path();
-            let Ok(real) = path.canonicalize() else {
-                continue;
-            };
-            if real.is_dir() {
-                // A folder of includes, or of the agent's own sockets. Two
-                // levels is more than anybody's `~/.ssh` has.
-                if real.starts_with(&ssh) && deep < 2 {
-                    readable.push(format!("  (literal {})", quoted(&real)));
-                    folders.push((real, deep + 1));
-                }
-            } else if a_private_key(&real) {
-                if !real.starts_with(&ssh) {
-                    elsewhere.push(real);
-                }
-            } else if real.starts_with(&ssh) {
-                readable.push(format!("  (literal {})", quoted(&real)));
-            }
-        }
-    }
-    for named in keys_the_config_names(&ssh, theirs) {
-        if !named.starts_with(&ssh) && !elsewhere.contains(&named) {
-            elsewhere.push(named);
-        }
-    }
+    let (readable, elsewhere) = what_ssh_holds(&ssh, theirs);
+    let readable: Vec<String> = readable
+        .iter()
+        .map(|place| format!("  (literal {})", quoted(place)))
+        .collect();
     let mut kept = format!(
         "{every_copy}\n(deny file-read-data (subpath {}))\n(allow file-read-data\n{})",
         quoted(&ssh),
@@ -473,6 +445,59 @@ fn keys_kept_out(theirs: &Path) -> String {
         kept.push_str(&format!("\n(deny file-read-data\n{})", keys.join("\n")));
     }
     kept
+}
+
+/// What the person's `.ssh` holds, from its real path: what may be read there
+/// (the folder, its folders of includes, and every file in them that is not a
+/// key), and the keys kept somewhere else that it links to or names.
+fn what_ssh_holds(ssh: &Path, theirs: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut readable = vec![ssh.to_path_buf()];
+    let mut elsewhere: Vec<PathBuf> = Vec::new();
+    let mut folders = vec![(ssh.to_path_buf(), 0)];
+    while let Some((folder, deep)) = folders.pop() {
+        let Ok(inside) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for one in inside.flatten() {
+            let path = one.path();
+            let Ok(real) = path.canonicalize() else {
+                continue;
+            };
+            if real.is_dir() {
+                // A folder of includes, or of the agent's own sockets. Two
+                // levels is more than anybody's `~/.ssh` has.
+                if real.starts_with(ssh) && deep < 2 {
+                    readable.push(real.clone());
+                    folders.push((real, deep + 1));
+                }
+            } else if a_private_key(&real) {
+                if !real.starts_with(ssh) {
+                    elsewhere.push(real);
+                }
+            } else if real.starts_with(ssh) {
+                readable.push(real);
+            }
+        }
+    }
+    for named in keys_the_config_names(ssh, theirs) {
+        if !named.starts_with(ssh) && !elsewhere.contains(&named) {
+            elsewhere.push(named);
+        }
+    }
+    (readable, elsewhere)
+}
+
+/// The person's keys kept outside `.ssh`, which `.ssh` links to or their SSH
+/// configuration names, by their real paths. For the file tools, which the
+/// wall does not stand in front of.
+pub fn keys_kept_elsewhere() -> Vec<PathBuf> {
+    let Some(theirs) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let Ok(ssh) = theirs.join(SSH).canonicalize() else {
+        return Vec::new();
+    };
+    what_ssh_holds(&ssh, &theirs).1
 }
 
 /// Whether a file is a private key, by how every kind of one begins.
@@ -694,6 +719,110 @@ pub fn nothing_opens_from_inside() -> &'static str {
      look for another way round it."
 }
 
+/// The places in Errand's own folder no teammate reaches by any means, each
+/// with whether it is a whole folder or one file, given Errand's real path.
+///
+/// The wall keeps commands out of them. The file tools run in the app,
+/// outside the wall, and ask the same list through `kept_from_teammates`, so
+/// a folder somebody allowed that happened to hold Errand's would not hand
+/// them over there either.
+fn never_reached(errand: &Path) -> Vec<(PathBuf, bool)> {
+    let mut never = vec![
+        (errand.join("keys"), true),
+        // What a teammate asked to have opened outside its wall, copied there
+        // so that what runs is what the person agreed to: changed from inside
+        // a wall, it would be a way back out of it.
+        (errand.join("opened"), true),
+    ];
+    // The store, its journal files, and any copy of it kept beside it, such as
+    // the one taken before clearing. Named one by one rather than by pattern,
+    // because a pattern is a second language inside this one with escaping of
+    // its own, and a folder name with a dot or a bracket in it would mean
+    // something else there.
+    let mut stores: Vec<PathBuf> = [
+        "errand.db",
+        "errand.db-wal",
+        "errand.db-shm",
+        "errand.db-journal",
+    ]
+    .iter()
+    .map(|name| errand.join(name))
+    .collect();
+    if let Ok(beside) = std::fs::read_dir(errand) {
+        for one in beside.flatten() {
+            let copy = one.path();
+            if one.file_name().to_string_lossy().contains(".db") && !stores.contains(&copy) {
+                stores.push(copy);
+            }
+        }
+    }
+    never.extend(stores.into_iter().map(|store| (store, false)));
+    // Every teammate's home: what it remembers and how it is told to work,
+    // written out for the person. No teammate writes any, and none reads
+    // another's. Its own it may read, which the wall allows after this.
+    never.push((errand.join(crate::home::HOMES), true));
+    never.push((errand.join(crate::home::INDEX), true));
+    never
+}
+
+/// Whether a path is a private key by where it is or what it is called: in a
+/// folder called `.ssh`, or named the way `ssh-keygen` names one. The rule
+/// `KEYS_ANYWHERE` gives the wall, by path alone and folded the way the disk
+/// folds names, for the file tools, which run outside the wall. Never by
+/// what is in the file: a file about to be written has nothing in it yet.
+pub fn a_key_by_its_name(at: &Path) -> bool {
+    let fold = |s: &str| {
+        s.chars()
+            .flat_map(char::to_uppercase)
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    if at
+        .components()
+        .any(|c| fold(&c.as_os_str().to_string_lossy()) == SSH)
+    {
+        return true;
+    }
+    let name = fold(&at.file_name().unwrap_or_default().to_string_lossy());
+    let base = name.strip_suffix("_sk").unwrap_or(&name);
+    matches!(base, "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519")
+}
+
+/// The same, and the keys kept outside `.ssh` that `.ssh` links to or the
+/// person's SSH configuration names, which the wall keeps from commands as
+/// well.
+pub fn a_key_kept_from_teammates(at: &Path) -> bool {
+    a_key_by_its_name(at) || keys_kept_elsewhere().iter().any(|key| key == at)
+}
+
+/// Whether a path, by its real path, is one of the places in Errand's own
+/// folder no teammate reaches. For the file tools, which the wall does not
+/// stand in front of.
+pub fn kept_from_teammates(at: &Path) -> bool {
+    crate::where_errand_lives().is_some_and(|errand| kept_in(&errand, at))
+}
+
+/// Whether a path is one of those places in this Errand folder. Compared
+/// the way the disk compares names, not only by case: `ERRAND.DB` is the
+/// store, and `keyſ`, with a long s, is the keys folder.
+fn kept_in(errand: &Path, at: &Path) -> bool {
+    let errand = errand
+        .canonicalize()
+        .unwrap_or_else(|_| errand.to_path_buf());
+    let folded = |p: &Path| {
+        p.to_string_lossy()
+            .chars()
+            .flat_map(char::to_uppercase)
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    let at = folded(at);
+    never_reached(&errand).iter().any(|(place, whole)| {
+        let place = folded(place);
+        at == place || (*whole && at.starts_with(&format!("{place}/")))
+    })
+}
+
 /// What no errand may touch, read or write, whatever else it has been allowed.
 ///
 /// The wall was about writing, and reading was left open on purpose: an errand
@@ -716,49 +845,13 @@ fn keep_out(errand: &Path, inside: Inside, working_in: Option<&Path>) -> String 
     let errand = errand
         .canonicalize()
         .unwrap_or_else(|_| errand.to_path_buf());
-    let mut never = vec![
-        format!("  (subpath {})", quoted(&errand.join("keys"))),
-        // What a teammate asked to have opened outside its wall, copied there
-        // so that what runs is what the person agreed to: changed from inside
-        // a wall, it would be a way back out of it.
-        format!("  (subpath {})", quoted(&errand.join("opened"))),
-    ];
-    // The store, its journal files, and any copy of it kept beside it, such as
-    // the one taken before clearing. Named one by one rather than by pattern,
-    // because a pattern is a second language inside this one with escaping of
-    // its own, and a folder name with a dot or a bracket in it would mean
-    // something else there.
-    let mut stores: Vec<PathBuf> = [
-        "errand.db",
-        "errand.db-wal",
-        "errand.db-shm",
-        "errand.db-journal",
-    ]
-    .iter()
-    .map(|name| errand.join(name))
-    .collect();
-    if let Ok(beside) = std::fs::read_dir(&errand) {
-        for one in beside.flatten() {
-            let copy = one.path();
-            if one.file_name().to_string_lossy().contains(".db") && !stores.contains(&copy) {
-                stores.push(copy);
-            }
-        }
-    }
-    for store in &stores {
-        never.push(format!("  (literal {})", quoted(store)));
-    }
-    // Every teammate's home: what it remembers and how it is told to work,
-    // written out for the person. No teammate writes any, and none reads
-    // another's. Its own it may read, below.
-    never.push(format!(
-        "  (subpath {})",
-        quoted(&errand.join(crate::home::HOMES))
-    ));
-    never.push(format!(
-        "  (subpath {})",
-        quoted(&errand.join(crate::home::INDEX))
-    ));
+    let never: Vec<String> = never_reached(&errand)
+        .iter()
+        .map(|(place, whole)| match whole {
+            true => format!("  (subpath {})", quoted(place)),
+            false => format!("  (literal {})", quoted(place)),
+        })
+        .collect();
     let mut kept = format!("\n(deny file-read* file-write*\n{})", never.join("\n"));
     if let Some(own) = whose_home(&errand, working_in) {
         kept.push_str(&format!(
@@ -1654,6 +1747,100 @@ mod tests {
         let home = Path::new("/tmp/errand-wall-relative");
         also_allow(home, vec![PathBuf::from("Documents")]);
         assert!(also_allowed(home).is_empty());
+    }
+
+    #[test]
+    fn the_keys_ssh_keeps_elsewhere_are_the_ones_it_links_to_or_names() {
+        let theirs = std::env::temp_dir().join(format!("errand-elsewhere-{}", std::process::id()));
+        std::fs::remove_dir_all(&theirs).ok();
+        let (ssh, team) = (theirs.join(".ssh"), theirs.join("teams/t1"));
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::create_dir_all(&team).unwrap();
+        std::fs::write(
+            team.join("github_deploy"),
+            "-----BEGIN OPENSSH PRIVATE KEY-----",
+        )
+        .unwrap();
+        std::fs::write(
+            team.join("linked_key"),
+            "-----BEGIN OPENSSH PRIVATE KEY-----",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(team.join("linked_key"), ssh.join("work")).unwrap();
+        std::fs::write(
+            ssh.join("config"),
+            format!(
+                "Host example\n  IdentityFile {}\n",
+                team.join("github_deploy").display()
+            ),
+        )
+        .unwrap();
+        let ssh = ssh.canonicalize().unwrap();
+        let (_, elsewhere) = what_ssh_holds(&ssh, &theirs);
+        let team = team.canonicalize().unwrap();
+        assert!(
+            elsewhere.contains(&team.join("github_deploy")),
+            "{elsewhere:?}"
+        );
+        assert!(
+            elsewhere.contains(&team.join("linked_key")),
+            "{elsewhere:?}"
+        );
+        std::fs::remove_dir_all(&theirs).ok();
+    }
+
+    #[test]
+    fn a_key_is_known_by_its_folder_or_its_name_the_way_the_wall_knows_it() {
+        for key in [
+            "/x/teams/t1/deploy/id_ed25519",
+            "/x/teams/t1/id_rsa_sk",
+            "/x/teams/t1/ID_ECDSA",
+            "/x/teams/t1/.ssh/config",
+            "/x/teams/t1/a/.SSH/anything",
+        ] {
+            assert!(
+                a_key_by_its_name(Path::new(key)),
+                "{key} was not taken for a key"
+            );
+        }
+        for not_a_key in [
+            "/x/teams/t1/id_ed25519.pub",
+            "/x/teams/t1/ssh-notes.md",
+            "/x/teams/t1/convert.py",
+        ] {
+            assert!(
+                !a_key_by_its_name(Path::new(not_a_key)),
+                "{not_a_key} was taken for a key"
+            );
+        }
+    }
+
+    #[test]
+    fn the_file_tools_are_kept_from_the_same_places_as_commands() {
+        let errand = std::env::temp_dir().join(format!("errand-kept-{}", std::process::id()));
+        std::fs::remove_dir_all(&errand).ok();
+        std::fs::create_dir_all(errand.join("keys")).unwrap();
+        std::fs::create_dir_all(errand.join("teams/t1")).unwrap();
+        std::fs::write(errand.join("errand.db"), "").unwrap();
+        std::fs::write(errand.join("errand-before-clearing.db"), "").unwrap();
+        let real = errand.canonicalize().unwrap();
+        for kept in [
+            "keys/anthropic",
+            "KEYS/anthropic",
+            "key\u{17f}/anthropic",
+            "errand.db",
+            "ERRAND.DB",
+            "errand.db-wal",
+            "errand-before-clearing.db",
+            "opened/App.app",
+            crate::home::HOMES,
+        ] {
+            assert!(kept_in(&errand, &real.join(kept)), "{kept} was not kept");
+        }
+        for open in ["teams/t1/part.md", "keysake/notes.txt", "errand.dbx/notes"] {
+            assert!(!kept_in(&errand, &real.join(open)), "{open} was kept");
+        }
+        std::fs::remove_dir_all(&errand).ok();
     }
 
     #[test]

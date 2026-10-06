@@ -53,7 +53,7 @@ pub fn all() -> Vec<Tool> {
         tool(
             "list_directory",
             "List what is in a directory.",
-            json!({ "path": { "type": "string", "description": "Directory to list; defaults to the working directory" } }),
+            json!({ "path": { "type": "string", "description": "Directory to list; defaults to the working directory. Your team's folder by its full path" } }),
             &[],
             false,
         ),
@@ -76,7 +76,7 @@ pub fn all() -> Vec<Tool> {
             "write_file",
             "Write a file, replacing anything already there.",
             json!({
-                "path": { "type": "string", "description": "Where to write it" },
+                "path": { "type": "string", "description": "Where to write it: relative to the working directory, or a full path in your team's folder" },
                 "contents": { "type": "string", "description": "The whole new contents" }
             }),
             &["path", "contents"],
@@ -400,22 +400,29 @@ pub fn the_thing_itself(name: &str, args: &serde_json::Value) -> String {
     }
 }
 
-/// A path inside the working directory, or nothing.
+/// A path inside the working directory, or inside the folder of a team it is
+/// on; or nothing.
 ///
 /// `Path::join` is not a boundary and looks exactly like one: joining an
 /// absolute path throws the base away entirely, so `home.join("/etc/passwd")`
 /// is `/etc/passwd`, and `..` walks out a component at a time. Both were
 /// possible here until this existed.
 ///
+/// An absolute path is taken only into those folders. Refusing every one kept
+/// a team's members on a local model out of their team's folder: the shell
+/// could write there and the file tools could not even list it, so each part
+/// went in by `cat` and a heredoc, or into the member's own folder instead.
+/// Only a team's folder, not every folder the wall allows: the file tools run
+/// in the app, outside the wall, and a folder somebody allowed can be their
+/// home or a disk with a copy of it, `.ssh` and Errand's keys included, which
+/// the wall keeps from commands rule by rule. A team's folder is Errand's own,
+/// made for the team's work, and holds only what its members put there.
+///
 /// Checked lexically, before touching the disk, and then again after resolving
 /// what is actually there -- because a symlink inside the folder can point
 /// anywhere, and the first check cannot see it.
 fn inside(home: &Path, said: &str) -> Result<std::path::PathBuf> {
     let asked = Path::new(said);
-    anyhow::ensure!(
-        asked.is_relative(),
-        "{said} is an absolute path; everything here is relative to the working directory"
-    );
     anyhow::ensure!(
         !asked
             .components()
@@ -455,12 +462,70 @@ fn inside(home: &Path, said: &str) -> Result<std::path::PathBuf> {
     for name in rest.into_iter().rev() {
         real.push(name);
     }
-    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    // Errand's keys, its store and every teammate's home, which the wall keeps
+    // from commands: a folder somebody allowed that held them would otherwise
+    // hand them to the file tools, which run outside it.
     anyhow::ensure!(
-        real.starts_with(&home),
-        "{said} leads outside the working directory"
+        !crate::wall::kept_from_teammates(&real),
+        "{said} is Errand's own and kept from every teammate"
     );
-    Ok(real)
+    // A private key, wherever it is: the person can open a team's folder as a
+    // project and make a deploy key there, which the wall keeps from commands.
+    anyhow::ensure!(
+        !crate::wall::a_key_kept_from_teammates(&real),
+        "{said} is a private key, or in a .ssh folder, and kept from every teammate"
+    );
+    let allowed_elsewhere = !crate::wall::also_allowed(home).is_empty();
+    let also = also_its(home);
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    if real.starts_with(&home) || also.iter().any(|folder| real.starts_with(folder)) {
+        return Ok(real);
+    }
+    anyhow::bail!(match (also.is_empty(), allowed_elsewhere) {
+        (true, false) => format!("{said} leads outside the working directory"),
+        (true, true) => format!(
+            "{said} leads outside the working directory, the only folder the file tools reach. \
+             Reach the other folders you were allowed with a command."
+        ),
+        (false, _) => format!(
+            "{said} leads outside the working directory and your team's folder: {}. Reach \
+             anywhere else you were allowed with a command.",
+            also.iter()
+                .map(|f| f.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
+}
+
+/// The folders of the teams it is on, by their real paths: of the folders the
+/// wall lets it write in, the ones that are a team's.
+pub(crate) fn also_its(home: &Path) -> Vec<std::path::PathBuf> {
+    let Some(teams) = where_teams_live() else {
+        return Vec::new();
+    };
+    let teams = teams.canonicalize().unwrap_or(teams);
+    crate::wall::also_allowed(home)
+        .into_iter()
+        .map(|f| f.canonicalize().unwrap_or(f))
+        .filter(|f| f.parent() == Some(teams.as_path()))
+        .collect()
+}
+
+/// Where Errand keeps its teams' folders. A test says where its own are.
+fn where_teams_live() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(at) = TEAMS_FOR_A_TEST.with(|t| t.borrow().clone()) {
+        return Some(at);
+    }
+    crate::where_errand_lives().map(|errand| errand.join(crate::home::TEAMS))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The folder a test keeps its teams' folders in, for that test's thread.
+    pub(crate) static TEAMS_FOR_A_TEST: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The most of one page that is read.
@@ -591,10 +656,19 @@ const NO_LINK_ANYWHERE: libc::c_int = libc::O_NOFOLLOW;
 /// starts. Lower case, compared without regard to case, as the disk does.
 pub const WHAT_AN_ENGINE_READS: &[&str] = &[".claude", ".mcp.json", "claude.md", "claude.local.md"];
 
-/// Whether a path, relative to the working directory, is one of those.
+/// Whether a path is one of those, at the top of its working directory or of
+/// a team's folder. The wall keeps them in both, and the file tools, which run
+/// outside it, keep them the same.
 fn an_engine_reads(home: &Path, at: &Path) -> bool {
-    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
-    let Ok(rest) = at.strip_prefix(&home) else {
+    let own = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    std::iter::once(own)
+        .chain(also_its(home))
+        .any(|folder| at_the_top_of(&folder, at))
+}
+
+/// Whether a path is one of those at the top of this folder.
+fn at_the_top_of(folder: &Path, at: &Path) -> bool {
+    let Ok(rest) = at.strip_prefix(folder) else {
         return false;
     };
     // Folded the way the disk folds names, not only by case: `.mcp.jſon`,
@@ -616,9 +690,10 @@ fn an_engine_reads(home: &Path, at: &Path) -> bool {
 /// What to say when one of those was refused.
 fn not_its_own_settings(said: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "{said} is not yours to write: at the top of your folder it would be the settings an \
-         engine reads, and you change what you are only through suggest_learning, with the \
-         person's yes. Put project files in a subfolder instead."
+        "{said} is not yours to write: at the top of your folder, or of your team's folder, it \
+         would be the settings an engine reads, and you change what you are only \
+         through suggest_learning, with the person's yes. Put project files in a subfolder \
+         instead."
     )
 }
 
@@ -705,6 +780,11 @@ fn walk(at: &Path, each: &mut impl FnMut(&Path)) {
             continue;
         }
         let path = one.path();
+        // Nor into a key's folder, nor a key: the walk reads what `inside`
+        // never saw, and a team's folder is one the person works in too.
+        if crate::wall::a_key_by_its_name(&path) {
+            continue;
+        }
         match one.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             // Symlinks are not followed: a link pointing at the root of the
             // disk turns a search of one folder into a search of everything,
@@ -768,13 +848,22 @@ fn matches(pattern: &str, name: &str) -> bool {
 }
 
 /// Look through the text of files for some words.
-fn searching(at: &Path, home: &Path, looking_for: &str, named: &str) -> String {
+fn searching(
+    at: &Path,
+    home: &Path,
+    looking_for: &str,
+    named: &str,
+    keys: &[std::path::PathBuf],
+) -> String {
     if looking_for.is_empty() {
         return "Say what to look for.".to_string();
     }
     let mut found: Vec<String> = Vec::new();
     let mut more = 0usize;
     walk(at, &mut |file| {
+        if keys.iter().any(|key| key == file) {
+            return;
+        }
         if !named.is_empty()
             && !matches(
                 named,
@@ -908,7 +997,16 @@ pub async fn run(
                 "" => real.clone(),
                 p => inside(home, p)?,
             };
-            Ok(searching(&at, &real, &get("pattern"), &get("named")))
+            Ok(searching(
+                &at,
+                &real,
+                &get("pattern"),
+                &get("named"),
+                // Keys kept outside `.ssh` that it links to or the
+                // configuration names, which a name alone does not give
+                // away: read by nobody here either.
+                &crate::wall::keys_kept_elsewhere(),
+            ))
         }
 
         "find_files" => {
@@ -923,7 +1021,15 @@ pub async fn run(
                     return;
                 }
                 let shown = said_from(home, file);
+                // From where the search began as well: in a team's folder the
+                // path said back is a full one, which `parts/*.md` never
+                // matches.
+                let from_here = file
+                    .strip_prefix(&at)
+                    .map(|rest| rest.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 if matches(&pattern, &shown)
+                    || matches(&pattern, &from_here)
                     || matches(
                         &pattern,
                         &file.file_name().unwrap_or_default().to_string_lossy(),
@@ -1482,6 +1588,288 @@ mod tests {
 
         std::fs::remove_dir_all(&home).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    /// A working directory and a team's folder beside it, the second allowed
+    /// by the wall the way a team's is, for one test. Named per test, because
+    /// the wall's list is one for the whole process.
+    fn a_home_and_its_teams_folder(test: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!("errand-{test}-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let (home, team) = (base.join("home"), base.join("teams").join("t1"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&team).unwrap();
+        TEAMS_FOR_A_TEST.with(|t| *t.borrow_mut() = Some(base.join("teams")));
+        crate::wall::also_allow(&home, vec![team.clone()]);
+        (home, team)
+    }
+
+    fn put_away(home: &Path) {
+        crate::wall::also_allow(home, vec![]);
+        TEAMS_FOR_A_TEST.with(|t| *t.borrow_mut() = None);
+        std::fs::remove_dir_all(home.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn a_folder_allowed_that_is_not_a_teams_is_left_to_commands() {
+        // Somebody's home or a disk with a copy of it: the wall keeps .ssh and
+        // Errand's keys from commands there, and the file tools, outside the
+        // wall, do not go there at all.
+        let (home, team) = a_home_and_its_teams_folder("not-a-team");
+        let disk = home.parent().unwrap().join("Backup");
+        std::fs::create_dir_all(disk.join(".ssh")).unwrap();
+        std::fs::write(disk.join(".ssh/id_ed25519"), "PRIVATE KEY").unwrap();
+        crate::wall::also_allow(&home, vec![team.clone(), disk.clone()]);
+        for (tool, args) in [
+            (
+                "read_file",
+                json!({ "path": disk.join(".ssh/id_ed25519").display().to_string() }),
+            ),
+            (
+                "search_files",
+                json!({ "pattern": "PRIVATE", "path": disk.display().to_string() }),
+            ),
+            (
+                "list_directory",
+                json!({ "path": disk.display().to_string() }),
+            ),
+        ] {
+            let said = run(tool, &args, &home, "c").await;
+            assert!(
+                said.is_err(),
+                "{tool} reached an allowed folder that is not a team's: {said:?}"
+            );
+        }
+        let why = inside(&home, &disk.join("x").display().to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("with a command"), "{why}");
+        // The team's folder still is.
+        assert!(inside(&home, &team.join("x").display().to_string()).is_ok());
+        // On no team, it is told the same.
+        crate::wall::also_allow(&home, vec![disk.clone()]);
+        let why = inside(&home, &disk.join("x").display().to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("with a command"), "{why}");
+        put_away(&home);
+    }
+
+    #[test]
+    fn a_search_reads_no_key_the_ssh_configuration_names_whatever_it_is_called() {
+        let (home, team) = a_home_and_its_teams_folder("team-named-key");
+        std::fs::create_dir_all(team.join("deploy")).unwrap();
+        std::fs::write(team.join("deploy/github_deploy"), "BEGIN KEY one").unwrap();
+        std::fs::write(team.join("notes.md"), "BEGIN KEY is a phrase").unwrap();
+        let real = team.canonicalize().unwrap();
+        let found = searching(
+            &real,
+            &real,
+            "BEGIN KEY",
+            "",
+            &[real.join("deploy/github_deploy")],
+        );
+        assert!(
+            found.contains("notes.md") && !found.contains("one"),
+            "{found}"
+        );
+        put_away(&home);
+    }
+
+    #[tokio::test]
+    async fn a_key_in_a_teams_folder_is_kept_from_the_file_tools_as_from_commands() {
+        // Made there by the person, who opens the folder as a project.
+        let (home, team) = a_home_and_its_teams_folder("team-key");
+        std::fs::create_dir_all(team.join("deploy")).unwrap();
+        std::fs::write(team.join("deploy/id_ed25519"), "PRIVATE KEY one").unwrap();
+        std::fs::create_dir_all(team.join("box/.ssh")).unwrap();
+        std::fs::write(team.join("box/.ssh/held"), "PRIVATE KEY two").unwrap();
+        std::fs::write(team.join("notes.md"), "PRIVATE KEY is a phrase").unwrap();
+        let read = run(
+            "read_file",
+            &json!({ "path": team.join("deploy/id_ed25519").display().to_string() }),
+            &home,
+            "c",
+        )
+        .await;
+        assert!(read.is_err(), "{read:?}");
+        let found = run(
+            "search_files",
+            &json!({ "pattern": "PRIVATE KEY", "path": team.display().to_string() }),
+            &home,
+            "c",
+        )
+        .await
+        .unwrap();
+        assert!(found.contains("notes.md"), "{found}");
+        assert!(!found.contains("one") && !found.contains("two"), "{found}");
+        let listed = run(
+            "find_files",
+            &json!({ "pattern": "**", "path": team.display().to_string() }),
+            &home,
+            "c",
+        )
+        .await
+        .unwrap();
+        assert!(
+            !listed.contains("id_ed25519") && !listed.contains(".ssh"),
+            "{listed}"
+        );
+        put_away(&home);
+    }
+
+    #[tokio::test]
+    async fn a_teams_folder_is_reached_by_its_full_path_with_every_file_tool() {
+        // On a local model the shell could write there and the file tools
+        // could not even list it: every part went in by heredoc, or into the
+        // member's own folder instead.
+        let (home, team) = a_home_and_its_teams_folder("team-reach");
+        let file = team.join("convert.py").display().to_string();
+        let said = run(
+            "write_file",
+            &json!({ "path": file, "contents": "x = 1\n" }),
+            &home,
+            "c",
+        )
+        .await;
+        assert!(said.is_ok(), "{said:?}");
+        assert_eq!(
+            std::fs::read_to_string(team.join("convert.py")).unwrap(),
+            "x = 1\n"
+        );
+        let read = run("read_file", &json!({ "path": file }), &home, "c")
+            .await
+            .unwrap();
+        assert!(read.contains("x = 1"), "{read}");
+        let listed = run(
+            "list_directory",
+            &json!({ "path": team.display().to_string() }),
+            &home,
+            "c",
+        )
+        .await
+        .unwrap();
+        assert!(listed.contains("convert.py"), "{listed}");
+        run(
+            "change_file",
+            &json!({ "path": file, "from": "x = 1", "to": "x = 2" }),
+            &home,
+            "c",
+        )
+        .await
+        .expect("changed in place");
+        let found = run(
+            "search_files",
+            &json!({ "pattern": "x = 2", "path": team.display().to_string() }),
+            &home,
+            "c",
+        )
+        .await
+        .unwrap();
+        assert!(found.contains("convert.py"), "{found}");
+        std::fs::create_dir_all(team.join("parts")).unwrap();
+        std::fs::write(team.join("parts/a.md"), "part").unwrap();
+        for pattern in ["*.md", "parts/*.md"] {
+            let listed = run(
+                "find_files",
+                &json!({ "pattern": pattern, "path": team.display().to_string() }),
+                &home,
+                "c",
+            )
+            .await
+            .unwrap();
+            assert!(listed.contains("parts/a.md"), "{pattern}: {listed}");
+        }
+        // Its own folder by its full path is its own folder.
+        let own = home.join("notes.txt").display().to_string();
+        run(
+            "write_file",
+            &json!({ "path": own, "contents": "mine" }),
+            &home,
+            "c",
+        )
+        .await
+        .expect("its own folder, named in full");
+        put_away(&home);
+    }
+
+    #[tokio::test]
+    async fn a_full_path_anywhere_else_is_still_refused_and_says_where_it_may_go() {
+        let (home, team) = a_home_and_its_teams_folder("team-elsewhere");
+        let beside = home.parent().unwrap().join("elsewhere");
+        std::fs::create_dir_all(&beside).unwrap();
+        let why = run(
+            "write_file",
+            &json!({ "path": beside.join("x.txt").display().to_string(), "contents": "no" }),
+            &home,
+            "c",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(!beside.join("x.txt").exists(), "written outside");
+        let team_real = team.canonicalize().unwrap();
+        assert!(
+            why.contains(&team_real.display().to_string()),
+            "it is told where it may: {why}"
+        );
+        // Nor out of the team's folder by climbing.
+        let climbing = format!("{}/../elsewhere/x.txt", team.display());
+        assert!(
+            inside(&home, &climbing).is_err(),
+            "climbed out of the team's folder"
+        );
+        // And with nothing allowed, nothing but its own folder.
+        crate::wall::also_allow(&home, vec![]);
+        assert!(inside(&home, &team.join("convert.py").display().to_string()).is_err());
+        put_away(&home);
+    }
+
+    #[tokio::test]
+    async fn a_link_in_a_teams_folder_that_leads_out_is_not_followed() {
+        let (home, team) = a_home_and_its_teams_folder("team-link");
+        let outside = home.parent().unwrap().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, team.join("out")).unwrap();
+        let said = run(
+            "write_file",
+            &json!({ "path": team.join("out/x.txt").display().to_string(), "contents": "no" }),
+            &home,
+            "c",
+        )
+        .await;
+        assert!(said.is_err() && !outside.join("x.txt").exists(), "{said:?}");
+        put_away(&home);
+    }
+
+    #[tokio::test]
+    async fn the_settings_at_the_top_of_a_teams_folder_are_not_its_to_write() {
+        // The wall keeps them for commands; the file tools run outside it.
+        let (home, team) = a_home_and_its_teams_folder("team-settings");
+        for refused in [".claude/settings.json", "CLAUDE.md", ".mcp.json"] {
+            let said = run(
+                "write_file",
+                &json!({ "path": team.join(refused).display().to_string(), "contents": "hooks" }),
+                &home,
+                "c",
+            )
+            .await;
+            assert!(
+                said.as_ref()
+                    .is_err_and(|why| why.to_string().contains("suggest_learning")),
+                "{refused}: {said:?}"
+            );
+        }
+        assert!(!team.join("CLAUDE.md").exists() && !team.join(".claude").exists());
+        run(
+            "write_file",
+            &json!({ "path": team.join("parts/CLAUDE.md").display().to_string(), "contents": "notes" }),
+            &home,
+            "c",
+        )
+        .await
+        .expect("a subfolder of the team's is the project's");
+        put_away(&home);
     }
 
     #[tokio::test]
