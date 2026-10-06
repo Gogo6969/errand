@@ -8,3 +8,9 @@
 # need adding here; the old commit stays in the history the scan reads.
 ae72ff04cf58792c4a4252bb2189de7439ef4b9b:core/src/memory.rs:generic-api-key:440
 ae72ff04cf58792c4a4252bb2189de7439ef4b9b:core/src/memory.rs:jwt:442
+
+# Two lines of a test of the keys the wall keeps outside .ssh, added in
+# 2f8c01f: the opening line of an invented private key, written into two
+# files, which the scanner reads as one key from the first line to the end of
+# the second. Never a real key. The test has built that line at run time since.
+2f8c01f06e1f9ac5ab0e1c7b27b594296735b6e5:core/src/wall.rs:private-key:1761
