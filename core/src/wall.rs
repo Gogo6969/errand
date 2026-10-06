@@ -1080,7 +1080,12 @@ pub fn what_the_wall_means(home: &Path) -> String {
          `open` and NSWorkspace fail here, and nothing can start a launchd job. To have something you made \
          opened, an app you built or a report, call open_outside with its path and why: \
          the person sees a card and decides, and an app can also be started at every \
-         login if they agree. A bare program or script has to go in a .app bundle first. \
+         login if they agree. A bare program or script has to go in a .app bundle first, \
+         and the bundle has to hold everything it needs: an app is opened from a copy of \
+         the .app alone, so a script or file beside it is not there when it runs. Put them \
+         in its Contents/Resources and find them from the bundle's own path. A program \
+         with a window never finishes as a command, because it runs until its window is \
+         closed, so do not run one to try it: build it as a .app and ask with open_outside. \
          For a web page they should see, use over_to_you with `where`.\n\n\
          At the top of your folder, and of every other folder you may write in, .claude, \
          .mcp.json, CLAUDE.md and CLAUDE.local.md are \

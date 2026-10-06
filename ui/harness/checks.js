@@ -7837,6 +7837,17 @@ export async function askingToOpenOutside() {
   await wait(200);
   const doc = document.querySelector('#messages .open-outside[data-handover="o-5"]')?.textContent || "";
   check("a document says its ending, and that it is a copy that opens", /A \.pdf document in its own folder/.test(doc) && /from a copy taken when it asked/.test(doc), doc.slice(0, 200));
+  // From a team's folder: the card says whose it is, and that anybody on
+  // the team could have changed it, never that it is the teammate's own.
+  ask("o-6", { at_login: false, kind: "an app", name: "DistanceConverter.app", team: "DRILL-TEAM", path: "2026-10-06 Make an app/DistanceConverter.app" });
+  await wait(200);
+  const teams = document.querySelector('#messages .open-outside[data-handover="o-6"]')?.textContent || "";
+  check(
+    "an app from a team's folder says it is the team's, which anyone on it can change",
+    /An app in DRILL-TEAM's shared folder, which everyone on that team can change/.test(teams) &&
+      /including things anyone on DRILL-TEAM sets up for it later/.test(teams) && !/in its own folder/.test(teams),
+    teams.slice(0, 260),
+  );
   // Nothing on an app's card promises more than the copy keeps.
   check("an app's card does not promise that what runs is what is shown", !/what runs is what you see/.test(said), said.slice(0, 200));
 

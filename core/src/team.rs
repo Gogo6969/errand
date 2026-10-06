@@ -421,14 +421,17 @@ pub fn declarations() -> Vec<Value> {
                 "name": "open_outside",
                 "description":
                     "Ask the person to open something you made, outside your wall: an app \
-                     (a .app bundle in your own folder), a folder, or a document. Nothing \
-                     inside your wall can open anything and you must not try to: this is the \
-                     way. They see a card with your reason and decide, and only their click \
-                     opens it. An app or a document is opened from a copy Errand takes when \
-                     you ask; a folder is only shown in Finder. If they say no, do not ask \
-                     again. An app can also be started at every login, if they agree to that \
-                     too. A bare program or a script cannot be opened this way: put it in a \
-                     .app bundle first. You get back what they chose.",
+                     (a .app bundle in your own folder or your team's), a folder, or a \
+                     document. Nothing inside your wall can open anything and you must not \
+                     try to: this is the way. They see a card with your reason and decide, \
+                     and only their click opens it. An app or a document is opened from a \
+                     copy Errand takes when you ask, of the .app or the document alone: put \
+                     everything an app needs inside its bundle, its script and files in \
+                     Contents/Resources, found from the bundle's own path, because nothing \
+                     beside it comes along. A folder is only shown in Finder. If they say no, \
+                     do not ask again. An app can also be started at every login, if they \
+                     agree to that too. A bare program or a script cannot be opened this way: \
+                     put it in a .app bundle first. You get back what they chose.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -436,7 +439,8 @@ pub fn declarations() -> Vec<Value> {
                             "type": "string",
                             "description":
                                 "What to open, in your own folder: `TideClock.app`, \
-                                 `reports`, or `reports/summary.pdf`"
+                                 `reports`, or `reports/summary.pdf`; or in your team's \
+                                 folder, by its full path"
                         },
                         "why": {
                             "type": "string",

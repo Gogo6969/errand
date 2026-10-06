@@ -4976,6 +4976,33 @@ fn copy_to_open(
     Ok(copy)
 }
 
+/// Where something a teammate asks to have opened may be, by its real path:
+/// inside its own folder, or inside the folder of a team it is on, never the
+/// folder itself, and never what the wall keeps from every teammate. Which
+/// team's folder, when it is one, and its path inside that folder; or
+/// nothing. The team is said apart, because the card has to say whose
+/// folder it is: everybody on a team can change what is in its folder.
+fn where_it_may_be_opened_from(
+    real: &std::path::Path,
+    home: &std::path::Path,
+    teams: &[(std::path::PathBuf, String)],
+) -> Option<(Option<String>, String)> {
+    if errand_core::wall::kept_from_teammates(real)
+        || errand_core::wall::a_key_kept_from_teammates(real)
+    {
+        return None;
+    }
+    if real != home {
+        if let Ok(rest) = real.strip_prefix(home) {
+            return Some((None, rest.display().to_string()));
+        }
+    }
+    teams.iter().find_map(|(folder, name)| {
+        let rest = real.strip_prefix(folder).ok()?;
+        (real != folder.as_path()).then(|| (Some(name.clone()), rest.display().to_string()))
+    })
+}
+
 /// Open something a teammate made, outside its wall, if the person says so.
 ///
 /// Nothing inside the wall can open anything any more: macOS opens things in a
@@ -5006,7 +5033,7 @@ async fn open_outside(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
         anyhow::bail!("there is no task here, so nothing to open anything from");
     }
     if path.is_empty() {
-        anyhow::bail!("say what to open: a path in your own folder");
+        anyhow::bail!("say what to open: a path in your own folder or your team's");
     }
     if why.is_empty() {
         anyhow::bail!(
@@ -5041,22 +5068,40 @@ async fn open_outside(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
     // Its real path, links followed, so a link in its folder to something
     // elsewhere is seen as elsewhere.
     let Ok(real) = wanted.canonicalize() else {
-        anyhow::bail!("there is nothing at {path} in your folder");
+        anyhow::bail!("there is nothing at {path} in your folder or your team's");
     };
-    if !real.starts_with(&home) || real == home {
-        anyhow::bail!("only something inside your own folder can be opened this way, not {path}");
-    }
+    // Its own folder, or a team's it is on: what a team builds is in the
+    // team's folder, and a teammate made to copy it out first took the app
+    // without the files it reached for beside it.
+    let teams: Vec<(std::path::PathBuf, String)> = {
+        let held: State<Held> = app.state();
+        let errand = errand_core::where_errand_lives();
+        held.store
+            .teams()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| {
+                t.lead.as_deref() == Some(agent.id.as_str()) || t.members.contains(&agent.id)
+            })
+            .filter_map(|t| {
+                let at = errand_core::home::team_folder(errand.as_deref()?, &t.id);
+                Some((at.canonicalize().ok()?, t.name))
+            })
+            .collect()
+    };
+    let Some((team_of_it, shown)) = where_it_may_be_opened_from(&real, &home, &teams) else {
+        anyhow::bail!(
+            "only something inside your own folder or your team's can be opened this way, not \
+             {path}"
+        );
+    };
     let opening = what_opening(&real).map_err(|why| anyhow::anyhow!(why))?;
     let at_login = at_login && opening == Opening::App;
     let name = real
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let shown = real
-        .strip_prefix(&home)
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| name.clone());
-    if hides_what_it_is(&shown) {
+    if hides_what_it_is(&shown) || team_of_it.as_deref().is_some_and(hides_what_it_is) {
         anyhow::bail!(
             "its name has characters in it that change how it looks, so they could not see \
              what they were agreeing to. Rename it with plain letters and ask again"
@@ -5110,6 +5155,7 @@ async fn open_outside(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
         // line of its own to the card.
         let card = serde_json::json!({
             "path": shown,
+            "team": team_of_it,
             "name": name,
             "kind": kind,
             "why": why,
@@ -5128,6 +5174,7 @@ async fn open_outside(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<St
                 seq: line.seq,
                 handover: handover.clone(),
                 path: shown.clone(),
+                team: team_of_it.clone(),
                 name: name.clone(),
                 kind: kind.clone(),
                 why: why.clone(),
@@ -5247,6 +5294,8 @@ struct AskingToOpen {
     seq: i64,
     handover: String,
     path: String,
+    /// The team whose folder it is in, when it is not the teammate's own.
+    team: Option<String>,
     name: String,
     kind: String,
     why: String,
@@ -10847,6 +10896,46 @@ fn everything_that_waits_for_the_app(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_teammate_may_have_opened_what_is_in_its_own_folder_or_its_teams() {
+        use std::path::{Path, PathBuf};
+        let home = Path::new("/x/Errand/threads/a1");
+        let teams = vec![(
+            PathBuf::from("/x/Errand/teams/t1"),
+            "DRILL-TEAM".to_string(),
+        )];
+        assert_eq!(
+            where_it_may_be_opened_from(&home.join("Tide.app"), home, &teams),
+            Some((None, "Tide.app".to_string()))
+        );
+        assert_eq!(
+            where_it_may_be_opened_from(
+                Path::new("/x/Errand/teams/t1/2026-10-06 Make an app/Converter.app"),
+                home,
+                &teams
+            ),
+            Some((
+                Some("DRILL-TEAM".to_string()),
+                "2026-10-06 Make an app/Converter.app".to_string()
+            ))
+        );
+        // Not the folders themselves, not a team it is not on, not elsewhere,
+        // and no key.
+        for refused in [
+            "/x/Errand/threads/a1",
+            "/x/Errand/teams/t1",
+            "/x/Errand/teams/t2/Other.app",
+            "/x/Errand/threads/a2/Theirs.app",
+            "/Applications/Safari.app",
+            "/x/Errand/teams/t1/deploy/id_ed25519",
+        ] {
+            assert!(
+                where_it_may_be_opened_from(Path::new(refused), home, &teams).is_none(),
+                "{refused}"
+            );
+        }
+    }
 
     #[test]
     fn a_team_tasks_lead_is_told_the_tasks_own_folder_and_to_leave_the_others() {

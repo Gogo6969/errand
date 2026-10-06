@@ -1124,7 +1124,10 @@ pub async fn run(
                     "Still going after {} seconds, so it was left running rather than thrown \
                      away. Its handle is {}. Everything it has done so far is still being done. \
                      Use check_command with that handle to see what it has printed since, and \
-                     stop_command to stop it.",
+                     stop_command to stop it. If it is a program with a window, it never \
+                     finishes as a command, because it runs until its window is closed: stop \
+                     that one and ask for it with open_outside as a .app instead. A build, an \
+                     install, a download or a server is fine left running.",
                     LONG_ENOUGH_TO_WAIT.as_secs(),
                     started.handle
                 ));

@@ -2644,6 +2644,7 @@ function fromStoreLine(line, live = false) {
         seq: line.seq,
         handover: line.call || "",
         path: asked.path || "",
+        team: asked.team || "",
         name: asked.name || "",
         what: `open ${asked.name || "something"} outside its wall`,
         opening: asked.kind || "",
@@ -3900,10 +3901,18 @@ function openItOutside(m) {
   const facts = document.createElement("ul");
   facts.className = "facts";
   const fact = (text, how = "") => facts.append(note("li", text, how));
-  fact(`${m.opening ? m.opening[0].toUpperCase() + m.opening.slice(1) : "Something"} in its own folder:`);
+  // Whose folder it is in, because that is who could have changed it: a
+  // team's folder is everybody's on the team, not the teammate's alone.
+  const kindOf = m.opening ? m.opening[0].toUpperCase() + m.opening.slice(1) : "Something";
+  fact(m.team ? `${kindOf} in ${m.team}'s shared folder, which everyone on that team can change:` : `${kindOf} in its own folder:`);
   facts.lastChild.append(" ", note("code", m.path || m.name, "path"));
   if (m.opening === "an app") {
-    fact("It runs as you, outside the wall, and can do anything you can, including things the teammate sets up for it later.", "warning");
+    fact(
+      m.team
+        ? `It runs as you, outside the wall, and can do anything you can, including things anyone on ${m.team} sets up for it later.`
+        : "It runs as you, outside the wall, and can do anything you can, including things the teammate sets up for it later.",
+      "warning",
+    );
   } else if (m.opening === "a folder") {
     fact("It is shown in Finder. Nothing runs.");
   } else {
@@ -4327,6 +4336,7 @@ listen("asking_to_open", async ({ payload }) => {
     seq: payload.seq,
     handover: payload.handover,
     path: payload.path,
+    team: payload.team || "",
     name: payload.name,
     what: `open ${payload.name} outside its wall`,
     opening: payload.kind,
