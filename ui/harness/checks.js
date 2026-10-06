@@ -5124,10 +5124,26 @@ export async function aNewTeammate() {
     !chooser.hidden && document.activeElement === what && rows().some((r) => r.dataset.kind === "person") && rows().at(-1)?.dataset.kind === "new",
     rows().map((r) => `${r.dataset.kind}:${r.querySelector(".name")?.textContent}`).join(" | "),
   );
+  // A copy made earlier says the same as Bitcoin Desk: two equally close,
+  // and neither is marked, rather than whichever is listed first.
   what.value = "Prepare tomorrow's morning crypto briefing";
   what.dispatchEvent(new Event("input"));
   await settle(100);
-  const fits = [...document.querySelectorAll("#task-chooser-who .fit")].map((f) => f.closest(".who"));
+  const marked = () => [...document.querySelectorAll("#task-chooser-who .fit")].map((f) => f.closest(".who"));
+  if (rows().some((r) => /Bitcoin Desk copy/.test(r.textContent))) {
+    check("two teammates equally close: neither is marked the best fit", marked().length === 0, marked().map((r) => r.querySelector(".name")?.textContent).join(", "));
+  }
+  // A skill of its own makes the original the closer one.
+  document.getElementById("task-chooser").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await settle(100);
+  const skillsBefore = FIXTURE.skills?.["agent-bitcoin"];
+  (FIXTURE.skills ||= {})["agent-bitcoin"] = [...(skillsBefore || []), { name: "Price alerts" }];
+  document.getElementById("new").click();
+  await settle(300);
+  what.value = "Prepare tomorrow's morning crypto briefing with price alerts";
+  what.dispatchEvent(new Event("input"));
+  await settle(100);
+  const fits = marked();
   check(
     "the teammate whose role and job fit what was written is marked the best fit, and only one",
     fits.length === 1 && fits[0].dataset.id === "agent-bitcoin",
@@ -5153,6 +5169,8 @@ export async function aNewTeammate() {
       asked.slice(sent).some((a) => a.name === "say" && a.args?.id === begun?.args?.id && /morning crypto briefing/.test(a.args?.text || "")),
     JSON.stringify(asked.slice(sent).map((a) => a.name)),
   );
+  if (skillsBefore) FIXTURE.skills["agent-bitcoin"] = skillsBefore;
+  else delete FIXTURE.skills["agent-bitcoin"];
   // Somebody new, from the same +.
   document.getElementById("new").click();
   await settle(300);

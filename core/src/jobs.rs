@@ -49,6 +49,11 @@ struct Job {
     /// interactive prompt there is, and with nothing able to answer it the
     /// symptom is indistinguishable from an agent that stopped thinking.
     typing: Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
+    /// Its process group, which is everything it started as well as itself.
+    group: Option<i32>,
+    /// Whether it left something running when its shell ended, which was
+    /// stopped then.
+    left: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// What a command has printed, and what had to be let go.
@@ -119,6 +124,8 @@ pub struct Progress {
     pub lost: usize,
     /// The exit code, once there is one.
     pub over: Option<i32>,
+    /// Whether it left something running when it ended, which was stopped.
+    pub left: bool,
 }
 
 /// One running command, as the window shows it.
@@ -175,8 +182,13 @@ pub fn start(
         // but now there is something to send.
         .stdin(Stdio::piped())
         .kill_on_drop(true)
+        // A group of its own, so what it starts can be stopped with it.
+        // Stopping the shell alone left a server it started, or an app it
+        // ran with `&`, running with nothing anywhere to show it.
+        .process_group(0)
         .spawn()
         .context("starting the command")?;
+    let group = child.id().and_then(|id| i32::try_from(id).ok());
 
     let said = Arc::new(Mutex::new(Kept::default()));
     let over = Arc::new(Mutex::new(None));
@@ -196,9 +208,11 @@ pub fn start(
     // holding it is the thing that kills it.
     let typing = Arc::new(tokio::sync::Mutex::new(child.stdin.take()));
     let waiting = Arc::new(Mutex::new(Some(child)));
+    let left = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let over = over.clone();
         let waiting = waiting.clone();
+        let left = left.clone();
         // Asked rather than awaited, so that the one thing holding the child is
         // still holding it when somebody wants it killed. Awaiting it meant the
         // waiter took the child the instant the job started, and stopping a job
@@ -208,23 +222,38 @@ pub fn start(
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                let mut held = waiting.lock().unwrap();
-                let Some(child) = held.as_mut() else {
-                    return;
-                };
-                match child.try_wait() {
-                    Ok(None) => continue,
-                    Ok(Some(status)) => {
-                        *over.lock().unwrap() = Some(status.code().unwrap_or(-1));
-                        *held = None;
+                let ended = {
+                    let mut held = waiting.lock().unwrap();
+                    let Some(child) = held.as_mut() else {
                         return;
+                    };
+                    let code = match child.try_wait() {
+                        Ok(None) => None,
+                        Ok(Some(status)) => Some(status.code().unwrap_or(-1)),
+                        Err(_) => Some(-1),
+                    };
+                    if code.is_some() {
+                        *held = None;
                     }
-                    Err(_) => {
-                        *over.lock().unwrap() = Some(-1);
-                        *held = None;
-                        return;
+                    code
+                };
+                let Some(code) = ended else {
+                    continue;
+                };
+                // What its shell left running, stopped as it ends, however it
+                // was started: `&` in a command that ran past the wait, or in
+                // one started to keep going, ran on in the wall in no list,
+                // past Stop and past quitting. Said only when nobody stopped
+                // it, since stopping takes what is left anyway. Before it is
+                // over, so whoever waits for the end hears of it.
+                let stopped = over.lock().unwrap().is_some();
+                if let Some(group) = group {
+                    if stop_the_group(group).await && !stopped {
+                        left.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
+                *over.lock().unwrap() = Some(code);
+                return;
             }
         });
     }
@@ -240,6 +269,8 @@ pub fn start(
             over,
             child: waiting,
             typing,
+            group,
+            left,
         },
     );
     Ok(Started {
@@ -319,6 +350,7 @@ pub fn look(handle: &str) -> Option<Progress> {
         said,
         lost,
         over,
+        left: job.left.load(std::sync::atomic::Ordering::SeqCst),
     })
 }
 
@@ -394,22 +426,99 @@ pub fn stop(handle: &str) -> bool {
         return false;
     };
     // Marked over here rather than left to the waiter to notice, so that a
-    // command is gone from the list the moment somebody stops it. The waiter
-    // reaps it and writes the real code over this a moment later.
-    let was_running = job.over.lock().unwrap().is_none();
+    // command is gone from the list the moment somebody stops it, and first,
+    // so a shell that ends while it is being stopped is not taken for one
+    // that left something behind on its own. The waiter reaps it and writes
+    // the real code over this a moment later.
+    let was_running = {
+        let mut over = job.over.lock().unwrap();
+        let was = over.is_none();
+        if was {
+            *over = Some(-1);
+        }
+        was
+    };
+    // Everything it started with it, while it is still running and so still
+    // the one its group's number belongs to.
+    if was_running {
+        if let Some(group) = job.group {
+            // SAFETY: a plain signal to a process group this job made.
+            unsafe { libc::killpg(group, libc::SIGTERM) };
+            // And made to, a moment later, whatever did not stop when asked.
+            // Off this thread, because stopping is asked for from anywhere.
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                // SAFETY: signal 0 only asks; then a plain signal to the group.
+                if unsafe { libc::killpg(group, 0) } == 0 {
+                    unsafe { libc::killpg(group, libc::SIGKILL) };
+                }
+            });
+        }
+    }
     if let Some(child) = job.child.lock().unwrap().as_mut() {
         let _ = child.start_kill();
     }
-    *job.over.lock().unwrap() = Some(-1);
     was_running
+}
+
+/// Whether a command left something running when its shell ended, which was
+/// stopped then. For run_command, once the command is over.
+pub fn left_something(handle: &str) -> bool {
+    table()
+        .lock()
+        .unwrap()
+        .get(handle)
+        .is_some_and(|job| job.left.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// Stop what is left in a command's group once its shell has ended, and say
+/// whether there was anything.
+///
+/// A command is over when its shell is, and `&` leaves what it started
+/// running on, in the wall, out of every list: a window app tried that way
+/// ran for twelve minutes with nothing to show it. Asked the moment the shell
+/// has ended, while the group is still its own: a group's number is not given
+/// to anything else while anything is in it.
+async fn stop_the_group(group: i32) -> bool {
+    // SAFETY: signal 0 only asks whether anything in the group is there.
+    if unsafe { libc::killpg(group, 0) } != 0 {
+        return false;
+    }
+    // SAFETY: a plain signal to the group this command made.
+    unsafe { libc::killpg(group, libc::SIGTERM) };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // SAFETY: as above; what did not stop when asked is made to.
+    if unsafe { libc::killpg(group, 0) } == 0 {
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    }
+    true
 }
 
 /// Stop everything. Called when the app is going, because a command nobody can
 /// see or stop is worse than one that ended early.
 pub fn stop_everything() {
-    let handles: Vec<String> = table().lock().unwrap().keys().cloned().collect();
+    let (handles, groups): (Vec<String>, Vec<i32>) = {
+        let jobs = table().lock().unwrap();
+        let groups = jobs
+            .values()
+            .filter(|job| job.over.lock().unwrap().is_none())
+            .filter_map(|job| job.group)
+            .collect();
+        (jobs.keys().cloned().collect(), groups)
+    };
     for handle in handles {
         stop(&handle);
+    }
+    // The app is going, so the moment for what did not stop when asked is
+    // now rather than on a thread that goes with it.
+    if !groups.is_empty() {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        for group in groups {
+            // SAFETY: signal 0 only asks; then a plain signal to the group.
+            if unsafe { libc::killpg(group, 0) } == 0 {
+                unsafe { libc::killpg(group, libc::SIGKILL) };
+            }
+        }
     }
 }
 
@@ -460,6 +569,13 @@ pub fn how_its_going(p: &Progress) -> String {
         Some(0) => said.push_str("\nFinished, and it succeeded."),
         Some(code) => said.push_str(&format!("\nFinished, and it exited {code}.")),
     }
+    if p.left {
+        said.push_str(
+            " It left something running in the background with &, which was stopped when \
+             it ended: run a long thing without & so it stays this command, and use \
+             open_outside for an app with a window.",
+        );
+    }
     said
 }
 
@@ -471,6 +587,57 @@ mod tests {
         let mut sh = tokio::process::Command::new("/bin/sh");
         sh.arg("-c").arg(command);
         sh
+    }
+
+    /// A process's id, written by the command into a file in this folder.
+    fn written_pid(at: &std::path::Path) -> i32 {
+        std::fs::read_to_string(at).unwrap().trim().parse().unwrap()
+    }
+
+    fn still_there(pid: i32) -> bool {
+        // SAFETY: signal 0 only asks whether that process is there.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn what_a_started_command_leaves_running_is_stopped_when_its_shell_ends() {
+        // `&` in a command started to keep going: the shell ends at once,
+        // and what it left ran on in no list, past Stop and past quitting.
+        let here = std::env::temp_dir().join(format!("errand-jobs-left-{}", std::process::id()));
+        std::fs::create_dir_all(&here).unwrap();
+        let mut sh = shell("sleep 300 & echo $! > left.pid");
+        sh.current_dir(&here);
+        let started = start(sh, "sleep 300 &", "a leftover", "jobs-left", 0).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let left = written_pid(&here.join("left.pid"));
+        assert!(!still_there(left), "what it left is still running");
+        let seen = look(&started.handle).unwrap();
+        assert!(seen.left && seen.over.is_some(), "{seen:?}");
+        assert!(how_its_going(&seen).contains("which was stopped when it ended"));
+        forget(&started.handle);
+        std::fs::remove_dir_all(&here).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stopping_makes_what_ignores_being_asked_stop_as_well() {
+        let here = std::env::temp_dir().join(format!("errand-jobs-deaf-{}", std::process::id()));
+        std::fs::create_dir_all(&here).unwrap();
+        // An ignored signal stays ignored in what the shell starts.
+        let mut sh = shell("trap '' TERM; sleep 300 & echo $! > deaf.pid; wait");
+        sh.current_dir(&here);
+        let started = start(sh, "a deaf sleep", "a deaf sleep", "jobs-deaf", 0).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let deaf = written_pid(&here.join("deaf.pid"));
+        assert!(stop(&started.handle));
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        assert!(
+            !still_there(deaf),
+            "what ignored being asked outlived the stop"
+        );
+        // Stopped by somebody, so nothing is said about leftovers.
+        assert!(!look(&started.handle).unwrap().left);
+        forget(&started.handle);
+        std::fs::remove_dir_all(&here).ok();
     }
 
     #[tokio::test(flavor = "multi_thread")]

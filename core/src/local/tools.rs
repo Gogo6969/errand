@@ -104,8 +104,9 @@ pub fn all() -> Vec<Tool> {
                  for it. Use this for anything that will not be over in a minute or two: a \
                  build, a download, a long script, a server. It keeps running while you do \
                  something else and after this errand ends, for as long as Errand is running, \
-                 window or no window. Check what it has printed with check_command. Not for \
-                 anything on a schedule, \
+                 window or no window. Check what it has printed with check_command. Do not \
+                 end it with &: it is already kept running, and what a command leaves running \
+                 once its shell has ended is stopped. Not for anything on a schedule, \
                  however often: a command that loops and sleeps is not under Repeat and nobody \
                  can see or stop it there. Use every_day for that; it runs as often as `{}`.",
                 crate::routine::most_often()
@@ -675,12 +676,33 @@ fn an_engine_reads(home: &Path, at: &Path) -> bool {
 }
 
 /// Whether a name is one the app gives a team task's own folder: a day,
-/// "YYYY-MM-DD", then a space and words.
+/// "YYYY-MM-DD", then a hyphen and words, or a space and words, as the first
+/// ones were named.
 fn a_task_folders_name(name: &str) -> bool {
     name.len() > 11
-        && name.as_bytes()[10] == b' '
+        && matches!(name.as_bytes()[10], b' ' | b'-')
+        && !name.contains('.')
         && name.is_char_boundary(10)
         && chrono::NaiveDate::parse_from_str(&name[..10], "%Y-%m-%d").is_ok()
+}
+
+/// A task's folder this would make, at the top of a team's folder, that is
+/// not there yet: Errand makes those, one for each task as it begins, and a
+/// lead that made one of its own left the task's own folder empty beside it.
+fn a_task_folder_it_would_make(home: &Path, at: &Path) -> Option<std::path::PathBuf> {
+    also_its(home).into_iter().find_map(|team| {
+        let rest = at.strip_prefix(&team).ok()?;
+        // A folder it would make, with something in it; a file at the top is
+        // only a file.
+        if rest.components().count() < 2 {
+            return None;
+        }
+        let first = rest.components().next()?;
+        let named = first.as_os_str().to_string_lossy();
+        let folder = team.join(named.as_ref());
+        (a_task_folders_name(&named) && std::fs::symlink_metadata(&folder).is_err())
+            .then_some(folder)
+    })
 }
 
 /// Whether a path is one of those at the top of this folder.
@@ -990,6 +1012,15 @@ pub async fn run(
             if an_engine_reads(home, &at) {
                 return Err(not_its_own_settings(&get("path")));
             }
+            if let Some(folder) = a_task_folder_it_would_make(home, &at) {
+                anyhow::bail!(
+                    "{} would be named like a task's folder, and Errand makes those itself, by \
+                     the day, when a task is given to the team. If this task was given one, put \
+                     its work there: the lead was told it. If not, name the folder without a day \
+                     in front, such as Weather-widget.",
+                    folder.display()
+                );
+            }
             if let Some(parent) = at.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
@@ -1132,15 +1163,25 @@ pub async fn run(
                     started.handle
                 ));
             };
+            let left = crate::jobs::left_something(&started.handle);
             crate::jobs::forget(&started.handle);
             let said = ended.said;
+            let left = match left {
+                true => {
+                    "\n\nIt left something running in the background when it ended, which \
+                     was stopped: a command here ends with everything it started. Use \
+                     start_command for anything that should keep running, and open_outside \
+                     for an app with a window."
+                }
+                false => "",
+            };
             // A command that failed has to say so in the result rather than as
             // an error, or the model treats the step as impossible instead of
             // as a thing that went wrong and can be tried differently.
             Ok(match ended.code == 0 {
-                true => cut_to_something_readable(&said),
+                true => format!("{}{left}", cut_to_something_readable(&said)),
                 false => format!(
-                    "exited {}\n{}{}",
+                    "exited {}\n{}{left}{}",
                     ended.code,
                     cut_to_something_readable(&said),
                     // The wall's refusal, named. A shell says only "Operation
@@ -1700,7 +1741,7 @@ mod tests {
     async fn the_settings_at_the_top_of_a_team_tasks_folder_are_not_its_to_write() {
         // Where the result lands and the person opens it.
         let (home, team) = a_home_and_its_teams_folder("task-settings");
-        let task = team.join("2026-10-05 Build a small website");
+        let task = team.join("2026-10-05-Build-a-small-website");
         std::fs::create_dir_all(&task).unwrap();
         for refused in [".claude/settings.json", "CLAUDE.md", ".MCP.json"] {
             let said = run(
@@ -1736,7 +1777,34 @@ mod tests {
         )
         .await
         .expect("a folder of the team's that is not a task's");
-        assert!(a_task_folders_name("2026-10-05 Plan"));
+        assert!(a_task_folders_name("2026-10-05 Plan") && a_task_folders_name("2026-10-05-Plan"));
+        // A task's folder Errand did not make is not made here either: the
+        // lead is sent back to the one it has.
+        let invented = team.join("2026-10-06-ConvertApp/README.md");
+        let why = run(
+            "write_file",
+            &json!({ "path": invented.display().to_string(), "contents": "x" }),
+            &home,
+            "c",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(why.contains("Errand makes those itself"), "{why}");
+        assert!(!team.join("2026-10-06-ConvertApp").exists());
+        // A dated file at the team's top, and a folder without a day, are the
+        // team's own.
+        for allowed in ["2026-10-05-market-report.md", "Weather-widget/README.md"] {
+            run(
+                "write_file",
+                &json!({ "path": team.join(allowed).display().to_string(), "contents": "x" }),
+                &home,
+                "c",
+            )
+            .await
+            .unwrap_or_else(|why| panic!("{allowed}: {why}"));
+        }
+        assert!(!a_task_folders_name("2026-10-05-market-report.md"));
         assert!(!a_task_folders_name("2026-13-05 Plan") && !a_task_folders_name("parts"));
         assert!(!a_task_folders_name("2026-10-05") && !a_task_folders_name("2026-10-05x Plan"));
         put_away(&home);
@@ -2137,6 +2205,78 @@ mod tests {
         // its own: stopping every command there is killed the one another test
         // was in the middle of, which then failed for a reason of this one's.
         crate::jobs::stop_everything_from("a-conversation");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_command_that_ends_takes_what_it_started_in_the_background_with_it() {
+        // A window app tried with `&` ran on in the wall for twelve minutes,
+        // in no list and stopped by nothing.
+        if !crate::wall::possible() {
+            return;
+        }
+        let home = std::env::temp_dir().join(format!("errand-left-{}", std::process::id()));
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(&home).unwrap();
+        let said = run(
+            "run_command",
+            &json!({ "command": "sleep 300 & echo $! > left.pid; echo started" }),
+            &home,
+            "left-behind",
+        )
+        .await
+        .unwrap();
+        assert!(
+            said.contains("started") && said.contains("which was stopped"),
+            "{said}"
+        );
+        let left: i32 = std::fs::read_to_string(home.join("left.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // SAFETY: signal 0 only asks whether that process is there.
+        assert!(
+            unsafe { libc::kill(left, 0) } != 0,
+            "the background sleep is still running"
+        );
+        // A command that leaves nothing behind says nothing about it.
+        let said = run(
+            "run_command",
+            &json!({ "command": "echo plain" }),
+            &home,
+            "left-behind",
+        )
+        .await
+        .unwrap();
+        assert!(!said.contains("which was stopped"), "{said}");
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stopping_a_command_stops_what_it_started_too() {
+        let home = std::env::temp_dir().join(format!("errand-stop-tree-{}", std::process::id()));
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::create_dir_all(&home).unwrap();
+        let mut sh = tokio::process::Command::new("/bin/sh");
+        sh.current_dir(&home)
+            .arg("-c")
+            .arg("sleep 300 & echo $! > child.pid; sleep 300");
+        let started = crate::jobs::start(sh, "two sleeps", "two sleeps", "stop-tree", 0).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let child: i32 = std::fs::read_to_string(home.join("child.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(crate::jobs::stop(&started.handle));
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        // SAFETY: signal 0 only asks whether that process is there.
+        assert!(
+            unsafe { libc::kill(child, 0) } != 0,
+            "what it started outlived the stop"
+        );
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[tokio::test(flavor = "multi_thread")]

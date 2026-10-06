@@ -21,6 +21,7 @@ import { tile, forTool, kindOf } from "./icons.js";
 import { STATES, SHOWING, shown, stateOf, chipOf, byState as inStateOrder, stillInTheList, inOrder, byTeammate, aMadeUpName, askedBy, aNameFrom, answeredAs, askedForByOthers } from "./jobs.js";
 import { render, reachTheAppWith } from "./markdown.js";
 import { toSay, worthSaying } from "./speech.js";
+import { wordsOf, fitOf, usualWordsFor, leaningWordsFor, theBestFit } from "./fit.js";
 
 const { invoke: invokeTheApp } = window.__TAURI__.core;
 
@@ -905,52 +906,13 @@ async function alsoAsk() {
  */
 let newTaskFor = { teams: [], people: [], brings: new Map() };
 
-/** Words too common to say anything about who should do a task. */
-const TOO_COMMON = new Set(
-  ("that this with from have what which will would should could about into them they their there then than when where your make made need needs does done some more most very just also only each every please want like " +
-    "the and for you are but not all any can has its our out new get now one two use way who why how see let put say too was his her him may own team")
-    .split(" "),
-);
-
-/** The usual words for a kind of role, so a role of two letters still matches. */
-const ROLE_WORDS = [
-  [/\b(qa|test\w*|review\w*|check\w*|verif\w*)\b/i, "test tests testing check checks verify review bug bugs break"],
-  [/\b(code\w*|coder|dev|developer|engineer\w*|build\w*|program\w*|app)\b/i, "code build program script tool function implement python rust javascript fix bug"],
-  [/\b(writ\w*|copy\w*|editor|docs|text|content)\b/i, "write writing readme docs documentation text explain article"],
-  [/\b(research\w*|analys\w*|scout|news|market\w*|finance)\b/i, "research find sources search news compare analyse report"],
-  [/\b(design\w*|visual\w*|pixel)\b/i, "design layout visual image icon style colour"],
-];
-
-function wordsOf(text) {
-  return (String(text || "").toLowerCase().match(/[a-z0-9]+/g) || []).filter(
-    (w) => w.length >= 3 && !TOO_COMMON.has(w),
-  );
-}
-
-/** A word without its ending, so test, tests, tester and testing are one. */
-function stemOf(w) {
-  for (const end of ["ing", "ers", "er", "ed", "es", "s"]) {
-    if (w.length > end.length + 2 && w.endsWith(end)) {
-      w = w.slice(0, -end.length);
-      break;
-    }
-  }
-  return w.length > 3 && w.endsWith("e") ? w.slice(0, -1) : w;
-}
-
 /** What a teammate is about, as words to match a task against. Its role
  * brings the usual words for that kind of role, matched as a whole word. */
 function profileOf(a) {
   const brought = newTaskFor.brings.get(a.id);
-  const usual = ROLE_WORDS.filter(([asks]) => asks.test(a.title || "")).map(([, words]) => words);
-  return [a.name, a.title || "", a.about || "", ...(brought?.skills || []), ...usual].join(" ");
+  return [a.name, a.title || "", a.about || "", ...(brought?.skills || []), usualWordsFor(a.title)].join(" ");
 }
 
-/** How many words a task shares with a profile, by their starts. */
-function fitOf(text, profile) {
-  const theirs = new Set(wordsOf(profile).map(stemOf));
-  return new Set(wordsOf(text).map(stemOf).filter((w) => theirs.has(w))).size;
-}
 
 /**
  * Open the box for a new task. With `aim`, a team or a teammate already
@@ -1026,15 +988,16 @@ function newTaskRows() {
 function drawNewTask() {
   const text = el.newTaskWhat.value;
   const byId = new Map([...agents.values()].map((a) => [a.id, a]));
-  const people = newTaskFor.people.map((a, at) => ({ a, at, fit: fitOf(text, profileOf(a)) }));
+  const people = newTaskFor.people.map((a, at) => ({ a, at, fit: fitOf(text, profileOf(a), leaningWordsFor(a.title)) }));
   const fitOfPerson = new Map(people.map((x) => [x.a.id, x.fit]));
   // A team fits by its best member, and better only when several of its
   // people each fit a part: one member's words alone are that member's.
   const team = newTaskFor.teams.map((t) => {
     const lead = t.lead && byId.get(t.lead);
     const crew = [lead, ...t.members.map((m) => byId.get(m))].filter(Boolean);
-    const fits = crew.map((a) => fitOfPerson.get(a.id) ?? fitOf(text, profileOf(a)));
-    const several = fits.filter((f) => f > 0).length;
+    const fits = crew.map((a) => fitOfPerson.get(a.id) ?? fitOf(text, profileOf(a), leaningWordsFor(a.title)));
+    // Only members that fit by a word of their own count as several.
+    const several = fits.filter((f) => f >= 1).length;
     const fit = lead ? Math.max(0, ...fits) + (several >= 2 ? several - 1 : 0) : 0;
     return { t, lead, crew, fit };
   });
@@ -1045,7 +1008,7 @@ function drawNewTask() {
     ...people.map((x) => ({ key: `person:${x.a.id}`, fit: x.fit, team: 0 })),
     ...team.filter((x) => x.lead).map((x) => ({ key: `team:${x.t.id}`, fit: x.fit, team: 1 })),
   ].sort((x, y) => y.fit - x.fit || x.team - y.team);
-  const bestKey = ranked[0]?.fit > 0 ? ranked[0].key : null;
+  const bestKey = theBestFit(ranked);
   const mark = (key) => {
     if (key !== bestKey) return null;
     const pill = document.createElement("span");

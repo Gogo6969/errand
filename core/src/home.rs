@@ -103,11 +103,17 @@ pub fn make_task_folder(
 ) -> Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
     let theirs = make_team_folder(errand, team, name)?;
-    let called = format!("{} {}", on.format("%Y-%m-%d"), a_task_folders_words(asked));
+    // Joined with hyphens rather than spaces: a model writing a command
+    // leaves a path with spaces unquoted often enough to lose the folder.
+    let called = format!(
+        "{}-{}",
+        on.format("%Y-%m-%d"),
+        a_task_folders_words(asked).replace(' ', "-")
+    );
     for n in 1..=99 {
         let at = theirs.join(match n {
             1 => called.clone(),
-            n => format!("{called} {n}"),
+            n => format!("{called}-{n}"),
         });
         // Made private as it is made: a separate change of permissions
         // afterwards would follow a link a member swapped in meanwhile.
@@ -746,12 +752,12 @@ mod tests {
         let named = first.file_name().unwrap().to_string_lossy().to_string();
         assert_eq!(
             named,
-            "2026-10-05 Write a small Python script that converts"
+            "2026-10-05-Write-a-small-Python-script-that-converts"
         );
         // The same words on the same day: another folder, not the same one.
         let second = make_task_folder(&errand, "d920e678-7edf", "Drill", asked, on).unwrap();
         assert_ne!(first, second);
-        assert!(second.ends_with("2026-10-05 Write a small Python script that converts 2"));
+        assert!(second.ends_with("2026-10-05-Write-a-small-Python-script-that-converts-2"));
         std::fs::remove_dir_all(&errand).ok();
     }
 
@@ -799,17 +805,17 @@ mod tests {
         let team = make_team_folder(&errand, "d920e678-7edf", "Drill").unwrap();
         let elsewhere = errand.join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
-        std::os::unix::fs::symlink(&elsewhere, team.join("2026-10-05 Plan the launch")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, team.join("2026-10-05-Plan-the-launch")).unwrap();
         let at =
             make_task_folder(&errand, "d920e678-7edf", "Drill", "Plan the launch", on).unwrap();
         assert!(
-            at.ends_with("2026-10-05 Plan the launch 2"),
+            at.ends_with("2026-10-05-Plan-the-launch-2"),
             "{}",
             at.display()
         );
         assert!(std::fs::symlink_metadata(&at).unwrap().file_type().is_dir());
         assert!(
-            std::fs::read_link(team.join("2026-10-05 Plan the launch")).is_ok(),
+            std::fs::read_link(team.join("2026-10-05-Plan-the-launch")).is_ok(),
             "the member's link was left as it was"
         );
         std::fs::remove_dir_all(&errand).ok();

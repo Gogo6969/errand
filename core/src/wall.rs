@@ -371,7 +371,9 @@ fn its_tasks_kept(team: &Path) -> String {
     };
     // Spelled out: the wall's regular expressions take no counts, and
     // "[0-9]{4}" there is a rule that matches nothing.
-    let day = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [^/]+";
+    // No dot: a task's folder never has one, and a dated file such as
+    // 2026-10-05-report.md at the team's top is the team's own to write.
+    let day = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][- ][^/.]+";
     let names = "(\\.[Cc][Ll][Aa][Uu][Dd][Ee](/|$)|\\.[Mm][Cc][Pp]\\.[Jj][Ss][Oo][Nn]$|\
                  [Cc][Ll][Aa][Uu][Dd][Ee](\\.[Ll][Oo][Cc][Aa][Ll])?\\.[Mm][Dd]$)";
     format!("\n(deny file-write*\n  (regex #\"^{at}/{day}$\")\n  (regex #\"^{at}/{day}/{names}\"))")
@@ -1290,7 +1292,7 @@ mod tests {
         let errand = root.join("Errand");
         let home = errand.join("threads/a1");
         let team = errand.join("teams/t1");
-        let task = team.join("2026-10-05 Build a small website");
+        let task = team.join("2026-10-05-Build-a-small-website");
         let other = root.join("Allowed");
         for folder in [&home, &task, &other.join("2026-10-05 Notes")] {
             std::fs::create_dir_all(folder).unwrap();
@@ -1338,6 +1340,21 @@ mod tests {
             )),
             "moved a task's folder aside"
         );
+        // A dated file at the team's top is the team's own to write.
+        assert!(
+            run(&format!(
+                "echo x > {}",
+                quoted(&team.join("2026-10-05-market-report.md"))
+            )),
+            "could not write a dated file at the team's top"
+        );
+        // Nor makes one of its own: Errand makes a task's folder as it begins.
+        for invented in ["2026-10-06-ConvertApp", "2026-10-06 ConvertApp"] {
+            assert!(
+                !run(&format!("mkdir {}", quoted(&team.join(invented)))),
+                "made a task's folder of its own, {invented}"
+            );
+        }
         // The work itself goes in, a project's own settings a folder down,
         // and the team's other folders are as they were.
         for written in ["index.html", "site/CLAUDE.md"] {

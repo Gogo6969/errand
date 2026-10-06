@@ -1565,9 +1565,9 @@ fn close_if_on_another_model(held: &Held, id: &str, now: &Model) {
 fn where_the_parts_go(team: Option<&std::path::Path>, own: Option<&std::path::Path>) -> String {
     match (own, team) {
         (Some(own), _) => format!(
-            " Have the parts and the result put in this task's own folder, {}, inside the \
-             team's folder, which every member can read and write, and tell each member that \
-             is where its part goes. Earlier tasks' work is in the team's folder too, at its \
+            " This task's own folder is already made: {}, inside the team's folder, which \
+             every member can read and write. Use it as it is, make no other, and tell each \
+             member that is where its part goes. Earlier tasks' work is in the team's folder too, at its \
              top or in folders of their own: read it if it helps, and do not write over it, \
              unless what the person wants done is to change it; then change it where it is and \
              say so.",
@@ -10911,13 +10911,13 @@ mod tests {
         );
         assert_eq!(
             where_it_may_be_opened_from(
-                Path::new("/x/Errand/teams/t1/2026-10-06 Make an app/Converter.app"),
+                Path::new("/x/Errand/teams/t1/2026-10-06-Make-an-app/Converter.app"),
                 home,
                 &teams
             ),
             Some((
                 Some("DRILL-TEAM".to_string()),
-                "2026-10-06 Make an app/Converter.app".to_string()
+                "2026-10-06-Make-an-app/Converter.app".to_string()
             ))
         );
         // Not the folders themselves, not a team it is not on, not elsewhere,
@@ -10940,10 +10940,10 @@ mod tests {
     #[test]
     fn a_team_tasks_lead_is_told_the_tasks_own_folder_and_to_leave_the_others() {
         let team = std::path::Path::new("/x/Errand/teams/t1");
-        let own = team.join("2026-10-05 Plan the launch");
+        let own = team.join("2026-10-05-Plan-the-launch");
         let told = where_the_parts_go(Some(team), Some(&own));
         assert!(
-            told.contains("this task's own folder, /x/Errand/teams/t1/2026-10-05 Plan the launch,"),
+            told.contains("This task's own folder is already made: /x/Errand/teams/t1/2026-10-05-Plan-the-launch,"),
             "{told}"
         );
         assert!(told.contains("do not write over it"), "{told}");
