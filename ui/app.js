@@ -266,6 +266,7 @@ const el = {
   missionDone: document.getElementById("mission-done"),
   nowCount: document.getElementById("now-count"),
   newTask: document.getElementById("task-chooser"),
+  newTaskTitle: document.getElementById("task-chooser-title"),
   newTaskWhat: document.getElementById("task-chooser-what"),
   newTaskSay: document.getElementById("task-chooser-say"),
   newTaskWho: document.getElementById("task-chooser-who"),
@@ -886,13 +887,10 @@ async function start({ introduce = false } = {}) {
 async function alsoAsk() {
   const a = whose();
   if (!a) return;
-  const id = uuid();
-  await invoke("start_conversation", { id, agent: a.id, name: "New task" });
-  talks.set(id, asTalk({ id, agent: a.id, name: "New task" }, { loaded: true }));
-  // `show` opens it. Doing it here as well was harmless and still wrong: the
-  // second call is a no-op only because the first one already succeeded.
-  await show(id);
-  el.what.focus();
+  // Through the same box as +, aimed at this teammate: the task is made when
+  // something is said in it. Made first, a task nobody went on to ask
+  // anything sat on the list as "Nothing asked yet" for good.
+  await openNewTask({ aim: { kind: "person", id: a.id } });
 }
 
 /* ------------------------------------------------------------ new task -- */
@@ -954,22 +952,56 @@ function fitOf(text, profile) {
   return new Set(wordsOf(text).map(stemOf).filter((w) => theirs.has(w))).size;
 }
 
-async function openNewTask() {
+/**
+ * Open the box for a new task. With `aim`, a team or a teammate already
+ * chosen: from its own New task button, so Enter gives it to them.
+ */
+async function openNewTask({ aim = null } = {}) {
   const [teams, brought] = await Promise.all([
     invoke("teams").catch(() => []),
     invoke("what_they_bring").catch(() => []),
   ]);
+  const people = teammatesToChoose();
+  // The one it is aimed at is listed even before it has a name of its own.
+  if (aim?.kind === "person" && !people.some((a) => a.id === aim.id) && agents.has(aim.id)) {
+    people.unshift(agents.get(aim.id));
+  }
   newTaskFor = {
     teams: teams || [],
-    people: teammatesToChoose(),
+    people,
     brings: new Map((brought || []).map(([id, skills, checks, own]) => [id, { skills: skills || [], checks, own }])),
+    aim,
   };
   focusBeforeNewTask = document.activeElement;
   el.newTaskWhat.value = "";
-  el.newTaskSay.textContent = "Who should do it?";
-  el.newTaskSay.dataset.wrong = "false";
+  sayWhoDoesIt();
   el.newTask.hidden = false;
   drawNewTask();
+  el.newTaskWhat.focus();
+}
+
+/** The team or teammate the box is aimed at, with its name, or null. */
+function aimedAt() {
+  const aim = newTaskFor.aim;
+  if (!aim) return null;
+  const name =
+    aim.kind === "team" ? newTaskFor.teams.find((t) => t.id === aim.id)?.name : agents.get(aim.id)?.name;
+  return name ? { ...aim, name } : null;
+}
+
+/** The box's title and the line over the list, as they are while nothing is wrong. */
+function sayWhoDoesIt() {
+  const aimed = aimedAt();
+  el.newTaskTitle.textContent = aimed ? `New task for ${aimed.name}` : "New task";
+  el.newTaskWhat.placeholder = aimed ? `What should ${aimed.name} do?` : "What needs doing?";
+  el.newTaskSay.textContent = aimed ? `Enter gives it to ${aimed.name}.` : "Who should do it?";
+  el.newTaskSay.dataset.wrong = "false";
+}
+
+/** Asked to choose before anything was written: said once, where it was asked. */
+function sayWhatFirst() {
+  el.newTaskSay.textContent = "Say what needs doing first, then who does it.";
+  el.newTaskSay.dataset.wrong = "true";
   el.newTaskWhat.focus();
 }
 
@@ -1099,6 +1131,21 @@ function drawNewTask() {
   const someone = row("new", "", plus, "New teammate", "", "Somebody new for this: you name it and give it a job first");
   someone.classList.add("someone-new");
   items.push(someone);
+
+  // Aimed at one: that one, chosen, and a way to everybody else.
+  const aimed = aimedAt();
+  if (aimed) {
+    const theOne = items.find((li) => li.dataset?.kind === aimed.kind && li.dataset.id === aimed.id);
+    theOne?.querySelector(".fit")?.remove();
+    theOne?.setAttribute("aria-selected", "true");
+    const more = document.createElement("span");
+    more.className = "team-mark";
+    more.textContent = "…";
+    const anyone = row("anyone", "", more, "Somebody else", "", "Every team and teammate, with the best fit marked");
+    anyone.classList.add("someone-new");
+    el.newTaskWho.replaceChildren(...[theOne, anyone].filter(Boolean));
+    return;
+  }
   el.newTaskWho.replaceChildren(...items);
 }
 
@@ -1116,8 +1163,34 @@ function outOfTheWay() {
   document.querySelector(".closer")?.remove();
 }
 
+/** A choice still being carried out: a second Enter or click waits for it. */
+let choosingNow = false;
+
 async function chooseWhoDoesIt(kind, id) {
+  if (choosingNow) return;
   const text = el.newTaskWhat.value.trim();
+  if (kind === "anyone") {
+    newTaskFor.aim = null;
+    sayWhoDoesIt();
+    drawNewTask();
+    el.newTaskWhat.focus();
+    return;
+  }
+  // A task is made with what it is for, never empty: one made first and
+  // never asked anything stayed on the list as "Nothing asked yet".
+  if (kind !== "new" && !text) {
+    sayWhatFirst();
+    return;
+  }
+  choosingNow = true;
+  try {
+    await carryOutTheChoice(kind, id, text);
+  } finally {
+    choosingNow = false;
+  }
+}
+
+async function carryOutTheChoice(kind, id, text) {
   if (kind === "new") {
     closeNewTask();
     outOfTheWay();
@@ -1136,9 +1209,30 @@ async function chooseWhoDoesIt(kind, id) {
       talk = await invoke("a_task_for_the_team", { team: id });
       talks.set(talk, asTalk({ id: talk, agent: team.lead, name: team.name }, { loaded: false }));
     } else {
-      talk = uuid();
-      await invoke("start_conversation", { id: talk, agent: id, name: "New task" });
-      talks.set(talk, asTalk({ id: talk, agent: id, name: "New task" }, { loaded: true }));
+      const first = talks.get(id);
+      // Never one written down already: a saved agent still called that, with
+      // its first conversation not read yet, would have the task said into
+      // that conversation instead.
+      if (
+        agents.get(id)?.name === NOT_YET_NAMED && !agents.get(id)?.spoke &&
+        first?.agent === id && first.loaded && !first.messages?.length
+      ) {
+        // Made in this window and not written down until something is said to
+        // it: its first conversation is the task, and saying it writes both
+        // down. A conversation of its own would have nobody to belong to yet.
+        talk = id;
+      } else {
+        talk = uuid();
+        await invoke("start_conversation", { id: talk, agent: id, name: "New task" });
+        talks.set(talk, asTalk({ id: talk, agent: id, name: "New task" }, { loaded: true }));
+      }
+    }
+    // The rest of whoever's task it is, as opening them would: a teammate
+    // not opened yet in this window otherwise showed this task alone, in its
+    // menu, under its row and on the card, until somebody clicked it.
+    const owner = talks.get(talk)?.agent;
+    for (const c of (await invoke("conversations", { agent: owner }).catch(() => [])) || []) {
+      talks.set(c.id, asTalk(c, talks.get(c.id)));
     }
   } catch (why) {
     // Kept open, with what was written: said where it was asked.
@@ -1151,12 +1245,18 @@ async function chooseWhoDoesIt(kind, id) {
   await show(talk);
   // Said in that task only. If something else was opened meanwhile, the
   // words wait in that task's box rather than going to whoever is on screen.
-  if (text && showing === talk) await sayIt(text);
-  else if (text) halfTyped.set(talk, text);
-  else el.what.focus();
+  // The keyboard in its box, as when a task was made there, for what comes next.
+  if (showing === talk) {
+    el.what.focus();
+    await sayIt(text);
+  } else halfTyped.set(talk, text);
 }
 
-el.newTaskWhat.addEventListener("input", () => drawNewTask());
+el.newTaskWhat.addEventListener("input", () => {
+  // Nobody is told off for a box they are still filling in.
+  if (el.newTaskSay.dataset.wrong === "true") sayWhoDoesIt();
+  drawNewTask();
+});
 el.newTaskWhat.addEventListener("keydown", (e) => {
   // A word still being composed takes its own Enter.
   if (e.isComposing || e.keyCode === 229) return;
@@ -1168,6 +1268,11 @@ el.newTaskWhat.addEventListener("keydown", (e) => {
     el.newTaskWhat.selectionEnd === el.newTaskWhat.value.length;
   if ((e.key === "ArrowDown" && atTheEnd) || (e.key === "Enter" && !e.shiftKey)) {
     e.preventDefault();
+    if (e.key === "Enter" && e.repeat) return;
+    if (e.key === "Enter" && !el.newTaskWhat.value.trim()) return sayWhatFirst();
+    // Aimed at somebody, Enter gives it to them: they are already chosen.
+    const aimed = aimedAt();
+    if (e.key === "Enter" && aimed) return chooseWhoDoesIt(aimed.kind, aimed.id);
     const rows = newTaskRows();
     pickNewTaskRow(rows.find((r) => r.querySelector(".fit")) || rows[0]);
   }
@@ -2685,8 +2790,7 @@ function openTheMenu(a, x, y) {
 
   item("New task for this teammate", async () => {
     closeTheMenu();
-    if (a.id !== showingAgent) await openAgent(a.id);
-    await alsoAsk();
+    await openNewTask({ aim: { kind: "person", id: a.id } });
   });
 
   item("Duplicate", async () => {
@@ -4825,6 +4929,13 @@ async function sayIt(text, going = []) {
     // the store has answered.
     mine.seq = await invoke("say", { id: t.id, text, attached: going.length ? going : null });
     drawMessages();
+    // The first thing asked is what the task says it does. The list was read
+    // only at the start and in Mission Control, so a new task's card said
+    // "Nothing asked yet" through the whole of its first run.
+    if (!tasksNow.find((x) => x.id === t.id)?.first) {
+      await readTasks();
+      if (showing === t.id) drawTaskCard();
+    }
   } catch (why) {
     t.working = false;
     t.messages.push({ kind: "ended", failed: true, text: String(why) });
@@ -5965,7 +6076,12 @@ el.taskDone.addEventListener("click", () => {
 });
 
 el.talks.addEventListener("change", async () => {
-  if (el.talks.value === "+") return alsoAsk();
+  if (el.talks.value === "+") {
+    // The menu goes back to the task on screen; the new one is made once
+    // something is said in it.
+    el.talks.value = showing || "";
+    return alsoAsk();
+  }
   if (el.talks.value === "room") return offerARoom();
   await show(el.talks.value);
 });
@@ -9275,21 +9391,9 @@ async function drawTeams() {
       folder.title = `Open the folder where ${team.name} keeps its work. Everybody on the team can write in it.`;
     };
     retitle();
-    give.addEventListener("click", async () => {
-      give.disabled = true;
-      let id;
-      try {
-        id = await invoke("a_task_for_the_team", { team: team.id });
-      } catch (why) {
-        give.disabled = false;
-        give.title = String(why);
-        return;
-      }
-      talks.set(id, asTalk({ id, agent: team.lead, name: team.name }, { loaded: false }));
-      closeTeams();
-      await show(id);
-      el.what.focus();
-    });
+    // Through the box +, aimed at this team: the task is made with what it
+    // is for, rather than made first and left empty if nothing was said.
+    give.addEventListener("click", () => openNewTask({ aim: { kind: "team", id: team.id } }));
     changes.append(give);
     const onIt = new Set([team.lead, ...team.members]);
     const addable = everybody.filter((a) => !onIt.has(a.id)).map((a) => [a.id, label(a)]);

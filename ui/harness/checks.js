@@ -22,6 +22,14 @@ function openTheTab(which) {
 /** Whether Mission Control, the overlay itself, is closed. */
 const missionClosed = () => document.getElementById("mission").hidden;
 
+/** Write in the New task box, and press Enter there. */
+function writeInTheNewTaskBox(words) {
+  const what = document.getElementById("task-chooser-what");
+  what.value = words;
+  what.dispatchEvent(new Event("input"));
+  what.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+}
+
 /**
  * Open one of the fixture's conversations, the way somebody would.
  *
@@ -5532,6 +5540,54 @@ export async function missionControlKeepsItsPlace() {
     parseFloat(getComputedStyle(setup).fontSize) >= 18 && (!beingDrawn() || (gear.top >= row.top && gear.bottom <= row.bottom)),
     `${getComputedStyle(setup).fontSize}, ${Math.round(gear.height)}px in a ${Math.round(row.height)}px row`,
   );
+  // A teammate made here and not written down yet: its first conversation
+  // is the task, and nothing is started for somebody not in the store yet.
+  key("k", { metaKey: true });
+  await wait(150);
+  [...document.querySelectorAll("#palette-list li")].find((li) => /^New agent/.test(li.textContent))?.click();
+  await wait(400);
+  const fresh = document.querySelector('#threads li[aria-current="true"]')?.dataset.agent;
+  const madeBefore = asked.length;
+  document.querySelector(`#threads li[data-agent="${fresh}"] .task-new .add`)?.click();
+  await wait(400);
+  check("its New task names the teammate it is for", document.getElementById("task-chooser-title").textContent === "New task for New errand", document.getElementById("task-chooser-title").textContent);
+  writeInTheNewTaskBox("Plan the week");
+  await wait(500);
+  check(
+    "a teammate not written down yet takes the task in its first conversation, with nothing started for nobody",
+    !asked.slice(madeBefore).some((a) => a.name === "start_conversation") &&
+      asked.slice(madeBefore).some((a) => a.name === "say" && a.args?.id === fresh && a.args.text === "Plan the week") &&
+      document.getElementById("task-chooser").hidden && !document.getElementById("task-chooser-say").textContent.includes("could not"),
+    JSON.stringify(asked.slice(madeBefore).map((a) => a.name)),
+  );
+  check("and the keyboard is in its box for what comes next", document.activeElement === document.getElementById("what"), document.activeElement?.id);
+  if (fresh) tell("happened", { conversation: fresh, seq: 9801, kind: "done" });
+  await wait(150);
+  // Written down already but still called New errand, its first conversation
+  // not read yet in this window: a task for it is a task of its own, never
+  // said into that conversation.
+  FIXTURE.agents.push({ ...FIXTURE.agents.find((a) => a.id === "agent-bitcoin"), id: "agent-unsettled", name: "New errand", title: null, started_at: 5, spoke_at: 5 });
+  FIXTURE.conversations["agent-unsettled"] = [{ id: "agent-unsettled", agent: "agent-unsettled", name: "First", opened: false }];
+  tell("task_made", { conversation: "agent-unsettled", agent: "agent-unsettled", name: "First" });
+  await wait(500);
+  const unsettledRow = document.querySelector('#threads li[data-agent="agent-unsettled"]');
+  unsettledRow?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 200 }));
+  await wait(150);
+  [...document.querySelectorAll("#menu button")].find((b) => /^New task for this teammate/.test(b.textContent))?.click();
+  await wait(400);
+  const unsettledAt = asked.length;
+  writeInTheNewTaskBox("Plan the week ahead");
+  await wait(600);
+  const ownTask = asked.slice(unsettledAt).find((a) => a.name === "start_conversation");
+  check(
+    "a teammate written down but still called New errand gets a task of its own, not its first conversation",
+    ownTask?.args?.agent === "agent-unsettled" &&
+      asked.slice(unsettledAt).some((a) => a.name === "say" && a.args?.id === ownTask.args.id) &&
+      !asked.slice(unsettledAt).some((a) => a.name === "say" && a.args?.id === "agent-unsettled"),
+    JSON.stringify(asked.slice(unsettledAt).map((a) => `${a.name}:${a.args?.id || a.args?.agent || ""}`)),
+  );
+  if (ownTask) tell("happened", { conversation: ownTask.args.id, seq: 9802, kind: "done" });
+  await wait(150);
   return found;
 }
 
@@ -6816,13 +6872,37 @@ export async function aTaskSaysWhatItIs() {
   const starting = asked.length;
   newTask.click();
   await wait(300);
+  const box = document.getElementById("task-chooser");
+  const boxSays = () => document.getElementById("task-chooser-say");
   check(
-    "and it starts a new task for that teammate and opens it",
-    asked.slice(starting).some((a) => a.name === "start_conversation" && a.args?.agent === "agent-bitcoin") &&
-      (document.getElementById("talks").selectedOptions[0]?.textContent || "").startsWith("New task") &&
-      chip()?.dataset.kind === "idle" && fact("Does") === "Nothing asked yet",
-    `${document.getElementById("talks").selectedOptions[0]?.textContent} ${chip()?.dataset.kind} ${fact("Does")}`,
+    "and it opens the New task box for that teammate, with nothing made yet",
+    !box.hidden && document.getElementById("task-chooser-title").textContent === "New task for Bitcoin Desk" &&
+      document.activeElement?.id === "task-chooser-what" &&
+      document.querySelector('#task-chooser-who .who[aria-selected="true"]')?.dataset.id === "agent-bitcoin" &&
+      !asked.slice(starting).some((a) => a.name === "start_conversation"),
+    `${document.getElementById("task-chooser-title").textContent} | ${JSON.stringify(asked.slice(starting).map((a) => a.name))}`,
   );
+  writeInTheNewTaskBox("");
+  await wait(200);
+  check(
+    "Enter with nothing written asks what needs doing, and makes nothing",
+    !box.hidden && boxSays().dataset.wrong === "true" && /Say what needs doing first/.test(boxSays().textContent) &&
+      !asked.slice(starting).some((a) => a.name === "start_conversation"),
+    boxSays().textContent,
+  );
+  writeInTheNewTaskBox("Check the overnight price moves");
+  await wait(600);
+  const made = asked.slice(starting).find((a) => a.name === "start_conversation");
+  check(
+    "written, Enter makes the task for that teammate, opens it, and asks it",
+    box.hidden && made?.args?.agent === "agent-bitcoin" &&
+      asked.slice(starting).some((a) => a.name === "say" && a.args?.id === made.args.id && a.args.text === "Check the overnight price moves") &&
+      (document.getElementById("talks").selectedOptions[0]?.textContent || "").startsWith("New task"),
+    `${document.getElementById("talks").selectedOptions[0]?.textContent} ${JSON.stringify(asked.slice(starting).map((a) => a.name))}`,
+  );
+  check("and its card says what it was asked, not Nothing asked yet", fact("Does") === "Check the overnight price moves", fact("Does"));
+  if (made) tell("happened", { conversation: made.args.id, seq: 9701, kind: "done" });
+  await wait(200);
 
   // A second schedule the app set up as a task of its own is there at once.
   FIXTURE.conversations["agent-bitcoin"].push({
@@ -6920,12 +7000,36 @@ export async function tasksDownTheSideAndNow() {
   const starting = asked.length;
   add.click();
   await wait(400);
+  const whoRows = () => [...document.querySelectorAll("#task-chooser-who .who")];
   check(
-    "New task starts one for this teammate, listed and marked",
-    asked.slice(starting).some((a) => a.name === "start_conversation" && a.args?.agent === "agent-bitcoin") &&
-      rows().find((r) => r.getAttribute("aria-current") === "true")?.querySelector(".task-name")?.textContent === "New task",
+    "New task asks what it is for that teammate, with somebody else a choice away",
+    whoRows().map((r) => r.dataset.kind).join(",") === "person,anyone" && whoRows()[0].dataset.id === "agent-bitcoin",
+    whoRows().map((r) => `${r.dataset.kind}:${r.querySelector(".name")?.textContent}`).join(" | "),
+  );
+  document.getElementById("task-chooser-what").value = "Sort the overnight notes";
+  whoRows()[1].click();
+  await wait(200);
+  check(
+    "Somebody else shows every team and teammate, and keeps what was written",
+    document.getElementById("task-chooser-title").textContent === "New task" && whoRows().filter((r) => r.dataset.kind === "person").length > 1 &&
+      document.getElementById("task-chooser-what").value === "Sort the overnight notes",
+    `${document.getElementById("task-chooser-title").textContent} ${whoRows().length}`,
+  );
+  document.getElementById("task-chooser").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await wait(150);
+  add.click();
+  await wait(400);
+  writeInTheNewTaskBox("Sort the overnight notes");
+  await wait(600);
+  const sorted = asked.slice(starting).find((a) => a.name === "start_conversation");
+  check(
+    "and written, Enter starts it for this teammate, listed by what it was asked and marked",
+    sorted?.args?.agent === "agent-bitcoin" && asked.slice(starting).filter((a) => a.name === "start_conversation").length === 1 &&
+      rows().find((r) => r.getAttribute("aria-current") === "true")?.querySelector(".task-name")?.textContent === "Sort the overnight notes",
     rows().map((r) => `${r.getAttribute("aria-current") === "true" ? "*" : ""}${r.querySelector(".task-name")?.textContent}`).join(" | "),
   );
+  if (sorted) tell("happened", { conversation: sorted.args.id, seq: 9702, kind: "done" });
+  await wait(150);
 
   // Mission Control: drawn and said, with how many tasks need you.
   const now = document.getElementById("mission-open");
@@ -8157,10 +8261,20 @@ export async function aHomeAndATeamTask() {
   renamed.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   await wait(300);
   check("a new name is said at once on the task and folder buttons", give.textContent === "Give A-SQUAD a task" && /A-SQUAD keeps its work/.test(folder.title), `${give.textContent} | ${folder.title.slice(0, 40)}`);
+  const giving = asked.length;
   give.click();
+  await wait(400);
+  check(
+    "which asks what the task is, for that team, and makes nothing yet",
+    !document.getElementById("task-chooser").hidden && document.getElementById("task-chooser-title").textContent === "New task for A-SQUAD" &&
+      !asked.slice(giving).some((a) => a.name === "a_task_for_the_team"),
+    document.getElementById("task-chooser-title").textContent,
+  );
+  writeInTheNewTaskBox("Ship the release notes");
   await wait(700);
-  check("which starts a task with the lead, named after the team, and opens it", asked.some((a) => a.name === "a_task_for_the_team" && a.args?.team === "team-a") && document.getElementById("teams").hidden && missionClosed() && /A task for A-SQUAD/.test(document.getElementById("messages").textContent), document.getElementById("messages").textContent.slice(-120));
-  check("ready for the person to say what it is", document.activeElement === document.getElementById("what"), document.activeElement?.id);
+  check("and written, starts it with the lead, named after the team, and opens it", asked.some((a) => a.name === "a_task_for_the_team" && a.args?.team === "team-a") && document.getElementById("teams").hidden && missionClosed() && /A task for A-SQUAD/.test(document.getElementById("messages").textContent), document.getElementById("messages").textContent.slice(-120));
+  check("and says to the lead what was written", asked.some((a) => a.name === "say" && a.args?.id === "talk-team-team-a" && a.args.text === "Ship the release notes"), JSON.stringify(asked.slice(giving).map((a) => a.name)));
+  check("with the lead's other tasks read, and the keyboard ready for a follow-up", asked.slice(giving).some((a) => a.name === "conversations" && a.args?.agent === "agent-bitcoin") && document.activeElement === document.getElementById("what"), document.activeElement?.id);
   // The lead hands parts out at once: one step, marked as handing to helpers,
   // with how many finished once they are all back.
   tell("happened", { conversation: "talk-team-team-a", seq: 50, kind: "doing", what: "Handing out parts to Page Smith, Bug Hunter and Ship Lead", tool: "hand_out", call: "ho-1" });
@@ -8170,6 +8284,8 @@ export async function aHomeAndATeamTask() {
   tell("happened", { conversation: "talk-team-team-a", seq: 51, kind: "did", call: "ho-1", outcome: "All 3 finished." });
   await wait(250);
   check("and says how many finished once every part is back", handing() && !handing().classList.contains("running") && /All 3 finished\./.test(handing().textContent), handing()?.textContent);
+  tell("happened", { conversation: "talk-team-team-a", seq: 52, kind: "done" });
+  await wait(150);
   FIXTURE.teams = [{ id: "team-b", name: "B-TEAM", lead: null, members: [], made_at: 0 }];
   openTheTab("teams");
   await wait(400);
@@ -8195,12 +8311,28 @@ export async function aHomeAndATeamTask() {
   );
   const handed = asked.length;
   first.click();
+  await wait(300);
+  check(
+    "choosing before anything is written asks for it, and gives nobody an empty task",
+    !document.getElementById("task-chooser").hidden && document.getElementById("task-chooser-say").dataset.wrong === "true" &&
+      !asked.slice(handed).some((a) => a.name === "a_task_for_the_team") && document.activeElement?.id === "task-chooser-what",
+    JSON.stringify(asked.slice(handed).map((a) => a.name)),
+  );
+  const planBox = document.getElementById("task-chooser-what");
+  planBox.value = "Plan the launch";
+  planBox.dispatchEvent(new Event("input"));
+  await wait(100);
+  check("and writing clears that, rather than telling somebody off while they write", document.getElementById("task-chooser-say").dataset.wrong === "false", document.getElementById("task-chooser-say").textContent);
+  document.querySelector('#task-chooser-who .who[data-id="team-c"]').click();
   await wait(500);
   check(
     "choosing a team gives the team the task, through its lead",
-    document.getElementById("task-chooser").hidden && asked.slice(handed).some((a) => a.name === "a_task_for_the_team" && a.args?.team === "team-c"),
+    document.getElementById("task-chooser").hidden && asked.slice(handed).some((a) => a.name === "a_task_for_the_team" && a.args?.team === "team-c") &&
+      asked.slice(handed).some((a) => a.name === "say" && a.args?.id === "talk-team-team-c" && a.args.text === "Plan the launch"),
     JSON.stringify(asked.slice(handed).map((a) => a.name)),
   );
+  tell("happened", { conversation: "talk-team-team-c", seq: 9703, kind: "done" });
+  await wait(150);
   FIXTURE.teams = [];
   return found;
 }

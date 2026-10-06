@@ -523,7 +523,7 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
                   priority: 2,
                   finished_at: null,
                   spoke_at: 0,
-                  first: null,
+                  first: fixture.firstSaid?.[c.id] ?? null,
                   said: true,
                   ...c,
                   ...(fixture.tasks?.[c.id] || {}),
@@ -723,6 +723,19 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
           case "leave_team": {
             const team = (fixture.teams || []).find((t) => t.id === args.id);
             if (team) team.members = team.members.filter((m) => m !== args.agent);
+            return Promise.resolve(null);
+          }
+          // A task of a teammate's, kept as the app keeps it, so the list of
+          // tasks read afterwards has it.
+          case "start_conversation": {
+            const theirs = (fixture.conversations[args.agent] ||= []);
+            if (!theirs.some((c) => c.id === args.id)) theirs.push({ id: args.id, agent: args.agent, name: args.name, opened: true });
+            return Promise.resolve(null);
+          }
+          // What was said, kept as the first thing asked in that task, which
+          // is what its card says it does.
+          case "say": {
+            (fixture.firstSaid ||= {})[args.id] ??= args.text;
             return Promise.resolve(null);
           }
           // A task for a team: a conversation of the lead's, named after the
