@@ -505,6 +505,8 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
       invoke(name, args) {
         asked.push({ name, args });
         if (breaking[name]) return Promise.reject(breaking[name]);
+        // A check that needs one command to fail for a moment says so here.
+        if (fixture.refuse?.[name]) return Promise.reject(fixture.refuse[name]);
         if (slowly[name]) {
           return new Promise((go) => setTimeout(() => go(null), slowly[name]));
         }
@@ -524,6 +526,7 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
                   finished_at: null,
                   spoke_at: 0,
                   first: fixture.firstSaid?.[c.id] ?? null,
+                  team: fixture.teamOf?.[c.id] ?? null,
                   said: true,
                   ...c,
                   ...(fixture.tasks?.[c.id] || {}),
@@ -744,6 +747,7 @@ export function standIn(fixture = FIXTURE, breaking = {}, slowly = {}) {
             const team = (fixture.teams || []).find((t) => t.id === args.team);
             if (!team?.lead) return Promise.reject("the team has no lead yet: choose one first");
             const id = `talk-team-${team.id}`;
+            (fixture.teamOf ||= {})[id] = team.id;
             (fixture.conversations[team.lead] ||= []).push({ id, agent: team.lead, name: team.name, opened: true });
             fixture.lines[id] = [{ seq: 1, at: Date.now(), kind: "note", text: `A task for ${team.name}. It is told this is the team's task.` }];
             return Promise.resolve(id);

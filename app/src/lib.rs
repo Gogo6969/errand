@@ -9573,6 +9573,9 @@ struct Task {
     talk: Conversation,
     first: Option<String>,
     said: bool,
+    /// The team it was given to, when it was given to a team, so a new task
+    /// from a finished one goes where that one went.
+    team: Option<String>,
 }
 
 /// Every task, whoever's it is: every conversation, with what matters and
@@ -9581,6 +9584,7 @@ struct Task {
 async fn tasks(held: State<'_, Held>) -> Result<Vec<Task>, String> {
     let mut first = held.store.first_things_said().map_err(|e| e.to_string())?;
     let said = held.store.tasks_with_words().map_err(|e| e.to_string())?;
+    let mut teams = held.store.team_of_each_task().map_err(|e| e.to_string())?;
     Ok(held
         .store
         .tasks()
@@ -9589,6 +9593,7 @@ async fn tasks(held: State<'_, Held>) -> Result<Vec<Task>, String> {
         .map(|talk| Task {
             first: first.remove(&talk.id),
             said: said.contains(&talk.id),
+            team: teams.remove(&talk.id),
             talk,
         })
         .collect())
@@ -11296,6 +11301,7 @@ mod tests {
             talk,
             first: Some("Check the drive".into()),
             said: true,
+            team: Some("crew".into()),
         })
         .unwrap();
         assert_eq!(sent["id"], "talk");
@@ -11304,6 +11310,7 @@ mod tests {
         assert_eq!(sent["finished_at"], 1234);
         assert_eq!(sent["first"], "Check the drive");
         assert_eq!(sent["said"], true);
+        assert_eq!(sent["team"], "crew");
         assert!(sent.get("talk").is_none(), "nested: {sent}");
     }
 

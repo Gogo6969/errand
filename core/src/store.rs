@@ -3701,6 +3701,14 @@ impl Store {
             .map(|t| (t, told)))
     }
 
+    /// Which team each team task is for, by conversation.
+    pub fn team_of_each_task(&self) -> Result<HashMap<String, String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut q = conn.prepare("SELECT conversation, team FROM team_tasks")?;
+        let rows = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The lead of a team task has been told it is the team's.
     pub fn team_task_told(&self, conversation: &str) -> Result<()> {
         self.conn.lock().unwrap().execute(
@@ -4554,6 +4562,13 @@ mod tests {
         s.begin_conversation("task", "lead", "A-TEAM").unwrap();
         assert!(s.team_task("task").unwrap().is_none());
         s.mark_team_task("task", "crew").unwrap();
+        assert_eq!(
+            s.team_of_each_task()
+                .unwrap()
+                .get("task")
+                .map(String::as_str),
+            Some("crew")
+        );
         let (team, told) = s.team_task("task").unwrap().unwrap();
         assert_eq!(team.name, "A-TEAM");
         assert!(!told);

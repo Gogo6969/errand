@@ -2272,6 +2272,40 @@ body.catching #what { border-color: var(--accent); }
 #running-note button:hover { border-color: var(--edge); }
 #running-note button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 @keyframes beat { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+
+/* A finished task: the same bar, quiet until somebody writes in it. */
+#finished-note[hidden] { display: none; }
+#finished-note {
+  margin: 8px 18px 0;
+  padding: 7px 8px 7px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+#finished-note[data-asked="true"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--rule));
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  color: var(--ink);
+}
+#finished-note .what { flex: 1; min-width: 0; }
+#finished-note button {
+  flex: none;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+#finished-note button:hover { border-color: var(--edge); }
+#finished-note button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 @media (prefers-reduced-motion: reduce) { #running-note .what::before { animation: none; } }
 /* Paused is the one state here that means nothing will happen, and it should
    not look like a preference. The same red as a watch that has given up. */

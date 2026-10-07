@@ -281,6 +281,10 @@ const el = {
   taskCard: document.getElementById("task-card"),
   runningNote: document.getElementById("running-note"),
   runningStop: document.getElementById("running-stop"),
+  finishedNote: document.getElementById("finished-note"),
+  finishedSays: document.getElementById("finished-says"),
+  finishedReopen: document.getElementById("finished-reopen"),
+  finishedNew: document.getElementById("finished-new"),
   errandModelSays: document.getElementById("errand-model-says"),
   reachableList: document.getElementById("reachable-list"),
   atLogin: document.getElementById("at-login"),
@@ -1153,7 +1157,8 @@ async function chooseWhoDoesIt(kind, id) {
   }
 }
 
-async function carryOutTheChoice(kind, id, text) {
+/** Make the task and say it, with any pictures. True once made, or why not. */
+async function carryOutTheChoice(kind, id, text, pictures = []) {
   if (kind === "new") {
     closeNewTask();
     outOfTheWay();
@@ -1163,7 +1168,7 @@ async function carryOutTheChoice(kind, id, text) {
       el.what.value = text;
       el.what.dispatchEvent(new Event("input"));
     }
-    return;
+    return true;
   }
   let talk;
   try {
@@ -1201,7 +1206,7 @@ async function carryOutTheChoice(kind, id, text) {
     // Kept open, with what was written: said where it was asked.
     el.newTaskSay.textContent = `That could not be started: ${why}`;
     el.newTaskSay.dataset.wrong = "true";
-    return;
+    return String(why);
   }
   closeNewTask();
   outOfTheWay();
@@ -1211,8 +1216,9 @@ async function carryOutTheChoice(kind, id, text) {
   // The keyboard in its box, as when a task was made there, for what comes next.
   if (showing === talk) {
     el.what.focus();
-    await sayIt(text);
+    await sayIt(text, pictures);
   } else halfTyped.set(talk, text);
+  return true;
 }
 
 el.newTaskWhat.addEventListener("input", () => {
@@ -1544,17 +1550,17 @@ function drawTalks() {
       t.agent === showingAgent &&
       (t.id === showing || stillInTheList(t, now, FINISHED_KEPT_DAYS)),
   );
-  el.talks.replaceChildren(
-    ...theirs.map((t) => {
-      const option = document.createElement("option");
-      option.value = t.id;
-      // A clock on the name, so a scheduled task is recognisable without
-      // opening the panel that would tell you, and a tick on a finished one.
-      option.textContent = `${t.name}${t.repeats ? " ⏱" : ""}${t.finished ? " ✓" : ""}`;
-      option.selected = t.id === showing;
-      return option;
-    }),
-  );
+  const optionFor = (t) => {
+    const option = document.createElement("option");
+    option.value = t.id;
+    // A clock on the name, so a scheduled task is recognisable without
+    // opening the panel that would tell you, and a tick on a finished one.
+    option.textContent = `${t.name}${t.repeats ? " ⏱" : ""}${t.finished ? " ✓" : ""}`;
+    option.selected = t.id === showing;
+    return option;
+  };
+  // Open ones first; finished ones apart, below, as they are down the side.
+  el.talks.replaceChildren(...theirs.filter((t) => !t.finished).map(optionFor));
   const another = document.createElement("option");
   another.value = "+";
   another.textContent = "New task…";
@@ -1565,6 +1571,13 @@ function drawTalks() {
   room.value = "room";
   room.textContent = "New room…";
   el.talks.append(room);
+  const finished = theirs.filter((t) => t.finished);
+  if (finished.length) {
+    const group = document.createElement("optgroup");
+    group.label = "Finished";
+    group.append(...finished.map(optionFor));
+    el.talks.append(group);
+  }
   el.talks.hidden = !a;
   drawTaskDone();
   drawTaskCard();
@@ -1878,7 +1891,7 @@ function taskRow(t, { here = false, going, alone }) {
         ),
       );
     }
-    if ((routine || watch) && state.kind !== "running") {
+    if ((routine || watch) && state.kind !== "running" && !t.finished) {
       actions.append(
         button("Run now", () => sayIt((routine || watch).what), "Do it now, without changing when it next runs"),
       );
@@ -2090,7 +2103,106 @@ function onlyThisOneOpen(panel) {
 function drawRunningNote() {
   const t = talking();
   el.runningNote.hidden = !(t && t.working && whose());
+  drawFinishedNote();
 }
+
+/**
+ * Over the box of a finished task: what writing in it means. Written in, it
+ * used to start the same task again under its old name, which nobody meant
+ * when what they wrote was something new.
+ */
+function drawFinishedNote({ asked = false } = {}) {
+  const t = talking();
+  // Shown when asked even while something still runs in it: a task can be
+  // marked finished in the middle of a run, and a refusal nobody sees is
+  // words that went nowhere.
+  const finished = Boolean(t?.finished && whose() && (asked || !t.working));
+  // A room is its members' together: picked up again, or nothing. A new task
+  // from it would be one teammate's alone.
+  const room = (t?.members?.length || 0) > 1;
+  el.finishedNote.hidden = !finished;
+  el.finishedNote.dataset.asked = String(finished && asked);
+  el.finishedNew.hidden = room;
+  el.finishedSays.textContent = room
+    ? asked
+      ? "This room is finished. Reopen it to say something in it."
+      : "This room is finished."
+    : asked
+      ? "This task is finished. Reopen it to change it, or start a new task with what you wrote."
+      : "This task is finished.";
+}
+
+/**
+ * Where a new task from this one goes: to its team when it was a team's and
+ * the team is still there with a lead, otherwise to its teammate.
+ */
+async function aimFor(t) {
+  const team = teamOf(t);
+  if (team) {
+    const teams = (await invoke("teams").catch(() => [])) || [];
+    newTaskFor = { ...newTaskFor, teams };
+    if (teams.some((x) => x.id === team && x.lead)) return { kind: "team", id: team };
+  }
+  return { kind: "person", id: t.agent };
+}
+
+/** The team a task was given to, or nothing. */
+function teamOf(t) {
+  return tasksNow.find((x) => x.id === t?.id)?.team || null;
+}
+
+el.finishedReopen.addEventListener("click", async () => {
+  const t = talking();
+  if (!t?.finished) return;
+  await markTaskFinished(t, false);
+  drawFinishedNote();
+  // What was written goes with it, into the task it was written in.
+  if (el.what.value.trim() || attached.length) el.form.requestSubmit();
+  else el.what.focus();
+});
+
+el.finishedNew.addEventListener("click", async () => {
+  const t = talking();
+  if (!t) return;
+  // A call waiting on this answer goes back to listening.
+  if (inACall && itsYourTurn === "waiting") itsYourTurn = "listening";
+  const text = el.what.value.trim();
+  // A skill named here runs as a skill, in a conversation of its own, as it
+  // does from the box.
+  const a = agents.get(t.agent);
+  if (a && text.startsWith("/")) {
+    const called = aSkillCalledFor(text, await readSkills(a.id));
+    if (called) {
+      halfTyped.delete(showing);
+      el.what.value = "";
+      el.what.style.height = "auto";
+      await runTheSkill(a, called.one.name, called.differently);
+      return;
+    }
+  }
+  const aim = await aimFor(t);
+  // Nothing written: the box for a new task, aimed where this one went.
+  if (!text && !attached.length) return openNewTask({ aim });
+  // One at a time: a second press while the first is making it would make two.
+  if (choosingNow) return;
+  choosingNow = true;
+  const from = showing;
+  const keptPictures = [...attached];
+  try {
+    const made = await carryOutTheChoice(aim.kind, aim.id, text, takeThePictures());
+    if (made === true) {
+      // The words went into the new task, not to wait in this one's box.
+      halfTyped.delete(from);
+    } else {
+      // Nothing lost: the words are still in the box, the pictures back.
+      attached = keptPictures;
+      drawAttached();
+      el.finishedSays.textContent = `That could not be started: ${made}`;
+    }
+  } finally {
+    choosingNow = false;
+  }
+});
 
 el.runningStop.addEventListener("click", () => stopTheRun(showing));
 
@@ -4733,9 +4845,6 @@ el.form.addEventListener("submit", async (e) => {
   // what to do differently. Anything else starting with / is somebody's own
   // words, a path included, and goes as it is.
   const a = whose();
-  // Something new asked in a task marked finished is that task going again.
-  const going = talking();
-  if (going?.finished) markTaskFinished(going, false);
   if (a && text.startsWith("/")) {
     const called = aSkillCalledFor(text, await readSkills(a.id));
     if (called) {
@@ -4745,6 +4854,15 @@ el.form.addEventListener("submit", async (e) => {
       await runTheSkill(a, called.one.name, called.differently);
       return;
     }
+  }
+  // Written in a finished task: reopened, or a new task, as the person says,
+  // and nothing sent until they do. The words stay in the box, and so does
+  // the keyboard: a second Enter is asked the same, never taken for Reopen.
+  if (talking()?.finished) {
+    drawFinishedNote({ asked: true });
+    el.what.focus();
+    if (inACall) sayOutLoud("This task is finished. Reopen it, or start a new task, in the Errand window.", "waiting");
+    return;
   }
   // A room takes one thing round at a time. Refused here, with the words left
   // in the box, rather than sent: the app refuses it too, but by then the box
@@ -4884,6 +5002,17 @@ function showThePictures(node, m) {
 async function sayIt(text, going = []) {
   const t = talking();
   if (!t) return;
+  // A finished task is written in only once somebody says Reopen or New
+  // task: Ask again, Run it again and the rest put their words in the box and
+  // ask the same, rather than starting the task under its old name.
+  if (t.finished) {
+    if (!el.what.value.trim()) {
+      el.what.value = text;
+      el.what.dispatchEvent(new Event("input"));
+    }
+    drawFinishedNote({ asked: true });
+    return;
+  }
   // Shown from the moment it is sent, out of what is already in hand, rather
   // than waiting for a round trip to disk and back to see what was attached.
   const mine = { kind: "mine", text, showing: going };
@@ -7493,6 +7622,8 @@ el.speak.addEventListener("click", () => {
 // back as the next thing said.
 el.form.addEventListener("submit", () => {
   clearTimeout(waitingForAPause);
+  // Refused above, with nothing sent: the call is asked, not working.
+  if (talking()?.finished) return;
   if (inACall) itsYourTurn = "working";
   stopListening();
 });
@@ -8667,6 +8798,7 @@ async function markTaskFinished(t, finished) {
     for (const one of tasksNow) if (one.id === t.id) one.finished = when;
     drawTalks();
     drawThreads();
+    drawFinishedNote();
     if (!el.overview.hidden) drawOverview();
   };
   const was = t.finished;
@@ -8739,9 +8871,28 @@ el.learnNote.addEventListener("submit", async (e) => {
     el.learnSays.textContent = String(why);
   }
 });
-el.learnDone.addEventListener("click", () => {
+el.learnDone.addEventListener("click", async () => {
   el.taskLearn.hidden = true;
+  const t = talks.get(el.taskLearn.dataset.task);
+  if (t?.finished && showing === t.id) await moveOnFrom(t);
 });
+
+/**
+ * Away from a task just finished, once nothing more is asked about it: to
+ * the teammate's most recent open task, or a new one for the teammate when it
+ * has none. The finished task stays under Finished, a click away.
+ */
+async function moveOnFrom(t) {
+  // A room stays on screen: its members' other tasks are no next step.
+  if ((t.members?.length || 0) > 1) return;
+  // Not to a task another teammate asked for: those are its answers to them,
+  // not the person's work.
+  const next = tasksNow
+    .filter((x) => x.agent === t.agent && x.id !== t.id && !x.finished && x.said && !askedForByOthers(x))
+    .sort((x, y) => (y.spoke || 0) - (x.spoke || 0))[0];
+  if (next && (talks.has(next.id) || (await meet(next.id)))) return show(next.id);
+  await openNewTask({ aim: await aimFor(t) });
+}
 
 /** Every task, read again, and the list down the side drawn with it. */
 async function readTasks() {
@@ -8760,6 +8911,8 @@ function asTask(c) {
     agent: c.agent,
     name: c.name,
     first: c.first || "",
+    // The team it was given to, if it was: a new task from it goes there.
+    team: c.team || null,
     // Whether anything was said in it: a teammate's first task is there from
     // the moment the teammate is, and is not a piece of work until asked.
     said: c.said !== false,

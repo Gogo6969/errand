@@ -5075,19 +5075,71 @@ export async function theOverview() {
     list.querySelector('li[data-agent="agent-bitcoin"]') && !list.querySelector(".finished-badge, li.is-finished"),
     list.querySelector('li[data-agent="agent-bitcoin"]')?.className ?? "gone",
   );
-  // Something new asked in a finished task is that task going again.
+  // Written in a finished task: nothing is sent until the person says
+  // whether it is that task again, or a new one.
   const what = document.getElementById("what");
-  what.value = "One more thing about last night";
+  const note = document.getElementById("finished-note");
+  check("over a finished task's box it says the task is finished, with both ways on", !note.hidden && note.dataset.asked === "false" && /Reopen to change it/.test(note.textContent) && /New task/.test(note.textContent), note.textContent.trim());
+  const writing = asked.length;
+  what.value = "Add the Asian markets too";
   what.dispatchEvent(new Event("input"));
   document.getElementById("composer").dispatchEvent(new Event("submit", { cancelable: true }));
   await settle(300);
   check(
-    "asking something new in a finished task opens it again",
-    asked.some((a) => a.name === "finish_task" && a.args?.id === "talk-overnight" && a.args?.finished === false) &&
-      done.dataset.finished === "false" &&
-      done.textContent === "Mark finished",
-    `${done.textContent}`,
+    "sending there sends nothing and reopens nothing, and asks which it is",
+    !asked.slice(writing).some((a) => a.name === "say" || (a.name === "finish_task" && a.args?.finished === false)) &&
+      note.dataset.asked === "true" && document.activeElement?.id === "what" && what.value === "Add the Asian markets too",
+    `${note.dataset.asked} ${document.activeElement?.id} ${JSON.stringify(asked.slice(writing).map((a) => a.name))}`,
   );
+  // Kept finished where the store would keep it, so a list read again says so.
+  const overnight = FIXTURE.conversations["agent-bitcoin"].find((c) => c.id === "talk-overnight");
+  overnight.finished_at = Date.now();
+  // A new task that could not be made: nothing lost, and said why.
+  FIXTURE.refuse = { start_conversation: "the store is busy" };
+  document.getElementById("finished-new").click();
+  await settle(400);
+  delete FIXTURE.refuse;
+  check(
+    "a new task that could not be made keeps what was written, and says why on the bar",
+    what.value === "Add the Asian markets too" && /could not be started: the store is busy/.test(document.getElementById("finished-says").textContent),
+    `${what.value} | ${document.getElementById("finished-says").textContent}`,
+  );
+  // A new task, for the same teammate, with what was written.
+  const madeFrom = asked.length;
+  document.getElementById("finished-new").click();
+  await settle(600);
+  const fresh = asked.slice(madeFrom).find((a) => a.name === "start_conversation");
+  check(
+    "New task starts a task of its own for that teammate, with what was written, and leaves the finished one finished",
+    fresh?.args?.agent === "agent-bitcoin" &&
+      asked.slice(madeFrom).some((a) => a.name === "say" && a.args?.id === fresh.args.id && a.args.text === "Add the Asian markets too") &&
+      !asked.slice(writing).some((a) => a.name === "finish_task" && a.args?.id === "talk-overnight"),
+    JSON.stringify(asked.slice(madeFrom).map((a) => `${a.name}:${a.args?.id || a.args?.agent || ""}`)),
+  );
+  if (fresh) tell("happened", { conversation: fresh.args.id, seq: 9704, kind: "done" });
+  await settle(150);
+  // The finished one, apart in the menu, and a click away.
+  const inFinished = [...talks.querySelectorAll('optgroup[label="Finished"] option')].map((o) => o.value);
+  check("in the task menu a finished task is under Finished, apart from the open ones", inFinished.includes("talk-overnight"), JSON.stringify(inFinished));
+  talks.value = "talk-overnight";
+  talks.dispatchEvent(new Event("change"));
+  await settle(400);
+  // Reopened on purpose, with what was written going into it.
+  const reopening = asked.length;
+  what.value = "One more thing about last night";
+  what.dispatchEvent(new Event("input"));
+  document.getElementById("finished-reopen").click();
+  await settle(400);
+  check(
+    "Reopen to change it opens that task again and sends what was written into it",
+    asked.slice(reopening).some((a) => a.name === "finish_task" && a.args?.id === "talk-overnight" && a.args?.finished === false) &&
+      asked.slice(reopening).some((a) => a.name === "say" && a.args?.id === "talk-overnight" && a.args.text === "One more thing about last night") &&
+      done.dataset.finished === "false" && done.textContent === "Mark finished" && note.hidden,
+    `${done.textContent} ${note.hidden} ${JSON.stringify(asked.slice(reopening).map((a) => a.name))}`,
+  );
+  delete overnight.finished_at;
+  tell("happened", { conversation: "talk-overnight", seq: 9705, kind: "done" });
+  await settle(150);
 
   // How long a finished task stays in the menu is said in Settings, not set.
   const said = document.getElementById("finished-tasks");
@@ -8149,9 +8201,24 @@ export async function learningFromATask() {
   await wait(250);
   const noted = asked.find((a) => a.name === "note_down" && a.args?.note === "Prices are in euros unless asked");
   check("and something to remember is written down as one of its notes", noted && noted.args.about === "Prices are in euros", JSON.stringify(noted?.args));
+  const finishedOne = document.getElementById("talks").value;
   document.getElementById("learn-done").click();
-  await wait(100);
+  await wait(400);
   check("Done puts it away", panel.hidden, String(panel.hidden));
+  // And moves on: to the teammate's open task, or a new one for it.
+  const chooser = document.getElementById("task-chooser");
+  check(
+    "and moves on from the finished task, to an open one of the teammate's or a new one",
+    document.getElementById("talks").value !== finishedOne || !chooser.hidden,
+    `${document.getElementById("talks").value} chooser=${!chooser.hidden}`,
+  );
+  if (!chooser.hidden) chooser.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await wait(150);
+  // Back to it, from under Finished.
+  const menu = document.getElementById("talks");
+  menu.value = finishedOne;
+  menu.dispatchEvent(new Event("change"));
+  await wait(400);
 
   // Reopened, and finished again where there is nothing to keep as a skill.
   document.getElementById("task-done").click();

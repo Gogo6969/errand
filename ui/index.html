@@ -825,6 +825,16 @@
         <button id="running-stop" type="button">Stop this run</button>
       </div>
 
+      <!--
+        A finished task, and what writing in it means: it is picked up again
+        only when somebody says so, and something new is a task of its own.
+      -->
+      <div id="finished-note" role="status" hidden>
+        <span class="what" id="finished-says">This task is finished.</span>
+        <button id="finished-reopen" type="button">Reopen to change it</button>
+        <button id="finished-new" type="button">New task</button>
+      </div>
+
       <div id="key-note" role="status" hidden>
         <p class="what">A teammate's SSH was refused your key: it isn't loaded in the key agent.</p>
         <p class="fix" id="key-note-says">
