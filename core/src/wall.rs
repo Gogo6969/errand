@@ -260,7 +260,7 @@ fn profile_keeping_out(
     ));
     // The system's own temporary folder, and only what the system's own tools
     // make there whatever TMPDIR says: Swift's working folders, Foundation's
-    // items, lock files, and `mktemp`'s names. None of the rest. That folder
+    // items, lock files, and plain `mktemp`'s names. None of the rest. That folder
     // also holds what the person's programs keep and run again, such as the
     // cache the system's `git` and `clang` are found through, and a teammate
     // that could rewrite it could put another program in their place.
@@ -274,11 +274,14 @@ fn profile_keeping_out(
                 quoted(&temporary.join("TemporaryItems"))
             ));
             allowed.push(format!("  (regex #\"^{pattern}/[^/]+\\.lock$\")"));
-            // `mktemp` and `mktemp -t name`, which ignore TMPDIR on macOS.
+            // Plain `mktemp`, which ignores TMPDIR on macOS and makes "tmp."
+            // and ten letters or digits there. Not `mktemp -t name`, which
+            // ignores it too: allowing "name.<ten>" would open every file the
+            // person's own programs make that way while they still use it,
+            // and a line added to one of those runs outside the wall. Plain
+            // `mktemp`'s names are the same trade, kept because so much uses
+            // it. Errands are told to give `mktemp` a place in TMPDIR.
             allowed.push(format!("  (regex #\"^{pattern}/tmp\\.[A-Za-z0-9]+(/|$)\")"));
-            allowed.push(format!(
-                "  (regex #\"^{pattern}/[A-Za-z0-9_-]+\\.[A-Za-z0-9]{{8}}(/|$)\")"
-            ));
         }
     }
     // Writing to the terminal is not writing to a file, and a process that
@@ -369,8 +372,8 @@ fn its_tasks_kept(team: &Path) -> String {
     let Some(at) = as_a_pattern(&team) else {
         return String::new();
     };
-    // Spelled out: the wall's regular expressions take no counts, and
-    // "[0-9]{4}" there is a rule that matches nothing.
+    // Spelled out: the wall's regular expressions take no counts, and read
+    // "[0-9]{4}" as a digit followed by "{4}" itself.
     // No dot: a task's folder never has one, and a dated file such as
     // 2026-10-05-report.md at the team's top is the team's own to write.
     let day = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][- ][^/.]+";
@@ -1103,7 +1106,9 @@ pub fn what_the_wall_means(home: &Path) -> String {
          python3 -m venv .venv, cargo): global installs (npm -g, pip --user, rustup \
          toolchains, playwright install) cannot work here, and npm's advice to use sudo or \
          chown never applies. Write temporary files in $TMPDIR or your folder, never in \
-         /tmp. To build a Swift package use swift build --disable-sandbox --cache-path \
+         /tmp. mktemp on this Mac ignores TMPDIR, so give it the place: mktemp \
+         \"$TMPDIR/name.XXXXXX\", with -d for a folder; mktemp -t is refused here. \
+         To build a Swift package use swift build --disable-sandbox --cache-path \
          .cache/swiftpm --config-path .cache/swiftpm-config --security-path \
          .cache/swiftpm-security; with xcodebuild, pass -derivedDataPath .build/xcode. For \
          plots use MPLBACKEND=Agg. The system's git, python3 and clang may print \
@@ -1670,17 +1675,56 @@ mod tests {
             Inside::ACommand,
             &format!("echo x >> {}", quoted(&own.join("b.jsonl")))
         ));
-        // And the system's temporary folder only for what Swift makes there.
+        // And the system's temporary folder only for what Swift and plain
+        // `mktemp` make there.
         if let Some(temporary) = the_systems_temporary_folder() {
             let made = temporary.join(format!("TemporaryDirectory.errand{}", std::process::id()));
             assert!(run(
                 Inside::ACommand,
                 &format!("mkdir {} && rmdir {}", quoted(&made), quoted(&made))
             ));
-            assert!(!run(
-                Inside::ACommand,
-                &format!("echo x >> {}", quoted(&temporary.join("xcrun_db")))
-            ));
+            // Opened for writing, never written to, so a wall that let it
+            // through would still leave the person's cache as it was.
+            let cache = temporary.join("xcrun_db");
+            if cache.exists() {
+                assert!(!run(Inside::ACommand, &format!(": >> {}", quoted(&cache))));
+            }
+            // Not `mktemp -t`, whose names are those of the files the person's
+            // own programs make that way, nor anything near them: not a
+            // name with a dot before the last, as the system's own services
+            // name theirs, nor a dot among the last ten, nor eight letters
+            // and no dot, as xcrun_db is, nor what the rule that stood here
+            // once let through by mistake.
+            let ten = format!("Errnd{:05}", std::process::id() % 100_000);
+            for inside in [Inside::ACommand, claude] {
+                assert!(
+                    !run(
+                        inside,
+                        "f=$(mktemp -t errand-probe) && rm -f \"$f\" || exit 1; \
+                         d=$(mktemp -d -t errand_probe) && rmdir \"$d\""
+                    ),
+                    "mktemp -t inside the wall"
+                );
+                for name in [
+                    format!("errand.{ten}"),
+                    format!("com.errand.{ten}"),
+                    format!("com.errnd.{}", &ten[6..]),
+                    format!("errand.{}", &ten[1..]),
+                    format!("errand.{ten}X"),
+                    format!("err+nd.{ten}"),
+                    format!("err nd.{ten}"),
+                    format!("errnd_{}", &ten[8..]),
+                    "e{8}".to_string(),
+                ] {
+                    let path = temporary.join(&name);
+                    let went = run(inside, &format!("echo x > {}", quoted(&path)));
+                    std::fs::remove_file(&path).ok();
+                    assert!(
+                        !went,
+                        "{name} could be written in the system's temporary folder"
+                    );
+                }
+            }
         }
         std::fs::remove_dir_all(&root).ok();
     }
@@ -2331,6 +2375,20 @@ mod tests {
             "f=$(mktemp) && echo x > \"$f\" && rm \"$f\" && d=$(mktemp -d) && rmdir \"$d\"",
         );
         assert!(ok, "mktemp: {said}");
+        // And given a place in its own temporary folder, as errands are told
+        // to, since `mktemp -t` is not allowed.
+        let temporary = its_own_temporary_folder(&home);
+        make_its_own_temporary_folder(&temporary);
+        let (ok, said) = walled(
+            &home,
+            &format!(
+                "TMPDIR={}/ && f=$(mktemp \"$TMPDIR/name.XXXXXX\") && echo x > \"$f\" && \
+                 rm \"$f\" && d=$(mktemp -d \"$TMPDIR/name.XXXXXX\") && rmdir \"$d\"",
+                quoted(&temporary)
+            ),
+        );
+        std::fs::remove_dir_all(&temporary).ok();
+        assert!(ok, "mktemp in TMPDIR: {said}");
         let away = root.join("away");
         let (ok, said) = walled(&home, &format!("mv {} {}", home.display(), away.display()));
         assert!(!ok, "the folder was moved: {said}");
