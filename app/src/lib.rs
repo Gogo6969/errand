@@ -63,6 +63,10 @@ struct Held {
     /// it is talking to -- that is the whole point of the protocol, and it
     /// stops being true the moment this map knows.
     live: Mutex<HashMap<String, Box<dyn Engine + Send>>>,
+    /// When each open engine was last given something or last finished
+    /// something, so one left doing nothing can be put away. Written under
+    /// `live`'s lock wherever both are held, and only ever in that order.
+    quiet_since: Mutex<HashMap<String, std::time::Instant>>,
     /// Which model each open conversation's engine was opened on, so that one
     /// opened before the Errand model was changed can be noticed and replaced
     /// the next time it is given something.
@@ -739,7 +743,14 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         *count += 1;
         *count
     };
-    held.live.lock().unwrap().insert(id.clone(), engine);
+    {
+        let mut live = held.live.lock().unwrap();
+        live.insert(id.clone(), engine);
+        held.quiet_since
+            .lock()
+            .unwrap()
+            .insert(id.clone(), std::time::Instant::now());
+    }
     held.opened_with
         .lock()
         .unwrap()
@@ -784,6 +795,17 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                     };
                     if current() && going && !said_it_died {
                         said_it_died = true;
+                        // Out of the open ones before the failure goes round,
+                        // so what follows from it, a goal's next turn, opens
+                        // another engine rather than going to this one, which
+                        // takes it and never answers.
+                        {
+                            let held: State<Held> = app.state();
+                            let mut live = held.live.lock().unwrap();
+                            if current() {
+                                live.remove(&id);
+                            }
+                        }
                         Event::Failed {
                             why:
                                 "The engine stopped part way through, so this turn did not finish."
@@ -1092,6 +1114,17 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
                 }
             }
 
+            // Heard from, so not idle: quiet from here, for putting it away
+            // only once it stays so. Every event rather than only a turn's
+            // end, for anything it says between turns of its own accord.
+            {
+                let held: State<Held> = app.state();
+                held.quiet_since
+                    .lock()
+                    .unwrap()
+                    .insert(id.clone(), std::time::Instant::now());
+            }
+
             // A routine's turn is over, so the clock may start it again.
             if event.ends_the_turn() {
                 let held: State<Held> = app.state();
@@ -1230,7 +1263,11 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         // turn opened a third, and the third read the whole conversation back
         // because the first had already spent the flag that says to start
         // clean. The standing job went back to repeating itself.
+        //
+        // Looked at under `live`'s lock, which opening another takes to put it
+        // there, so the one taken out is this one and no other.
         let held: State<Held> = app.state();
+        let mut live = held.live.lock().unwrap();
         let still_ours = held
             .opening
             .lock()
@@ -1238,11 +1275,24 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             .get(&id)
             .is_some_and(|current| *current == opening);
         if still_ours {
-            held.live.lock().unwrap().remove(&id);
+            live.remove(&id);
+            // Something handed to it as it stopped was taken and will never be
+            // answered, and its mark would say a turn was going for good.
+            let mut doing = held.doing.lock().unwrap();
+            if doing
+                .get(&id)
+                .is_some_and(|what| what == READING_WHAT_IT_WAS_ASKED)
+            {
+                doing.remove(&id);
+            }
         }
     });
     Ok(())
 }
+
+/// What a conversation is doing from the moment it is handed something until
+/// it says what it is on.
+const READING_WHAT_IT_WAS_ASKED: &str = "Reading what it was asked";
 
 /// Say something. Safe while it is working: that is the point of the thing.
 #[tauri::command]
@@ -1385,7 +1435,19 @@ async fn say_as(
             }
         }
     }
-    if !held.live.lock().unwrap().contains_key(&id) {
+    // Given something from now, so it is not put away as idle on its way in:
+    // stamped under the lock that putting away takes, so either it was put
+    // away before this looks, and is opened again below, or it is not put
+    // away until long after this has reached it.
+    let open = {
+        let live = held.live.lock().unwrap();
+        held.quiet_since
+            .lock()
+            .unwrap()
+            .insert(id.clone(), std::time::Instant::now());
+        live.contains_key(&id)
+    };
+    if !open {
         open_thread(app.clone(), held.clone(), id.clone()).await?;
     }
 
@@ -1430,11 +1492,34 @@ async fn say_as(
         None => text,
     };
 
-    let mut live = held.live.lock().unwrap();
-    let thread = live
-        .get_mut(&id)
-        .ok_or_else(|| "that conversation is not open".to_string())?;
-    thread.say(&text, &pictures).map_err(|e| e.to_string())?;
+    // Going from the moment it is handed this, as a hand-off is, rather than
+    // from the first thing it says: an engine can be some seconds about that,
+    // with a slow hook of the person's before every turn, and in between it
+    // looked idle and could be put away with the words unanswered. Not over
+    // what a turn already going says it is on.
+    let marked = {
+        let mut doing = held.doing.lock().unwrap();
+        match doing.contains_key(&id) {
+            true => false,
+            false => {
+                doing.insert(id.clone(), READING_WHAT_IT_WAS_ASKED.to_string());
+                true
+            }
+        }
+    };
+    let handed = {
+        let mut live = held.live.lock().unwrap();
+        match live.get_mut(&id) {
+            Some(thread) => thread.say(&text, &pictures).map_err(|e| e.to_string()),
+            None => Err("that conversation is not open".to_string()),
+        }
+    };
+    if let Err(why) = handed {
+        if marked {
+            held.doing.lock().unwrap().remove(&id);
+        }
+        return Err(why);
+    }
     Ok(Some(written.seq))
 }
 
@@ -6429,7 +6514,7 @@ async fn hand_to_now(
         held.doing
             .lock()
             .unwrap()
-            .insert(talk.clone(), "Reading what it was asked".to_string());
+            .insert(talk.clone(), READING_WHAT_IT_WAS_ASKED.to_string());
     }
 
     if let Err(why) = open_thread(app.clone(), app.state(), talk.clone()).await {
@@ -6900,7 +6985,7 @@ async fn answer_from(
         held.doing
             .lock()
             .unwrap()
-            .insert(talk.to_string(), "Reading what it was asked".to_string());
+            .insert(talk.to_string(), READING_WHAT_IT_WAS_ASKED.to_string());
         if let Ok(Some(c)) = held.store.conversation(talk) {
             held.handed
                 .lock()
@@ -8104,6 +8189,144 @@ fn put_away_when_done(app: &AppHandle, talk: &str) {
         let _ = thread.stop();
     }
     held.doorways.lock().unwrap().remove(talk);
+}
+
+/// How long an engine that keeps its own record is left open with nothing
+/// going on in it.
+///
+/// Each Claude conversation is a process of its own with its tool servers,
+/// a hundred megabytes and more, and nothing closed one that had simply
+/// finished: four from one morning's runs were still open that afternoon,
+/// holding over half a gigabyte between them. Opened again, it picks up its
+/// session where it was, so this costs the next message a few seconds.
+const PUT_AWAY_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// The same for a task marked finished, which is not expected to be spoken to
+/// again soon. Not at once: a message said into it a moment before, or one
+/// waiting behind the turn that was going, may not have started yet.
+const PUT_AWAY_FINISHED_AFTER: std::time::Duration = std::time::Duration::from_secs(2 * 60);
+
+/// Every minute, put away what has stayed idle.
+fn put_away_what_stays_idle(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            // Each pass on a task of its own, as the clock's ticks are, so
+            // one that fails cannot end the looking.
+            let this = app.clone();
+            let pass = tauri::async_runtime::spawn(async move {
+                let held: State<Held> = this.state();
+                put_away_if_idle(&held);
+            });
+            if pass.await.is_err() {
+                eprintln!("putting idle engines away: a pass stopped in a way it could not report");
+            }
+        }
+    });
+}
+
+/// Put away the engines that keep their own record and have had nothing going
+/// on in them for long enough: no turn, nothing handed to them or waited on,
+/// no run, no name being settled, no command of the app's still running for
+/// them, and nothing of their own going on, as they say.
+fn put_away_if_idle(held: &Held) {
+    let going_on = |id: &str| {
+        mid_turn(held, id)
+            || held.handed.lock().unwrap().contains_key(id)
+            || held.watching.lock().unwrap().contains_key(id)
+            || held.mid_run.lock().unwrap().contains_key(id)
+            || held.settling.lock().unwrap().contains_key(id)
+            || errand_core::jobs::running()
+                .iter()
+                .any(|job| job.conversation == id)
+    };
+    let after = |id: &str| {
+        let finished = held
+            .store
+            .conversation(id)
+            .ok()
+            .flatten()
+            .is_some_and(|c| c.finished_at.is_some());
+        match finished {
+            true => PUT_AWAY_FINISHED_AFTER,
+            false => PUT_AWAY_AFTER,
+        }
+    };
+    let taken = take_out_what_is_idle(
+        &held.live,
+        &held.quiet_since,
+        going_on,
+        after,
+        std::time::Instant::now(),
+        // What goes with it, under the same lock, as closing one on another
+        // model does: its reader is no longer the current one, so its last
+        // events are not read as a turn dying, and its way in to the app's
+        // tools goes, so a new one bound for the conversation never does.
+        |id| {
+            *held
+                .opening
+                .lock()
+                .unwrap()
+                .entry(id.to_string())
+                .or_insert(0) += 1;
+            held.opened_with.lock().unwrap().remove(id);
+            drop(held.doorways.lock().unwrap().remove(id));
+        },
+    );
+    for (_, mut engine) in taken {
+        let _ = engine.stop();
+    }
+}
+
+/// The engines to put away, taken out of `live`: each that keeps its own
+/// record, has nothing `going_on` and nothing still running, and has been
+/// quiet for as long as `after` says. One with something going on is quiet
+/// only from now.
+///
+/// Looked at and taken under `live`'s lock, the one a turn on its way in is
+/// stamped under, so that turn is never cut off: either the engine is taken
+/// first and the turn opens another, or the stamp is seen and it stays.
+/// `also` runs under the lock too, for whatever goes with the engine.
+fn take_out_what_is_idle(
+    live: &Mutex<HashMap<String, Box<dyn Engine + Send>>>,
+    quiet_since: &Mutex<HashMap<String, std::time::Instant>>,
+    going_on: impl Fn(&str) -> bool,
+    after: impl Fn(&str) -> std::time::Duration,
+    now: std::time::Instant,
+    mut also: impl FnMut(&str),
+) -> Vec<(String, Box<dyn Engine + Send>)> {
+    let open: Vec<String> = live.lock().unwrap().keys().cloned().collect();
+    let mut taken = Vec::new();
+    for id in open {
+        // Before the lock, since they read the app's other records and the
+        // store, each under a lock of its own.
+        let going = going_on(&id);
+        let long_enough = after(&id);
+        let mut live = live.lock().unwrap();
+        let Some(engine) = live.get(&id) else {
+            continue;
+        };
+        if !engine.keeps_its_own_record() {
+            continue;
+        }
+        let busy = going || engine.still_running_something();
+        let mut quiet = quiet_since.lock().unwrap();
+        if busy {
+            quiet.insert(id, now);
+            continue;
+        }
+        let since = *quiet.entry(id.clone()).or_insert(now);
+        if now.saturating_duration_since(since) < long_enough {
+            continue;
+        }
+        quiet.remove(&id);
+        drop(quiet);
+        if let Some(engine) = live.remove(&id) {
+            also(&id);
+            taken.push((id, engine));
+        }
+    }
+    taken
 }
 
 /// Let an agent's open conversations know who it is now.
@@ -9996,6 +10219,10 @@ fn stop_it(app: &AppHandle, held: &Held, id: &str, why: &str) -> Result<(), Stri
         .unwrap()
         .entry(id.to_string())
         .or_insert(0) += 1;
+    // Out of the open ones before its marks are cleared, and stopped after: a
+    // turn on its way in while this runs is refused or opens another, never
+    // handed to this one with a mark nothing would clear.
+    let thread = held.live.lock().unwrap().remove(id);
     // The doorway goes with it. A socket that outlives the conversation behind
     // it is a way in to something that is no longer there.
     held.doorways.lock().unwrap().remove(id);
@@ -10036,7 +10263,7 @@ fn stop_it(app: &AppHandle, held: &Held, id: &str, why: &str) -> Result<(), Stri
     }
     let _ = held.store.a_turn_ended(id);
     errand_core::jobs::stop_everything_from(id);
-    if let Some(mut thread) = held.live.lock().unwrap().remove(id) {
+    if let Some(mut thread) = thread {
         thread.stop().map_err(|e| e.to_string())?;
     }
     onscreen::waiting(how_many_are_waiting(held));
@@ -10415,6 +10642,7 @@ pub fn run() {
             let (goals, ended) = tokio::sync::mpsc::unbounded_channel();
             app.manage(Held {
                 live: Mutex::new(HashMap::new()),
+                quiet_since: Mutex::new(HashMap::new()),
                 opened_with: Mutex::new(HashMap::new()),
                 settling: Settling::default(),
                 wants,
@@ -10845,6 +11073,7 @@ fn everything_that_waits_for_the_app(app: &AppHandle) {
     // app that is still being built.
     watch_the_clock(app.clone());
     keep_the_homes(app.clone());
+    put_away_what_stays_idle(app.clone());
     load_ssh_keys_if_wanted(app);
     let waiting = {
         let parked: State<Waiting> = app.state();
@@ -10940,6 +11169,140 @@ mod tests {
                 "{refused}"
             );
         }
+    }
+
+    /// An engine that does nothing but say what it is and whether it was
+    /// stopped.
+    struct Standing {
+        keeps_its_record: bool,
+        running_something: bool,
+        stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl errand_core::Engine for Standing {
+        fn say(&mut self, _: &str, _: &[errand_core::Picture]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn answer(&mut self, _: &str, _: errand_core::Answer) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn keeps_its_own_record(&self) -> bool {
+            self.keeps_its_record
+        }
+        fn still_running_something(&self) -> bool {
+            self.running_something
+        }
+        fn stop(&mut self) -> anyhow::Result<()> {
+            self.stopped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Open engines for the tests below, each with how long it has been quiet.
+    type Open =
+        std::sync::Mutex<std::collections::HashMap<String, Box<dyn errand_core::Engine + Send>>>;
+    type Quiet = std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>;
+
+    fn standing(
+        open: &Open,
+        quiet: &Quiet,
+        id: &str,
+        keeps: bool,
+        running: bool,
+        since: Option<std::time::Instant>,
+    ) {
+        open.lock().unwrap().insert(
+            id.to_string(),
+            Box::new(Standing {
+                keeps_its_record: keeps,
+                running_something: running,
+                stopped: Default::default(),
+            }),
+        );
+        if let Some(since) = since {
+            quiet.lock().unwrap().insert(id.to_string(), since);
+        }
+    }
+
+    #[test]
+    fn only_an_engine_that_keeps_its_record_and_has_been_doing_nothing_is_put_away() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now() + Duration::from_secs(4 * 60 * 60);
+        let ago = |minutes: u64| now - Duration::from_secs(minutes * 60);
+        let live = Open::default();
+        let quiet = Quiet::default();
+        standing(&live, &quiet, "long-idle", true, false, Some(ago(31)));
+        standing(&live, &quiet, "just-idle", true, false, Some(ago(29)));
+        standing(&live, &quiet, "local", false, false, Some(ago(240)));
+        standing(&live, &quiet, "in-a-turn", true, false, Some(ago(240)));
+        standing(&live, &quiet, "left-a-command", true, true, Some(ago(240)));
+        standing(&live, &quiet, "never-stamped", true, false, None);
+        let mut also = Vec::new();
+        let taken = super::take_out_what_is_idle(
+            &live,
+            &quiet,
+            |id| id == "in-a-turn",
+            |_| super::PUT_AWAY_AFTER,
+            now,
+            |id| also.push(id.to_string()),
+        );
+        let taken: Vec<String> = taken.into_iter().map(|(id, _)| id).collect();
+        assert_eq!(taken, vec!["long-idle".to_string()]);
+        assert_eq!(also, vec!["long-idle".to_string()], "what goes with it");
+        let left = live.lock().unwrap();
+        for id in [
+            "just-idle",
+            "local",
+            "in-a-turn",
+            "left-a-command",
+            "never-stamped",
+        ] {
+            assert!(left.contains_key(id), "{id} was put away");
+        }
+        let quiet = quiet.lock().unwrap();
+        assert!(!quiet.contains_key("long-idle"));
+        // Something going on makes it quiet only from now, so it is not put
+        // away the minute what it was doing ends.
+        assert_eq!(quiet.get("in-a-turn"), Some(&now));
+        assert_eq!(quiet.get("left-a-command"), Some(&now));
+        assert_eq!(quiet.get("never-stamped"), Some(&now));
+        // A local model's is left as it was.
+        assert_eq!(quiet.get("local"), Some(&ago(240)));
+    }
+
+    #[test]
+    fn a_finished_tasks_engine_is_put_away_sooner_and_not_one_just_given_something() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now() + Duration::from_secs(60 * 60);
+        let ago = |seconds: u64| now - Duration::from_secs(seconds);
+        let live = Open::default();
+        let quiet = Quiet::default();
+        standing(&live, &quiet, "finished", true, false, Some(ago(3 * 60)));
+        standing(
+            &live,
+            &quiet,
+            "finished-said-into",
+            true,
+            false,
+            Some(ago(20)),
+        );
+        standing(&live, &quiet, "open-task", true, false, Some(ago(3 * 60)));
+        let taken = super::take_out_what_is_idle(
+            &live,
+            &quiet,
+            |_| false,
+            |id| match id.starts_with("finished") {
+                true => super::PUT_AWAY_FINISHED_AFTER,
+                false => super::PUT_AWAY_AFTER,
+            },
+            now,
+            |_| {},
+        );
+        let taken: Vec<String> = taken.into_iter().map(|(id, _)| id).collect();
+        assert_eq!(taken, vec!["finished".to_string()]);
+        let left = live.lock().unwrap();
+        assert!(left.contains_key("finished-said-into") && left.contains_key("open-task"));
     }
 
     #[test]

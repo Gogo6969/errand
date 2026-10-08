@@ -197,6 +197,140 @@ pub struct Claude {
     /// the line goes past. Read by the window when somebody asks what this
     /// agent can reach.
     brought: Arc<Mutex<crate::Brought>>,
+    /// What it has going on of its own between turns, as it says.
+    of_its_own: Arc<Mutex<OfItsOwn>>,
+    /// Its process, for looking at what is running under it.
+    pid: Option<u32>,
+}
+
+/// What a Claude Code session has going on of its own between turns, from
+/// what it says, so that it is not closed in the middle of it: work it is
+/// doing in the background, and timed jobs it keeps.
+///
+/// None of it shows from outside. A helper or a workflow runs inside the
+/// process and says nothing until it is done; a job made with CronCreate is
+/// "session-only", as its own result says, and dies with the process.
+#[derive(Debug, Default)]
+struct OfItsOwn {
+    /// How many background tasks it last listed: commands, helpers,
+    /// workflows. It lists them all each time the list changes.
+    background: usize,
+    /// Timed jobs it made and has not deleted. A job that ran once and is
+    /// gone is still counted, since nothing it says marks that.
+    jobs: usize,
+    /// When a wake-up it set is due, if it set one and did not stop it.
+    wakes_at: Option<std::time::Instant>,
+    /// Calls to those tools, by their id, until their results say how they
+    /// went: which tool, whether it was a stop, and a wake-up's delay.
+    asked: HashMap<String, (String, bool, u64)>,
+    /// What ran under it when it first said it had started: its tool servers,
+    /// one of which may be a shell for as long as the session lasts.
+    there_from_the_start: Option<std::collections::HashSet<i32>>,
+}
+
+/// How long after a wake-up is due it is still waited for: it comes as a turn
+/// of its own, and one late by this much is not coming.
+const A_WAKE_UP_IS_LATE_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// The longest a wake-up is put off, whatever was asked: Claude Code says it
+/// keeps the delay between a minute and an hour, and asked for a day it takes
+/// it, says nothing, and wakes in an hour.
+const A_WAKE_UP_AT_THE_LATEST: u64 = 60 * 60;
+
+impl OfItsOwn {
+    /// Take in one line of what it said.
+    fn hear(&mut self, line: &str, pid: Option<u32>) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            return;
+        };
+        let blocks = || {
+            v.get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+                .cloned()
+                .unwrap_or_default()
+        };
+        match (
+            v.get("type").and_then(|t| t.as_str()),
+            v.get("subtype").and_then(|t| t.as_str()),
+        ) {
+            (Some("system"), Some("init")) if self.there_from_the_start.is_none() => {
+                self.there_from_the_start = Some(
+                    pid.map(children_of)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect(),
+                );
+            }
+            (Some("system"), Some("background_tasks_changed")) => {
+                self.background = v
+                    .get("tasks")
+                    .and_then(|t| t.as_array())
+                    .map_or(0, |tasks| tasks.len());
+            }
+            (Some("assistant"), _) => {
+                for block in blocks() {
+                    let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    if block.get("type").and_then(|t| t.as_str()) != Some("tool_use")
+                        || !["CronCreate", "CronDelete", "ScheduleWakeup"].contains(&name)
+                    {
+                        continue;
+                    }
+                    let Some(id) = block.get("id").and_then(|i| i.as_str()) else {
+                        continue;
+                    };
+                    let input = block.get("input");
+                    let stop = input
+                        .and_then(|i| i.get("stop"))
+                        .and_then(|s| s.as_bool())
+                        .unwrap_or(false);
+                    let delay = input
+                        .and_then(|i| i.get("delaySeconds"))
+                        .and_then(|d| d.as_f64())
+                        .map_or(0, |d| d.clamp(0.0, A_WAKE_UP_AT_THE_LATEST as f64) as u64);
+                    self.asked
+                        .insert(id.to_string(), (name.to_string(), stop, delay));
+                }
+            }
+            (Some("user"), _) => {
+                for block in blocks() {
+                    if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                        continue;
+                    }
+                    let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str()) else {
+                        continue;
+                    };
+                    let Some((name, stop, delay)) = self.asked.remove(id) else {
+                        continue;
+                    };
+                    if block.get("is_error").and_then(|e| e.as_bool()) == Some(true) {
+                        continue;
+                    }
+                    match name.as_str() {
+                        "CronCreate" => self.jobs += 1,
+                        "CronDelete" => self.jobs = self.jobs.saturating_sub(1),
+                        _ if stop => self.wakes_at = None,
+                        _ => {
+                            self.wakes_at = std::time::Instant::now().checked_add(
+                                std::time::Duration::from_secs(delay.min(A_WAKE_UP_AT_THE_LATEST)),
+                            )
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether any of it is still going.
+    fn anything(&self, now: std::time::Instant) -> bool {
+        self.background > 0
+            || self.jobs > 0
+            || self.wakes_at.is_some_and(|due| {
+                due.checked_add(A_WAKE_UP_IS_LATE_AFTER)
+                    .is_none_or(|late| now < late)
+            })
+    }
 }
 
 /// The questions in flight, shared between the task reading them and the
@@ -670,9 +804,12 @@ impl Claude {
             .kill_on_drop(true)
             .spawn()
             .context("starting claude; is Claude Code installed and on the PATH?")?;
+        let pid = child.id();
         let waiting: Waiting = Arc::default();
         let brought: Arc<Mutex<crate::Brought>> = Arc::default();
         let turning_up = brought.clone();
+        let of_its_own: Arc<Mutex<OfItsOwn>> = Arc::default();
+        let hearing = of_its_own.clone();
 
         let mut stdin = child.stdin.take().context("claude stdin")?;
         let stdout = child.stdout.take().context("claude stdout")?;
@@ -725,6 +862,12 @@ impl Claude {
                 if let Some(kit) = what_it_brought(&line) {
                     *turning_up.lock().unwrap() = kit;
                 }
+                // What it has going on of its own, kept the same way, for
+                // whether it can be closed when it looks idle.
+                hearing
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .hear(&line, pid);
                 // A question is the one thing that has to be kept rather than
                 // only passed on: answering it needs what it arrived with.
                 if let Some((id, request)) = a_question(&line) {
@@ -823,10 +966,73 @@ impl Claude {
                 turns,
                 waiting,
                 brought,
+                of_its_own,
+                pid,
             },
             rx,
         ))
     }
+}
+
+/// The programs that are a shell, by the name the system gives the process.
+/// The wall's own launcher among them, for the moment before it becomes one.
+const SHELLS: &[&str] = &[
+    "zsh",
+    "bash",
+    "sh",
+    "dash",
+    "ksh",
+    "fish",
+    "tcsh",
+    "csh",
+    "sandbox-exec",
+];
+
+/// Whether a shell is running directly under this process, other than the
+/// ones `besides` names: for Claude Code, a command its Bash tool started and
+/// has not seen end, which between turns is one left running. It starts a
+/// shell for each command rather than keeping one open. Its tool servers are
+/// what it started with, and one of those may be a shell that lasts as long
+/// as it does, so they are left out by being named.
+///
+/// Second to what it says about its background work, which covers what this
+/// cannot see, such as a command that became its program with `exec`; kept in
+/// case a version of it stops saying.
+pub fn a_shell_runs_under(pid: u32, besides: &std::collections::HashSet<i32>) -> bool {
+    children_of(pid)
+        .into_iter()
+        .filter(|child| !besides.contains(child))
+        .filter_map(name_of)
+        .any(|name| SHELLS.contains(&name.as_str()))
+}
+
+/// The processes whose parent is this one, as many as fit in a page of them.
+fn children_of(pid: u32) -> Vec<i32> {
+    let Ok(parent) = libc::pid_t::try_from(pid) else {
+        return Vec::new();
+    };
+    let mut found = vec![0 as libc::pid_t; 256];
+    let room = libc::c_int::try_from(found.len() * std::mem::size_of::<libc::pid_t>())
+        .unwrap_or(libc::c_int::MAX);
+    // SAFETY: the buffer is as long as said, and the call writes at most that
+    // much; what it answers is how many it wrote.
+    let many = unsafe { libc::proc_listchildpids(parent, found.as_mut_ptr().cast(), room) };
+    let many = usize::try_from(many).unwrap_or(0).min(found.len());
+    found.truncate(many);
+    found.retain(|&child| child > 0);
+    found
+}
+
+/// A process's name, as the system keeps it: the program it is running.
+fn name_of(pid: i32) -> Option<String> {
+    let mut name = vec![0u8; 64];
+    let room = u32::try_from(name.len()).unwrap_or(0);
+    // SAFETY: the buffer is as long as said, and the call writes at most that
+    // much; what it answers is how many bytes of name it wrote.
+    let wrote = unsafe { libc::proc_name(pid, name.as_mut_ptr().cast(), room) };
+    let wrote = usize::try_from(wrote).ok().filter(|&n| n > 0)?;
+    name.truncate(wrote.min(name.len()));
+    Some(String::from_utf8_lossy(&name).into_owned())
 }
 
 impl Engine for Claude {
@@ -909,6 +1115,25 @@ impl Engine for Claude {
         self.turns
             .send(Turn::Say(line))
             .map_err(|_| anyhow::anyhow!("this conversation has ended"))
+    }
+
+    fn keeps_its_own_record(&self) -> bool {
+        // Its session, which the next one opened picks up with --resume.
+        true
+    }
+
+    fn still_running_something(&self) -> bool {
+        // Never a panic here: it is asked while the app's list of open
+        // engines is held, and a lock left poisoned by one line read wrongly
+        // would take that list with it.
+        let of_its_own = self.of_its_own.lock().unwrap_or_else(|e| e.into_inner());
+        if of_its_own.anything(std::time::Instant::now()) {
+            return true;
+        }
+        let besides = of_its_own.there_from_the_start.clone().unwrap_or_default();
+        drop(of_its_own);
+        self.pid
+            .is_some_and(|pid| a_shell_runs_under(pid, &besides))
     }
 
     fn stop(&mut self) -> Result<()> {
@@ -1553,6 +1778,152 @@ fn one_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_left_running_is_seen_under_its_process_and_a_tool_server_is_not() {
+        use std::os::unix::process::CommandExt;
+        // Each a parent of its own, standing in for Claude Code: one with a
+        // program under it, as a tool server is, and one with a shell under
+        // it, as a command left running in the background is.
+        let start = |script: &str| {
+            std::process::Command::new("/bin/sh")
+                .args(["-c", script])
+                .process_group(0)
+                .spawn()
+                .expect("a stand-in starts")
+        };
+        let mut server = start("/bin/sleep 30 & wait");
+        let mut command = start("/bin/sh -c '/bin/sleep 30; :' & wait");
+        // Once what is under it has started, which takes a moment.
+        let none = std::collections::HashSet::new();
+        let seen = |pid: u32, shell: bool| {
+            (0..60).any(|_| {
+                if !children_of(pid).is_empty() && a_shell_runs_under(pid, &none) == shell {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                false
+            })
+        };
+        let the_command = seen(command.id(), true);
+        let the_server = seen(server.id(), false);
+        // And not when it was there from the start, as a tool server is.
+        let from_the_start: std::collections::HashSet<i32> =
+            children_of(command.id()).into_iter().collect();
+        let left_out = !a_shell_runs_under(command.id(), &from_the_start);
+        for child in [&mut server, &mut command] {
+            let group = libc::pid_t::try_from(child.id()).expect("a pid");
+            // SAFETY: a process group of this test's own making.
+            unsafe { libc::killpg(group, libc::SIGKILL) };
+            let _ = child.wait();
+        }
+        assert!(the_command, "a shell under it was not seen");
+        assert!(the_server, "a program under it was taken for a shell");
+        assert!(left_out, "a shell it started with was taken for a command");
+        assert!(
+            !a_shell_runs_under(u32::MAX, &none),
+            "a process that is not there"
+        );
+    }
+
+    #[test]
+    fn what_a_session_has_going_on_of_its_own_is_heard_from_what_it_says() {
+        // Shaped as Claude Code 2.1.292 said them, seen with a stand-in model:
+        // the whole list each time it changes, and a timed job's call and
+        // result.
+        let mut its = OfItsOwn::default();
+        let now = std::time::Instant::now();
+        let listed = |tasks: &str| {
+            format!(
+                r#"{{"type":"system","subtype":"background_tasks_changed","tasks":[{tasks}],"session_id":"s"}}"#
+            )
+        };
+        let bash = r#"{"task_id":"b4jusy2mg","task_type":"local_bash","description":"bg"}"#;
+        let helper =
+            r#"{"task_id":"a8d16d21","task_type":"local_agent","description":"slow helper"}"#;
+        assert!(!its.anything(now));
+        its.hear(&listed(&format!("{bash},{helper}")), None);
+        assert!(its.anything(now), "two in the background");
+        its.hear(&listed(helper), None);
+        assert!(its.anything(now), "one still in the background");
+        its.hear(&listed(""), None);
+        assert!(!its.anything(now), "the list is empty");
+
+        let call = |id: &str, name: &str, input: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{input}}}]}},"parent_tool_use_id":null}}"#
+            )
+        };
+        let result = |id: &str, error: bool| {
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"{id}","type":"tool_result","content":"Scheduled recurring job 4a95cb04 (Every 30 minutes). Session-only (not written to disk, dies when Claude exits).","is_error":{error}}}]}}}}"#
+            )
+        };
+        // A job that was refused is no job.
+        its.hear(&call("t1", "CronCreate", r#"{"cron":"bad"}"#), None);
+        its.hear(&result("t1", true), None);
+        assert!(!its.anything(now), "a refused job");
+        its.hear(
+            &call(
+                "t2",
+                "CronCreate",
+                r#"{"cron":"*/30 * * * *","prompt":"p"}"#,
+            ),
+            None,
+        );
+        its.hear(&result("t2", false), None);
+        assert!(its.anything(now), "a job it keeps");
+        its.hear(&call("t3", "CronDelete", r#"{"id":"4a95cb04"}"#), None);
+        its.hear(&result("t3", false), None);
+        assert!(!its.anything(now), "the job deleted");
+
+        // A wake-up is waited for until a while after it is due, and not once
+        // it is stopped.
+        its.hear(
+            &call(
+                "t4",
+                "ScheduleWakeup",
+                r#"{"delaySeconds":1200,"noop":false}"#,
+            ),
+            None,
+        );
+        its.hear(&result("t4", false), None);
+        assert!(its.anything(now + std::time::Duration::from_secs(1200)));
+        assert!(!its.anything(
+            now + std::time::Duration::from_secs(1200)
+                + A_WAKE_UP_IS_LATE_AFTER
+                + std::time::Duration::from_secs(5)
+        ));
+        // Asked for a day, it wakes within the hour; asked for more than any
+        // clock holds, the same, and nothing breaks.
+        for (id, delay) in [("t6", "86400"), ("t7", "1e30")] {
+            its.hear(
+                &call(
+                    id,
+                    "ScheduleWakeup",
+                    &format!(r#"{{"delaySeconds":{delay}}}"#),
+                ),
+                None,
+            );
+            its.hear(&result(id, false), None);
+            let late = std::time::Duration::from_secs(A_WAKE_UP_AT_THE_LATEST + 5)
+                + A_WAKE_UP_IS_LATE_AFTER;
+            assert!(!its.anything(std::time::Instant::now() + late), "{delay}");
+        }
+        its.hear(&call("t5", "ScheduleWakeup", r#"{"stop":true}"#), None);
+        its.hear(&result("t5", false), None);
+        assert!(!its.anything(now), "the wake-up stopped");
+
+        // What it started with is noted once, at the first start, and only then.
+        its.hear(INIT, Some(std::process::id()));
+        assert!(its.there_from_the_start.is_some());
+        its.there_from_the_start = Some(std::collections::HashSet::from([1]));
+        its.hear(INIT, Some(std::process::id()));
+        assert_eq!(
+            its.there_from_the_start,
+            Some(std::collections::HashSet::from([1]))
+        );
+    }
 
     #[test]
     fn an_agent_is_told_who_it_is_before_anything_else_and_its_notes_under_their_own_heading() {

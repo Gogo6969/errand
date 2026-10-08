@@ -308,6 +308,19 @@ pub trait Engine {
     fn walls_each_command(&self) -> bool {
         false
     }
+    /// Whether it keeps its own record of the conversation, so that closing it
+    /// and opening it again loses nothing. Claude Code does, in its session. A
+    /// local model opened again gets back the words and none of its steps, as
+    /// `walls_each_command` says, so one is not closed only for sitting idle.
+    fn keeps_its_own_record(&self) -> bool {
+        false
+    }
+    /// Whether something it started is still going while no turn is: a
+    /// command it left running in the background. Closing it would end that,
+    /// or leave it running where nothing can see it, so it is not idle.
+    fn still_running_something(&self) -> bool {
+        false
+    }
     /// Stop it, whatever it is doing.
     fn stop(&mut self) -> anyhow::Result<()>;
     /// What it turned up with, once it has said.
