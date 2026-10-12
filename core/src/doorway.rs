@@ -48,11 +48,12 @@ const SPOKEN: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"
 
 /// How long the doorway waits for the app to answer one call.
 ///
-/// Deliberately longer than the app's own ten minutes for a delegated errand,
+/// Deliberately longer than the app's own longest wait for a delegated errand,
 /// so that a slow answer is reported by the side that knows why it was slow. If
 /// this were the shorter of the two, every long delegation would come back as a
 /// timeout from a process that has no idea what it was waiting for.
-const TO_ANSWER: Duration = Duration::from_secs(660);
+const TO_ANSWER: Duration =
+    Duration::from_secs(crate::team::A_HANDED_ERRAND_IS_WAITED_FOR_AT_MOST.as_secs() + 60);
 
 /// One request, one answer, one connection.
 ///

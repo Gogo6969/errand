@@ -465,15 +465,16 @@ pub fn declarations() -> Vec<Value> {
                 "name": "project_folder",
                 "description":
                     "Get this task's project folder. Call it before writing anything when a \
-                     task is about a project of files: an app, a program, a script, a site, a \
-                     set of documents. Give the project's own short name, such as KmMiles or \
-                     Tide-Clock: Errand makes a folder of that name in your folder, or finds the \
-                     one already there under it when this is about an earlier project, and \
-                     links this task to it. You get back its full path. Put every file of the \
-                     project there and nowhere else, and start your commands there: from then on \
-                     this task writes only in it, and so does every later change asked for in \
-                     this task. A new project gets a new name. A task already linked to a \
-                     folder keeps it, and is told which. Not for a plain question or an errand \
+                     task you were given is about a project of files: an app, a program, a \
+                     script, a site, a set of documents. Give the project's own short name, \
+                     such as KmMiles or Tide-Clock: Errand makes a folder of that name in your \
+                     folder, or finds the one already there under it when this is about an \
+                     earlier project, and links this task to it. You get back its full path. Put \
+                     every file of the project there, named with that path, and start your \
+                     commands with cd into it: from then on this task writes only there, and so \
+                     does every later change asked for in this task. A new project gets a new \
+                     name, and needs a task of its own. Not for a part another teammate handed \
+                     you, which goes where they said, and not for a plain question or an errand \
                      that makes no files.",
                 "parameters": {
                     "type": "object",
@@ -1098,24 +1099,49 @@ pub fn without_the_app(tool: Ours) -> &'static str {
 }
 
 /// What `project_folder` says back: where the task works from now on.
+///
+/// Paths stay as they were, from the working directory, so the files are
+/// named by the folder's full path or its name in front: a path given to the
+/// file tools without it lands outside the project and is refused.
 pub fn works_in(folder: &str, made: bool, already: bool) -> String {
+    let how = format!(
+        "Name its files by their full path, {folder}/..., or from your working directory with \
+         the folder's name in front, and start each command with cd \"{folder}\", quoted: the \
+         path has a space in it. From now on this task writes only in it, and so does every \
+         later change asked for here."
+    );
     match (already, made) {
         (true, _) => format!(
-            "This task already works in {folder}, and keeps it: a task's folder never moves. \
-             Put everything for it there."
+            "This task already works in {folder}, and keeps it: a task's folder never moves. {how}"
         ),
         (false, true) => format!(
             "Made {folder} for this project and linked this task to it. Put every file of the \
-             project there, start each command there, and write nowhere else: from now on this \
-             task writes only in it."
+             project there. {how}"
         ),
         (false, false) => format!(
             "{folder} was already there, the folder of that project, and this task is linked to \
-             it now. Work on what is in it, start each command there, and write nowhere else: \
-             from now on this task writes only in it."
+             it now. Work on what is in it. {how}"
         ),
     }
 }
+
+/// What `project_folder` says when asked, under another name, in a task that
+/// already works on a project: a second project is a task of its own, or its
+/// files are mixed into the first one's.
+pub fn another_project(folder: &str, named: &str) -> String {
+    format!(
+        "This task works on the project in {folder}, and only there, and keeps it. If {named} \
+         is that same project under another name, carry on there. If it is a different \
+         project, do not put it here: tell the person it needs a task of its own, where it gets \
+         a folder of its own."
+    )
+}
+
+/// How long an errand handed to another teammate is waited on in all, however
+/// much it is doing. Here, where both the app and the doorway can see it,
+/// because the doorway gave up at eleven minutes while the app waited on.
+pub const A_HANDED_ERRAND_IS_WAITED_FOR_AT_MOST: std::time::Duration =
+    std::time::Duration::from_secs(2 * 60 * 60);
 
 /// What `stop_repeating` was asked to switch off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

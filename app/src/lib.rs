@@ -564,9 +564,10 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
     // only place it writes. Kept in the store, so a change asked for days
     // later lands with the rest.
     let folder = conversation.as_ref().and_then(|c| c.folder.clone());
-    let knows = match &folder {
-        Some(folder) => knows.working_in(folder),
-        None => knows,
+    let knows = match (&folder, held.store.team_task(&id).ok().flatten()) {
+        (Some(folder), Some(_)) => knows.working_in_the_teams(folder),
+        (Some(folder), None) => knows.working_in(folder),
+        (None, _) => knows,
     };
     let project =
         errand_core::wall::a_project_in(&home, folder.as_deref().map(std::path::Path::new));
@@ -1464,7 +1465,7 @@ async fn say_as(
                         )
                         .ok()
                     })
-                    .map(|at| at.display().to_string())
+                    .map(|at| at.canonicalize().unwrap_or(at).display().to_string())
             });
             if let Some(folder) = &folder {
                 let _ = held.store.works_in(&id, folder);
@@ -1681,6 +1682,18 @@ fn close_if_its_folder_changed(held: &Held, id: &str) {
         .is_some_and(|engine| engine.walls_each_command());
     if walls_each {
         held.opened_in.lock().unwrap().insert(id.to_string(), now);
+        return;
+    }
+    // Not while something it started is still going, a server the person is
+    // looking at among them: closed, that would be left running where nothing
+    // sees it. Opened again behind the narrower wall at its next quiet turn.
+    let busy = held
+        .live
+        .lock()
+        .unwrap()
+        .get(id)
+        .is_some_and(|engine| engine.still_running_something());
+    if busy {
         return;
     }
     // As closing one on another model does: its reader is no longer the
@@ -3348,9 +3361,11 @@ async fn look_once(
             // than trying again every thirty seconds for the rest of the day.
             let turn = {
                 let held: State<Held> = app.state();
-                // Its engine on the model chosen now, before the turn is
-                // claimed: a claimed turn is never swapped.
+                // Its engine on the model chosen now, and behind the wall of
+                // the folder its task has now, before the turn is claimed: a
+                // claimed turn is never swapped.
                 close_if_its_model_changed(&held, conversation);
+                close_if_its_folder_changed(&held, conversation);
                 held.store
                     .woke(conversation, &seen.mark, &seen.note, today)
                     .map_err(|e| e.to_string())?;
@@ -4253,14 +4268,46 @@ fn stop_repeating(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
     Ok(team::switched_off(&done, stopping, &theirs, &asked.from))
 }
 
-/// Pause the agent this conversation belongs to, or start it again, because
-/// it was asked to.
-///
-/// The same switch as the one in the window, and the same stop: every other
-/// conversation of it in the middle of something is stopped and says so. Not
-/// this one. This turn is the one saying it has paused, and it ends when that
-/// is written; stopped here, the answer would be cut off before it said what
-/// had happened.
+/// Whether a folder's name and a project's name are the same project: without
+/// regard to capitals, as the disk takes them, or to spaces and hyphens, and
+/// with the number put on a second folder of the same name taken off.
+fn same_name(folder: &str, named: &str) -> bool {
+    let plain = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let folder = match folder.rsplit_once('-') {
+        Some((stem, n)) if !stem.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => stem,
+        _ => folder,
+    };
+    plain(folder) == plain(named)
+}
+
+/// Whether a conversation is, or comes from, a part another teammate handed
+/// over: up the chain of who asked, a skill run inside a part included. A room
+/// is not somebody handing work over: what is said there is the person's.
+fn handed_over_by_another(held: &Held, talk: &Conversation) -> bool {
+    let mut here = talk.clone();
+    for _ in 0..12 {
+        let Some(by) = here.asked_by.clone() else {
+            return false;
+        };
+        if held.store.is_a_room(&by).unwrap_or(false) {
+            return false;
+        }
+        let Some(asker) = held.store.conversation(&by).ok().flatten() else {
+            return false;
+        };
+        if asker.agent != here.agent {
+            return true;
+        }
+        here = asker;
+    }
+    false
+}
+
 /// A task's project folder changed, so the window can show it on the task.
 #[derive(Clone, Serialize)]
 struct WorksIn {
@@ -4282,9 +4329,47 @@ fn project_folder(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
         .store
         .conversation(&asked.from)?
         .ok_or_else(|| anyhow::anyhow!("there is no task here to give a folder"))?;
+    let named = asked
+        .args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if let Some(folder) = &talk.folder {
+        // Asked under another name, it may be another project, whose files
+        // would be mixed into this one's: that is a task of its own. Only for a
+        // project's own folder: a team's task folder is named for the day and
+        // what was asked, never for the project, and its lead naming the
+        // project is the ordinary case.
+        let a_project = held
+            .store
+            .agent(&talk.agent)?
+            .and_then(|a| {
+                errand_core::wall::a_project_in(
+                    std::path::Path::new(&a.cwd),
+                    Some(std::path::Path::new(folder)),
+                )
+            })
+            .is_some();
+        let ours = std::path::Path::new(folder)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if a_project && !named.is_empty() && !same_name(&ours, &named) {
+            return Ok(team::another_project(folder, &named));
+        }
         return Ok(team::works_in(folder, false, true));
     }
+    // A part another teammate handed over goes where they said, in their
+    // task's folder or a team's: a folder of its own here would wall it out of
+    // the place its work is wanted.
+    let handed_over = handed_over_by_another(&held, &talk);
+    anyhow::ensure!(
+        !handed_over,
+        "this is a part another teammate handed you: put your work where they said, not in a \
+         project folder of your own"
+    );
     // A team's task made before its folder was kept: its lead was told the
     // folder in the first message, and a second one would split its work.
     anyhow::ensure!(
@@ -4296,16 +4381,10 @@ fn project_folder(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
         .store
         .agent(&talk.agent)?
         .ok_or_else(|| anyhow::anyhow!("the teammate of this task is gone"))?;
-    let named = asked
-        .args
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
     let cwd = std::path::Path::new(&agent.cwd);
     let (at, made) = errand_core::home::project_folder(cwd, &named)?;
-    let at = at.display().to_string();
+    // By its real path, the form the card's Open checks it is still in.
+    let at = at.canonicalize().unwrap_or(at).display().to_string();
     // Another turn may have given it one in the meantime: that one stands.
     let now = held
         .store
@@ -4326,6 +4405,14 @@ fn project_folder(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
     Ok(team::works_in(&now, made && !already, already))
 }
 
+/// Pause the agent this conversation belongs to, or start it again, because
+/// it was asked to.
+///
+/// The same switch as the one in the window, and the same stop: every other
+/// conversation of it in the middle of something is stopped and says so. Not
+/// this one. This turn is the one saying it has paused, and it ends when that
+/// is written; stopped here, the answer would be cut off before it said what
+/// had happened.
 fn pause_from_inside(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
     let agent = whose_notebook(app, &asked.from)?;
     let paused = asked
@@ -5604,9 +5691,19 @@ async fn show_task_folder(held: State<'_, Held>, id: String) -> Result<(), Strin
         .map_err(|e| e.to_string())?
         .ok_or("that task is gone")?;
     let folder = talk.folder.ok_or("this task has no folder of its own")?;
-    let real = std::path::Path::new(&folder)
-        .canonicalize()
-        .map_err(|_| format!("{folder} is not there any more"))?;
+    let real = std::path::PathBuf::from(&folder);
+    // The folder itself, as it was made, and only shown in Finder, the way a
+    // folder a teammate asks to have opened is: a teammate can write where its
+    // folder is, and a link or an app left under that name would otherwise be
+    // opened outside its wall by the person's own click.
+    let same = std::fs::symlink_metadata(&real).is_ok_and(|m| m.is_dir())
+        && real.canonicalize().is_ok_and(|now| now == real)
+        && what_opening(&real) == Ok(Opening::Folder);
+    if !same {
+        return Err(format!(
+            "{folder} is not the plain folder Errand made for this task any more"
+        ));
+    }
     let theirs = held
         .store
         .agent(&talk.agent)
@@ -5617,10 +5714,11 @@ async fn show_task_folder(held: State<'_, Held>, id: String) -> Result<(), Strin
         .and_then(|errand| errand.join(errand_core::home::TEAMS).canonicalize().ok());
     let ours = theirs.is_some_and(|home| real.starts_with(home))
         || teams.is_some_and(|teams| real.starts_with(teams));
-    if !ours || !real.is_dir() {
+    if !ours {
         return Err(format!("{folder} is not a folder Errand gave this task"));
     }
     std::process::Command::new("/usr/bin/open")
+        .arg("-R")
         .arg(&real)
         .spawn()
         .map_err(|e| e.to_string())?;
@@ -6256,6 +6354,11 @@ async fn run_skill(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Strin
             // it. Nothing when the request came from outside the app.
             Some(asked.from.as_str()).filter(|from| !from.is_empty()),
         )?;
+        // In the folder of the task it was run from, which is the same
+        // teammate's: a skill run on a project is a change to that project.
+        if let Some(folder) = held.store.conversation(&asked.from)?.and_then(|c| c.folder) {
+            held.store.works_in(&talk, &folder)?;
+        }
         (talk, skill::the_plan(&found, &differently))
     };
 
@@ -6280,7 +6383,7 @@ async fn run_skill(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<Strin
     )
     .await
     {
-        Ok(_) => wait_for_the_answer(done, asked.along_the_way.clone()).await,
+        Ok(_) => wait_for_the_answer(app, &talk, done, asked.along_the_way.clone()).await,
         Err(why) => Err(anyhow::anyhow!("{why}")),
     };
     {
@@ -6738,7 +6841,7 @@ async fn hand_to_now(
     .await
     {
         // Where it landed is of no interest to a delegated errand.
-        Ok(_) => wait_for_the_answer(done, along_the_way).await,
+        Ok(_) => wait_for_the_answer(app, &talk, done, along_the_way).await,
         Err(why) => {
             let held: State<Held> = app.state();
             held.doing.lock().unwrap().remove(&talk);
@@ -6788,10 +6891,34 @@ fn how_it_ended(said: &str) -> i32 {
 /// this is waiting for. The symptom of that is silence, which reads exactly
 /// like an agent with nothing to say.
 async fn wait_for_the_answer(
+    app: &AppHandle,
+    talk: &str,
     done: tokio::sync::mpsc::UnboundedReceiver<Event>,
     along_the_way: Option<tokio::sync::mpsc::UnboundedSender<errand_core::team::Meanwhile>>,
 ) -> anyhow::Result<String> {
-    Ok(in_words(what_came_back(done, along_the_way).await))
+    let came = what_came_back(|| waiting_on_something(app, talk), done, along_the_way).await;
+    stop_what_nobody_waits_for(app, talk, &came);
+    Ok(in_words(came))
+}
+
+/// Stop a turn nobody is waiting on any more, so it does not go on working
+/// with nobody reading what it does, and so the teammate is not free for a
+/// second errand while it is still busy with the first.
+fn stop_what_nobody_waits_for(app: &AppHandle, talk: &str, came: &Came) {
+    if matches!(came, Came::TooLong(_)) {
+        let held: State<Held> = app.state();
+        // What it handed on too, which nobody will read either.
+        stop_what_it_handed_out(app, &held, talk);
+        // Said in it, so its record does not just end.
+        stop_and_say(
+            app,
+            &held,
+            talk,
+            "stopped when it was no longer waited for",
+            "Stopped: whoever asked for this stopped waiting for it, after ten minutes with \
+             nothing from it or two hours in all.",
+        );
+    }
 }
 
 /// What an errand came to, as the one who asked for it is told.
@@ -6808,9 +6935,10 @@ fn in_words(came: Came) -> String {
         Came::Stopped(so_far) => {
             format!("It stopped before it finished. What it got to: {so_far}")
         }
-        Came::TooLong(so_far) => {
-            format!("It did not finish within ten minutes. What it got to: {so_far}")
-        }
+        Came::TooLong(so_far) => format!(
+            "It did not finish within the time it is waited for: ten minutes with nothing \
+             from it, or two hours in all. It was stopped there. What it got to: {so_far}"
+        ),
     }
 }
 
@@ -6832,25 +6960,27 @@ enum Came {
     Failed(String),
     /// Its pump went away before it finished.
     Stopped(String),
-    /// Ten minutes passed.
+    /// It went ten minutes with nothing from it, or two hours in all.
     TooLong(String),
 }
 
 /// Collect what a conversation said, until its turn ends or ten minutes pass.
 async fn what_came_back(
+    // Whether the conversation, quiet though it is, is waiting on something:
+    // a part it handed on, still working, or a card in front of the person.
+    // It is not given up on for being quiet while it waits.
+    waiting_on_something: impl Fn() -> bool,
     mut done: tokio::sync::mpsc::UnboundedReceiver<Event>,
     // Where to say what is happening, for a caller watching rather than
     // waiting. Nothing for an engine: a model handed a commentary on somebody
     // else's work puts all of it in its context and none of it is the answer.
     along_the_way: Option<tokio::sync::mpsc::UnboundedSender<errand_core::team::Meanwhile>>,
 ) -> Came {
-    use std::time::Duration;
-    // Shared with the collecting task, so that giving up still reports what was
-    // said before the deadline. An agent that worked for nine minutes and then
-    // ran out of time has usually produced something worth passing back, and
-    // "it did not finish" on its own throws that away.
-    let said = Arc::new(Mutex::new(String::new()));
-    let filling = said.clone();
+    // Kept as it comes, so that giving up still reports what was said before
+    // the wait ended. An agent that worked for nine minutes and then ran out of
+    // time has usually produced something worth passing back, and "it did not
+    // finish" on its own throws that away.
+    let filling = Arc::new(Mutex::new(String::new()));
 
     let collect = async move {
         let push = |text: &str| {
@@ -6860,7 +6990,24 @@ async fn what_came_back(
         };
         let so_far = || filling.lock().unwrap().clone();
 
-        while let Some(event) = done.recv().await {
+        // Waited on while it keeps doing something, and given up on once it
+        // has gone quiet for ten minutes, or after two hours in all. Ten
+        // minutes in all was the limit while a turn could take only so many
+        // steps; one that goes on until a job is done ran past it, building,
+        // and the one who asked was told it had not finished while it worked
+        // on with nobody reading what it did.
+        let started = std::time::Instant::now();
+        loop {
+            let left = A_HANDED_ERRAND_IS_WAITED_FOR_AT_MOST.saturating_sub(started.elapsed());
+            let event =
+                match tokio::time::timeout(A_QUIET_ERRAND_IS_WAITED_FOR.min(left), done.recv())
+                    .await
+                {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break,
+                    Err(_) if !left.is_zero() && waiting_on_something() => continue,
+                    Err(_) => return Came::TooLong(so_far()),
+                };
             // Said as it happens, in the same words the window uses. What a
             // step is called is already written for a person to read, so there
             // is nothing to invent here.
@@ -6920,10 +7067,44 @@ async fn what_came_back(
         Came::Stopped(so_far())
     };
 
-    match tokio::time::timeout(Duration::from_secs(600), collect).await {
-        Ok(came) => came,
-        Err(_) => Came::TooLong(said.lock().unwrap().clone()),
+    collect.await
+}
+
+/// How long an errand handed to somebody is waited on with nothing at all
+/// coming from it.
+const A_QUIET_ERRAND_IS_WAITED_FOR: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// How long one is waited on in all, however much it is doing.
+const A_HANDED_ERRAND_IS_WAITED_FOR_AT_MOST: std::time::Duration =
+    errand_core::team::A_HANDED_ERRAND_IS_WAITED_FOR_AT_MOST;
+
+/// Whether a conversation is waiting on something rather than stuck: a part
+/// it handed to somebody else that is still being waited on, or a card in
+/// front of the person.
+fn waiting_on_something(app: &AppHandle, talk: &str) -> bool {
+    let held: State<Held> = app.state();
+    if a_handover_waiting_in(&held, talk).is_some() {
+        return true;
     }
+    if held
+        .doing
+        .lock()
+        .unwrap()
+        .get(talk)
+        .is_some_and(|what| what.starts_with(NEEDS_YOU))
+    {
+        return true;
+    }
+    let waited_on: Vec<String> = held.watching.lock().unwrap().keys().cloned().collect();
+    waited_on.iter().any(|child| {
+        held.store
+            .conversation(child)
+            .ok()
+            .flatten()
+            .and_then(|c| c.asked_by)
+            .as_deref()
+            == Some(talk)
+    })
 }
 
 /// One thing said in a room, taken round to whoever it was said to.
@@ -7099,7 +7280,8 @@ async fn take_it_round(
                     "note",
                     None,
                     format!(
-                        "{who} did not finish within ten minutes.{}",
+                        "{who} did not finish within the time it is waited for, ten minutes \
+                         with nothing from it or two hours in all, and was stopped.{}",
                         got_to(&so_far)
                     ),
                 ),
@@ -7157,6 +7339,7 @@ async fn answer_from(
     {
         let held: State<Held> = app.state();
         close_if_its_model_changed(&held, talk);
+        close_if_its_folder_changed(&held, talk);
     }
     open_thread(app.clone(), app.state(), talk.to_string())
         .await
@@ -7182,7 +7365,11 @@ async fn answer_from(
         }
     }
     let came = match say_later(app.clone(), talk.to_string(), words, attached).await {
-        Ok(_) => Ok(what_came_back(done, None).await),
+        Ok(_) => {
+            let came = what_came_back(|| waiting_on_something(app, talk), done, None).await;
+            stop_what_nobody_waits_for(app, talk, &came);
+            Ok(came)
+        }
         Err(why) => {
             let held: State<Held> = app.state();
             held.doing.lock().unwrap().remove(talk);
@@ -11359,6 +11546,22 @@ mod tests {
                 where_it_may_be_opened_from(Path::new(refused), home, &teams).is_none(),
                 "{refused}"
             );
+        }
+    }
+
+    #[test]
+    fn a_project_asked_for_again_under_another_spelling_is_the_same_project() {
+        for (folder, named) in [
+            ("KmMiles", "KmMiles"),
+            ("Km-Miles", "KmMiles"),
+            ("Km-Miles", "km miles"),
+            ("KmMiles-2", "KmMiles"),
+            ("Tide-Clock", "TIDE_CLOCK"),
+        ] {
+            assert!(super::same_name(folder, named), "{folder} / {named}");
+        }
+        for (folder, named) in [("KmMiles", "Tide-Clock"), ("KmMiles", "KmMiles2-Pro")] {
+            assert!(!super::same_name(folder, named), "{folder} / {named}");
         }
     }
 

@@ -343,6 +343,17 @@ fn profile_keeping_out_in(
         allowed.join("\n")
     );
     profile.push_str(&its_own_settings_kept(home));
+    // A project's folder kept where it is, as its working directory is: moved
+    // aside and something else put under its name, a link or an app, it is
+    // what the task card would show the person, outside the wall.
+    // Only its moving and removing: the folder's own dates and permissions
+    // are still its to set, as `rsync -a` and `touch` do.
+    if let Some(project) = &project {
+        profile.push_str(&format!(
+            "\n(deny file-write-unlink (literal {}))",
+            quoted(project)
+        ));
+    }
     // The same for every folder it was allowed besides its own, a team's
     // shared one among them: the person opens those as projects, and an
     // engine started there reads the settings at their top as the person's.
@@ -1155,7 +1166,8 @@ pub fn what_the_wall_means_in(home: &Path, project: Option<&Path>) -> String {
         Some(project) => format!(
             " This task works on one project, and everything it makes or changes goes in its \
              folder: the rest of your working directory, {}, is read-only to you in this task. \
-             Start each command in the project folder (cd {} first) and write paths inside it.",
+             Start each command in the project folder (cd \"{}\" first, quoted, since the path \
+             has a space in it) and write paths inside it.",
             home.display(),
             project.display()
         ),
@@ -1365,12 +1377,14 @@ pub fn shell(home: &Path, command: &str) -> tokio::process::Command {
     shell_in(home, None, command)
 }
 
-/// The same, for a task with a project folder of its own: run there, where
-/// everything it writes has to go.
+/// The same, for a task with a project folder of its own, which it may write
+/// in and nowhere else of its working directory.
 pub fn shell_in(home: &Path, project: Option<&Path>, command: &str) -> tokio::process::Command {
+    // Started in the working directory, as the model is told: a command that
+    // writes in the project goes there first, and one that does not is
+    // refused by the wall with the project's name.
     let mut sh = around_in("/bin/sh", home, project, Inside::ACommand);
-    let here = a_project_in(home, project).unwrap_or_else(|| home.to_path_buf());
-    sh.arg("-lc").arg(command).current_dir(here);
+    sh.arg("-lc").arg(command).current_dir(home);
     sh
 }
 
@@ -1479,6 +1493,26 @@ mod tests {
             );
             std::fs::remove_file(&refused).ok();
         }
+        // The project's folder itself stays where it is: moved aside, a link
+        // could be left under its name for the person to open.
+        let moved = std::process::Command::new(THE_SANDBOX)
+            .arg("-p")
+            .arg(&narrowed)
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "mv {} {}",
+                quoted(&home.join("KmMiles")),
+                quoted(&home.join(".cache/moved"))
+            ))
+            .output()
+            .expect("sandbox-exec runs")
+            .status
+            .success();
+        assert!(
+            !moved && home.join("KmMiles").is_dir(),
+            "the project folder was moved"
+        );
         // Without a project the whole folder is its own, as it always was.
         assert!(run(&whole, &home.join("loose.txt")));
         // Only a folder inside the working directory is a project.

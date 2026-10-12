@@ -541,6 +541,9 @@ struct Covered {
 struct Round {
     /// Whether any call in it did something not done before this turn.
     new: bool,
+    /// Whether it looked at something not looked at before this turn and
+    /// found something there: worth half a step that did something.
+    looked: bool,
     /// Each call, as what it asked for and what came back, in the order made.
     did: Vec<(u64, u64)>,
 }
@@ -566,9 +569,20 @@ impl Covered {
                 self.files.insert(path.to_string());
             }
         }
+        // Only looking is not getting anywhere by itself, however many places
+        // it looks: a model that had invented a job looked through folder after
+        // folder for it, every look new, and would have gone on for every step
+        // a message allows. Looked at again and found changed, it is: a file
+        // read again after it was edited, a build that printed more.
+        let first_time = match only_looks(name) {
+            true => false,
+            false => !failed(outcome),
+        };
         let new = (wrote && self.written.insert(asked))
-            || before.map_or(!failed(outcome), |was| was != came_back);
+            || before.map_or(first_time, |was| was != came_back);
         self.now.new |= new;
+        self.now.looked |=
+            only_looks(name) && before.is_none() && !failed(outcome) && !found_nothing(outcome);
     }
 
     /// A call that cannot have moved anything on, whatever came back: its
@@ -606,6 +620,19 @@ impl Covered {
     fn new_in_the_last(&self, count: usize) -> usize {
         let from = self.rounds.len().saturating_sub(count);
         self.rounds[from..].iter().filter(|one| one.new).count()
+    }
+
+    /// How far the last `count` rounds got, in rounds that did something new:
+    /// one that only looked somewhere new and found something counts half.
+    /// Reading thirty files before the first change is how work on a big
+    /// project starts, and it was called going round in circles.
+    fn got_on_in_the_last(&self, count: usize) -> usize {
+        let from = self.rounds.len().saturating_sub(count);
+        let looked = self.rounds[from..]
+            .iter()
+            .filter(|one| one.looked && !one.new)
+            .count();
+        self.new_in_the_last(count) + looked / 2
     }
 
     /// What is said on screen as a long turn carries on past a stretch.
@@ -661,6 +688,33 @@ fn hashed(said: &str) -> u64 {
     hasher.finish()
 }
 
+/// A look that came back empty: nothing matched, nothing was there.
+fn found_nothing(outcome: &str) -> bool {
+    let said = outcome.trim();
+    said.is_empty()
+        || said == "(empty)"
+        || said.starts_with("Nothing matches")
+        || said.starts_with("Nothing contains")
+}
+
+/// The tools that only look: what they find is worth having, and finding it is
+/// not the work moving on.
+fn only_looks(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file"
+            | "list_directory"
+            | "find_files"
+            | "search_files"
+            | "fetch_url"
+            | "check_command"
+            | "find_tools"
+            | "who_else"
+            | "recall"
+            | "skills"
+    )
+}
+
 /// A result that says the call did nothing at all: it failed outright, was
 /// refused, was not run, or named a tool that is not there.
 fn went_nowhere(outcome: &str) -> bool {
@@ -699,6 +753,9 @@ enum Halted {
     /// After this many steps, with the earliest of this turn's own no longer
     /// in what the model can hold.
     OutOfSight(usize),
+    /// After this many steps that only looked and read, two stretches of
+    /// them, without changing anything.
+    OnlyLooked(usize),
 }
 
 impl Halted {
@@ -717,6 +774,10 @@ impl Halted {
                 "(It stopped after {after} steps because the earliest of them no longer fit in \
                  what the model can hold, and a model that cannot see what it did starts doing \
                  it again. Say \"Continue\" to let it carry on from here.)"
+            ),
+            Halted::OnlyLooked(after) => format!(
+                "(It stopped after {after} steps that only read and looked, without changing \
+                 anything. Say \"Continue\" to let it carry on, or say what to do next.)"
             ),
         }
     }
@@ -737,6 +798,11 @@ impl Halted {
                 "It stopped after {after} steps, before it had answered, because the earliest \
                  of them no longer fit in what the model can hold. Say \"Continue\" to let it \
                  carry on from here."
+            ),
+            Halted::OnlyLooked(after) => format!(
+                "It stopped after {after} steps that only read and looked, before it had \
+                 answered and without changing anything. Say \"Continue\" to let it carry on, \
+                 or say what to do next."
             ),
         }
     }
@@ -820,7 +886,14 @@ async fn errand(
                 halted = Halted::OutOfSight(round);
                 break;
             }
-            if covered.new_in_the_last(ENOUGH) < NEW_ENOUGH {
+            // Two stretches of only looking: whatever it is reading, it has
+            // read it, and a hunt for something that is not there looks the
+            // same from here. Said as what it is, not as going in circles.
+            if round >= 2 * ENOUGH && covered.new_in_the_last(2 * ENOUGH) == 0 {
+                halted = Halted::OnlyLooked(round);
+                break;
+            }
+            if covered.got_on_in_the_last(ENOUGH) < NEW_ENOUGH {
                 halted = Halted::InCircles(round);
                 break;
             }
@@ -849,19 +922,23 @@ async fn errand(
         // message from them would be where the trim says a turn begins, and
         // everything the turn did before it would be the first to go.
         if !an_aside && matches!(history.last(), Some(ChatMessage::Tool { .. })) {
-            let Some(words) = said_while_it_worked(asked, kept) else {
+            let Some(words) = said_while_it_worked(asked, kept, renamed) else {
                 return Ok(Done::Abandoned);
             };
             if !words.is_empty() {
+                // In front of the result, not after it: a result too long for
+                // the window is cut from its end, and words put there were the
+                // first thing cut, every round, with the window showing them
+                // as sent.
                 if let Some(ChatMessage::Tool { content, .. }) = history.last_mut() {
-                    content.push_str(&format!(
-                        "\n\nWhile you were working, they wrote: {}",
+                    *content = format!(
+                        "While you were working, they wrote: {}\n\n{content}",
                         words
                             .iter()
                             .map(|text| format!("\"{text}\""))
                             .collect::<Vec<_>>()
                             .join(" ")
-                    ));
+                    );
                 }
                 typed_meanwhile.extend(words);
             }
@@ -1384,10 +1461,11 @@ async fn errand(
                         .unwrap_or_else(|| crate::allowing::the_whole_tool(&name).in_words),
                 }));
 
-                let (said, meanwhile) = match wait_for_an_answer(asked, &call.id, renamed).await {
-                    None => return Ok(Done::Abandoned),
-                    Some(both) => both,
-                };
+                let (said, meanwhile) =
+                    match wait_for_an_answer(asked, kept, &call.id, renamed).await {
+                        None => return Ok(Done::Abandoned),
+                        Some(both) => both,
+                    };
                 // Whatever they typed while deciding is part of the
                 // conversation, and it travels with this step's result so the
                 // model reads it as context for the step rather than as a new
@@ -1395,9 +1473,10 @@ async fn errand(
                 // call and its result, and no provider takes a conversation in
                 // that shape: every request after it was refused, for the rest
                 // of the session.
+                // In front of the result, where the trim keeps it.
                 if !meanwhile.is_empty() {
                     they_also_said = format!(
-                        "\n\nWhile you waited for their answer, they wrote: {}",
+                        "While you waited for their answer, they wrote: {}\n\n",
                         meanwhile
                             .iter()
                             .map(|text| format!("\"{text}\""))
@@ -1415,7 +1494,7 @@ async fn errand(
                             outcome: "Not allowed".to_string(),
                         });
                         history.push(ChatMessage::Tool {
-                            content: format!("{refused}{they_also_said}"),
+                            content: format!("{they_also_said}{refused}"),
                             tool_call_id: call.id.clone(),
                         });
                         continue;
@@ -1511,7 +1590,7 @@ async fn errand(
                 outcome: crate::wall::the_line_for_a_step(&outcome, first_line),
             });
             history.push(ChatMessage::Tool {
-                content: format!("{outcome}{they_also_said}"),
+                content: format!("{they_also_said}{outcome}"),
                 tool_call_id: call.id,
             });
         }
@@ -1698,6 +1777,7 @@ fn must_ask(asks: &str, name: &str, mine: Option<team::Ours>, worth_stopping_for
 /// Returns nothing at all only when the thread is being closed.
 async fn wait_for_an_answer(
     asked: &mut UnboundedReceiver<Turn>,
+    kept: &mut VecDeque<Turn>,
     call: &str,
     renamed: &mut Option<String>,
 ) -> Option<(Answer, Vec<String>)> {
@@ -1708,6 +1788,9 @@ async fn wait_for_an_answer(
                 return Some((said, meanwhile))
             }
             Some(Turn::Stop) | None => return None,
+            // Behind whatever was said before it and kept for after the turn,
+            // a line with a picture on it: nothing is answered ahead of that.
+            Some(said @ Turn::Say(..)) if !kept.is_empty() => kept.push_back(said),
             Some(Turn::Say(text, _)) => meanwhile.push(text),
             // The app asking something of its own while a card is on screen.
             // Not what the card is waiting for and not a person's words either,
@@ -1737,6 +1820,7 @@ async fn wait_for_an_answer(
 fn said_while_it_worked(
     asked: &mut UnboundedReceiver<Turn>,
     kept: &mut VecDeque<Turn>,
+    renamed: &mut Option<String>,
 ) -> Option<Vec<String>> {
     let mut said = Vec::new();
     loop {
@@ -1747,6 +1831,12 @@ fn said_while_it_worked(
             Ok(Turn::Say(text, pictures)) if pictures.is_empty() && kept.is_empty() => {
                 said.push(text)
             }
+            // A new name is taken as it comes, the way a card's wait takes it,
+            // so the newest wins and nothing the person says waits behind it.
+            Ok(Turn::Called(identity)) => *renamed = Some(identity),
+            // An answer to a card no longer up has nothing behind it, here as
+            // after the turn.
+            Ok(Turn::Answer { .. }) => {}
             Ok(other) => kept.push_back(other),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return Some(said),
         }
@@ -2465,15 +2555,74 @@ mod tests {
         covered.ran("run_command", &tests, "test result: ok. 12 passed");
         assert!(covered.now.new, "tests that pass now");
         covered.round_over();
-        covered.ran(
-            "read_file",
-            &serde_json::json!({ "path": "src/main.rs" }),
-            "fn main() {}",
+        // Looking somewhere new is not the work moving on, however many
+        // places it looks; looking again and finding it changed is.
+        let main = serde_json::json!({ "path": "src/main.rs" });
+        covered.ran("read_file", &main, "fn main() {}");
+        assert!(!covered.now.new, "a first look");
+        covered.round_over();
+        for (n, pattern) in ["*polymarket*", "*.job", "start_*"].iter().enumerate() {
+            covered.ran(
+                if n % 2 == 0 {
+                    "find_files"
+                } else {
+                    "search_files"
+                },
+                &serde_json::json!({ "pattern": pattern }),
+                &format!("Nothing matches {pattern}."),
+            );
+            assert!(!covered.now.new, "a search that found nothing: {pattern}");
+            covered.round_over();
+        }
+        covered.ran("read_file", &main, "fn main() { println!(\"hi\"); }");
+        assert!(
+            covered.now.new,
+            "the same file, read again after it changed"
         );
-        assert!(covered.now.new, "something not looked at before");
         covered.round_over();
         assert_eq!(covered.new_in_the_last(usize::MAX), 3);
-        assert_eq!(covered.new_in_the_last(2), 2);
+        assert_eq!(covered.new_in_the_last(2), 1);
+    }
+
+    #[test]
+    fn reading_somewhere_new_counts_half_and_two_stretches_of_only_reading_is_not_progress() {
+        let mut covered = Covered::default();
+        for n in 0..ENOUGH {
+            covered.ran(
+                "read_file",
+                &serde_json::json!({ "path": format!("src/part{n}.rs") }),
+                "fn part() {}",
+            );
+            covered.round_over();
+        }
+        // Twenty-four files read: half of them count, which is enough to go on.
+        assert_eq!(covered.new_in_the_last(ENOUGH), 0);
+        assert_eq!(covered.got_on_in_the_last(ENOUGH), ENOUGH / 2);
+        assert!(covered.got_on_in_the_last(ENOUGH) >= NEW_ENOUGH);
+        // Looks that found nothing count for nothing at all.
+        let mut hunting = Covered::default();
+        for n in 0..ENOUGH {
+            hunting.ran(
+                "find_files",
+                &serde_json::json!({ "pattern": format!("*job{n}*") }),
+                &format!("Nothing matches *job{n}*."),
+            );
+            hunting.round_over();
+        }
+        assert_eq!(hunting.got_on_in_the_last(ENOUGH), 0);
+        // And a second stretch of only reading has done nothing in two.
+        for n in ENOUGH..2 * ENOUGH {
+            covered.ran(
+                "read_file",
+                &serde_json::json!({ "path": format!("src/part{n}.rs") }),
+                "fn part() {}",
+            );
+            covered.round_over();
+        }
+        assert_eq!(covered.new_in_the_last(2 * ENOUGH), 0);
+        assert!(Halted::OnlyLooked(48)
+            .under_an_answer()
+            .contains("only read and looked"));
     }
 
     #[test]
@@ -2605,7 +2754,8 @@ mod tests {
         to.send(Turn::Aside("WHO ARE YOU".into())).unwrap();
         to.send(Turn::Say("and keep it short".into(), Vec::new()))
             .unwrap();
-        let said = said_while_it_worked(&mut asked, &mut kept).expect("not stopped");
+        let mut renamed = None;
+        let said = said_while_it_worked(&mut asked, &mut kept, &mut renamed).expect("not stopped");
         assert_eq!(said, vec!["use the other folder".to_string()]);
         // What came after the aside waits behind it rather than going ahead.
         assert!(matches!(kept.front(), Some(Turn::Aside(_))));
@@ -2620,15 +2770,34 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            said_while_it_worked(&mut asked, &mut kept),
+            said_while_it_worked(&mut asked, &mut kept, &mut renamed),
             Some(Vec::new())
         );
         assert_eq!(kept.len(), 1);
 
+        // A new name is taken at once, the newest winning, and an answer to a
+        // card no longer up is let go: neither holds back what is typed after.
+        let mut kept = VecDeque::new();
+        to.send(Turn::Called("You are Old Name".into())).unwrap();
+        to.send(Turn::Answer {
+            call: "gone".into(),
+            said: Answer::No,
+        })
+        .unwrap();
+        to.send(Turn::Called("You are New Name".into())).unwrap();
+        to.send(Turn::Say("keep going".into(), Vec::new())).unwrap();
+        let said = said_while_it_worked(&mut asked, &mut kept, &mut renamed).expect("not stopped");
+        assert_eq!(said, vec!["keep going".to_string()]);
+        assert!(kept.is_empty());
+        assert_eq!(renamed.as_deref(), Some("You are New Name"));
+
         // Stop is never kept: it ends the turn where it is.
         to.send(Turn::Say("never mind".into(), Vec::new())).unwrap();
         to.send(Turn::Stop).unwrap();
-        assert_eq!(said_while_it_worked(&mut asked, &mut VecDeque::new()), None);
+        assert_eq!(
+            said_while_it_worked(&mut asked, &mut VecDeque::new(), &mut None),
+            None
+        );
     }
 }
 
@@ -4383,11 +4552,12 @@ mod an_aside_leaves_no_trace {
         let body: serde_json::Value = serde_json::from_str(next).unwrap();
         let last = body["messages"].as_array().unwrap().last().unwrap().clone();
         assert_eq!(last["role"], "tool", "{last}");
+        // In front of the result, where the trim never cuts.
         assert!(
             last["content"]
                 .as_str()
                 .unwrap_or_default()
-                .ends_with("While you were working, they wrote: \"also put a README in\""),
+                .starts_with("While you were working, they wrote: \"also put a README in\""),
             "{last}"
         );
         assert!(

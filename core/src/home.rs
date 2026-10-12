@@ -126,6 +126,15 @@ pub fn make_task_folder(
     anyhow::bail!("there are already 99 folders called {called}")
 }
 
+/// The name a project's folder is given, from the name a teammate said for
+/// it: letters, digits and hyphens. Nothing when there is no name in it.
+pub fn a_project_folders_name(named: &str) -> String {
+    match named.chars().any(char::is_alphanumeric) {
+        true => a_task_folders_words(named).replace(' ', "-"),
+        false => String::new(),
+    }
+}
+
 /// Where one project of a teammate's keeps its files: a folder of its own in
 /// the teammate's folder, under the name the teammate gave the project, so
 /// one project's files are never mixed with another's and the person finds
@@ -145,7 +154,7 @@ pub fn project_folder(cwd: &Path, named: &str) -> Result<(PathBuf, bool)> {
     );
     // Joined with hyphens, as a task's folder is: a model writing a command
     // leaves a path with spaces unquoted often enough to lose the folder.
-    let called = a_task_folders_words(named).replace(' ', "-");
+    let called = a_project_folders_name(named);
     for n in 1..=99 {
         let at = cwd.join(match n {
             1 => called.clone(),

@@ -353,12 +353,29 @@ impl Knowing {
     /// conversation is opened, so a change asked for days later lands with the
     /// rest of the project. Said once, in the first message only, a local model
     /// opened again from the stored lines never heard it again.
-    pub fn working_in(mut self, folder: &str) -> Self {
-        let said = format!(
-            "THIS TASK'S FOLDER\n\nEverything this task makes or changes goes in {folder}. \
-             Work there and nowhere else: start each command there and keep every path \
-             inside it. To work on another project, the person opens that project's own task."
-        );
+    pub fn working_in(self, folder: &str) -> Self {
+        self.told(format!(
+            "THIS TASK'S FOLDER\n\nEverything this task makes or changes goes in {folder}, and \
+             this task writes nowhere else. Name its files by their full path, or from your \
+             working directory with the folder's name in front, and start each command with \
+             cd \"{folder}\", quoted: the path has a space in it. To work on another project, \
+             the person opens that project's own task."
+        ))
+    }
+
+    /// The same for a team's task, whose lead hands parts to its members and
+    /// may be asked to change what an earlier task of the team made: the new
+    /// work goes in this task's folder, and earlier work is changed where it is.
+    pub fn working_in_the_teams(self, folder: &str) -> Self {
+        self.told(format!(
+            "THIS TASK'S FOLDER\n\nThis team task's new work goes in {folder}, every member's \
+             part included: tell each member that is where its part goes. What an earlier task \
+             of the team made is changed where it is, when changing it is what was asked."
+        ))
+    }
+
+    /// A paragraph after the notes, which the agent is reminded of every time.
+    fn told(mut self, said: String) -> Self {
         self.notes = match self.notes.trim().is_empty() {
             true => said,
             false => format!("{}\n\n{said}", self.notes),

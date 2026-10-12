@@ -988,10 +988,14 @@ pub async fn run(
             .unwrap_or("")
             .to_string()
     };
-    // The task's project folder, when it has one: where its paths are read
-    // from, where its commands start, and the only place it writes.
+    // The task's project folder, when it has one: the only place it writes.
+    // Paths are still read from the working directory, as the model is told
+    // and as the found files are named back to it, so its files are named
+    // with the folder in front; read from the project, every path it was
+    // given landed a folder too deep.
     let project = crate::wall::a_project_in(home, crate::wall::project_of(whose).as_deref());
-    let base = project.as_deref().unwrap_or(home);
+    let base = home;
+    let writes_in = project.as_deref().unwrap_or(home);
     match name {
         "read_file" => {
             let at = inside_from(base, home, &get("path"))?;
@@ -1060,7 +1064,7 @@ pub async fn run(
                 get("path")
             );
             write_here(&at, get("contents").as_bytes())
-                .map_err(|why| why_that_failed(why, &at, base))?;
+                .map_err(|why| why_that_failed(why, &at, writes_in))?;
             Ok(format!("Written: {}", at.display()))
         }
 
@@ -1147,7 +1151,7 @@ pub async fn run(
                 at.display()
             );
             write_here(&at, was.replacen(&from, &get("to"), 1).as_bytes())
-                .map_err(|why| why_that_failed(why, &at, base))?;
+                .map_err(|why| why_that_failed(why, &at, writes_in))?;
             Ok(format!("Changed: {}", at.display()))
         }
 
@@ -1226,7 +1230,7 @@ pub async fn run(
                     } else if crate::wall::an_opening_was_refused(&said) {
                         format!("\n\n{}", crate::wall::nothing_opens_from_inside())
                     } else if crate::wall::looks_like_the_wall(&said) {
-                        format!("\n\n{}", crate::wall::the_wall_refused(base))
+                        format!("\n\n{}", crate::wall::the_wall_refused(writes_in))
                     } else {
                         String::new()
                     }
@@ -1709,17 +1713,29 @@ mod tests {
             let talk = talk.clone();
             async move { run(tool, &args, &home, &talk).await }
         };
-        // A path said plainly is the project's.
+        // Paths read from the working directory, as it is told, with the
+        // project's folder in front.
         call(
             "write_file",
-            json!({ "path": "convert.py", "contents": "print(1)" }),
+            json!({ "path": "KmMiles/convert.py", "contents": "print(1)" }),
         )
         .await
         .unwrap();
         assert!(project.join("convert.py").exists());
-        assert!(!home.join("convert.py").exists());
-        let listed = call("list_directory", json!({})).await.unwrap();
+        let listed = call("list_directory", json!({ "path": "KmMiles" }))
+            .await
+            .unwrap();
         assert!(listed.contains("convert.py"), "{listed}");
+        // Without it, the file would be outside the project, and is refused.
+        let why = call(
+            "write_file",
+            json!({ "path": "convert.py", "contents": "x" }),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(why.contains("outside this task's project folder"), "{why}");
+        assert!(!home.join("convert.py").exists());
         // The rest of its folder is still read, and not written.
         let notes = home
             .canonicalize()
