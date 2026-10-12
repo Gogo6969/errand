@@ -422,7 +422,14 @@ pub fn the_thing_itself(name: &str, args: &serde_json::Value) -> String {
 /// Checked lexically, before touching the disk, and then again after resolving
 /// what is actually there -- because a symlink inside the folder can point
 /// anywhere, and the first check cannot see it.
+#[cfg(test)]
 fn inside(home: &Path, said: &str) -> Result<std::path::PathBuf> {
+    inside_from(home, home, said)
+}
+
+/// The same, with a relative path read from `base`: a task's project folder,
+/// for a task that has one, where everything it is asked about is.
+fn inside_from(base: &Path, home: &Path, said: &str) -> Result<std::path::PathBuf> {
     let asked = Path::new(said);
     anyhow::ensure!(
         !asked
@@ -431,7 +438,7 @@ fn inside(home: &Path, said: &str) -> Result<std::path::PathBuf> {
         "{said} climbs out of the working directory"
     );
 
-    let at = home.join(asked);
+    let at = base.join(asked);
     // Only what already exists can be resolved, and a file about to be written
     // does not. So the nearest ancestor that does exist is resolved instead --
     // which is where a symlink would have to be for one to matter -- and the
@@ -497,6 +504,21 @@ fn inside(home: &Path, said: &str) -> Result<std::path::PathBuf> {
                 .join(", ")
         ),
     })
+}
+
+/// Refuse a write outside a task's project folder, for a task that has one:
+/// everything it makes or changes goes there, so a change asked for later
+/// lands with the rest of the project and never in another's.
+fn in_its_project(project: Option<&Path>, at: &Path, said: &str) -> Result<()> {
+    match project {
+        Some(project) if !at.starts_with(project) => anyhow::bail!(
+            "{said} is outside this task's project folder, {}: in this task everything is \
+             written there. To work on another project, the person opens that project's own \
+             task.",
+            project.display()
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// The folders of the teams it is on, by their real paths: of the folders the
@@ -752,7 +774,7 @@ fn not_its_own_settings(said: &str) -> anyhow::Error {
 // copy had no allowance for the directories package managers write to, so
 // anything reached through `npx` failed here with npm's own advice to change
 // the ownership of a directory that was fine.
-use crate::wall::shell as walled_in;
+use crate::wall::shell_in as walled_in;
 
 /// Do it, and say what happened.
 ///
@@ -966,17 +988,21 @@ pub async fn run(
             .unwrap_or("")
             .to_string()
     };
+    // The task's project folder, when it has one: where its paths are read
+    // from, where its commands start, and the only place it writes.
+    let project = crate::wall::a_project_in(home, crate::wall::project_of(whose).as_deref());
+    let base = project.as_deref().unwrap_or(home);
     match name {
         "read_file" => {
-            let at = inside(home, &get("path"))?;
+            let at = inside_from(base, home, &get("path"))?;
             let text = read_here(&at).with_context(|| format!("reading {}", at.display()))?;
             Ok(cut_to_something_readable(&text))
         }
 
         "list_directory" => {
             let at = match get("path").as_str() {
-                "" => home.to_path_buf(),
-                p => inside(home, p)?,
+                "" => base.to_path_buf(),
+                p => inside_from(base, home, p)?,
             };
             let mut names: Vec<String> = std::fs::read_dir(&at)
                 .with_context(|| format!("listing {}", at.display()))?
@@ -1008,7 +1034,8 @@ pub async fn run(
         }
 
         "write_file" => {
-            let at = inside(home, &get("path"))?;
+            let at = inside_from(base, home, &get("path"))?;
+            in_its_project(project.as_deref(), &at, &get("path"))?;
             if an_engine_reads(home, &at) {
                 return Err(not_its_own_settings(&get("path")));
             }
@@ -1028,12 +1055,12 @@ pub async fn run(
             // while they were being made is caught here, and the write below
             // refuses a link anywhere along the way besides.
             anyhow::ensure!(
-                inside(home, &get("path"))? == at,
+                inside_from(base, home, &get("path"))? == at,
                 "{} changed while it was being written",
                 get("path")
             );
             write_here(&at, get("contents").as_bytes())
-                .map_err(|why| why_that_failed(why, &at, home))?;
+                .map_err(|why| why_that_failed(why, &at, base))?;
             Ok(format!("Written: {}", at.display()))
         }
 
@@ -1042,8 +1069,8 @@ pub async fn run(
             // refusing a link anywhere along the way.
             let real = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
             let at = match get("path").as_str() {
-                "" => real.clone(),
-                p => inside(home, p)?,
+                "" => base.canonicalize().unwrap_or_else(|_| base.to_path_buf()),
+                p => inside_from(base, home, p)?,
             };
             Ok(searching(
                 &at,
@@ -1059,8 +1086,8 @@ pub async fn run(
 
         "find_files" => {
             let at = match get("path").as_str() {
-                "" => home.to_path_buf(),
-                p => inside(home, p)?,
+                "" => base.to_path_buf(),
+                p => inside_from(base, home, p)?,
             };
             let pattern = get("pattern");
             let mut found: Vec<String> = Vec::new();
@@ -1094,7 +1121,8 @@ pub async fn run(
         }
 
         "change_file" => {
-            let at = inside(home, &get("path"))?;
+            let at = inside_from(base, home, &get("path"))?;
+            in_its_project(project.as_deref(), &at, &get("path"))?;
             if an_engine_reads(home, &at) {
                 return Err(not_its_own_settings(&get("path")));
             }
@@ -1119,7 +1147,7 @@ pub async fn run(
                 at.display()
             );
             write_here(&at, was.replacen(&from, &get("to"), 1).as_bytes())
-                .map_err(|why| why_that_failed(why, &at, home))?;
+                .map_err(|why| why_that_failed(why, &at, base))?;
             Ok(format!("Changed: {}", at.display()))
         }
 
@@ -1143,7 +1171,7 @@ pub async fn run(
             // the commonest bad failure.
             let command = get("command");
             let started = crate::jobs::start(
-                walled_in(home, &command),
+                walled_in(home, project.as_deref(), &command),
                 &command,
                 &in_plain_words(name, args),
                 whose,
@@ -1198,7 +1226,7 @@ pub async fn run(
                     } else if crate::wall::an_opening_was_refused(&said) {
                         format!("\n\n{}", crate::wall::nothing_opens_from_inside())
                     } else if crate::wall::looks_like_the_wall(&said) {
-                        format!("\n\n{}", crate::wall::the_wall_refused(home))
+                        format!("\n\n{}", crate::wall::the_wall_refused(base))
                     } else {
                         String::new()
                     }
@@ -1209,7 +1237,7 @@ pub async fn run(
         "start_command" => {
             let command = get("command");
             let started = crate::jobs::start(
-                walled_in(home, &command),
+                walled_in(home, project.as_deref(), &command),
                 &command,
                 match get("description").as_str() {
                     "" => &command,
@@ -1663,6 +1691,74 @@ mod tests {
         TEAMS_FOR_A_TEST.with(|t| *t.borrow_mut() = Some(base.join("teams")));
         crate::wall::also_allow(&home, vec![team.clone()]);
         (home, team)
+    }
+
+    #[tokio::test]
+    async fn a_project_task_reads_from_its_project_and_writes_nowhere_else() {
+        let root =
+            std::env::temp_dir().join(format!("errand-project-tools-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let home = root.join("a3");
+        let project = home.join("KmMiles");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(home.join("notes.md"), "kept beside the projects").unwrap();
+        let talk = format!("a-project-talk-{}", std::process::id());
+        crate::wall::works_in(&talk, Some(&project.canonicalize().unwrap()));
+        let call = |tool: &'static str, args: serde_json::Value| {
+            let home = home.clone();
+            let talk = talk.clone();
+            async move { run(tool, &args, &home, &talk).await }
+        };
+        // A path said plainly is the project's.
+        call(
+            "write_file",
+            json!({ "path": "convert.py", "contents": "print(1)" }),
+        )
+        .await
+        .unwrap();
+        assert!(project.join("convert.py").exists());
+        assert!(!home.join("convert.py").exists());
+        let listed = call("list_directory", json!({})).await.unwrap();
+        assert!(listed.contains("convert.py"), "{listed}");
+        // The rest of its folder is still read, and not written.
+        let notes = home
+            .canonicalize()
+            .unwrap()
+            .join("notes.md")
+            .display()
+            .to_string();
+        assert!(call("read_file", json!({ "path": notes })).await.is_ok());
+        let why = call(
+            "write_file",
+            json!({ "path": notes, "contents": "changed" }),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(why.contains("outside this task's project folder"), "{why}");
+        assert_eq!(
+            std::fs::read_to_string(home.join("notes.md")).unwrap(),
+            "kept beside the projects"
+        );
+        let why = call(
+            "change_file",
+            json!({ "path": notes, "from": "kept", "to": "moved" }),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(why.contains("outside this task's project folder"), "{why}");
+        // Another task of the same teammate, with no project, is as it was.
+        let loose = run(
+            "write_file",
+            &json!({ "path": "loose.md", "contents": "x" }),
+            &home,
+            "another-talk",
+        )
+        .await;
+        assert!(loose.is_ok() && home.join("loose.md").exists(), "{loose:?}");
+        crate::wall::works_in(&talk, None);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     fn put_away(home: &Path) {

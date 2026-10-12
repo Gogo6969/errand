@@ -349,6 +349,23 @@ impl Knowing {
     /// After the notes, because it is about this conversation and the notes
     /// are about the job; it goes in with them because both are things the
     /// agent is reminded of rather than told.
+    /// With the folder this task's work goes in, said every time the
+    /// conversation is opened, so a change asked for days later lands with the
+    /// rest of the project. Said once, in the first message only, a local model
+    /// opened again from the stored lines never heard it again.
+    pub fn working_in(mut self, folder: &str) -> Self {
+        let said = format!(
+            "THIS TASK'S FOLDER\n\nEverything this task makes or changes goes in {folder}. \
+             Work there and nowhere else: start each command there and keep every path \
+             inside it. To work on another project, the person opens that project's own task."
+        );
+        self.notes = match self.notes.trim().is_empty() {
+            true => said,
+            false => format!("{}\n\n{said}", self.notes),
+        };
+        self
+    }
+
     pub fn carrying(mut self, carried: &str) -> Self {
         if !carried.trim().is_empty() {
             self.notes = match self.notes.trim().is_empty() {

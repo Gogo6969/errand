@@ -1965,6 +1965,27 @@ function taskRow(t, { here = false, going, alone }) {
   }
   runsWords.append(change);
   facts.append(runsLabel, runsWords);
+  // Where its work goes, once it has a folder of its own: a project's, named
+  // by its teammate, or a team task's. Open shows it in Finder, which is the
+  // one place the person would go looking for what was made.
+  const folder = t.folder || task.folder;
+  if (folder) {
+    const [folderLabel, folderWords] = said("Folder", folder.split("/").filter(Boolean).pop() || folder, folder);
+    const reveal = document.createElement("button");
+    reveal.type = "button";
+    reveal.className = "change";
+    reveal.textContent = "Open";
+    reveal.title = `Open ${folder} in Finder`;
+    reveal.onclick = async () => {
+      try {
+        await invoke("show_task_folder", { id: t.id });
+      } catch (why) {
+        reveal.title = String(why);
+      }
+    };
+    folderWords.append(reveal);
+    facts.append(folderLabel, folderWords);
+  }
   // Who asked for it, when that is all its stored name said.
   const from = askedBy(t.name);
   if (from) facts.append(...said("From", from));
@@ -2570,6 +2591,8 @@ function asTalk(c, keeping) {
     // What matters and what is finished are a task's, and a task is this.
     priority: c.priority || 2,
     finished: c.finished_at || null,
+    // Where its work goes, once it has a folder of its own.
+    folder: c.folder || null,
     spoke: c.spoke_at || 0,
     messages: keeping?.messages ?? [],
     working: keeping?.working ?? false,
@@ -4375,6 +4398,16 @@ listen("paused", ({ payload }) => {
 });
 
 // A schedule set or switched off by the agent itself, because it was asked to.
+// A task given its folder, by its teammate naming the project: shown on its
+// card at once rather than at the next read of the tasks.
+listen("works_in", ({ payload }) => {
+  const t = talks.get(payload.conversation);
+  if (t) t.folder = payload.folder;
+  const task = tasksNow.find((x) => x.id === payload.conversation);
+  if (task) task.folder = payload.folder;
+  if (showing === payload.conversation) drawTaskCard();
+});
+
 listen("repeats", async ({ payload }) => {
   readStanding();
   const t = talks.get(payload.conversation);
@@ -8918,6 +8951,7 @@ function asTask(c) {
     said: c.said !== false,
     priority: c.priority || 2,
     finished: c.finished_at || null,
+    folder: c.folder || null,
     spoke: c.spoke_at || 0,
     // The task that asked for this one, when another teammate did.
     askedBy: c.asked_by || null,

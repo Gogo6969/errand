@@ -182,6 +182,11 @@ pub struct Conversation {
     /// When its person said this task was finished. Nothing while it is not.
     #[serde(default)]
     pub finished_at: Option<i64>,
+    /// The folder this task's work goes in, once it has one: a project's
+    /// folder, named by its teammate, or a team task's own. Set once and never
+    /// moved, so every later change in the task lands in the same place.
+    #[serde(default)]
+    pub folder: Option<String>,
 }
 
 /// Somewhere models are served from.
@@ -1189,6 +1194,11 @@ const CHANGES: &[&str] = &[
     // another model, and a Claude session picked up again is told them.
     // Nothing for one that has never had a Claude turn since there was this.
     "ALTER TABLE conversations ADD COLUMN claude_through INTEGER;",
+    // The folder a task's work goes in, once it has one. Kept rather than only
+    // told: a team task's folder was said once, in the first message handed to
+    // its lead, and a local model opened again from the stored lines never
+    // heard it again. Last, as every change is.
+    "ALTER TABLE conversations ADD COLUMN folder TEXT;",
 ];
 
 /// What finishing a task switched off, or reopening it switched back on.
@@ -1949,10 +1959,12 @@ impl Store {
         let now = now();
         let doing = conn.transaction()?;
         doing.execute(
+            // Its folder too: carried on, it is the same task, and its work
+            // belongs where the rest of it is.
             "INSERT INTO conversations
                   (id, agent, name, opened, started_at, spoke_at,
-                   came_from, carries_on, carries_on_at)
-             SELECT ?1, agent, ?2, 0, ?3, ?3, ?4, 1, ?5
+                   came_from, carries_on, carries_on_at, folder)
+             SELECT ?1, agent, ?2, 0, ?3, ?3, ?4, 1, ?5, folder
                FROM conversations WHERE id = ?4",
             params![new_id, name, now, from, at_anchor],
         )?;
@@ -2509,7 +2521,8 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at,
+                    folder
                FROM conversations",
         )?;
         let rows = q.query_map([], read_conversation)?;
@@ -2542,6 +2555,25 @@ impl Store {
     }
 
     /// How far a conversation's Claude session has seen, as a line's seq.
+    /// Give a task the folder its work goes in, unless it already has one.
+    /// Says the folder it has now, which is the one it already had when that
+    /// is so: a task's folder never moves, or its earlier work is left behind.
+    pub fn works_in(&self, conversation: &str, folder: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE conversations SET folder = ?2 WHERE id = ?1 AND folder IS NULL",
+            params![conversation, folder],
+        )?;
+        Ok(conn
+            .query_row(
+                "SELECT folder FROM conversations WHERE id = ?",
+                [conversation],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     pub fn claude_through(&self, conversation: &str) -> Result<Option<i64>> {
         Ok(self
             .conn
@@ -2625,7 +2657,8 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at,
+                    folder
                FROM conversations WHERE agent = ? ORDER BY spoke_at DESC",
         )?;
         let rows = q.query_map([agent], read_conversation)?;
@@ -2641,7 +2674,8 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at,
+                    folder
                FROM conversations WHERE id = ?",
         )?;
         let mut rows = q.query_map([id], read_conversation)?;
@@ -2946,7 +2980,8 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at,
+                    folder
                FROM conversations
               WHERE runs_at IS NOT NULL AND runs_what IS NOT NULL AND routine_off = 0
                 AND agent NOT IN (SELECT id FROM agents WHERE paused_at IS NOT NULL)
@@ -2970,7 +3005,8 @@ impl Store {
                     came_from, carries_on, carries_on_at,
                     watches, watches_what, saw, saw_note, seeing, looked_at,
                     woke_at, woke_today, woke_on, unsettled, misses, paused,
-                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at
+                    goal, goal_at, goal_tries, goal_left, goal_over, routine_off, routine_set_at, priority, finished_at,
+                    folder
                FROM conversations
               WHERE runs_at IS NOT NULL AND runs_what IS NOT NULL
               ORDER BY spoke_at DESC",
@@ -4378,6 +4414,7 @@ fn read_conversation(r: &rusqlite::Row) -> rusqlite::Result<Conversation> {
         goal_over: r.get(29)?,
         priority: r.get(32)?,
         finished_at: r.get(33)?,
+        folder: r.get(34)?,
     })
 }
 
@@ -4633,6 +4670,35 @@ mod tests {
         assert!(s.checklist("a").unwrap().is_empty());
         s.forget("b").unwrap();
         assert!(s.checklist("b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_task_keeps_the_first_folder_it_is_given_and_a_carried_on_one_has_it_too() {
+        let s = Store::in_memory().unwrap();
+        one(&s, "a", "/tmp/a");
+        assert_eq!(s.conversation("a").unwrap().unwrap().folder, None);
+        assert_eq!(
+            s.works_in("a", "/tmp/a/KmMiles").unwrap().as_deref(),
+            Some("/tmp/a/KmMiles")
+        );
+        // A second folder never replaces the first: its work would be left
+        // behind.
+        assert_eq!(
+            s.works_in("a", "/tmp/a/Other").unwrap().as_deref(),
+            Some("/tmp/a/KmMiles")
+        );
+        assert_eq!(
+            s.conversation("a").unwrap().unwrap().folder.as_deref(),
+            Some("/tmp/a/KmMiles")
+        );
+        s.asked_by("a", "Make the app", None).unwrap();
+        let up_to = s.lines("a").unwrap().last().unwrap().seq;
+        s.carry_on("b", "a", up_to, "Carried on", None).unwrap();
+        assert_eq!(
+            s.conversation("b").unwrap().unwrap().folder.as_deref(),
+            Some("/tmp/a/KmMiles")
+        );
+        assert_eq!(s.works_in("nobody", "/tmp/x").unwrap(), None);
     }
 
     #[test]

@@ -156,6 +156,10 @@ const GRANTED: &[&str] = &[
     // Nor in front of a suggestion, which keeps nothing: its own card is
     // where the person says yes.
     "mcp__errand__suggest_learning",
+    // A task's project folder only ever narrows where it writes, and the
+    // person asked for it as a matter of course: a card in front of it would
+    // be asking whether the task may keep its files together.
+    "mcp__errand__project_folder",
     // Saving and listing reach this agent's own records and nothing else.
     // Running one opens a conversation for the same agent on the same
     // posture, and every step the run takes goes through the same cards as
@@ -360,6 +364,7 @@ enum Turn {
 struct OffTheRecord {
     claude: std::path::PathBuf,
     cwd: std::path::PathBuf,
+    project: Option<std::path::PathBuf>,
     session: String,
     model: Option<String>,
     walled: bool,
@@ -375,9 +380,10 @@ impl OffTheRecord {
         let claude = self.claude.to_string_lossy();
         // Behind the same wall as the conversation it copies.
         let mut command = match self.walled {
-            true => crate::wall::around(
+            true => crate::wall::around_in(
                 &claude,
                 &self.cwd,
+                self.project.as_deref(),
                 crate::wall::Inside::ClaudeCode {
                     doorway: self.doorway.as_deref(),
                 },
@@ -668,6 +674,25 @@ impl Claude {
         // Who this agent is and what it has already been told about its job.
         knows: &crate::memory::Knowing,
     ) -> Result<(Self, Receiver<Event>)> {
+        Self::open_in(session, cwd, None, pick_up, asks, doorway, model, knows)
+    }
+
+    /// The same, for a task with a project folder of its own inside `cwd`.
+    ///
+    /// The working directory stays the agent's, because the session is filed
+    /// under it and a session opened anywhere else would start empty. Walled,
+    /// it writes only in the project; asked about everything, it is told.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_in(
+        session: &str,
+        cwd: &std::path::Path,
+        project: Option<&std::path::Path>,
+        pick_up: PickUp<'_>,
+        asks: &str,
+        doorway: Option<&std::path::Path>,
+        model: Option<&str>,
+        knows: &crate::memory::Knowing,
+    ) -> Result<(Self, Receiver<Event>)> {
         // Three shapes, and the third is why this is not a bool. Forking asks
         // Claude Code to read one conversation and continue it under a
         // different name, which needs both ids on the command line at once.
@@ -694,7 +719,10 @@ impl Claude {
         // the person to grant access the app already has.
         let walled = asks == "auto" && crate::wall::possible();
         // Owned, because it has to outlive the command builder that borrows it.
-        let steering = steering(knows, walled.then(|| crate::wall::what_the_wall_means(cwd)));
+        let steering = steering(
+            knows,
+            walled.then(|| crate::wall::what_the_wall_means_in(cwd, project)),
+        );
 
         // Where to reach this app's own two tools, if this conversation has a
         // doorway open. Passed on the command line rather than written into a
@@ -736,7 +764,12 @@ impl Claude {
             }
         }
         let mut command = match walled {
-            true => crate::wall::around(&claude, cwd, crate::wall::Inside::ClaudeCode { doorway }),
+            true => crate::wall::around_in(
+                &claude,
+                cwd,
+                project,
+                crate::wall::Inside::ClaudeCode { doorway },
+            ),
             false => crate::wall::kept_out(&claude, doorway, cwd),
         };
         // And the person's own PATH for everything it runs, so the tools they
@@ -913,6 +946,7 @@ impl Claude {
         let off_the_record = OffTheRecord {
             claude: where_claude_is(),
             cwd: cwd.to_path_buf(),
+            project: project.map(std::path::Path::to_path_buf),
             session: session.to_string(),
             model: model.map(str::to_string),
             walled,

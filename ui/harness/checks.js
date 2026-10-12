@@ -6864,6 +6864,31 @@ export async function aTaskSaysWhatItIs() {
   check("what came of it last, with when", /\d:\d\d/.test(fact("Last")) || fact("Last") === "Nothing yet", fact("Last"));
   check("with Pause and Run now on it", button("Pause") && button("Run now"), buttons().map((b) => b.textContent).join(", "));
 
+  // Where its work goes, once its teammate has named the project: on the card
+  // at once, by the folder's own name, with Open to show it in Finder.
+  check("a task with no folder of its own says nothing about one", fact("Folder") === "", fact("Folder"));
+  const folderPath = "/Users/someone/Library/Application Support/Errand/threads/agent-bitcoin/Morning-Brief";
+  tell("works_in", { conversation: "talk-2", folder: folderPath });
+  await wait(150);
+  const folderRow = () => {
+    const at = [...card.querySelectorAll("dt")].findIndex((d) => d.textContent === "Folder");
+    return at < 0 ? null : card.querySelectorAll("dd")[at];
+  };
+  check(
+    "once its teammate names the project, the card shows the folder by its name, the whole path on hover",
+    fact("Folder") === "Morning-Brief" && folderRow()?.querySelector(".words")?.title === folderPath,
+    `${fact("Folder")} / ${folderRow()?.querySelector(".words")?.title}`,
+  );
+  const opening = asked.length;
+  folderRow()?.querySelector(".change")?.click();
+  await wait(100);
+  check(
+    "and Open shows that folder in Finder",
+    folderRow()?.querySelector(".change")?.textContent === "Open" &&
+      asked.slice(opening).some((a) => a.name === "show_task_folder" && a.args?.id === "talk-2"),
+    JSON.stringify(asked.slice(opening).map((a) => a.name)),
+  );
+
   button("Pause").click();
   await wait(300);
   check(

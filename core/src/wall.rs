@@ -209,11 +209,18 @@ pub enum Inside<'a> {
 /// list of forbidden places is a list somebody has to keep complete, and the
 /// day it is not complete is the day it is worth nothing.
 pub fn profile(home: &Path, inside: Inside) -> String {
+    profile_in(home, None, inside)
+}
+
+/// The same, for a task with a project folder of its own: it writes there and
+/// not in the rest of its working directory. See `profile_keeping_out_in`.
+pub fn profile_in(home: &Path, project: Option<&Path>, inside: Inside) -> String {
     // The environment rather than a crate, because this is the same HOME the
     // process being walled in will use, and the two agreeing is the point.
     let theirs = std::env::var("HOME").ok().map(PathBuf::from);
-    profile_keeping_out(
+    profile_keeping_out_in(
         home,
+        project,
         inside,
         crate::where_errand_lives().as_deref(),
         theirs.as_deref(),
@@ -225,8 +232,35 @@ pub fn profile(home: &Path, inside: Inside) -> String {
 ///
 /// Separate so that a test can lay out places of its own rather than reach
 /// for the real ones.
+#[cfg(test)]
 fn profile_keeping_out(
     home: &Path,
+    inside: Inside,
+    errand: Option<&Path>,
+    theirs: Option<&Path>,
+) -> String {
+    profile_keeping_out_in(home, None, inside, errand, theirs)
+}
+
+/// The project folder a task writes in, by its real path, when it is one
+/// inside the working directory and not the directory itself: anything else
+/// is no project folder, and the task writes where it always did.
+pub fn a_project_in(home: &Path, project: Option<&Path>) -> Option<PathBuf> {
+    let home = home.canonicalize().ok()?;
+    let project = project?.canonicalize().ok()?;
+    (project != home && project.starts_with(&home)).then_some(project)
+}
+
+/// The profile, with a task's project folder.
+///
+/// A task with one writes in it and nowhere else of its working directory but
+/// the caches its tools keep there, so that every later change in the task
+/// lands with the rest of the project and none of it in another's. Nor in its
+/// team's folders, which are for a team's tasks; but still in the folders the
+/// person allowed on purpose, which are theirs to give.
+fn profile_keeping_out_in(
+    home: &Path,
+    project: Option<&Path>,
     inside: Inside,
     errand: Option<&Path>,
     theirs: Option<&Path>,
@@ -235,12 +269,22 @@ fn profile_keeping_out(
     // named through a link would be a rule that matches nothing, and the
     // errand could write nowhere at all.
     let real = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
-    let mut allowed = vec![format!("  (subpath {})", quoted(&real))];
+    let project = a_project_in(home, project);
+    let mut allowed = match &project {
+        None => vec![format!("  (subpath {})", quoted(&real))],
+        Some(project) => vec![
+            format!("  (subpath {})", quoted(project)),
+            format!("  (subpath {})", quoted(&real.join(".cache"))),
+        ],
+    };
     // Folders somebody allowed for this agent on purpose, on top of its own.
     // The wall used to be absolute: an agent set never to ask could not write
     // outside its folder by any means, and somebody who wanted a file on an
     // external disk every five minutes had no way to say so.
     for place in also_allowed(home) {
+        if project.is_some() && errand.is_some_and(|errand| a_teams_folder(errand, &place)) {
+            continue;
+        }
         allowed.push(format!("  (subpath {})", quoted(&place)));
     }
     // Claude Code's record of this conversation, so it can be carried on, and
@@ -929,6 +973,37 @@ fn registry() -> &'static Mutex<HashMap<PathBuf, Vec<PathBuf>>> {
     ALSO.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// The project folder each task works in, by conversation, for the ones that
+/// have one. Kept here, in the app, for the same reason the list above is:
+/// the file tools and commands of a local model look it up as they run, so a
+/// project named in the middle of a turn holds from the next step.
+fn projects() -> &'static Mutex<HashMap<String, PathBuf>> {
+    static PROJECTS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+    PROJECTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Say which project folder a conversation works in, or that it has none.
+pub fn works_in(conversation: &str, project: Option<&Path>) {
+    let mut all = projects().lock().unwrap_or_else(|e| e.into_inner());
+    match project {
+        Some(project) if project.is_absolute() => {
+            all.insert(conversation.to_string(), project.to_path_buf());
+        }
+        _ => {
+            all.remove(conversation);
+        }
+    }
+}
+
+/// The project folder a conversation works in, if it has one.
+pub fn project_of(conversation: &str) -> Option<PathBuf> {
+    projects()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(conversation)
+        .cloned()
+}
+
 /// Let an errand write inside these folders as well as its own.
 ///
 /// Replaces what was allowed before, so taking a folder back is the same call
@@ -1050,7 +1125,41 @@ pub fn the_key_is_not_loaded() -> String {
 /// The person then grants nothing, because they already had it, and the errand
 /// is stuck on a door that was never the problem.
 pub fn what_the_wall_means(home: &Path) -> String {
-    let also = also_allowed(home);
+    what_the_wall_means_in(home, None)
+}
+
+/// The same, for a task with a project folder of its own, which is told where
+/// that is and that it writes nowhere else.
+pub fn what_the_wall_means_in(home: &Path, project: Option<&Path>) -> String {
+    let project = a_project_in(home, project);
+    let errand = crate::where_errand_lives();
+    let also: Vec<PathBuf> = also_allowed(home)
+        .into_iter()
+        .filter(|place| {
+            project.is_none()
+                || !errand
+                    .as_deref()
+                    .is_some_and(|errand| a_teams_folder(errand, place))
+        })
+        .collect();
+    let where_it_writes = match &project {
+        None => format!("your working directory, {}", home.display()),
+        Some(project) => format!(
+            "this task's project folder, {}, the caches your tools keep in {}",
+            project.display(),
+            home.join(".cache").display()
+        ),
+    };
+    let this_task = match &project {
+        None => String::new(),
+        Some(project) => format!(
+            " This task works on one project, and everything it makes or changes goes in its \
+             folder: the rest of your working directory, {}, is read-only to you in this task. \
+             Start each command in the project folder (cd {} first) and write paths inside it.",
+            home.display(),
+            project.display()
+        ),
+    };
     let more = match also.is_empty() {
         true => String::new(),
         false => format!(
@@ -1063,8 +1172,8 @@ pub fn what_the_wall_means(home: &Path) -> String {
     };
     format!(
         "WHERE YOU CAN WRITE\n\n\
-         You run inside Errand's own wall. You can write only inside your working \
-         directory, {}, and your own temporary folder, which TMPDIR names.{more} \
+         You run inside Errand's own wall. You can write only inside {where_it_writes}, \
+         and your own temporary folder, which TMPDIR names.{more}{this_task} \
          Everywhere else on this \
          Mac is read-only to you, whatever permissions the app has: a write there fails \
          with \"Operation not permitted\", and that is the wall, never a macOS setting. \
@@ -1113,8 +1222,7 @@ pub fn what_the_wall_means(home: &Path) -> String {
          .cache/swiftpm-security; with xcodebuild, pass -derivedDataPath .build/xcode. For \
          plots use MPLBACKEND=Agg. The system's git, python3 and clang may print \
          \"couldn't create cache file ... xcrun_db ... Operation not permitted\": that line \
-         is harmless and the command still works.",
-        home.display()
+         is harmless and the command still works."
     )
 }
 
@@ -1167,8 +1275,21 @@ pub fn holds(pid: u32) -> Option<bool> {
 /// The caller adds the arguments, so this reads the same way as building the
 /// command directly and there is no second shape to remember.
 pub fn around(program: &str, home: &Path, inside: Inside) -> tokio::process::Command {
+    around_in(program, home, None, inside)
+}
+
+/// The same, for a task with a project folder of its own.
+pub fn around_in(
+    program: &str,
+    home: &Path,
+    project: Option<&Path>,
+    inside: Inside,
+) -> tokio::process::Command {
     let mut walled = tokio::process::Command::new(THE_SANDBOX);
-    walled.arg("-p").arg(profile(home, inside)).arg(program);
+    walled
+        .arg("-p")
+        .arg(profile_in(home, project, inside))
+        .arg(program);
     // Every tool's caches in the errand's own folder, and its temporary files
     // in a folder of its own, which are the places inside the wall they can
     // be written. Made here, outside it.
@@ -1241,8 +1362,15 @@ fn only_kept_out(
 /// happened to start in, and the wall refuses a write that should have been
 /// fine. Left to callers once, and missed once.
 pub fn shell(home: &Path, command: &str) -> tokio::process::Command {
-    let mut sh = around("/bin/sh", home, Inside::ACommand);
-    sh.arg("-lc").arg(command).current_dir(home);
+    shell_in(home, None, command)
+}
+
+/// The same, for a task with a project folder of its own: run there, where
+/// everything it writes has to go.
+pub fn shell_in(home: &Path, project: Option<&Path>, command: &str) -> tokio::process::Command {
+    let mut sh = around_in("/bin/sh", home, project, Inside::ACommand);
+    let here = a_project_in(home, project).unwrap_or_else(|| home.to_path_buf());
+    sh.arg("-lc").arg(command).current_dir(here);
     sh
 }
 
@@ -1286,6 +1414,85 @@ pub fn the_wall_refused(home: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_task_writes_in_its_project_and_its_caches_and_nowhere_else_of_its_own() {
+        if !possible() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("errand-project-wall-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let errand = root.join("Errand");
+        let home = errand.join("threads/a2");
+        let project = home.join("KmMiles");
+        let earlier = home.join("Tide-Clock");
+        let team = errand.join("teams/t2");
+        let allowed = root.join("Allowed");
+        for folder in [&project, &earlier, &team, &allowed] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        also_allow(&home, vec![team.clone(), allowed.clone()]);
+        let errand = errand.canonicalize().unwrap();
+        let narrowed =
+            profile_keeping_out_in(&home, Some(&project), Inside::ACommand, Some(&errand), None);
+        let whole = profile_keeping_out_in(&home, None, Inside::ACommand, Some(&errand), None);
+        also_allow(&home, vec![]);
+        let run = |profile: &str, at: &Path| {
+            std::process::Command::new(THE_SANDBOX)
+                .arg("-p")
+                .arg(profile)
+                .arg("/bin/sh")
+                .arg("-c")
+                .arg(format!(
+                    "mkdir -p {} && echo x > {}",
+                    quoted(at.parent().unwrap()),
+                    quoted(at)
+                ))
+                .output()
+                .expect("sandbox-exec runs")
+                .status
+                .success()
+        };
+        let home = home.canonicalize().unwrap();
+        // Its project, the caches its tools keep, and what the person allowed.
+        for written in [
+            home.join("KmMiles/src/main.py"),
+            home.join(".cache/pip/wheel"),
+            allowed.canonicalize().unwrap().join("out.txt"),
+        ] {
+            assert!(
+                run(&narrowed, &written),
+                "{} was refused",
+                written.display()
+            );
+        }
+        // Not the rest of its own folder, an earlier project, or its team's.
+        for refused in [
+            home.join("loose.txt"),
+            home.join("Tide-Clock/index.html"),
+            team.canonicalize().unwrap().join("x.txt"),
+        ] {
+            assert!(
+                !run(&narrowed, &refused),
+                "{} was written",
+                refused.display()
+            );
+            std::fs::remove_file(&refused).ok();
+        }
+        // Without a project the whole folder is its own, as it always was.
+        assert!(run(&whole, &home.join("loose.txt")));
+        // Only a folder inside the working directory is a project.
+        assert!(a_project_in(&home, Some(&root)).is_none());
+        assert!(a_project_in(&home, Some(&home)).is_none());
+        assert!(a_project_in(&home, None).is_none());
+        let told = what_the_wall_means_in(&home, Some(&project));
+        assert!(
+            told.contains(&home.join("KmMiles").display().to_string()),
+            "{told}"
+        );
+        assert!(told.contains("read-only to you in this task"), "{told}");
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn a_team_tasks_folder_keeps_its_settings_and_its_place_and_takes_the_work() {

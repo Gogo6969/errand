@@ -126,6 +126,46 @@ pub fn make_task_folder(
     anyhow::bail!("there are already 99 folders called {called}")
 }
 
+/// Where one project of a teammate's keeps its files: a folder of its own in
+/// the teammate's folder, under the name the teammate gave the project, so
+/// one project's files are never mixed with another's and the person finds
+/// each by its name. The one already there under that name, when there is
+/// one, so a later task about the same project works where its files are.
+/// Says whether it was made just now.
+///
+/// Never through something already there under that name that is not a
+/// folder: a walled command can leave a link in its own folder, and the app
+/// writing through it would write wherever it points. That name is passed
+/// over for the next.
+pub fn project_folder(cwd: &Path, named: &str) -> Result<(PathBuf, bool)> {
+    use std::os::unix::fs::DirBuilderExt;
+    anyhow::ensure!(
+        named.chars().any(char::is_alphanumeric),
+        "a project needs a name of letters or digits, such as KmMiles"
+    );
+    // Joined with hyphens, as a task's folder is: a model writing a command
+    // leaves a path with spaces unquoted often enough to lose the folder.
+    let called = a_task_folders_words(named).replace(' ', "-");
+    for n in 1..=99 {
+        let at = cwd.join(match n {
+            1 => called.clone(),
+            n => format!("{called}-{n}"),
+        });
+        match std::fs::symlink_metadata(&at) {
+            Ok(there) if there.file_type().is_dir() => return Ok((at, false)),
+            Ok(_) => continue,
+            Err(_) => {}
+        }
+        // Made private as it is made, and only where nothing is.
+        match std::fs::DirBuilder::new().mode(0o700).create(&at) {
+            Ok(()) => return Ok((at, true)),
+            Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(why) => return Err(why.into()),
+        }
+    }
+    anyhow::bail!("there are already 99 things called {called}")
+}
+
 /// The first words of what was asked, as a folder's name: letters, digits and
 /// hyphens, nothing a path would read as anything else, short enough to read
 /// in a window. "Task" when nothing is left.
@@ -759,6 +799,40 @@ mod tests {
         assert_ne!(first, second);
         assert!(second.ends_with("2026-10-05-Write-a-small-Python-script-that-converts-2"));
         std::fs::remove_dir_all(&errand).ok();
+    }
+
+    #[test]
+    fn a_project_gets_a_folder_under_its_name_and_a_later_task_finds_the_same_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let cwd =
+            std::env::temp_dir().join(format!("errand-project-folder-{}", std::process::id()));
+        std::fs::remove_dir_all(&cwd).ok();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let (made, new) = project_folder(&cwd, "Km Miles").unwrap();
+        assert!(new);
+        assert_eq!(made, cwd.join("Km-Miles"));
+        assert_eq!(
+            std::fs::metadata(&made).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // Asked for again by the same name: the same folder, not a second one.
+        let (again, new) = project_folder(&cwd, "Km Miles").unwrap();
+        assert!(!new);
+        assert_eq!(again, made);
+        // A name that is not one is refused, and a path is only ever a name.
+        assert!(project_folder(&cwd, " - ").is_err());
+        let (flat, _) = project_folder(&cwd, "../../Elsewhere/App").unwrap();
+        assert_eq!(flat.parent().unwrap(), cwd);
+        // Something under that name that is not a folder, a link above all, is
+        // passed over rather than followed.
+        let away = cwd.join("away");
+        std::fs::create_dir_all(&away).unwrap();
+        std::os::unix::fs::symlink(&away, cwd.join("Linked")).unwrap();
+        let (beside, new) = project_folder(&cwd, "Linked").unwrap();
+        assert!(new);
+        assert_eq!(beside, cwd.join("Linked-2"));
+        assert!(std::fs::read_dir(&away).unwrap().next().is_none());
+        std::fs::remove_dir_all(&cwd).ok();
     }
 
     #[test]

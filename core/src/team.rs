@@ -462,6 +462,36 @@ pub fn declarations() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "project_folder",
+                "description":
+                    "Get this task's project folder. Call it before writing anything when a \
+                     task is about a project of files: an app, a program, a script, a site, a \
+                     set of documents. Give the project's own short name, such as KmMiles or \
+                     Tide-Clock: Errand makes a folder of that name in your folder, or finds the \
+                     one already there under it when this is about an earlier project, and \
+                     links this task to it. You get back its full path. Put every file of the \
+                     project there and nowhere else, and start your commands there: from then on \
+                     this task writes only in it, and so does every later change asked for in \
+                     this task. A new project gets a new name. A task already linked to a \
+                     folder keeps it, and is told which. Not for a plain question or an errand \
+                     that makes no files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description":
+                                "The project's name, short, in letters, digits and hyphens: \
+                                 `KmMiles`, `Weather-widget`."
+                        }
+                    },
+                    "required": ["name"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "suggest_learning",
                 "description":
                     "Suggest keeping something you learned, so you do it better next time. \
@@ -662,6 +692,7 @@ pub enum Ours {
     KeepAnEyeOn,
     OverToYou,
     OpenOutside,
+    ProjectFolder,
     SuggestLearning,
     SaveSkill,
     RunSkill,
@@ -684,6 +715,7 @@ impl Ours {
             Ours::KeepAnEyeOn => "keep_an_eye_on",
             Ours::OverToYou => "over_to_you",
             Ours::OpenOutside => "open_outside",
+            Ours::ProjectFolder => "project_folder",
             Ours::SuggestLearning => "suggest_learning",
             Ours::SaveSkill => "save_skill",
             Ours::RunSkill => "run_skill",
@@ -707,6 +739,7 @@ pub fn ours(tool: &str) -> Option<Ours> {
         "keep_an_eye_on" => Some(Ours::KeepAnEyeOn),
         "over_to_you" => Some(Ours::OverToYou),
         "open_outside" => Some(Ours::OpenOutside),
+        "project_folder" => Some(Ours::ProjectFolder),
         "suggest_learning" => Some(Ours::SuggestLearning),
         "save_skill" => Some(Ours::SaveSkill),
         "run_skill" => Some(Ours::RunSkill),
@@ -777,6 +810,10 @@ pub fn in_plain_words(tool: Ours, args: &Value) -> String {
         Ours::OpenOutside => match get("path").rsplit('/').find(|part| !part.is_empty()) {
             None => "Asking you to open something outside its wall".to_string(),
             Some(name) => format!("Asking you to open {name} outside its wall"),
+        },
+        Ours::ProjectFolder => match get("name").trim() {
+            "" => "Getting this task's project folder".to_string(),
+            name => format!("Working in the project folder {name}"),
         },
         Ours::SuggestLearning => match get("kind") {
             "skill" => match get("name") {
@@ -877,6 +914,13 @@ pub fn the_thing_itself(tool: Ours, args: &Value) -> String {
         // Nor a suggestion: it keeps nothing, and the card it raises is the
         // person's to answer each time.
         Ours::SuggestLearning => String::new(),
+        // The name: an "always" here would be agreeing to that project's
+        // folder, though nothing asks for one.
+        Ours::ProjectFolder => args
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         Ours::EveryDay => args
             .get("when")
             .and_then(|v| v.as_str())
@@ -990,6 +1034,10 @@ pub fn asks_first(tool: Ours) -> bool {
         // A suggestion keeps nothing by itself: the card it raises is where
         // the person says yes, and a card in front of that card asks twice.
         Ours::SuggestLearning => false,
+        // Nor this. It makes a folder in the teammate's own and narrows where
+        // the task writes, which only ever takes room away; and the person
+        // asked for it to happen as a matter of course, without being asked.
+        Ours::ProjectFolder => false,
         // Saving and listing reach this agent's own records and nothing else.
         // Running one is not delegation: it opens a conversation for the same
         // agent on the same posture, and every step the run takes goes
@@ -1033,6 +1081,11 @@ pub fn without_the_app(tool: Ours) -> &'static str {
             "There is nobody at a window here to agree to keeping anything. Say what you \
              would keep, and why, in your answer."
         }
+        Ours::ProjectFolder => {
+            "There is nothing here to keep a project's folder. This is an engine with no app \
+             behind it, so make a folder named for the project in your working directory and \
+             put everything for it there."
+        }
         Ours::SaveSkill | Ours::RunSkill | Ours::Skills => {
             "There is nowhere to keep skills here. This is an engine with no app behind it, \
              so do the task yourself and say what you would have saved."
@@ -1041,6 +1094,26 @@ pub fn without_the_app(tool: Ours) -> &'static str {
             "Nothing here runs on its own. This is an engine with no app behind it, so there \
              is nothing to stop or pause."
         }
+    }
+}
+
+/// What `project_folder` says back: where the task works from now on.
+pub fn works_in(folder: &str, made: bool, already: bool) -> String {
+    match (already, made) {
+        (true, _) => format!(
+            "This task already works in {folder}, and keeps it: a task's folder never moves. \
+             Put everything for it there."
+        ),
+        (false, true) => format!(
+            "Made {folder} for this project and linked this task to it. Put every file of the \
+             project there, start each command there, and write nowhere else: from now on this \
+             task writes only in it."
+        ),
+        (false, false) => format!(
+            "{folder} was already there, the folder of that project, and this task is linked to \
+             it now. Work on what is in it, start each command there, and write nowhere else: \
+             from now on this task writes only in it."
+        ),
     }
 }
 
@@ -1686,6 +1759,7 @@ mod tests {
                 "keep_an_eye_on",
                 "over_to_you",
                 "open_outside",
+                "project_folder",
                 "suggest_learning",
                 "who_else",
                 "save_skill",

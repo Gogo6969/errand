@@ -71,6 +71,10 @@ struct Held {
     /// opened before the Errand model was changed can be noticed and replaced
     /// the next time it is given something.
     opened_with: Mutex<HashMap<String, String>>,
+    /// Which folder each open conversation's engine was opened with, so one
+    /// opened before its task had a project folder can be opened again behind
+    /// the narrower wall before its next turn.
+    opened_in: Mutex<HashMap<String, Option<String>>>,
     settling: Settling,
     /// Where an engine posts the things only the app can do.
     wants: tokio::sync::mpsc::UnboundedSender<team::Wants>,
@@ -555,6 +559,18 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         .as_ref()
         .and_then(|agent| memory::opening_as(&held.store, agent).ok())
         .unwrap_or_default();
+    // The folder this task's work goes in, told every time it is opened and
+    // given to the wall: a project's own, inside the agent's folder, is the
+    // only place it writes. Kept in the store, so a change asked for days
+    // later lands with the rest.
+    let folder = conversation.as_ref().and_then(|c| c.folder.clone());
+    let knows = match &folder {
+        Some(folder) => knows.working_in(folder),
+        None => knows,
+    };
+    let project =
+        errand_core::wall::a_project_in(&home, folder.as_deref().map(std::path::Path::new));
+    errand_core::wall::works_in(&id, project.as_deref());
 
     let (engine, events): (Box<dyn Engine + Send>, _) = match on_engine.as_str() {
         "local" => {
@@ -721,9 +737,10 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
             )
             .map_err(|e| e.to_string())?;
 
-            let (it, events) = Claude::open(
+            let (it, events) = Claude::open_in(
                 &id,
                 &home,
+                project.as_deref(),
                 pick_up,
                 asks,
                 Some(door.at()),
@@ -755,6 +772,7 @@ async fn open_thread(app: AppHandle, held: State<'_, Held>, id: String) -> Resul
         .lock()
         .unwrap()
         .insert(id.clone(), opened_on);
+    held.opened_in.lock().unwrap().insert(id.clone(), folder);
 
     // Everything it says: written down, then forwarded. In that order, so that
     // a window which reloads a moment later reads the same conversation it was
@@ -1421,6 +1439,41 @@ async fn say_as(
     // kept local has nothing local to run on.
     let for_it = the_model_for(&held, whose.as_ref(), fallback)?;
     close_if_on_another_model(&held, &id, &for_it);
+    // A team task's own folder, in the team's, named from what was asked, made
+    // with the first thing the person says, as it always was; now before its
+    // engine opens and kept with the task, so it is told every time the task
+    // is opened. Said once, in that first message, a local model opened again
+    // from the stored lines never heard it again.
+    let team_task_folder = match (by, held.store.team_task(&id)) {
+        (None, Ok(Some((team, false)))) => {
+            let kept = held
+                .store
+                .conversation(&id)
+                .ok()
+                .flatten()
+                .and_then(|c| c.folder);
+            let folder = kept.or_else(|| {
+                errand_core::where_errand_lives()
+                    .and_then(|errand| {
+                        errand_core::home::make_task_folder(
+                            &errand,
+                            &team.id,
+                            &team.name,
+                            &text,
+                            chrono::Local::now().date_naive(),
+                        )
+                        .ok()
+                    })
+                    .map(|at| at.display().to_string())
+            });
+            if let Some(folder) = &folder {
+                let _ = held.store.works_in(&id, folder);
+            }
+            folder
+        }
+        _ => None,
+    };
+    close_if_its_folder_changed(&held, &id);
     // Kept local, and still open on a model out there in the middle of
     // something: nothing goes to it. Switching to kept local stops such a
     // turn, so this is the backstop and not the rule.
@@ -1464,18 +1517,8 @@ async fn say_as(
     let text = match (by, held.store.team_task(&id)) {
         (None, Ok(Some((team, false)))) => {
             let _ = held.store.team_task_told(&id);
-            // A folder of its own for this task's work, in the team's, named
-            // from what was asked: made now, when that is known.
-            let own = errand_core::where_errand_lives().and_then(|errand| {
-                errand_core::home::make_task_folder(
-                    &errand,
-                    &team.id,
-                    &team.name,
-                    &text,
-                    chrono::Local::now().date_naive(),
-                )
-                .ok()
-            });
+            // Its folder, made above before its engine opened.
+            let own = team_task_folder.as_ref().map(std::path::PathBuf::from);
             format!(
                 "{}\n\n{text}",
                 a_task_for_the_team_in_words(&held, &team, own.as_deref())
@@ -1608,6 +1651,52 @@ fn close_what_changed_model(held: &Held, agent: Option<&str>) {
         if theirs {
             close_if_its_model_changed(held, &id);
         }
+    }
+}
+
+/// Close an idle engine opened before its task had the folder it has now, so
+/// the next thing said opens it told the folder and, walled, behind the wall
+/// that keeps it there. One that walls each command as it runs is left open:
+/// its next command is walled in the folder anyway, and opened again a local
+/// model gets back the words and none of its steps.
+fn close_if_its_folder_changed(held: &Held, id: &str) {
+    let now = held
+        .store
+        .conversation(id)
+        .ok()
+        .flatten()
+        .and_then(|c| c.folder);
+    let was = held.opened_in.lock().unwrap().get(id).cloned();
+    let Some(was) = was else {
+        return;
+    };
+    if was == now || mid_turn(held, id) {
+        return;
+    }
+    let walls_each = held
+        .live
+        .lock()
+        .unwrap()
+        .get(id)
+        .is_some_and(|engine| engine.walls_each_command());
+    if walls_each {
+        held.opened_in.lock().unwrap().insert(id.to_string(), now);
+        return;
+    }
+    // As closing one on another model does: its reader is no longer the
+    // current one, and its way in to the app's tools goes with it.
+    *held
+        .opening
+        .lock()
+        .unwrap()
+        .entry(id.to_string())
+        .or_insert(0) += 1;
+    held.opened_with.lock().unwrap().remove(id);
+    held.opened_in.lock().unwrap().remove(id);
+    held.doorways.lock().unwrap().remove(id);
+    let was = held.live.lock().unwrap().remove(id);
+    if let Some(mut was) = was {
+        let _ = was.stop();
     }
 }
 
@@ -3846,6 +3935,7 @@ fn answer_what_engines_cannot(
                     Some(team::Ours::KeepAnEyeOn) => keep_an_eye_on(&app, &asked),
                     Some(team::Ours::OverToYou) => over_to_you(&app, &asked).await,
                     Some(team::Ours::OpenOutside) => open_outside(&app, &asked).await,
+                    Some(team::Ours::ProjectFolder) => project_folder(&app, &asked),
                     Some(team::Ours::SuggestLearning) => suggest_learning(&app, &asked),
                     Some(team::Ours::SaveSkill) => save_skill(&app, &asked),
                     Some(team::Ours::RunSkill) => run_skill(&app, &asked).await,
@@ -4171,6 +4261,71 @@ fn stop_repeating(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String
 /// this one. This turn is the one saying it has paused, and it ends when that
 /// is written; stopped here, the answer would be cut off before it said what
 /// had happened.
+/// A task's project folder changed, so the window can show it on the task.
+#[derive(Clone, Serialize)]
+struct WorksIn {
+    conversation: String,
+    folder: String,
+}
+
+/// Give the task asking its project folder: one of the project's name in its
+/// teammate's folder, made if it is new, the one already there if it is not,
+/// and kept with the task, which from then on writes only there.
+///
+/// Asked for by the teammate, never the person: they asked for it to happen
+/// as a matter of course, and the teammate is the one that knows what the
+/// project is called. A task keeps the folder it was given, because work
+/// already done in it would be left behind by a second.
+fn project_folder(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
+    let held: State<Held> = app.state();
+    let talk = held
+        .store
+        .conversation(&asked.from)?
+        .ok_or_else(|| anyhow::anyhow!("there is no task here to give a folder"))?;
+    if let Some(folder) = &talk.folder {
+        return Ok(team::works_in(folder, false, true));
+    }
+    // A team's task made before its folder was kept: its lead was told the
+    // folder in the first message, and a second one would split its work.
+    anyhow::ensure!(
+        held.store.team_task(&asked.from)?.is_none(),
+        "this task is the team's, and its work goes in the task's own folder in the team's \
+         folder, which the first message here named"
+    );
+    let agent = held
+        .store
+        .agent(&talk.agent)?
+        .ok_or_else(|| anyhow::anyhow!("the teammate of this task is gone"))?;
+    let named = asked
+        .args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let cwd = std::path::Path::new(&agent.cwd);
+    let (at, made) = errand_core::home::project_folder(cwd, &named)?;
+    let at = at.display().to_string();
+    // Another turn may have given it one in the meantime: that one stands.
+    let now = held
+        .store
+        .works_in(&asked.from, &at)?
+        .unwrap_or_else(|| at.clone());
+    let already = now != at;
+    errand_core::wall::works_in(
+        &asked.from,
+        errand_core::wall::a_project_in(cwd, Some(std::path::Path::new(&now))).as_deref(),
+    );
+    let _ = app.emit(
+        "works_in",
+        WorksIn {
+            conversation: asked.from.clone(),
+            folder: now.clone(),
+        },
+    );
+    Ok(team::works_in(&now, made && !already, already))
+}
+
 fn pause_from_inside(app: &AppHandle, asked: &team::Wants) -> anyhow::Result<String> {
     let agent = whose_notebook(app, &asked.from)?;
     let paused = asked
@@ -5434,6 +5589,39 @@ async fn show_team_folder(held: State<'_, Held>, id: String) -> Result<(), Strin
         .map_err(|e| e.to_string())?;
     std::process::Command::new("/usr/bin/open")
         .arg(&at)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Open a task's folder in Finder. Only a folder Errand gave the task: inside
+/// its teammate's folder, or inside a team's.
+#[tauri::command]
+async fn show_task_folder(held: State<'_, Held>, id: String) -> Result<(), String> {
+    let talk = held
+        .store
+        .conversation(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or("that task is gone")?;
+    let folder = talk.folder.ok_or("this task has no folder of its own")?;
+    let real = std::path::Path::new(&folder)
+        .canonicalize()
+        .map_err(|_| format!("{folder} is not there any more"))?;
+    let theirs = held
+        .store
+        .agent(&talk.agent)
+        .ok()
+        .flatten()
+        .and_then(|a| std::path::Path::new(&a.cwd).canonicalize().ok());
+    let teams = errand_core::where_errand_lives()
+        .and_then(|errand| errand.join(errand_core::home::TEAMS).canonicalize().ok());
+    let ours = theirs.is_some_and(|home| real.starts_with(home))
+        || teams.is_some_and(|teams| real.starts_with(teams));
+    if !ours || !real.is_dir() {
+        return Err(format!("{folder} is not a folder Errand gave this task"));
+    }
+    std::process::Command::new("/usr/bin/open")
+        .arg(&real)
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -8270,6 +8458,7 @@ fn put_away_if_idle(held: &Held) {
                 .entry(id.to_string())
                 .or_insert(0) += 1;
             held.opened_with.lock().unwrap().remove(id);
+            held.opened_in.lock().unwrap().remove(id);
             drop(held.doorways.lock().unwrap().remove(id));
         },
     );
@@ -10644,6 +10833,7 @@ pub fn run() {
                 live: Mutex::new(HashMap::new()),
                 quiet_since: Mutex::new(HashMap::new()),
                 opened_with: Mutex::new(HashMap::new()),
+                opened_in: Mutex::new(HashMap::new()),
                 settling: Settling::default(),
                 wants,
                 goals,
@@ -10747,6 +10937,7 @@ pub fn run() {
             suggest_next,
             also_allowed,
             show_team_folder,
+            show_task_folder,
             revoke,
             asks,
             outside,
