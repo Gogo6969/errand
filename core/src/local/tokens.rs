@@ -54,6 +54,26 @@ fn cost_of(m: &ChatMessage) -> usize {
     count_tokens(m.content()) + PER_MESSAGE_OVERHEAD + carried
 }
 
+/// How many steps of the turn being worked on are in these messages.
+///
+/// The turn starts where `trim_to_fit` says it does, at the last thing the
+/// person said, and a step is a message that calls tools. Fewer here after a
+/// trim than before it means the trim has started taking the turn's own steps,
+/// which is the point past which a model cannot see what it has already done
+/// and starts doing it again.
+pub fn steps_this_turn(messages: &[ChatMessage]) -> usize {
+    let after = messages
+        .iter()
+        .rposition(|m| matches!(m, ChatMessage::User { .. }))
+        .map_or(0, |at| at + 1);
+    messages[after..]
+        .iter()
+        .filter(
+            |m| matches!(m, ChatMessage::Assistant { tool_calls, .. } if !tool_calls.is_empty()),
+        )
+        .count()
+}
+
 /// How much of a result is always kept, however little room there is: enough
 /// for the model to see what the step returned and that it ran.
 const ENOUGH_TO_GO_ON: usize = 2_000;
@@ -486,6 +506,40 @@ mod tests {
             "the request went"
         );
         offered_and_answered(&talk);
+    }
+
+    #[test]
+    fn a_trim_that_takes_one_of_the_turns_own_steps_can_be_told_from_one_that_does_not() {
+        // How a long turn knows the model has lost sight of its own work.
+        let talk = vec![
+            ChatMessage::System {
+                content: "instructions".into(),
+            },
+            user("the oldest thing"),
+            calling("call-old"),
+            answering("call-old", &"filler ".repeat(500)),
+            user("Tidy the folder"),
+            calling("call-list"),
+            answering("call-list", &"a file name in the listing ".repeat(90)),
+            calling("call-move"),
+            answering("call-move", &"moved one more file ".repeat(90)),
+            calling("call-check"),
+            answering("call-check", "the folder is tidy"),
+        ];
+        assert_eq!(steps_this_turn(&talk), 3);
+
+        // A little short of room, which the turn before this one more than
+        // makes up.
+        let mut roomy = talk.clone();
+        trim_to_fit(&mut roomy, estimate_messages(&talk) - 100);
+        assert!(!roomy
+            .iter()
+            .any(|m| m.content().contains("the oldest thing")));
+        assert_eq!(steps_this_turn(&roomy), 3, "only the turn before went");
+
+        let mut tight = talk.clone();
+        trim_to_fit(&mut tight, 700);
+        assert!(steps_this_turn(&tight) < 3, "nothing of the turn went");
     }
 
     #[test]
