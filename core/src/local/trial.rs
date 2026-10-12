@@ -40,8 +40,10 @@ use super::{ChatMessage, ToolCall, ToolDef};
 
 /// How many rounds one run gets.
 ///
-/// Fewer than the twenty-four a real errand gets, because a run still going at
-/// sixteen has already shown what it does, and more than any scenario here needs.
+/// Fewer than a real errand gets, which is a first stretch of twenty-four and
+/// up to a hundred and twenty while it keeps doing something new, because a
+/// run still going at sixteen has already shown what it does, and more than any
+/// scenario here needs.
 const ROUNDS: usize = 16;
 
 /// How long one answer may take before the run is written off.

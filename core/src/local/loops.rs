@@ -13,7 +13,7 @@
 //! arrive on a channel the loop is already listening to, or the loop would have
 //! to poll something while it waits.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 
@@ -91,12 +91,41 @@ async fn ask_it(
     }
 }
 
-/// How many times round the loop before something is wrong.
+/// How many steps make one stretch of a turn: how often a long turn is looked
+/// at to see whether it is still getting anywhere.
 ///
-/// Not a budget, a tripwire. A model that has called the same tool twenty times
-/// is not making progress and will not start; without this it does it for ever
-/// and the only symptom is a thread that never ends.
+/// A turn used to end here, as a tripwire, and that was right for the fault it
+/// was set against: a model calling the same tool twenty times is not making
+/// progress and will not start, and without something stopping it the only
+/// symptom is a thread that never ends. It was wrong for everything else. A
+/// coding project going perfectly well stopped every twenty-four steps to ask
+/// somebody to say "Continue", which is a question nobody needed asking. So
+/// the end of a stretch is where a turn is judged rather than where it ends:
+/// see `NEW_ENOUGH` and `AT_MOST_ROUNDS`.
 const ENOUGH: usize = 24;
+
+/// How many of a stretch's steps have to do something new for the turn to
+/// carry on into the next.
+///
+/// A quarter, and low on purpose. A stretch of debugging is mostly running the
+/// same tests and reading what they say, with a file changed now and then, and
+/// that is work. What a model going round in circles never does is come back
+/// with something different: it asks for what it already has, or tries one
+/// thing after another and every one of them fails.
+const NEW_ENOUGH: usize = 6;
+
+/// The most steps one message may take, however well they are going.
+///
+/// Five stretches. A ceiling and not a target: every step is a request, paid
+/// for in time on this machine and in money on a hosted model, and a turn
+/// that keeps finding new things to do for ever is a fault of its own. Past
+/// here the person decides, with what it did in front of them.
+const AT_MOST_ROUNDS: usize = 5 * ENOUGH;
+
+/// How many rounds in a row exactly alike are going round in circles: the same
+/// calls, coming back the same. Stopped there, whatever stretch it is in,
+/// rather than left to burn the rest of one.
+const THE_SAME_AGAIN: usize = 3;
 
 /// The share of the context window that tool schemas may never exceed.
 ///
@@ -127,10 +156,12 @@ pub struct Local {
     turns: UnboundedSender<Turn>,
     /// Stops whatever the conversation is doing, in the middle of it.
     ///
-    /// A `Turn::Stop` on its own was read only between turns or while a card
-    /// was waiting, so Stop, Pause, a change of engine and a routine's restart
-    /// all left a turn running on: it went on streaming and calling tools, up
-    /// to twenty-four rounds of them, with nothing on screen saying so.
+    /// A `Turn::Stop` on its own is read only where the conversation looks at
+    /// what it has been sent, and it used to look only between turns or while
+    /// a card was waiting. So Stop, Pause, a change of engine and a routine's
+    /// restart all left a turn running on: it went on streaming and calling
+    /// tools, for as many steps as a turn was allowed, with nothing on screen
+    /// saying so.
     stopping: CancellationToken,
 }
 
@@ -316,8 +347,18 @@ async fn conversation(
     // A new name that arrived while a card was waiting on somebody, taken in
     // as soon as that turn is over.
     let mut renamed: Option<String> = None;
+    // What arrived while a turn was working and was not for that turn, in the
+    // order it came, taken before anything still waiting on the channel.
+    let mut kept: VecDeque<Turn> = VecDeque::new();
 
-    while let Some(turn) = asked.recv().await {
+    loop {
+        let turn = match kept.pop_front() {
+            Some(turn) => turn,
+            None => match asked.recv().await {
+                Some(turn) => turn,
+                None => break,
+            },
+        };
         let (said, pictures, an_aside) = match turn {
             Turn::Say(text, pictures) => (text, pictures, false),
             Turn::Aside(text) => (text, Vec::new(), true),
@@ -397,6 +438,8 @@ async fn conversation(
             &mut loaded,
             &mut forgotten,
             &mut asked,
+            &mut kept,
+            an_aside,
             &out,
             &stopping,
             &mut counted,
@@ -469,7 +512,238 @@ struct Counted {
     tokens_out: i64,
 }
 
-/// One errand: round the loop until the model stops asking for tools.
+/// What a turn's steps have done so far, to tell a long turn that is getting
+/// somewhere from one going round in circles.
+///
+/// Judged from what each call asked for and what came back, and never from
+/// what the model says about it: a model going round in circles says it is
+/// nearly there. A call is known by its tool and its arguments with their keys
+/// in order, so the same request written twice is the same call.
+#[derive(Debug, Default)]
+struct Covered {
+    /// Every call made this turn, by what it asked for, with what it came
+    /// back with last time.
+    seen: HashMap<u64, u64>,
+    /// The writes and changes that worked, by what they asked for.
+    written: HashSet<u64>,
+    /// The files written or changed this turn, for what is said on screen.
+    files: HashSet<String>,
+    /// Every round so far, in order.
+    rounds: Vec<Round>,
+    /// The round being run.
+    now: Round,
+    /// Whether the trim has taken any of this turn's own steps.
+    out_of_sight: bool,
+}
+
+/// One round of a turn, as `Covered` keeps it.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Round {
+    /// Whether any call in it did something not done before this turn.
+    new: bool,
+    /// Each call, as what it asked for and what came back, in the order made.
+    did: Vec<(u64, u64)>,
+}
+
+impl Covered {
+    /// A call that ran, and what came of it.
+    ///
+    /// New when it wrote or changed something in a way not asked for before
+    /// this turn; when it asked for something not asked for before and did
+    /// not fail; or when it asked for something again and something different
+    /// came back, which is what tests that pass now look like.
+    fn ran(&mut self, name: &str, args: &serde_json::Value, outcome: &str) {
+        let (asked, came_back) = (fingerprint(name, args), hashed(outcome));
+        let before = self.seen.insert(asked, came_back);
+        self.now.did.push((asked, came_back));
+        if went_nowhere(outcome) {
+            return;
+        }
+        let wrote = matches!(name, "write_file" | "change_file")
+            && (outcome.starts_with("Written:") || outcome.starts_with("Changed:"));
+        if wrote {
+            if let Some(path) = args.get("path").and_then(|p| p.as_str()) {
+                self.files.insert(path.to_string());
+            }
+        }
+        let new = (wrote && self.written.insert(asked))
+            || before.map_or(!failed(outcome), |was| was != came_back);
+        self.now.new |= new;
+    }
+
+    /// A call that cannot have moved anything on, whatever came back: its
+    /// arguments were not JSON, the person said no, or it only looked a tool
+    /// up. Still part of what the round did, so the same one three times
+    /// running is seen for what it is.
+    fn never_new(&mut self, name: &str, args: &serde_json::Value, outcome: &str) {
+        let (asked, came_back) = (fingerprint(name, args), hashed(outcome));
+        self.seen.insert(asked, came_back);
+        self.now.did.push((asked, came_back));
+    }
+
+    /// The round being run is over.
+    fn round_over(&mut self) {
+        self.rounds.push(std::mem::take(&mut self.now));
+    }
+
+    /// A round whose answer was sent back: it claimed work it never did, or
+    /// copied Errand's record. Nothing new, whatever it said.
+    fn sent_back(&mut self) {
+        self.now = Round::default();
+        self.round_over();
+    }
+
+    /// Whether the last few rounds were the same calls coming back the same.
+    fn going_round(&self) -> bool {
+        let Some(last) = self.rounds.len().checked_sub(THE_SAME_AGAIN) else {
+            return false;
+        };
+        let these = &self.rounds[last..];
+        !these[0].did.is_empty() && these.iter().all(|one| one.did == these[0].did)
+    }
+
+    /// How many of the last `count` rounds did something new.
+    fn new_in_the_last(&self, count: usize) -> usize {
+        let from = self.rounds.len().saturating_sub(count);
+        self.rounds[from..].iter().filter(|one| one.new).count()
+    }
+
+    /// What is said on screen as a long turn carries on past a stretch.
+    fn still_going(&self, round: usize) -> String {
+        let files = match self.files.len() {
+            0 => "no files".to_string(),
+            1 => "1 file".to_string(),
+            n => format!("{n} files"),
+        };
+        let new = match self.new_in_the_last(usize::MAX) {
+            1 => "1 of the steps".to_string(),
+            n => format!("{n} of the steps"),
+        };
+        format!(
+            "Still going after {round} steps: so far it has written or changed {files}, and \
+             {new} did something new"
+        )
+    }
+}
+
+/// A call, known by its tool and what it asked for, whatever order the model
+/// wrote the arguments in.
+fn fingerprint(name: &str, args: &serde_json::Value) -> u64 {
+    /// The same value with every object's keys in order. Put in order here
+    /// rather than trusted to the map: with serde_json's `preserve_order` on,
+    /// anywhere in the build, a map keeps the order it was written in.
+    fn in_order(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                serde_json::Value::Object(
+                    keys.into_iter()
+                        .map(|key| (key.clone(), in_order(&map[key])))
+                        .collect(),
+                )
+            }
+            serde_json::Value::Array(all) => {
+                serde_json::Value::Array(all.iter().map(in_order).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    hashed(&format!("{name} {}", in_order(args)))
+}
+
+/// Small enough to keep one for every call of a long turn, however much a
+/// call carries: a file written whole is in its arguments.
+fn hashed(said: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    said.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A result that says the call did nothing at all: it failed outright, was
+/// refused, was not run, or named a tool that is not there.
+fn went_nowhere(outcome: &str) -> bool {
+    [
+        "That did not work",
+        "There is no tool called",
+        "You said no",
+        "Nothing was run",
+    ]
+    .iter()
+    .any(|start| outcome.starts_with(start))
+}
+
+/// A result that says the call failed, a command that exited with an error
+/// among them. A call that fails is not new even the first time it is made,
+/// because trying one thing after another and having each of them fail is
+/// what going round in circles looks like. Made again and failing differently,
+/// it is: see `Covered::ran`.
+fn failed(outcome: &str) -> bool {
+    went_nowhere(outcome)
+        || outcome
+            .strip_prefix("exited ")
+            .and_then(|rest| rest.lines().next())
+            .and_then(|code| code.trim().parse::<i64>().ok())
+            .is_some_and(|code| code != 0)
+}
+
+/// Why a turn stopped before the model said it was done.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Halted {
+    /// It took all the steps one message allows.
+    AtTheCeiling,
+    /// After this many steps, the last of them going round in circles: a
+    /// stretch with too little new in it, or the same steps three times.
+    InCircles(usize),
+    /// After this many steps, with the earliest of this turn's own no longer
+    /// in what the model can hold.
+    OutOfSight(usize),
+}
+
+impl Halted {
+    /// Said under what it managed to say about where it got to.
+    fn under_an_answer(self) -> String {
+        match self {
+            Halted::AtTheCeiling => format!(
+                "(It used all {AT_MOST_ROUNDS} steps one message allows, so it stopped there. \
+                 Say \"Continue\" to let it carry on.)"
+            ),
+            Halted::InCircles(after) => format!(
+                "(It stopped after {after} steps because its last ones went round in circles. \
+                 Say \"Continue\" to let it try again, or say what to do differently.)"
+            ),
+            Halted::OutOfSight(after) => format!(
+                "(It stopped after {after} steps because the earliest of them no longer fit in \
+                 what the model can hold, and a model that cannot see what it did starts doing \
+                 it again. Say \"Continue\" to let it carry on from here.)"
+            ),
+        }
+    }
+
+    /// Said in its place, when it said nothing.
+    fn instead_of_an_answer(self) -> String {
+        match self {
+            Halted::AtTheCeiling => format!(
+                "It used all {AT_MOST_ROUNDS} steps one message allows and stopped before it had \
+                 answered. Say \"Continue\" to let it carry on."
+            ),
+            Halted::InCircles(after) => format!(
+                "It stopped after {after} steps, before it had answered, because its last ones \
+                 went round in circles. Say \"Continue\" to let it try again, or say what to do \
+                 differently."
+            ),
+            Halted::OutOfSight(after) => format!(
+                "It stopped after {after} steps, before it had answered, because the earliest \
+                 of them no longer fit in what the model can hold. Say \"Continue\" to let it \
+                 carry on from here."
+            ),
+        }
+    }
+}
+
+/// One errand: round the loop until the model stops asking for tools, it has
+/// taken all the steps one message allows, or it is going round in circles.
 #[allow(clippy::too_many_arguments)]
 async fn errand(
     client: &LlmClient,
@@ -485,6 +759,12 @@ async fn errand(
     // is mentioned when it changes rather than on every turn from then on.
     forgotten: &mut usize,
     asked: &mut UnboundedReceiver<Turn>,
+    // What arrived while this turn worked and is not for it, for the caller
+    // to take in order once the turn is over.
+    kept: &mut VecDeque<Turn>,
+    // An aside is taken back out of the conversation when it is done, with
+    // everything put into it, so nothing the person says goes into one.
+    an_aside: bool,
     out: &std::sync::mpsc::Sender<Event>,
     stopping: &CancellationToken,
     // What the rounds of this turn used, where the server said.
@@ -492,10 +772,16 @@ async fn errand(
     // A new name that arrived while a card was up, for the caller to take in.
     renamed: &mut Option<String>,
 ) -> Result<Done> {
-    // What the person typed while a card was waiting on them, this turn. Their
-    // words, so an address in them counts as one they named; kept apart
-    // because they go into the conversation beside a step's result.
-    let mut typed_while_asked: Vec<String> = Vec::new();
+    // What the person typed this turn while a card was waiting on them, or
+    // while it worked. Their words, so an address in them counts as one they
+    // named; kept apart because they go into the conversation beside a step's
+    // result.
+    let mut typed_meanwhile: Vec<String> = Vec::new();
+    // What this turn's steps have done, to tell a long turn that is getting
+    // somewhere from one going round in circles.
+    let mut covered = Covered::default();
+    // Why the turn stopped, if it stops before the model says it is done.
+    let mut halted = Halted::AtTheCeiling;
     // Whether this turn has run anything yet, and whether an answer that
     // claimed or promised work without running any has been sent back: once,
     // never twice, so a model that insists is shown with Errand's note under
@@ -522,7 +808,65 @@ async fn errand(
         }),
     };
 
-    for round in 0..ENOUGH {
+    for round in 0..AT_MOST_ROUNDS {
+        // The end of a stretch, where a long turn is judged: on into the next
+        // if enough of this one was new and the model can still see all it
+        // did, and over if not. Said on screen when it carries on, as Errand's
+        // own step, so a turn going for half an hour is plainly meant to be;
+        // and never put to the model or the person as a question, because
+        // there is nothing to ask.
+        if round > 0 && round % ENOUGH == 0 {
+            if covered.out_of_sight {
+                halted = Halted::OutOfSight(round);
+                break;
+            }
+            if covered.new_in_the_last(ENOUGH) < NEW_ENOUGH {
+                halted = Halted::InCircles(round);
+                break;
+            }
+            let call = format!("still-going-{round}-{}", uuid::Uuid::new_v4().simple());
+            let _ = out.send(Event::Doing(Step {
+                what: covered.still_going(round),
+                tool: "errand".into(),
+                call: call.clone(),
+            }));
+            let _ = out.send(Event::Did {
+                call,
+                outcome: format!(
+                    "It carries on by itself, up to {AT_MOST_ROUNDS} steps for one message, \
+                     and stops sooner if it starts going round in circles."
+                ),
+            });
+        }
+
+        // Anything said since the last step, put beside that step's result.
+        //
+        // A long turn is a long time to sit on what somebody typed: "use the
+        // other folder" read twenty minutes later, after the work was done in
+        // this one, is no use to anybody. So it is taken now, without waiting
+        // for anything, and goes where words typed at a card go, as Errand's
+        // note beside the result rather than as a message of their own: a new
+        // message from them would be where the trim says a turn begins, and
+        // everything the turn did before it would be the first to go.
+        if !an_aside && matches!(history.last(), Some(ChatMessage::Tool { .. })) {
+            let Some(words) = said_while_it_worked(asked, kept) else {
+                return Ok(Done::Abandoned);
+            };
+            if !words.is_empty() {
+                if let Some(ChatMessage::Tool { content, .. }) = history.last_mut() {
+                    content.push_str(&format!(
+                        "\n\nWhile you were working, they wrote: {}",
+                        words
+                            .iter()
+                            .map(|text| format!("\"{text}\""))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ));
+                }
+                typed_meanwhile.extend(words);
+            }
+        }
+
         // Rebuilt each time round, because the last step may have fetched more.
         let mut defs: Vec<ToolDef> = tools::all()
             .into_iter()
@@ -591,6 +935,15 @@ async fn errand(
                 .saturating_sub(client.settings.max_tokens)
                 .saturating_sub(tokens_in(&defs)),
         );
+        // Once the trim takes one of this turn's own steps, the model can no
+        // longer see all it has done, and that is when a model starts doing it
+        // again: twenty-four copies of one file, in `tokens::trim_to_fit`.
+        // Noted rather than acted on here, because within one stretch a turn
+        // has always run on like this; it is what keeps one from going on past
+        // the end of the stretch.
+        if tokens::steps_this_turn(&asking) < tokens::steps_this_turn(history) {
+            covered.out_of_sight = true;
+        }
 
         // Said out loud when it happens, and only when the amount changes.
         //
@@ -745,6 +1098,7 @@ async fn errand(
                 history.push(ChatMessage::System {
                     content: COPIED_THE_RECORD.into(),
                 });
+                covered.sent_back();
                 continue;
             }
             // Unless it claims work, or promises it, in a turn that ran
@@ -792,6 +1146,7 @@ async fn errand(
                 history.push(ChatMessage::System {
                     content: SENT_BACK.into(),
                 });
+                covered.sent_back();
                 continue;
             }
             if !said.is_empty() {
@@ -894,12 +1249,18 @@ async fn errand(
                     call: call.id.clone(),
                     outcome: "Not run: its arguments were not JSON".to_string(),
                 });
+                let outcome = format!(
+                    "Nothing was run: the arguments of that call were not valid JSON \
+                     ({why}). Call {name} again with its arguments as one JSON object. \
+                     A quote mark inside a string needs a backslash in front of it."
+                );
+                covered.never_new(
+                    &name,
+                    &serde_json::from_str(&call.function.arguments).unwrap_or_default(),
+                    &outcome,
+                );
                 history.push(ChatMessage::Tool {
-                    content: format!(
-                        "Nothing was run: the arguments of that call were not valid JSON \
-                         ({why}). Call {name} again with its arguments as one JSON object. \
-                         A quote mark inside a string needs a backslash in front of it."
-                    ),
+                    content: outcome,
                     tool_call_id: call.id.clone(),
                 });
                 continue;
@@ -943,7 +1304,7 @@ async fn errand(
                     ChatMessage::User { content, .. } => Some(content.clone()),
                     _ => None,
                 })
-                .chain(typed_while_asked.iter().cloned())
+                .chain(typed_meanwhile.iter().cloned())
                 .collect();
             // Anything they typed while a card for this step was up, said
             // beside the step's result.
@@ -1043,11 +1404,12 @@ async fn errand(
                             .collect::<Vec<_>>()
                             .join(" ")
                     );
-                    typed_while_asked.extend(meanwhile);
+                    typed_meanwhile.extend(meanwhile);
                 }
                 match said {
                     Answer::No => {
                         let refused = "You said no. Try another way, or say what you need.";
+                        covered.never_new(&name, &args, refused);
                         let _ = out.send(Event::Did {
                             call: call.id.clone(),
                             outcome: "Not allowed".to_string(),
@@ -1139,6 +1501,11 @@ async fn errand(
                 // something to give up on.
                 Err(why) => format!("That did not work: {why}"),
             };
+            match name.as_str() {
+                // Looking a tool up finds out what there is, and does nothing.
+                "find_tools" => covered.never_new(&name, &args, &outcome),
+                _ => covered.ran(&name, &args, &outcome),
+            }
             let _ = out.send(Event::Did {
                 call: call.id.clone(),
                 outcome: crate::wall::the_line_for_a_step(&outcome, first_line),
@@ -1148,14 +1515,22 @@ async fn errand(
                 tool_call_id: call.id,
             });
         }
+        covered.round_over();
+        // The same steps coming back the same, three times running, will come
+        // back the same a fourth: stopped now rather than at the end of the
+        // stretch, which could be twenty steps of it away.
+        if covered.going_round() {
+            halted = Halted::InCircles(round + 1);
+            break;
+        }
     }
 
-    // Out of rounds, and asked once more, with no tools, to say where it got
-    // to. This used to end on "Whatever it is trying is not working", which
-    // was a guess, and on 29 Sep it was wrong twice: a teammate asked for a
-    // video's transcript had got round a broken yt-dlp, made the transcript
-    // and checked it word for word, and the turn ended on that sentence with
-    // the transcript never handed over.
+    // Stopped short of an answer, and asked once more, with no tools, to say
+    // where it got to. This used to end on "Whatever it is trying is not
+    // working", which was a guess, and on 29 Sep it was wrong twice: a
+    // teammate asked for a video's transcript had got round a broken yt-dlp,
+    // made the transcript and checked it word for word, and the turn ended on
+    // that sentence with the transcript never handed over.
     let said = match last_word(client, history, stopping, out, counted).await {
         LastWord::Stopped => return Ok(Done::Abandoned),
         LastWord::Said(answer) => {
@@ -1164,15 +1539,9 @@ async fn errand(
                 tool_calls: Vec::new(),
                 reasoning: None,
             });
-            format!(
-                "{answer}\n\n(It used all {ENOUGH} rounds one turn allows, so it stopped \
-                 there. Say \"Continue\" to let it carry on.)"
-            )
+            format!("{answer}\n\n{}", halted.under_an_answer())
         }
-        LastWord::Nothing => format!(
-            "It used all {ENOUGH} rounds one turn allows and stopped before it had \
-             answered. Say \"Continue\" to let it carry on."
-        ),
+        LastWord::Nothing => halted.instead_of_an_answer(),
     };
     let _ = out.send(Event::Said {
         text: said.clone(),
@@ -1199,15 +1568,22 @@ const COPIED_TWICE: &str = "The model answered twice with a copy of Errand's rec
      earlier steps instead of an answer, so there is nothing to show. Asking again usually \
      works.";
 
-/// Said to a model whose turn has run out of rounds, beside its last step's
-/// result. Beside it, where Errand's other notes to a model go, and never as a
-/// message of its own from the person: they did not write it.
-const OUT_OF_ROUNDS: &str = "(From Errand: that was the last step this turn allows, and \
-     there are no tools now. In a few plain sentences, tell them what you did, what you \
-     found or made and where it is, and what is left to do. Say only what the steps above \
-     show.)";
+/// Said to a model whose turn has stopped short of an answer, beside its last
+/// step's result. Beside it, where Errand's other notes to a model go, and
+/// never as a message of its own from the person: they did not write it.
+///
+/// One note whatever the reason, and no reason given in it. It has taken all
+/// the steps it may, or gone round in circles, or lost sight of its own work,
+/// and what is wanted from it is the same each time: where it got to, said
+/// truthfully. Why it stopped is Errand's to say, and is said to the person
+/// under its answer.
+const OUT_OF_ROUNDS: &str = "(From Errand: that was the last step for this turn, and there \
+     are no tools now. In a few plain sentences, tell them what you did, what you found or \
+     made and where it is, and what is left to do. If something kept going wrong, say what. \
+     Say only what the steps above show.)";
 
-/// What a turn that ran out of rounds had to show for them, in its own words.
+/// What a turn that stopped short of an answer had to show for it, in its own
+/// words.
 enum LastWord {
     Said(String),
     /// Nothing came back, or the request itself failed.
@@ -1343,6 +1719,36 @@ async fn wait_for_an_answer(
             // Kept for after the card, because the conversation's opening is
             // not something this can reach.
             Some(Turn::Called(identity)) => *renamed = Some(identity),
+        }
+    }
+}
+
+/// What the person said while a turn worked, taken without waiting.
+///
+/// Their words come back to be put beside the last step's result. Anything
+/// else is not for this turn and is kept, in the order it came, for the
+/// conversation to take in once the turn is over, which is when it would have
+/// been taken before: the app asking something of its own, a new name, an
+/// answer to a card no longer up. So is a line with a picture on it, which
+/// cannot go beside a result, and everything after the first thing kept, so
+/// that nothing is answered ahead of something said before it.
+///
+/// Returns nothing at all only when the conversation is being stopped.
+fn said_while_it_worked(
+    asked: &mut UnboundedReceiver<Turn>,
+    kept: &mut VecDeque<Turn>,
+) -> Option<Vec<String>> {
+    let mut said = Vec::new();
+    loop {
+        match asked.try_recv() {
+            Ok(Turn::Stop) | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                return None
+            }
+            Ok(Turn::Say(text, pictures)) if pictures.is_empty() && kept.is_empty() => {
+                said.push(text)
+            }
+            Ok(other) => kept.push_back(other),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return Some(said),
         }
     }
 }
@@ -2038,6 +2444,191 @@ mod tests {
             bare.contains("/tmp/x"),
             "it still needs to know where it is working"
         );
+    }
+
+    #[test]
+    fn a_step_is_new_the_first_time_and_again_only_when_something_different_comes_back() {
+        let mut covered = Covered::default();
+        let tests = serde_json::json!({ "command": "cargo test", "timeout": 60 });
+        // The same call with its keys the other way round is the same call.
+        let again = serde_json::json!({ "timeout": 60, "command": "cargo test" });
+
+        covered.ran("run_command", &tests, "exited 101\n2 failed");
+        assert!(!covered.now.new, "a command that failed the first time");
+        covered.round_over();
+        covered.ran("run_command", &again, "exited 101\n1 failed");
+        assert!(covered.now.new, "failing differently is getting somewhere");
+        covered.round_over();
+        covered.ran("run_command", &again, "exited 101\n1 failed");
+        assert!(!covered.now.new, "the same thing back");
+        covered.round_over();
+        covered.ran("run_command", &tests, "test result: ok. 12 passed");
+        assert!(covered.now.new, "tests that pass now");
+        covered.round_over();
+        covered.ran(
+            "read_file",
+            &serde_json::json!({ "path": "src/main.rs" }),
+            "fn main() {}",
+        );
+        assert!(covered.now.new, "something not looked at before");
+        covered.round_over();
+        assert_eq!(covered.new_in_the_last(usize::MAX), 3);
+        assert_eq!(covered.new_in_the_last(2), 2);
+    }
+
+    #[test]
+    fn a_refusal_a_failure_a_lookup_and_a_call_that_was_not_json_are_never_new() {
+        let mut covered = Covered::default();
+        covered.never_new(
+            "run_command",
+            &serde_json::json!({ "command": "rm notes.txt" }),
+            "You said no. Try another way, or say what you need.",
+        );
+        covered.ran(
+            "read_file",
+            &serde_json::json!({ "path": "missing.txt" }),
+            "That did not work: reading missing.txt",
+        );
+        covered.ran(
+            "unread_mail",
+            &serde_json::json!({}),
+            "There is no tool called unread_mail here.",
+        );
+        covered.never_new(
+            "find_tools",
+            &serde_json::json!({ "needing": "mail" }),
+            "These are available to you now:\n  mail -- reads mail",
+        );
+        covered.never_new(
+            "run_command",
+            &serde_json::json!({ "unreadable": "{\"command\": \"echo" }),
+            "Nothing was run: the arguments of that call were not valid JSON",
+        );
+        assert!(!covered.now.new, "{:?}", covered.now);
+        assert_eq!(
+            covered.now.did.len(),
+            5,
+            "every call is still part of the round"
+        );
+        covered.round_over();
+        covered.sent_back();
+        assert_eq!(covered.new_in_the_last(ENOUGH), 0);
+    }
+
+    #[test]
+    fn writing_a_file_is_new_until_the_same_thing_is_written_again() {
+        let mut covered = Covered::default();
+        let one = serde_json::json!({ "path": "notes.txt", "contents": "one" });
+        covered.ran("write_file", &one, "Written: /work/notes.txt");
+        assert!(covered.now.new);
+        covered.round_over();
+        covered.ran("write_file", &one, "Written: /work/notes.txt");
+        assert!(!covered.now.new, "the same file written the same way again");
+        covered.round_over();
+        covered.ran(
+            "change_file",
+            &serde_json::json!({ "path": "notes.txt", "from": "one", "to": "two" }),
+            "Changed: /work/notes.txt",
+        );
+        assert!(covered.now.new);
+        covered.round_over();
+        assert_eq!(covered.files.len(), 1, "one file, written and then changed");
+        assert!(covered
+            .still_going(48)
+            .contains("written or changed 1 file,"));
+    }
+
+    #[test]
+    fn three_rounds_alike_are_going_round_in_circles_and_two_or_a_different_one_are_not() {
+        let mut covered = Covered::default();
+        let same = serde_json::json!({ "command": "true" });
+        for _ in 0..2 {
+            covered.ran("run_command", &same, "");
+            covered.round_over();
+        }
+        assert!(!covered.going_round(), "two alike");
+        covered.ran("run_command", &same, "");
+        covered.round_over();
+        assert!(covered.going_round(), "three alike");
+
+        // The same call coming back with something different each time is
+        // something happening, even with nothing new about it.
+        let mut changing = Covered::default();
+        for said in ["Still running.", "Compiling one", "Compiling two"] {
+            changing.ran(
+                "check_command",
+                &serde_json::json!({ "handle": "job-1" }),
+                said,
+            );
+            changing.round_over();
+        }
+        assert!(!changing.going_round());
+
+        // Answers sent back have no calls in them to be alike.
+        let mut sent = Covered::default();
+        for _ in 0..THE_SAME_AGAIN {
+            sent.sent_back();
+        }
+        assert!(!sent.going_round());
+    }
+
+    #[test]
+    fn every_way_a_long_turn_stops_says_why_in_steps_and_how_to_carry_on() {
+        for halted in [
+            Halted::AtTheCeiling,
+            Halted::InCircles(48),
+            Halted::OutOfSight(48),
+        ] {
+            for said in [halted.under_an_answer(), halted.instead_of_an_answer()] {
+                assert!(said.contains("Say \"Continue\""), "{said}");
+                assert!(said.contains("steps"), "{said}");
+                assert!(!said.contains("rounds"), "{said}");
+            }
+        }
+        assert!(Halted::AtTheCeiling
+            .under_an_answer()
+            .contains(&format!("all {AT_MOST_ROUNDS} steps one message allows")));
+        assert!(Halted::InCircles(48)
+            .instead_of_an_answer()
+            .contains("after 48 steps"));
+        assert!(Halted::OutOfSight(48)
+            .under_an_answer()
+            .contains("no longer fit in what the model can hold"));
+    }
+
+    #[test]
+    fn words_said_while_it_works_are_taken_and_everything_else_is_kept_in_order() {
+        let (to, mut asked) = tokio::sync::mpsc::unbounded_channel();
+        let mut kept = VecDeque::new();
+        to.send(Turn::Say("use the other folder".into(), Vec::new()))
+            .unwrap();
+        to.send(Turn::Aside("WHO ARE YOU".into())).unwrap();
+        to.send(Turn::Say("and keep it short".into(), Vec::new()))
+            .unwrap();
+        let said = said_while_it_worked(&mut asked, &mut kept).expect("not stopped");
+        assert_eq!(said, vec!["use the other folder".to_string()]);
+        // What came after the aside waits behind it rather than going ahead.
+        assert!(matches!(kept.front(), Some(Turn::Aside(_))));
+        assert!(matches!(kept.back(), Some(Turn::Say(text, _)) if text == "and keep it short"));
+        assert_eq!(kept.len(), 2);
+
+        // A line with a picture cannot go beside a result, and is kept.
+        let mut kept = VecDeque::new();
+        to.send(Turn::Say(
+            "this one".into(),
+            vec!["data:image/png;base64,AA==".into()],
+        ))
+        .unwrap();
+        assert_eq!(
+            said_while_it_worked(&mut asked, &mut kept),
+            Some(Vec::new())
+        );
+        assert_eq!(kept.len(), 1);
+
+        // Stop is never kept: it ends the turn where it is.
+        to.send(Turn::Say("never mind".into(), Vec::new())).unwrap();
+        to.send(Turn::Stop).unwrap();
+        assert_eq!(said_while_it_worked(&mut asked, &mut VecDeque::new()), None);
     }
 }
 
@@ -3201,10 +3792,12 @@ mod an_aside_leaves_no_trace {
     }
 
     #[tokio::test]
-    async fn a_turn_that_runs_out_of_rounds_still_says_where_it_got_to() {
+    async fn a_turn_that_takes_the_same_step_three_times_stops_and_still_says_where_it_got_to() {
         // A teammate made a transcript, spent the rest of its rounds tidying
         // it, and the turn ended on "Whatever it is trying is not working"
-        // with the transcript never handed over. Twice.
+        // with the transcript never handed over. Twice. The same harmless
+        // command coming back the same three times running is going round in
+        // circles, and it stops there, still saying where it got to.
         let asked: Arc<Mutex<Vec<String>>> = Arc::default();
         let where_it_is = a_server_that_never_stops_on_its_own(asked.clone()).await;
         let home = std::env::temp_dir().join("errand-out-of-rounds-test");
@@ -3243,8 +3836,8 @@ mod an_aside_leaves_no_trace {
         let seen = asked.lock().unwrap().clone();
         assert_eq!(
             seen.len(),
-            ENOUGH + 1,
-            "every round, and one more for the last word"
+            THE_SAME_AGAIN + 1,
+            "three rounds alike, and one more for the last word"
         );
         let last: serde_json::Value = serde_json::from_str(seen.last().unwrap()).unwrap();
         assert!(
@@ -3273,13 +3866,22 @@ mod an_aside_leaves_no_trace {
         );
         assert!(said.contains("Say \"Continue\""), "{said}");
         assert!(!said.contains("not working"), "{said}");
+        assert!(
+            said.ends_with(&Halted::InCircles(THE_SAME_AGAIN).under_an_answer()),
+            "{said}"
+        );
+        assert!(
+            said.contains("It stopped after 3 steps because its last ones went round in circles"),
+            "{said}"
+        );
+        assert!(!said.contains("rounds"), "{said}");
     }
 
     #[tokio::test]
     async fn stopping_a_conversation_stops_it_in_the_middle_of_a_step() {
         // Stop was a message queued behind the turn, read only between turns,
         // so a turn that was running a command ran on after Stop, Pause or a
-        // change of engine: up to twenty-four more rounds of tools.
+        // change of engine: every round of tools it had left.
         let asked: Arc<Mutex<Vec<String>>> = Arc::default();
         let where_it_is = a_server_that_wants_one_command(asked.clone(), "sleep 30").await;
         let home = std::env::temp_dir().join("errand-stopped-mid-step-test");
@@ -3396,5 +3998,403 @@ mod an_aside_leaves_no_trace {
             "the conversation itself was thrown away with the aside:\n{last}"
         );
         assert!(last.contains("do this once a day"));
+    }
+
+    /// What a stand-in model asks for on request `which`, or nothing when it
+    /// has finished and says so.
+    type Script = fn(usize) -> Option<(&'static str, serde_json::Value)>;
+
+    /// A server that asks for whatever `script` says on each request it is
+    /// offered tools in, with the request's number in the call's id, and says
+    /// where it got to when it is offered none, or once `script` has finished.
+    async fn a_server_that_keeps_calling(asked: Arc<Mutex<Vec<String>>>, script: Script) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let where_it_is = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let asked = asked.clone();
+                tokio::spawn(async move {
+                    let mut got = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    let request = loop {
+                        let Ok(n) = stream.read(&mut buf).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        got.extend_from_slice(&buf[..n]);
+                        let text = String::from_utf8_lossy(&got).to_string();
+                        let Some(at) = text.find("\r\n\r\n") else {
+                            continue;
+                        };
+                        let want: usize = text
+                            .to_ascii_lowercase()
+                            .split("content-length:")
+                            .nth(1)
+                            .and_then(|rest| rest.split("\r\n").next())
+                            .and_then(|n| n.trim().parse().ok())
+                            .unwrap_or(0);
+                        if text.len() - (at + 4) >= want {
+                            break text[at + 4..].to_string();
+                        }
+                    };
+                    let offered_tools = serde_json::from_str::<serde_json::Value>(&request)
+                        .map(|body| body.get("tools").is_some())
+                        .unwrap_or(false);
+                    let which = {
+                        let mut all = asked.lock().unwrap();
+                        all.push(request);
+                        all.len() - 1
+                    };
+                    let body = match offered_tools.then(|| script(which)).flatten() {
+                        Some((name, arguments)) => {
+                            let call = serde_json::json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [{
+                                "index": 0, "id": format!("call-{which}"), "type": "function",
+                                "function": { "name": name, "arguments": arguments.to_string() }
+                            }]}}]});
+                            format!(
+                                "data: {call}\n\n\
+                                 data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
+                                 data: [DONE]\n\n"
+                            )
+                        }
+                        None => "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"All done: the parts are written.\"}}]}\n\n\
+                                 data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                                 data: [DONE]\n\n"
+                            .to_string(),
+                    };
+                    let _ = stream
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                                 Content-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        where_it_is
+    }
+
+    /// A different file written on every request, for ever.
+    fn a_new_file_every_time(which: usize) -> Option<(&'static str, serde_json::Value)> {
+        Some((
+            "write_file",
+            serde_json::json!({ "path": format!("part-{which}.txt"), "contents": format!("part {which}") }),
+        ))
+    }
+
+    /// A conversation on `where_it_is`, in a fresh folder, that never asks,
+    /// already asked `asking`.
+    fn a_long_turn_on(
+        where_it_is: String,
+        home: &str,
+        asking: &str,
+    ) -> (Local, std::sync::mpsc::Receiver<Event>) {
+        let home = std::env::temp_dir().join(home);
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let settings = LlmSettings {
+            provider: "openai-compat".into(),
+            base_url: where_it_is,
+            model: "pretend".into(),
+            ..Default::default()
+        };
+        let (mut engine, events) = Local::open(
+            settings,
+            home,
+            "auto",
+            &crate::memory::Knowing::default(),
+            Vec::new(),
+            None,
+        )
+        .expect("a conversation to talk to");
+        engine.say(asking, &[]).unwrap();
+        (engine, events)
+    }
+
+    /// Every step shown until the turn answers, and what it said. Longer to
+    /// wait than the others, because a turn here can be a hundred and twenty
+    /// steps long.
+    async fn the_steps_and_the_answer(
+        events: &std::sync::mpsc::Receiver<Event>,
+    ) -> (Vec<Step>, String) {
+        let mut steps = Vec::new();
+        let waited = std::time::Instant::now();
+        loop {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(180),
+                "the turn never finished"
+            );
+            match events.try_recv() {
+                Ok(Event::Doing(step)) => steps.push(step),
+                Ok(Event::Done { said, .. }) => return (steps, said),
+                Ok(Event::Failed { why }) => panic!("the turn failed: {why}"),
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+            }
+        }
+    }
+
+    /// Errand's own steps saying a long turn is carrying on.
+    fn still_going(steps: &[Step]) -> Vec<&Step> {
+        steps
+            .iter()
+            .filter(|s| s.tool == "errand" && s.what.starts_with("Still going after"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_keeps_doing_something_new_carries_on_until_the_most_one_message_allows() {
+        // A coding project going well stopped every twenty-four steps to ask
+        // somebody to say "Continue". It carries on now, saying so on screen,
+        // up to the ceiling, and only then stops and says where it got to.
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_keeps_calling(asked.clone(), a_new_file_every_time).await;
+        let (_engine, events) =
+            a_long_turn_on(where_it_is, "errand-ceiling-test", "write the parts");
+        let (steps, said) = the_steps_and_the_answer(&events).await;
+
+        let seen = asked.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            AT_MOST_ROUNDS + 1,
+            "every step allowed, and one more for the last word"
+        );
+        let last: serde_json::Value = serde_json::from_str(seen.last().unwrap()).unwrap();
+        assert!(
+            last.get("tools").is_none(),
+            "the last word was offered tools"
+        );
+        assert!(
+            said.ends_with(&Halted::AtTheCeiling.under_an_answer()),
+            "{said}"
+        );
+        assert!(
+            said.contains(&format!(
+                "It used all {AT_MOST_ROUNDS} steps one message allows"
+            )),
+            "{said}"
+        );
+        assert!(
+            said.starts_with("All done: the parts are written."),
+            "{said}"
+        );
+
+        // Said on screen at the end of each stretch it carried on past, as
+        // Errand's own step.
+        let going = still_going(&steps);
+        assert_eq!(going.len(), AT_MOST_ROUNDS / ENOUGH - 1, "{going:?}");
+        assert!(
+            going[0].what.starts_with(
+                "Still going after 24 steps: so far it has written or changed 24 files"
+            ),
+            "{}",
+            going[0].what
+        );
+        assert!(
+            going[3].what.contains("after 96 steps") && going[3].what.contains("96 files"),
+            "{}",
+            going[3].what
+        );
+
+        // And nothing of it went to the model, as a person's line or any
+        // other way: one request from them, and no word about carrying on.
+        for request in &seen {
+            assert!(!request.contains("Still going after"), "{request}");
+            assert!(!request.contains("carries on by itself"), "{request}");
+            assert_eq!(
+                roles_in(request).iter().filter(|r| *r == "user").count(),
+                1,
+                "{request}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_whose_every_step_fails_stops_at_the_end_of_its_first_stretch() {
+        // A different file asked for every time, and none of them there: not
+        // the same step twice, and nothing new either.
+        fn a_missing_file_every_time(which: usize) -> Option<(&'static str, serde_json::Value)> {
+            Some((
+                "read_file",
+                serde_json::json!({ "path": format!("missing-{which}.txt") }),
+            ))
+        }
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is =
+            a_server_that_keeps_calling(asked.clone(), a_missing_file_every_time).await;
+        let (_engine, events) =
+            a_long_turn_on(where_it_is, "errand-all-failing-test", "read the parts");
+        let (steps, said) = the_steps_and_the_answer(&events).await;
+
+        let seen = asked.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            ENOUGH + 1,
+            "one stretch, and one more for the last word"
+        );
+        let last: serde_json::Value = serde_json::from_str(seen.last().unwrap()).unwrap();
+        assert!(last.get("tools").is_none());
+        let failed = seen[1].contains("That did not work");
+        assert!(failed, "the stand-in's steps did not fail: {}", seen[1]);
+        assert!(
+            said.ends_with(&Halted::InCircles(ENOUGH).under_an_answer()),
+            "{said}"
+        );
+        assert!(
+            said.contains("It stopped after 24 steps because its last ones went round in circles"),
+            "{said}"
+        );
+        assert!(said.contains("say what to do differently"), "{said}");
+        assert!(still_going(&steps).is_empty(), "{steps:?}");
+    }
+
+    #[tokio::test]
+    async fn stopping_a_turn_past_its_first_stretch_stops_it_in_the_middle_of_a_step() {
+        fn files_and_then_a_long_wait(which: usize) -> Option<(&'static str, serde_json::Value)> {
+            match which {
+                0..30 => a_new_file_every_time(which),
+                _ => Some(("run_command", serde_json::json!({ "command": "sleep 31" }))),
+            }
+        }
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is =
+            a_server_that_keeps_calling(asked.clone(), files_and_then_a_long_wait).await;
+        let (mut engine, events) = a_long_turn_on(
+            where_it_is,
+            "errand-stopped-past-a-stretch-test",
+            "write and wait",
+        );
+
+        let mut steps = Vec::new();
+        let waited = std::time::Instant::now();
+        loop {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(60),
+                "the step never started"
+            );
+            match events.try_recv() {
+                Ok(Event::Doing(step)) if step.call == "call-30" => break,
+                Ok(Event::Doing(step)) => steps.push(step),
+                Ok(Event::Done { said, .. }) => panic!("the turn ended first: {said}"),
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+            }
+        }
+        assert_eq!(still_going(&steps).len(), 1, "{steps:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        engine.stop().unwrap();
+
+        let stopped = std::time::Instant::now();
+        loop {
+            match events.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                Ok(Event::Did { call, outcome }) if call == "call-30" => {
+                    panic!("the step it was stopped in finished anyway: {outcome}")
+                }
+                Ok(Event::Done { said, .. }) => panic!("it answered after Stop: {said}"),
+                _ => {
+                    assert!(
+                        stopped.elapsed() < std::time::Duration::from_secs(5),
+                        "the conversation was still going five seconds after Stop"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        }
+        assert_eq!(
+            asked.lock().unwrap().len(),
+            31,
+            "it went on asking the model after Stop"
+        );
+        for job in crate::jobs::running() {
+            if job.conversation.is_empty() && job.command == "sleep 31" {
+                crate::jobs::stop(&job.handle);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn words_typed_during_a_long_turn_reach_the_model_beside_the_next_result_and_it_carries_on(
+    ) {
+        fn files_a_pause_and_done(which: usize) -> Option<(&'static str, serde_json::Value)> {
+            match which {
+                26 => Some(("run_command", serde_json::json!({ "command": "sleep 1" }))),
+                0..28 => a_new_file_every_time(which),
+                _ => None,
+            }
+        }
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let where_it_is = a_server_that_keeps_calling(asked.clone(), files_a_pause_and_done).await;
+        let (mut engine, events) = a_long_turn_on(
+            where_it_is,
+            "errand-typed-while-working-test",
+            "write the parts",
+        );
+
+        let waited = std::time::Instant::now();
+        loop {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(60),
+                "the pause never started"
+            );
+            match events.try_recv() {
+                Ok(Event::Doing(step)) if step.call == "call-26" => break,
+                Ok(Event::Done { said, .. }) => panic!("the turn ended first: {said}"),
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+            }
+        }
+        engine.say("also put a README in", &[]).unwrap();
+        let (_, said) = the_steps_and_the_answer(&events).await;
+        assert_eq!(said, "All done: the parts are written.");
+
+        // Not a turn of their own afterwards: one answer, and nothing more
+        // asked of the model once it was given.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let seen = asked.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            29,
+            "the words were taken as a turn of their own"
+        );
+        assert!(
+            !matches!(events.try_recv(), Ok(Event::Done { .. })),
+            "it answered twice"
+        );
+
+        // Beside the result of the step they were typed during, in the very
+        // next request, and never as a line of their own.
+        let next = &seen[27];
+        assert_eq!(
+            roles_in(next).iter().filter(|r| *r == "user").count(),
+            1,
+            "{next}"
+        );
+        let body: serde_json::Value = serde_json::from_str(next).unwrap();
+        let last = body["messages"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(last["role"], "tool", "{last}");
+        assert!(
+            last["content"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with("While you were working, they wrote: \"also put a README in\""),
+            "{last}"
+        );
+        assert!(
+            !seen[26].contains("also put a README in"),
+            "they were seen before they were typed"
+        );
+        // And still there for the rest of the turn.
+        assert!(seen[28].contains("also put a README in"));
     }
 }
